@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -103,6 +104,11 @@ type RESTServer struct {
 	// creation so two concurrent launches can't both pass the limit. A channel
 	// rather than a mutex so a waiter can give up when its client does.
 	launchSlot chan struct{}
+
+	// pendingCleanups holds launch IDs of failed launches whose Sessions
+	// are still to be deleted. Drained only while holding launchSlot.
+	cleanupMu       sync.Mutex
+	pendingCleanups []string
 
 	RESTServerOptions
 }
@@ -606,24 +612,16 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Don't leave a Session that never became ready: it would count
 		// against the session limit and lock every other user out until
-		// its owner cancels. In the background: moonlight-qt waits for the
-		// whole response, so a slow cleanup must not hold the handler open
-		// past the client's own timeout. Under the slot, so a queued launch
-		// doesn't count it: take it now if free (before the next launch
-		// can), else queue for it.
-		cleanup := func() {
+		// its owner cancels. Queued before answering, so whichever launch
+		// takes the slot next removes it before counting; and in the
+		// background, since moonlight-qt waits for the whole response and a
+		// slow cleanup must not hold it past the client's own timeout.
+		s.queueCleanup(launchID)
+		go func() {
+			s.launchSlot <- struct{}{}
 			defer func() { <-s.launchSlot }()
-			s.deleteLaunch(launchCtx, launchID)
-		}
-		select {
-		case s.launchSlot <- struct{}{}:
-			go cleanup()
-		default:
-			go func() {
-				s.launchSlot <- struct{}{}
-				cleanup()
-			}()
-		}
+			s.drainCleanups(launchCtx)
+		}()
 		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %w", err))
 		return
 	}
@@ -665,6 +663,9 @@ func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User
 	ctx, cancel := context.WithTimeout(ctx, launchSlotTimeout)
 	defer cancel()
 
+	// A failed launch's Session must be gone before we count.
+	s.drainCleanups(ctx)
+
 	if s.BusyCheck != nil {
 		reason, err := s.BusyCheck(ctx)
 		if err != nil {
@@ -697,6 +698,25 @@ func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User
 	session, err := create(ctx)
 	createFailed = err != nil
 	return session, "", err
+}
+
+func (s *RESTServer) queueCleanup(launchID string) {
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
+	s.pendingCleanups = append(s.pendingCleanups, launchID)
+}
+
+// drainCleanups deletes the Sessions of queued failed launches. The caller
+// must hold launchSlot.
+func (s *RESTServer) drainCleanups(ctx context.Context) {
+	s.cleanupMu.Lock()
+	ids := s.pendingCleanups
+	s.pendingCleanups = nil
+	s.cleanupMu.Unlock()
+
+	for _, id := range ids {
+		s.deleteLaunch(ctx, id)
+	}
 }
 
 // launchIDLabel marks a Session with the /launch request that created it.

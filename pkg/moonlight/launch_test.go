@@ -21,6 +21,7 @@ import (
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	"games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
+	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
 	"games-on-whales.github.io/direwolf/pkg/generic"
 )
 
@@ -121,6 +122,25 @@ func (f *launchFixture) launch(t *testing.T, user string) (int, Response) {
 		t.Errorf("unparseable response %q: %v", rec.Body.String(), err)
 	}
 	return rec.Code, resp
+}
+
+// slowListSessions delays launch-id (cleanup) Lists. It wraps the client
+// rather than using a reactor: the fake runs reactors under one lock, which
+// would stall every other call too and hide the race under test.
+type slowListSessions struct {
+	v1alpha1client.SessionInterface
+	delay time.Duration
+}
+
+func (s slowListSessions) List(ctx context.Context, opts metav1.ListOptions) (*v1alpha1types.SessionList, error) { //nolint:gocritic // interface signature
+	if strings.Contains(opts.LabelSelector, launchIDLabel) {
+		time.Sleep(s.delay)
+	}
+	return s.SessionInterface.List(ctx, opts) //nolint:wrapcheck // test passthrough
+}
+
+func (f *launchFixture) slowCleanupList(delay time.Duration) {
+	f.server.SessionClient = slowListSessions{f.server.SessionClient, delay}
 }
 
 // waitForSessionCount waits for background cleanup to settle on want.
@@ -352,13 +372,7 @@ func TestLaunchFailureCleanupHoldsSlot(t *testing.T) {
 		return true, &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: get.GetName(), Namespace: testNamespace}}, nil
 	})
 	// Alice's cleanup is slow to start deleting.
-	f.client.PrependReactor("list", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		list, ok := action.(k8stesting.ListAction)
-		if ok && strings.Contains(list.GetListRestrictions().Labels.String(), launchIDLabel) {
-			time.Sleep(100 * time.Millisecond) // within bob's 300ms budget
-		}
-		return false, nil, nil
-	})
+	f.slowCleanupList(100 * time.Millisecond) // within bob's 300ms budget
 
 	if code, _ := f.launch(t, "alice"); code != http.StatusInternalServerError {
 		t.Fatalf("alice HTTP status = %d, want 500", code)
@@ -367,6 +381,59 @@ func TestLaunchFailureCleanupHoldsSlot(t *testing.T) {
 	// count alice's orphan.
 	if code, resp := f.launch(t, "bob"); resp.StatusCode != http.StatusOK {
 		t.Errorf("bob = HTTP %d / %d %q, want success after alice's cleanup", code, resp.StatusCode, resp.StatusMessage)
+	}
+}
+
+func TestLaunchFailureCleanupQueuesForBusySlot(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int32
+	f := newLaunchFixture(t, &RESTServerOptions{
+		LaunchTimeout: 400 * time.Millisecond,
+		BusyCheck: func(context.Context) (string, error) {
+			// Call 2 is carol's: she holds the slot while alice fails.
+			if calls.Add(1) == 2 {
+				<-release
+				return "held", nil
+			}
+			return "", nil
+		},
+	})
+	f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		get, ok := action.(k8stesting.GetAction)
+		if !ok || !strings.HasPrefix(get.GetName(), "alice-") {
+			return false, nil, nil
+		}
+		return true, &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: get.GetName(), Namespace: testNamespace}}, nil
+	})
+	f.slowCleanupList(50 * time.Millisecond)
+
+	aliceDone := make(chan int, 1)
+	go func() {
+		code, _ := f.launch(t, "alice")
+		aliceDone <- code
+	}()
+	time.Sleep(100 * time.Millisecond) // alice is in her readiness wait
+	carolDone := make(chan struct{})
+	go func() {
+		defer close(carolDone)
+		f.launch(t, "carol")
+	}()
+	if code := <-aliceDone; code != http.StatusInternalServerError {
+		t.Fatalf("alice HTTP status = %d, want 500", code)
+	}
+
+	// Bob queues behind alice's cleanup, which queued behind carol.
+	bobDone := make(chan Response, 1)
+	go func() {
+		_, resp := f.launch(t, "bob")
+		bobDone <- resp
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	<-carolDone
+
+	if resp := <-bobDone; resp.StatusCode != http.StatusOK {
+		t.Errorf("bob = %d %q, want success after alice's cleanup", resp.StatusCode, resp.StatusMessage)
 	}
 }
 
