@@ -665,15 +665,17 @@ func (s *RESTServer) cancelHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *RESTServer) stopSessionsForUser(user *v1alpha1types.User, shouldWait bool) error {
-	sessions, err := s.SessionLister.List(labels.SelectorFromSet(labels.Set{
-		"direwolf/user": user.Name,
-	}))
+	// Live List, not the informer: a Session this user created moments ago
+	// (a quick relaunch) may not be cached yet and would be left running.
+	sessions, err := s.SessionClient.List(context.Background(), metav1.ListOptions{
+		LabelSelector: labels.SelectorFromSet(labels.Set{"direwolf/user": user.Name}).String(),
+	})
 	if err != nil {
 		return fmt.Errorf("failed to list sessions: %w", err)
 	}
 
 	didDelete := false
-	for _, session := range sessions {
+	for _, session := range sessions.Items {
 		if err := s.SessionClient.Delete(context.Background(), session.Name, metav1.DeleteOptions{}); err != nil {
 			return fmt.Errorf("failed to delete session: %w", err)
 		}

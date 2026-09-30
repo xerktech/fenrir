@@ -175,6 +175,22 @@ func TestLaunchRelaunchBySameUserIsNotBusy(t *testing.T) {
 	}
 }
 
+func TestLaunchBackToBackBySameUserLeavesOneSession(t *testing.T) {
+	f := newLaunchFixture(t, RESTServerOptions{})
+
+	// The informer never sees the first session; the second launch must
+	// still replace it.
+	f.launch(t, "alice")
+	code, resp := f.launch(t, "alice")
+
+	if code != http.StatusOK || resp.StatusCode != http.StatusOK {
+		t.Fatalf("relaunch = HTTP %d / %d %q, want success", code, resp.StatusCode, resp.StatusMessage)
+	}
+	if n := f.sessionCount(t); n != 1 {
+		t.Errorf("session count = %d, want 1", n)
+	}
+}
+
 func TestLaunchFreeHostSucceeds(t *testing.T) {
 	f := newLaunchFixture(t, RESTServerOptions{})
 
