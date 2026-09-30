@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -27,6 +29,7 @@ func main() {
 	serverKeyPath := flag.String("tls-key", "server.key", "Path to server key")
 	serverPort := flag.Int("port", 443, "Port to listen on")
 	wolfSocketPath := flag.String("socket", "/var/run/wolf.sock", "Path to wolf.sock")
+	tokenFile := flag.String("token-file", "", "Path to a file holding the bearer token required on /api/v1/ (required)")
 	klog.InitFlags(nil)
 	flag.Parse()
 
@@ -36,6 +39,13 @@ func main() {
 	klog.Info("Port:", *serverPort)
 	klog.Info("Wolf Socket:", *wolfSocketPath)
 	client := UnixHTTPClient(*wolfSocketPath)
+
+	// The /api/v1/ proxy drives Wolf, which can run arbitrary containers, so
+	// refuse to start without a token rather than serve it unauthenticated.
+	token, err := readToken(*tokenFile)
+	if err != nil {
+		klog.Fatal("Failed to load bearer token: ", err)
+	}
 
 	// Generate self-signed certificate and key
 	cert, err := util.LoadCertificates(*serverCertPath, *serverKeyPath)
@@ -60,9 +70,12 @@ func main() {
 					wolfClient := wolfapi.NewClient(
 						fmt.Sprintf("https://localhost:%d", *serverPort),
 						&http.Client{
-							Transport: &http.Transport{
-								TLSClientConfig: &tls.Config{
-									InsecureSkipVerify: true,
+							Transport: &wolfapi.BearerTokenTransport{
+								Token: token,
+								Base: &http.Transport{
+									TLSClientConfig: &tls.Config{
+										InsecureSkipVerify: true, //nolint:gosec // loopback to our own self-signed listener
+									},
 								},
 							},
 						},
@@ -103,15 +116,13 @@ func main() {
 	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/v1/", wolfapi.RequireBearerToken(token, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		klog.Info("Received request:", r.Method, r.URL.Path)
 		if !ready.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 
-		//!TODO: Use kubernetes metric.Filter or something to implement RBAC
-		// authorization against the bearer token
 		// Proxy the request to the wolf.sock
 		url, err := url.JoinPath("http://", "wolf.sock", r.URL.Path)
 		if err != nil {
@@ -177,7 +188,7 @@ func main() {
 			}
 		}
 		klog.InfoS("Request completed", "statusCode", response.StatusCode)
-	})
+	})))
 
 	// Start HTTPS server
 	server := &http.Server{
@@ -193,6 +204,23 @@ func main() {
 	if err != nil {
 		klog.Fatal("Failed to start server:", err)
 	}
+}
+
+// readToken loads the bearer token from path. An unset path or an empty
+// token is an error: wolf-agent must never serve /api/v1/ unauthenticated.
+func readToken(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("--token-file is required")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading token file: %w", err)
+	}
+	token := strings.TrimSpace(string(b))
+	if token == "" {
+		return "", fmt.Errorf("token file %s is empty", path)
+	}
+	return token, nil
 }
 
 func UnixHTTPClient(sockAddr string) http.Client {
