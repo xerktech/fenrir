@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +152,25 @@ func TestRemoteIP(t *testing.T) {
 		}
 		if err != nil || got != tc.want {
 			t.Errorf("remoteIP(%q) = %q, %v; want %q", tc.remoteAddr, got, err, tc.want)
+		}
+	}
+}
+
+// The handlers must take the client IP from remoteIP, not a ':' split that
+// accepts any RemoteAddr: an unparseable one is refused before anything else.
+func TestHandlersRejectUnparseableRemoteAddr(t *testing.T) {
+	s := &RESTServer{}
+	for name, h := range map[string]http.HandlerFunc{
+		"launch": s.launchHandler,
+		"pair":   s.pairHandler,
+		"unpair": s.unpairHandler,
+	} {
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/"+name+"?uniqueid=x&appid=a&rikey=k&rikeyid=1", nil)
+		r.RemoteAddr = "[::1"
+		w := httptest.NewRecorder()
+		h(w, r)
+		if body := w.Body.String(); !strings.Contains(body, "unparseable client address") {
+			t.Errorf("%s: response %d %q does not reject the address", name, w.Code, body)
 		}
 	}
 }

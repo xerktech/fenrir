@@ -12,10 +12,13 @@ func TestWolfSessionForClientIP(t *testing.T) {
 		wantErr        bool
 	}{
 		{name: "ipv4", in: "192.0.2.10", want: "192.0.2.10"},
-		{name: "ipv6", in: "2001:db8::1", want: "2001:db8::1"},
 		{name: "ipv4-mapped ipv6 is unmapped", in: "::ffff:192.0.2.10", want: "192.0.2.10"},
 		// No placeholder: a wrong peer silently breaks the stream.
 		{name: "empty", in: "", wantErr: true},
+		// Wolf's stream sockets are IPv4-only.
+		{name: "ipv6", in: "2001:db8::1", wantErr: true},
+		{name: "zoned ipv6", in: "fe80::1%eth0", wantErr: true},
+		{name: "unspecified", in: "0.0.0.0", wantErr: true},
 		{name: "host:port", in: "192.0.2.10:47989", wantErr: true},
 		{name: "old ipv6 split bug", in: "[", wantErr: true},
 	} {
