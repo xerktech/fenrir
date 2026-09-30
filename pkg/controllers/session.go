@@ -1615,8 +1615,8 @@ func (c *SessionController) reconcileActiveStreams(
 		Transport: &wolfapi.BearerTokenTransport{
 			Token: token,
 			Base: &http.Transport{
-				// wolf-agent serves a self-signed cert. Tracked separately:
-				// the token is sent without verifying the peer.
+				// wolf-agent serves a self-signed cert. XERK-1320 tracks
+				// pinning it; until then the token goes to an unverified peer.
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // see above
 			},
 		},
