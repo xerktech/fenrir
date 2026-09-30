@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,10 +46,36 @@ type RESTServerOptions struct {
 	// LaunchTimeout is how long /launch will wait for the operator to create a
 	// session and populate its stream URL before giving up. A cold start (image
 	// pull, wolf boot, wolf-agent readiness) can take longer than the default,
-	// so this is exposed as a knob instead of hard-coded. Defaults to 60s if
-	// unset.
+	// so this is exposed as a knob instead of hard-coded. Defaults to
+	// DefaultLaunchTimeout if unset.
 	LaunchTimeout time.Duration
+
+	// MaxConcurrentSessions caps how many users may stream at once (the node
+	// has one GPU). A /launch that would exceed it gets Moonlight's "busy"
+	// error instead of a Session. The caller's own sessions don't count: a
+	// relaunch replaces them. Defaults to 1 if unset; negative means no limit.
+	MaxConcurrentSessions int
+
+	// BusyCheck, if set, is consulted on every /launch before the session
+	// limit. A non-empty reason makes the launch fail with the busy error
+	// carrying that reason (e.g. a running Library pod holds the GPU).
+	BusyCheck BusyCheck
 }
+
+// BusyCheck reports whether something outside the Session count occupies the
+// host. It returns a human-readable reason when busy, "" when free.
+type BusyCheck func(ctx context.Context) (reason string, err error)
+
+// DefaultLaunchTimeout sits under moonlight-qt's 120s launch request timeout,
+// so the client sees our error rather than its own generic timeout.
+const DefaultLaunchTimeout = 100 * time.Second
+
+// busyStatusCode/busyMessage mirror what Sunshine sends when an app is
+// already running, so clients show a familiar error.
+const (
+	busyStatusCode = 400
+	busyMessage    = "An app is already running on this host"
+)
 
 type RESTServer struct {
 	router       *http.ServeMux
@@ -64,6 +91,10 @@ type RESTServer struct {
 
 	SessionClient v1alpha1client.SessionInterface
 
+	// launchMu serializes the busy check with Session creation so two
+	// concurrent launches can't both pass the limit.
+	launchMu sync.Mutex
+
 	RESTServerOptions
 }
 
@@ -78,7 +109,10 @@ func NewRESTServer(
 	opts RESTServerOptions,
 ) *RESTServer {
 	if opts.LaunchTimeout <= 0 {
-		opts.LaunchTimeout = 60 * time.Second
+		opts.LaunchTimeout = DefaultLaunchTimeout
+	}
+	if opts.MaxConcurrentSessions == 0 {
+		opts.MaxConcurrentSessions = 1
 	}
 
 	ps := &RESTServer{
@@ -454,61 +488,70 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(userContextKey{}).(*v1alpha1types.User)
 	pairing := r.Context().Value(pairingContextKey{}).(*v1alpha1types.Pairing)
 
-	//!TOOD: May want to wait here, since we need the Service to stop pointing
-	// at the old pod. It is very likely to happen before operator syncs and
-	// can create session, but perhaps should still check after operator returns
-	// the session URL.
-	if err := s.stopSessionsForUser(user, false); err != nil && !k8serrors.IsNotFound(err) {
-		writeErrorResponse(w, 500, fmt.Errorf("failed to stop existing sessions: %s", err))
+	session, busyReason, err := s.createSession(r.Context(), user, func() (*v1alpha1types.Session, error) {
+		//!TOOD: May want to wait here, since we need the Service to stop pointing
+		// at the old pod. It is very likely to happen before operator syncs and
+		// can create session, but perhaps should still check after operator returns
+		// the session URL.
+		if err := s.stopSessionsForUser(user, false); err != nil && !k8serrors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to stop existing sessions: %s", err)
+		}
+
+		klog.Infof("Launching app %s for user %s", app.ObjectMeta.Name, user.ObjectMeta.Name)
+		return s.SessionClient.Create(
+			r.Context(),
+			&v1alpha1types.Session{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: fmt.Sprintf("%s-%s-", user.Name, app.Name),
+					Namespace:    pairing.Namespace,
+					Labels: map[string]string{
+						"direwolf":      "true",
+						"direwolf/app":  app.ObjectMeta.Name,
+						"direwolf/user": user.ObjectMeta.Name,
+					},
+					Annotations: map[string]string{
+						"direwolf/pairing": pairing.ObjectMeta.Name,
+					},
+				},
+				Spec: v1alpha1types.SessionSpec{
+					GameReference: v1alpha1types.GameReference{
+						Name: app.ObjectMeta.Name,
+					},
+					PairingReference: v1alpha1types.PairingReference{
+						Name: pairing.ObjectMeta.Name,
+					},
+					UserReference: v1alpha1types.UserReference{
+						Name: user.ObjectMeta.Name,
+					},
+					//!TODO: Unused. v1alpha2 Gateway types are not widely supported
+					GatewayReference: v1alpha1types.GatewayReference{
+						Name:      "unused",
+						Namespace: "unused",
+					},
+					Config: v1alpha1types.SessionInfo{
+						ClientIP:           clientIP,
+						AESIV:              rikeyID,
+						AESKey:             rikey,
+						SurroundAudioFlags: surroundFlags,
+						VideoWidth:         width,
+						VideoHeight:        height,
+						VideoRefreshRate:   refreshRate,
+					},
+				},
+			},
+			metav1.CreateOptions{
+				FieldManager: "direwolf-launch",
+			},
+		)
+	})
+	if busyReason != "" {
+		klog.Infof("Refusing launch of app %s for user %s: %s", app.ObjectMeta.Name, user.ObjectMeta.Name, busyReason)
+		// HTTP 200 with the error in the XML status, as Sunshine does:
+		// moonlight-qt treats a non-2xx HTTP status as a transport error and
+		// would not show the message.
+		sendXMLWithHTTPStatus(w, http.StatusOK, busyResponse(busyReason))
 		return
 	}
-
-	klog.Infof("Launching app %s for user %s", app.ObjectMeta.Name, user.ObjectMeta.Name)
-	session, err := s.SessionClient.Create(
-		r.Context(),
-		&v1alpha1types.Session{
-			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: fmt.Sprintf("%s-%s-", user.Name, app.Name),
-				Namespace:    pairing.Namespace,
-				Labels: map[string]string{
-					"direwolf":      "true",
-					"direwolf/app":  app.ObjectMeta.Name,
-					"direwolf/user": user.ObjectMeta.Name,
-				},
-				Annotations: map[string]string{
-					"direwolf/pairing": pairing.ObjectMeta.Name,
-				},
-			},
-			Spec: v1alpha1types.SessionSpec{
-				GameReference: v1alpha1types.GameReference{
-					Name: app.ObjectMeta.Name,
-				},
-				PairingReference: v1alpha1types.PairingReference{
-					Name: pairing.ObjectMeta.Name,
-				},
-				UserReference: v1alpha1types.UserReference{
-					Name: user.ObjectMeta.Name,
-				},
-				//!TODO: Unused. v1alpha2 Gateway types are not widely supported
-				GatewayReference: v1alpha1types.GatewayReference{
-					Name:      "unused",
-					Namespace: "unused",
-				},
-				Config: v1alpha1types.SessionInfo{
-					ClientIP:           clientIP,
-					AESIV:              rikeyID,
-					AESKey:             rikey,
-					SurroundAudioFlags: surroundFlags,
-					VideoWidth:         width,
-					VideoHeight:        height,
-					VideoRefreshRate:   refreshRate,
-				},
-			},
-		},
-		metav1.CreateOptions{
-			FieldManager: "direwolf-launch",
-		},
-	)
 	if err != nil {
 		writeErrorResponse(w, 500, fmt.Errorf("failed to create session: %s", err))
 		return
@@ -547,6 +590,49 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		RTSPSessionURL: streamURL,
 		GameSession:    1,
 	})
+}
+
+// createSession runs create unless the host is busy for user, in which case
+// it returns a non-empty reason and create is not called. The check and the
+// create happen under launchMu so the session limit holds under concurrency.
+func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User, create func() (*v1alpha1types.Session, error)) (*v1alpha1types.Session, string, error) {
+	s.launchMu.Lock()
+	defer s.launchMu.Unlock()
+
+	if s.BusyCheck != nil {
+		reason, err := s.BusyCheck(ctx)
+		if err != nil {
+			return nil, "", fmt.Errorf("busy check failed: %w", err)
+		}
+		if reason != "" {
+			return nil, reason, nil
+		}
+	}
+
+	if s.MaxConcurrentSessions > 0 {
+		// Read from the API server, not the informer: a session created by the
+		// previous holder of launchMu may not have reached the cache yet.
+		sessions, err := s.SessionClient.List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to list sessions: %w", err)
+		}
+		others := 0
+		for _, session := range sessions.Items {
+			if session.Spec.UserReference.Name != user.Name {
+				others++
+			}
+		}
+		if others >= s.MaxConcurrentSessions {
+			return nil, busyMessage, nil
+		}
+	}
+
+	session, err := create()
+	return session, "", err
+}
+
+func busyResponse(reason string) Response {
+	return Response{StatusCode: busyStatusCode, StatusMessage: reason}
 }
 
 func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
@@ -666,6 +752,10 @@ func writeErrorResponse(w http.ResponseWriter, status int, err error) {
 }
 
 func sendXML(w http.ResponseWriter, resp Responsable) {
+	sendXMLWithHTTPStatus(w, resp.GetStatusCode(), resp)
+}
+
+func sendXMLWithHTTPStatus(w http.ResponseWriter, httpStatus int, resp Responsable) {
 	bytes, err := xml.Marshal(resp)
 	if err != nil {
 		writeErrorResponse(w, 500, fmt.Errorf("failed to marshal XML: %s", err))
@@ -673,7 +763,7 @@ func sendXML(w http.ResponseWriter, resp Responsable) {
 	}
 
 	w.Header().Set("Content-Type", "application/xml")
-	w.WriteHeader(resp.GetStatusCode())
+	w.WriteHeader(httpStatus)
 	w.Write([]byte(xml.Header))
 	w.Write(bytes)
 

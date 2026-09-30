@@ -25,10 +25,15 @@ func main() {
 	serverKeyPath := flag.String("tls-key", "server.key", "Path to server key")
 	port := flag.Int("port", 47989, "Port to listen on")
 	securePort := flag.Int("secure-port", 47984, "Secure port to listen on")
-	launchTimeout := flag.Duration("launch-timeout", 60*time.Second, "How long to wait for a session to become ready when launching an app (cold starts may need more time)")
+	launchTimeout := flag.Duration("launch-timeout", moonlight.DefaultLaunchTimeout, "How long to wait for a session to become ready when launching an app (keep under moonlight-qt's 120s launch timeout)")
+	maxSessions := flag.Int("max-concurrent-sessions", 1, "How many users may stream at once; further launches get Moonlight's busy error (-1 = unlimited)")
 	namespace := flag.String("namespace", os.Getenv("POD_NAMESPACE"), "Namespace to watch")
 	klog.InitFlags(nil)
 	flag.Parse()
+
+	if *maxSessions == 0 || *maxSessions < -1 {
+		klog.Fatal("--max-concurrent-sessions must be >= 1, or -1 for unlimited")
+	}
 
 	klog.Info("Starting moonlight-proxy")
 	klog.Info("TLS Cert: ", *serverCertPath)
@@ -36,6 +41,7 @@ func main() {
 	klog.Info("Port: ", *port)
 	klog.Info("Secure Port: ", *securePort)
 	klog.Info("Launch timeout: ", *launchTimeout)
+	klog.Info("Max concurrent sessions: ", *maxSessions)
 	klog.Info("Namespace: ", *namespace)
 
 	tlsCert, err := util.LoadCertificates(*serverCertPath, *serverKeyPath)
@@ -85,10 +91,11 @@ func main() {
 		generic.NewLister[*v1.Pod](podInformer.GetIndexer()).Namespaced(*namespace),
 		direwolfClient.DirewolfV1alpha1().Sessions(*namespace),
 		moonlight.RESTServerOptions{
-			Port:          *port,
-			SecurePort:    *securePort,
-			Cert:          tlsCert,
-			LaunchTimeout: *launchTimeout,
+			Port:                  *port,
+			SecurePort:            *securePort,
+			Cert:                  tlsCert,
+			LaunchTimeout:         *launchTimeout,
+			MaxConcurrentSessions: *maxSessions,
 		},
 	)
 
