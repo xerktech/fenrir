@@ -316,7 +316,7 @@ func TestLaunchWaiterHonoursCancellation(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := f.server.createSession(ctx, &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "bob"}}, func() (*v1alpha1types.Session, error) {
+		_, _, err := f.server.createSession(ctx, &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "bob"}}, func(context.Context) (*v1alpha1types.Session, error) {
 			return nil, nil
 		})
 		done <- err
@@ -329,6 +329,24 @@ func TestLaunchWaiterHonoursCancellation(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("waiter ignored its context and stayed blocked on the launch slot")
+	}
+}
+
+func TestLaunchSlotWorkIsBounded(t *testing.T) {
+	var deadline time.Time
+	var hasDeadline bool
+	f := newLaunchFixture(t, RESTServerOptions{
+		BusyCheck: func(ctx context.Context) (string, error) {
+			deadline, hasDeadline = ctx.Deadline()
+			return "", nil
+		},
+	})
+
+	// httptest requests have no deadline of their own.
+	f.launch(t, "alice")
+
+	if !hasDeadline || time.Until(deadline) > launchSlotTimeout {
+		t.Errorf("work under the launch slot has deadline %v (set=%v), want within %s", deadline, hasDeadline, launchSlotTimeout)
 	}
 }
 

@@ -25,12 +25,15 @@ func main() {
 	serverKeyPath := flag.String("tls-key", "server.key", "Path to server key")
 	port := flag.Int("port", 47989, "Port to listen on")
 	securePort := flag.Int("secure-port", 47984, "Secure port to listen on")
-	launchTimeout := flag.Duration("launch-timeout", moonlight.DefaultLaunchTimeout, "How long to wait for a session to become ready when launching an app (keep under moonlight-qt's 120s launch timeout)")
+	launchTimeout := flag.Duration("launch-timeout", moonlight.DefaultLaunchTimeout, "How long to wait for a session to become ready when launching an app (must be under moonlight-qt's 120s launch timeout)")
 	maxSessions := flag.Int("max-concurrent-sessions", 1, "How many users may stream at once; further launches get Moonlight's busy error (-1 = unlimited)")
 	namespace := flag.String("namespace", os.Getenv("POD_NAMESPACE"), "Namespace to watch")
 	klog.InitFlags(nil)
 	flag.Parse()
 
+	if *launchTimeout <= 0 || *launchTimeout >= moonlight.ClientLaunchTimeout {
+		klog.Fatalf("--launch-timeout must be > 0 and < %s (moonlight-qt's own launch timeout)", moonlight.ClientLaunchTimeout)
+	}
 	if *maxSessions == 0 || *maxSessions < -1 {
 		klog.Fatal("--max-concurrent-sessions must be >= 1, or -1 for unlimited")
 	}

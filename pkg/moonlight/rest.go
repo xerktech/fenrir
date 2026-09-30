@@ -65,9 +65,17 @@ type RESTServerOptions struct {
 // host. It returns a human-readable reason when busy, "" when free.
 type BusyCheck func(ctx context.Context) (reason string, err error)
 
-// DefaultLaunchTimeout sits under moonlight-qt's 120s launch request timeout,
-// so the client sees our error rather than its own generic timeout.
+// ClientLaunchTimeout is how long moonlight-qt waits for /launch before giving
+// up on its own. LaunchTimeout must stay below it.
+const ClientLaunchTimeout = 120 * time.Second
+
+// DefaultLaunchTimeout sits under ClientLaunchTimeout, so the client sees our
+// error rather than its own generic timeout.
 const DefaultLaunchTimeout = 100 * time.Second
+
+// launchSlotTimeout bounds the API calls made while holding launchSlot, so a
+// stalled API server can't block every launch indefinitely.
+const launchSlotTimeout = 30 * time.Second
 
 // busyStatusCode/busyMessage mirror what Sunshine sends when an app is
 // already running, so clients show a familiar error.
@@ -489,18 +497,18 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(userContextKey{}).(*v1alpha1types.User)
 	pairing := r.Context().Value(pairingContextKey{}).(*v1alpha1types.Pairing)
 
-	session, busyReason, err := s.createSession(r.Context(), user, func() (*v1alpha1types.Session, error) {
+	session, busyReason, err := s.createSession(r.Context(), user, func(ctx context.Context) (*v1alpha1types.Session, error) {
 		//!TOOD: May want to wait here, since we need the Service to stop pointing
 		// at the old pod. It is very likely to happen before operator syncs and
 		// can create session, but perhaps should still check after operator returns
 		// the session URL.
-		if err := s.stopSessionsForUser(user, false); err != nil && !k8serrors.IsNotFound(err) {
+		if err := s.stopSessionsForUser(ctx, user, false); err != nil && !k8serrors.IsNotFound(err) {
 			return nil, fmt.Errorf("failed to stop existing sessions: %s", err)
 		}
 
 		klog.Infof("Launching app %s for user %s", app.ObjectMeta.Name, user.ObjectMeta.Name)
 		return s.SessionClient.Create(
-			r.Context(),
+			ctx,
 			&v1alpha1types.Session{
 				ObjectMeta: metav1.ObjectMeta{
 					GenerateName: fmt.Sprintf("%s-%s-", user.Name, app.Name),
@@ -602,13 +610,16 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 // createSession runs create unless the host is busy for user, in which case
 // it returns a non-empty reason and create is not called. The check and the
 // create happen under launchSlot so the session limit holds under concurrency.
-func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User, create func() (*v1alpha1types.Session, error)) (*v1alpha1types.Session, string, error) {
+func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User, create func(ctx context.Context) (*v1alpha1types.Session, error)) (*v1alpha1types.Session, string, error) {
 	select {
 	case s.launchSlot <- struct{}{}:
 		defer func() { <-s.launchSlot }()
 	case <-ctx.Done():
 		return nil, "", ctx.Err()
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, launchSlotTimeout)
+	defer cancel()
 
 	if s.BusyCheck != nil {
 		reason, err := s.BusyCheck(ctx)
@@ -639,7 +650,7 @@ func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User
 		}
 	}
 
-	session, err := create()
+	session, err := create(ctx)
 	return session, "", err
 }
 
@@ -656,7 +667,10 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 func (s *RESTServer) cancelHandler(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(userContextKey{}).(*v1alpha1types.User)
 
-	err := s.stopSessionsForUser(user, true)
+	// Not r.Context(): finish the cancel even if the client hangs up.
+	ctx, cancel := context.WithTimeout(context.Background(), launchSlotTimeout)
+	defer cancel()
+	err := s.stopSessionsForUser(ctx, user, true)
 	if err != nil && !k8serrors.IsNotFound(err) {
 		writeErrorResponse(w, 500, fmt.Errorf("failed to cancel session: %s", err))
 		return
@@ -664,10 +678,10 @@ func (s *RESTServer) cancelHandler(w http.ResponseWriter, r *http.Request) {
 	sendXML(w, Response{StatusCode: 200})
 }
 
-func (s *RESTServer) stopSessionsForUser(user *v1alpha1types.User, shouldWait bool) error {
+func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1types.User, shouldWait bool) error {
 	// Live List, not the informer: a Session this user created moments ago
 	// (a quick relaunch) may not be cached yet and would be left running.
-	sessions, err := s.SessionClient.List(context.Background(), metav1.ListOptions{
+	sessions, err := s.SessionClient.List(ctx, metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(labels.Set{"direwolf/user": user.Name}).String(),
 	})
 	if err != nil {
@@ -676,7 +690,7 @@ func (s *RESTServer) stopSessionsForUser(user *v1alpha1types.User, shouldWait bo
 
 	didDelete := false
 	for _, session := range sessions.Items {
-		if err := s.SessionClient.Delete(context.Background(), session.Name, metav1.DeleteOptions{}); err != nil {
+		if err := s.SessionClient.Delete(ctx, session.Name, metav1.DeleteOptions{}); err != nil {
 			return fmt.Errorf("failed to delete session: %w", err)
 		}
 		didDelete = true

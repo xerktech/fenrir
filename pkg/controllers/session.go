@@ -44,10 +44,10 @@ import (
 
 // unstartedSessionTTL is how long a Session may go without a Wolf session
 // before it's reaped. It must outlast moonlight-proxy's --launch-timeout
-// (default 100s, itself under moonlight-qt's 120s): cold starts (image pull,
+// (capped below moonlight-qt's 120s): cold starts (image pull,
 // wolf boot) set WolfSessionID late, and reaping earlier would kill a launch
 // the client is still waiting on.
-const unstartedSessionTTL = 2 * time.Minute
+const unstartedSessionTTL = 3 * time.Minute
 
 var (
 	WOLF_IMAGE = func() string {
