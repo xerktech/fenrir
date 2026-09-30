@@ -3,6 +3,7 @@ package moonlight
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,15 +12,15 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
-	"games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
-	"games-on-whales.github.io/direwolf/pkg/generic"
-
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+
+	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	"games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
+	"games-on-whales.github.io/direwolf/pkg/generic"
 )
 
 const testNamespace = "direwolf"
@@ -33,7 +34,7 @@ type launchFixture struct {
 // newLaunchFixture builds a RESTServer over a fake clientset seeded with one
 // App (ID 1) and the given existing sessions. Created sessions get a name and
 // a stream URL immediately, standing in for the operator.
-func newLaunchFixture(t *testing.T, opts RESTServerOptions, existing ...*v1alpha1types.Session) *launchFixture {
+func newLaunchFixture(t *testing.T, opts *RESTServerOptions, existing ...*v1alpha1types.Session) *launchFixture {
 	t.Helper()
 
 	app := &v1alpha1types.App{
@@ -41,7 +42,7 @@ func newLaunchFixture(t *testing.T, opts RESTServerOptions, existing ...*v1alpha
 		Spec:       v1alpha1types.AppSpec{ID: 1},
 	}
 
-	objs := []runtime.Object{}
+	objs := make([]runtime.Object, 0, len(existing))
 	sessionIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	for _, s := range existing {
 		objs = append(objs, s)
@@ -56,7 +57,10 @@ func newLaunchFixture(t *testing.T, opts RESTServerOptions, existing ...*v1alpha
 
 	f := &launchFixture{client: fake.NewSimpleClientset(objs...)}
 	f.client.PrependReactor("create", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		s := action.(k8stesting.CreateAction).GetObject().(*v1alpha1types.Session)
+		s, ok := action.(k8stesting.CreateAction).GetObject().(*v1alpha1types.Session)
+		if !ok {
+			return false, nil, nil
+		}
 		n := f.created.Add(1)
 		s.Name = fmt.Sprintf("%s%d", s.GenerateName, n)
 		s.Status.StreamURL = "rtsp://example:48010"
@@ -75,9 +79,9 @@ func newLaunchFixture(t *testing.T, opts RESTServerOptions, existing ...*v1alpha
 		generic.NewLister[*v1alpha1types.User](emptyIndexer()).Namespaced(testNamespace),
 		generic.NewLister[*v1alpha1types.App](appIndexer).Namespaced(testNamespace),
 		generic.NewLister[*v1alpha1types.Session](sessionIndexer).Namespaced(testNamespace),
-		generic.NewLister[*v1.Pod](emptyIndexer()).Namespaced(testNamespace),
+		generic.NewLister[*corev1.Pod](emptyIndexer()).Namespaced(testNamespace),
 		f.client.DirewolfV1alpha1().Sessions(testNamespace),
-		opts,
+		*opts,
 	)
 	return f
 }
@@ -100,15 +104,15 @@ func sessionFor(user string) *v1alpha1types.Session {
 func (f *launchFixture) launch(t *testing.T, user string) (int, Response) {
 	t.Helper()
 
-	req := httptest.NewRequest(http.MethodGet, "/launch?appid=1&rikey=00&rikeyid=1&mode=1920x1080x60", nil)
-	ctx := context.WithValue(req.Context(), userContextKey{}, &v1alpha1types.User{
+	ctx := context.WithValue(context.Background(), userContextKey{}, &v1alpha1types.User{
 		ObjectMeta: metav1.ObjectMeta{Name: user, Namespace: testNamespace},
 	})
 	ctx = context.WithValue(ctx, pairingContextKey{}, &v1alpha1types.Pairing{
 		ObjectMeta: metav1.ObjectMeta{Name: user + "-pairing", Namespace: testNamespace},
 	})
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/launch?appid=1&rikey=00&rikeyid=1&mode=1920x1080x60", http.NoBody)
 	rec := httptest.NewRecorder()
-	f.server.launchHandler(rec, req.WithContext(ctx))
+	f.server.launchHandler(rec, req)
 
 	// Errorf, not Fatalf: this also runs on non-test goroutines.
 	var resp Response
@@ -149,7 +153,7 @@ func TestNewRESTServerDefaults(t *testing.T) {
 }
 
 func TestLaunchBusyWhenAnotherUserStreams(t *testing.T) {
-	f := newLaunchFixture(t, RESTServerOptions{}, sessionFor("alice"))
+	f := newLaunchFixture(t, &RESTServerOptions{}, sessionFor("alice"))
 
 	code, resp := f.launch(t, "bob")
 
@@ -163,7 +167,7 @@ func TestLaunchBusyWhenAnotherUserStreams(t *testing.T) {
 }
 
 func TestLaunchRelaunchBySameUserIsNotBusy(t *testing.T) {
-	f := newLaunchFixture(t, RESTServerOptions{}, sessionFor("alice"))
+	f := newLaunchFixture(t, &RESTServerOptions{}, sessionFor("alice"))
 
 	code, resp := f.launch(t, "alice")
 
@@ -176,7 +180,7 @@ func TestLaunchRelaunchBySameUserIsNotBusy(t *testing.T) {
 }
 
 func TestLaunchBackToBackBySameUserLeavesOneSession(t *testing.T) {
-	f := newLaunchFixture(t, RESTServerOptions{})
+	f := newLaunchFixture(t, &RESTServerOptions{})
 
 	// The informer never sees the first session; the second launch must
 	// still replace it.
@@ -192,7 +196,7 @@ func TestLaunchBackToBackBySameUserLeavesOneSession(t *testing.T) {
 }
 
 func TestLaunchFreeHostSucceeds(t *testing.T) {
-	f := newLaunchFixture(t, RESTServerOptions{})
+	f := newLaunchFixture(t, &RESTServerOptions{})
 
 	code, resp := f.launch(t, "bob")
 
@@ -205,7 +209,7 @@ func TestLaunchFreeHostSucceeds(t *testing.T) {
 }
 
 func TestLaunchLimitAboveOne(t *testing.T) {
-	f := newLaunchFixture(t, RESTServerOptions{MaxConcurrentSessions: 2}, sessionFor("alice"))
+	f := newLaunchFixture(t, &RESTServerOptions{MaxConcurrentSessions: 2}, sessionFor("alice"))
 
 	if code, resp := f.launch(t, "bob"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("second session = HTTP %d / %d %q, want success under limit 2", code, resp.StatusCode, resp.StatusMessage)
@@ -215,7 +219,7 @@ func TestLaunchLimitAboveOne(t *testing.T) {
 }
 
 func TestLaunchUnlimited(t *testing.T) {
-	f := newLaunchFixture(t, RESTServerOptions{MaxConcurrentSessions: -1}, sessionFor("alice"), sessionFor("bob"))
+	f := newLaunchFixture(t, &RESTServerOptions{MaxConcurrentSessions: -1}, sessionFor("alice"), sessionFor("bob"))
 
 	if code, resp := f.launch(t, "carol"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("launch = HTTP %d / %d %q, want success with no limit", code, resp.StatusCode, resp.StatusMessage)
@@ -224,7 +228,7 @@ func TestLaunchUnlimited(t *testing.T) {
 
 func TestLaunchBusyCheck(t *testing.T) {
 	const reason = "The Library is running"
-	f := newLaunchFixture(t, RESTServerOptions{
+	f := newLaunchFixture(t, &RESTServerOptions{
 		MaxConcurrentSessions: -1,
 		BusyCheck: func(context.Context) (string, error) {
 			return reason, nil
@@ -240,9 +244,9 @@ func TestLaunchBusyCheck(t *testing.T) {
 }
 
 func TestLaunchBusyCheckError(t *testing.T) {
-	f := newLaunchFixture(t, RESTServerOptions{
+	f := newLaunchFixture(t, &RESTServerOptions{
 		BusyCheck: func(context.Context) (string, error) {
-			return "", fmt.Errorf("boom")
+			return "", errors.New("boom")
 		},
 	})
 
@@ -258,10 +262,14 @@ func TestLaunchBusyCheckError(t *testing.T) {
 }
 
 func TestLaunchFailureDeletesSession(t *testing.T) {
-	f := newLaunchFixture(t, RESTServerOptions{LaunchTimeout: 300 * time.Millisecond})
+	f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 300 * time.Millisecond})
 	// The operator never publishes a stream URL.
 	f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		name := action.(k8stesting.GetAction).GetName()
+		get, ok := action.(k8stesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+		name := get.GetName()
 		return true, &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}}, nil
 	})
 
@@ -280,7 +288,7 @@ func TestLaunchFailureDeletesSession(t *testing.T) {
 func TestLaunchCountsUsersNotSessions(t *testing.T) {
 	second := sessionFor("alice")
 	second.Name = "alice-second"
-	f := newLaunchFixture(t, RESTServerOptions{MaxConcurrentSessions: 2}, sessionFor("alice"), second)
+	f := newLaunchFixture(t, &RESTServerOptions{MaxConcurrentSessions: 2}, sessionFor("alice"), second)
 
 	if code, resp := f.launch(t, "bob"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("launch = HTTP %d / %d %q, want success: alice is one user", code, resp.StatusCode, resp.StatusMessage)
@@ -290,7 +298,7 @@ func TestLaunchCountsUsersNotSessions(t *testing.T) {
 func TestLaunchWaiterHonoursCancellation(t *testing.T) {
 	release := make(chan struct{})
 	entered := make(chan struct{})
-	f := newLaunchFixture(t, RESTServerOptions{
+	f := newLaunchFixture(t, &RESTServerOptions{
 		BusyCheck: func(context.Context) (string, error) {
 			select {
 			case entered <- struct{}{}:
@@ -318,7 +326,7 @@ func TestLaunchWaiterHonoursCancellation(t *testing.T) {
 	go func() {
 		_, _, err := f.server.createSession(ctx, &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "bob"}}, func(context.Context) (*v1alpha1types.Session, error) {
 			return nil, nil
-		})
+		}, func() {})
 		done <- err
 	}()
 
@@ -335,7 +343,7 @@ func TestLaunchWaiterHonoursCancellation(t *testing.T) {
 func TestLaunchSlotWorkIsBounded(t *testing.T) {
 	var deadline time.Time
 	var hasDeadline bool
-	f := newLaunchFixture(t, RESTServerOptions{
+	f := newLaunchFixture(t, &RESTServerOptions{
 		BusyCheck: func(ctx context.Context) (string, error) {
 			deadline, hasDeadline = ctx.Deadline()
 			return "", nil
@@ -352,7 +360,7 @@ func TestLaunchSlotWorkIsBounded(t *testing.T) {
 
 func TestLaunchDeadlineCoversWholeLaunch(t *testing.T) {
 	var deadline time.Time
-	f := newLaunchFixture(t, RESTServerOptions{
+	f := newLaunchFixture(t, &RESTServerOptions{
 		LaunchTimeout: 2 * time.Second,
 		BusyCheck: func(ctx context.Context) (string, error) {
 			deadline, _ = ctx.Deadline()
@@ -373,27 +381,89 @@ func TestLaunchDeadlineCoversWholeLaunch(t *testing.T) {
 }
 
 func TestLaunchCreateErrorDeletesStoredSession(t *testing.T) {
-	f := newLaunchFixture(t, RESTServerOptions{})
+	f := newLaunchFixture(t, &RESTServerOptions{})
+	entered := make(chan struct{})
+	release := make(chan struct{})
 	// The API server stores the Session but the response is lost.
 	f.client.PrependReactor("create", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		obj := action.(k8stesting.CreateAction).GetObject().(*v1alpha1types.Session)
+		create, ok := action.(k8stesting.CreateAction)
+		if !ok {
+			return false, nil, nil
+		}
+		obj, ok := create.GetObject().(*v1alpha1types.Session)
+		if !ok || obj.Labels["direwolf/user"] != "alice" {
+			return false, nil, nil
+		}
 		obj.Name = obj.GenerateName + "stored"
 		if err := f.client.Tracker().Create(action.GetResource(), obj, action.GetNamespace()); err != nil {
-			t.Fatal(err)
+			return true, nil, fmt.Errorf("storing session: %w", err)
 		}
-		return true, nil, fmt.Errorf("response timed out")
+		entered <- struct{}{}
+		<-release
+		return true, nil, errors.New("response timed out")
 	})
 
-	if code, _ := f.launch(t, "alice"); code != http.StatusInternalServerError {
-		t.Fatalf("HTTP status = %d, want 500", code)
+	aliceCode := make(chan int, 1)
+	go func() {
+		code, _ := f.launch(t, "alice")
+		aliceCode <- code
+	}()
+	<-entered
+
+	// Bob queues on the launch slot behind alice's doomed Create.
+	type result struct {
+		code int
+		resp Response
 	}
-	if n := f.sessionCount(t); n != 0 {
-		t.Errorf("session count = %d, want the stored session cleaned up", n)
+	bobResult := make(chan result, 1)
+	go func() {
+		code, resp := f.launch(t, "bob")
+		bobResult <- result{code, resp}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	if code := <-aliceCode; code != http.StatusInternalServerError {
+		t.Errorf("alice HTTP status = %d, want 500", code)
+	}
+	bob := <-bobResult
+	if bob.resp.StatusCode != http.StatusOK {
+		t.Errorf("bob = HTTP %d / %d %q, want success: alice's stored session must be gone first", bob.code, bob.resp.StatusCode, bob.resp.StatusMessage)
+	}
+	if n := f.sessionCount(t); n != 1 {
+		t.Errorf("session count = %d, want only bob's", n)
+	}
+}
+
+func TestLaunchReadinessWaitSharesLaunchDeadline(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{
+		LaunchTimeout: time.Second,
+		BusyCheck: func(context.Context) (string, error) {
+			time.Sleep(700 * time.Millisecond)
+			return "", nil
+		},
+	})
+	// The operator never publishes a stream URL.
+	f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		get, ok := action.(k8stesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+		name := get.GetName()
+		return true, &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}}, nil
+	})
+
+	start := time.Now()
+	f.launch(t, "alice")
+
+	// 0.7s in the slot + a fresh 1s wait would be ~1.7s.
+	if elapsed := time.Since(start); elapsed > 1400*time.Millisecond {
+		t.Errorf("launch took %s, want the whole launch within its 1s budget", elapsed)
 	}
 }
 
 func TestLaunchConcurrentUsersRespectLimit(t *testing.T) {
-	f := newLaunchFixture(t, RESTServerOptions{})
+	f := newLaunchFixture(t, &RESTServerOptions{})
 
 	const users = 8
 	var wg sync.WaitGroup

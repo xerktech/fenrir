@@ -22,5 +22,6 @@ paths:
   - Work under the slot is bounded by `launchSlotTimeout` and by the launch's own deadline:
     slot queue + slot work + readiness wait all share one `LaunchTimeout` budget.
   - Sessions carry `direwolf/launch-id`; a failed launch (even a failed Create) deletes by it.
+    A failed Create is cleaned up while still holding the slot; a failed wait answers first.
 - `RESTServerOptions.BusyCheck` is the hook for anything besides Sessions that holds the GPU
   (the Library pod). A check error fails the launch closed.

@@ -18,12 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
-	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
-	"games-on-whales.github.io/direwolf/pkg/generic"
-	"games-on-whales.github.io/direwolf/pkg/util"
 	"golang.org/x/image/webp"
-
 	v1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +26,11 @@ import (
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
+
+	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
+	"games-on-whales.github.io/direwolf/pkg/generic"
+	"games-on-whales.github.io/direwolf/pkg/util"
 
 	_ "embed"
 )
@@ -513,11 +513,11 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		// at the old pod. It is very likely to happen before operator syncs and
 		// can create session, but perhaps should still check after operator returns
 		// the session URL.
-		if err := s.stopSessionsForUser(ctx, user, false); err != nil && !k8serrors.IsNotFound(err) {
-			return nil, fmt.Errorf("failed to stop existing sessions: %s", err)
+		if stopErr := s.stopSessionsForUser(ctx, user, false); stopErr != nil && !k8serrors.IsNotFound(stopErr) {
+			return nil, fmt.Errorf("failed to stop existing sessions: %w", stopErr)
 		}
 
-		klog.Infof("Launching app %s for user %s", app.ObjectMeta.Name, user.ObjectMeta.Name)
+		klog.Infof("Launching app %s for user %s", app.Name, user.Name)
 		return s.SessionClient.Create(
 			ctx,
 			&v1alpha1types.Session{
@@ -526,23 +526,23 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 					Namespace:    pairing.Namespace,
 					Labels: map[string]string{
 						"direwolf":      "true",
-						"direwolf/app":  app.ObjectMeta.Name,
-						"direwolf/user": user.ObjectMeta.Name,
+						"direwolf/app":  app.Name,
+						"direwolf/user": user.Name,
 						launchIDLabel:   launchID,
 					},
 					Annotations: map[string]string{
-						"direwolf/pairing": pairing.ObjectMeta.Name,
+						"direwolf/pairing": pairing.Name,
 					},
 				},
 				Spec: v1alpha1types.SessionSpec{
 					GameReference: v1alpha1types.GameReference{
-						Name: app.ObjectMeta.Name,
+						Name: app.Name,
 					},
 					PairingReference: v1alpha1types.PairingReference{
-						Name: pairing.ObjectMeta.Name,
+						Name: pairing.Name,
 					},
 					UserReference: v1alpha1types.UserReference{
-						Name: user.ObjectMeta.Name,
+						Name: user.Name,
 					},
 					//!TODO: Unused. v1alpha2 Gateway types are not widely supported
 					GatewayReference: v1alpha1types.GatewayReference{
@@ -564,9 +564,13 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 				FieldManager: "direwolf-launch",
 			},
 		)
+	}, func() {
+		// The Create may have been stored even though it errored (e.g. the
+		// response timed out); remove it before the next launch counts it.
+		s.deleteLaunch(launchCtx, launchID)
 	})
 	if busyReason != "" {
-		klog.Infof("Refusing launch of app %s for user %s: %s", app.ObjectMeta.Name, user.ObjectMeta.Name, busyReason)
+		klog.Infof("Refusing launch of app %s for user %s: %s", app.Name, user.Name, busyReason)
 		// HTTP 200 with the error in the XML status, as Sunshine does:
 		// moonlight-qt treats a non-2xx HTTP status as a transport error and
 		// would not show the message.
@@ -574,8 +578,7 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.deleteLaunch(launchID)
-		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %s", err))
+		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %w", err))
 		return
 	}
 
@@ -601,11 +604,16 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return true, nil
 	})
 	if err != nil {
+		// Answer first, so a slow cleanup can't push the reply past the
+		// client's own timeout.
+		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %w", err))
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			klog.Errorf("Failed to flush launch error: %s", err)
+		}
 		// Don't leave a Session that never became ready: it would count
 		// against the session limit and lock every other user out until
 		// its owner cancels.
-		s.deleteLaunch(launchID)
-		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %s", err))
+		s.deleteLaunch(launchCtx, launchID)
 		return
 	}
 
@@ -621,13 +629,27 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 // createSession runs create unless the host is busy for user, in which case
 // it returns a non-empty reason and create is not called. The check and the
 // create happen under launchSlot so the session limit holds under concurrency.
-func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User, create func(ctx context.Context) (*v1alpha1types.Session, error)) (*v1alpha1types.Session, string, error) {
+//
+// If create fails, onCreateError runs in the background while the slot is
+// still held, so the next launch can't count a half-created Session, and the
+// caller can answer its client without waiting for the cleanup.
+func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User, create func(ctx context.Context) (*v1alpha1types.Session, error), onCreateError func()) (*v1alpha1types.Session, string, error) {
 	select {
 	case s.launchSlot <- struct{}{}:
-		defer func() { <-s.launchSlot }()
 	case <-ctx.Done():
-		return nil, "", ctx.Err()
+		return nil, "", fmt.Errorf("waiting for a launch slot: %w", ctx.Err())
 	}
+	createFailed := false
+	defer func() {
+		if !createFailed {
+			<-s.launchSlot
+			return
+		}
+		go func() {
+			defer func() { <-s.launchSlot }()
+			onCreateError()
+		}()
+	}()
 
 	ctx, cancel := context.WithTimeout(ctx, launchSlotTimeout)
 	defer cancel()
@@ -662,16 +684,17 @@ func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User
 	}
 
 	session, err := create(ctx)
+	createFailed = err != nil
 	return session, "", err
 }
 
 // launchIDLabel marks a Session with the /launch request that created it.
 const launchIDLabel = "direwolf/launch-id"
 
-// deleteLaunch removes the Session(s) created by one /launch. It runs on a
-// fresh context: the request's may already be done.
-func (s *RESTServer) deleteLaunch(launchID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), launchSlotTimeout)
+// deleteLaunch removes the Session(s) created by one /launch. It detaches
+// from ctx's cancellation: the launch's deadline has usually passed by now.
+func (s *RESTServer) deleteLaunch(ctx context.Context, launchID string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), launchSlotTimeout)
 	defer cancel()
 
 	sessions, err := s.SessionClient.List(ctx, metav1.ListOptions{
@@ -701,8 +724,8 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 func (s *RESTServer) cancelHandler(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(userContextKey{}).(*v1alpha1types.User)
 
-	// Not r.Context(): finish the cancel even if the client hangs up.
-	ctx, cancel := context.WithTimeout(context.Background(), launchSlotTimeout)
+	// Detached from r.Context(): finish the cancel even if the client hangs up.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), launchSlotTimeout)
 	defer cancel()
 	err := s.stopSessionsForUser(ctx, user, true)
 	if err != nil && !k8serrors.IsNotFound(err) {
@@ -724,8 +747,8 @@ func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1type
 
 	didDelete := false
 	for _, session := range sessions.Items {
-		if err := s.SessionClient.Delete(ctx, session.Name, metav1.DeleteOptions{}); err != nil {
-			return fmt.Errorf("failed to delete session: %w", err)
+		if delErr := s.SessionClient.Delete(ctx, session.Name, metav1.DeleteOptions{}); delErr != nil {
+			return fmt.Errorf("failed to delete session: %w", delErr)
 		}
 		didDelete = true
 	}
@@ -817,7 +840,7 @@ func sendXML(w http.ResponseWriter, resp Responsable) {
 	sendXMLWithHTTPStatus(w, resp.GetStatusCode(), resp)
 }
 
-func sendXMLWithHTTPStatus(w http.ResponseWriter, httpStatus int, resp Responsable) {
+func sendXMLWithHTTPStatus(w http.ResponseWriter, httpStatus int, resp Responsable) { //nolint:misspell // existing type name
 	bytes, err := xml.Marshal(resp)
 	if err != nil {
 		writeErrorResponse(w, 500, fmt.Errorf("failed to marshal XML: %s", err))
