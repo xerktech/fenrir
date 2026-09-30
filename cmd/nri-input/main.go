@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"slices"
 	"strings"
@@ -82,6 +83,21 @@ func (p *plugin) adjustment(pod *api.PodSandbox) *api.ContainerAdjustment {
 	return adjust
 }
 
+// newPlugin validates the namespace scope. It fails closed: the session label
+// is pod-author controlled, so an unscoped plugin needs an explicit
+// allNamespaces opt-in.
+func newPlugin(namespaces string, allNamespaces bool) (*plugin, error) {
+	p := &plugin{namespaces: parseNamespaces(namespaces)}
+	switch {
+	case len(p.namespaces) > 0 && allNamespaces:
+		return nil, errors.New("--namespaces and --all-namespaces are mutually exclusive")
+	case len(p.namespaces) == 0 && !allNamespaces:
+		return nil, errors.New("--namespaces is required (or pass --all-namespaces to trust the " +
+			v1alpha1types.SessionPodLabel + " label in every namespace)")
+	}
+	return p, nil
+}
+
 // parseNamespaces splits a comma-separated namespace list, trimming spaces and
 // dropping empty entries.
 func parseNamespaces(s string) []string {
@@ -104,16 +120,13 @@ func main() {
 	klog.InitFlags(nil)
 	flag.Parse()
 
-	p := &plugin{namespaces: parseNamespaces(*namespaces)}
-	switch {
-	case len(p.namespaces) > 0 && *allNamespaces:
-		klog.Fatal("--namespaces and --all-namespaces are mutually exclusive")
-	case len(p.namespaces) == 0 && !*allNamespaces:
-		klog.Fatal("--namespaces is required (or pass --all-namespaces to trust the " +
-			v1alpha1types.SessionPodLabel + " label in every namespace)")
-	case *allNamespaces:
+	p, err := newPlugin(*namespaces, *allNamespaces)
+	if err != nil {
+		klog.Fatal(err)
+	}
+	if len(p.namespaces) == 0 {
 		klog.Warning("--all-namespaces set: any pod labelled " + v1alpha1types.SessionPodLabel + " gets input devices")
-	default:
+	} else {
 		klog.InfoS("Restricting input devices to namespaces", "namespaces", p.namespaces)
 	}
 

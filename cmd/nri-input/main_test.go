@@ -92,3 +92,20 @@ func TestParseNamespaces(t *testing.T) {
 	require.Empty(t, parseNamespaces(""))
 	require.Empty(t, parseNamespaces(" , "))
 }
+
+func TestNewPluginScope(t *testing.T) {
+	_, err := newPlugin("", false)
+	require.Error(t, err, "unscoped plugin must fail closed")
+	_, err = newPlugin(" , ", false)
+	require.Error(t, err, "blank namespace list must fail closed")
+	_, err = newPlugin("games", true)
+	require.Error(t, err, "flags are mutually exclusive")
+
+	p, err := newPlugin("games", false)
+	require.NoError(t, err)
+	require.Equal(t, []string{"games"}, p.namespaces)
+
+	p, err = newPlugin("", true)
+	require.NoError(t, err)
+	require.Empty(t, p.namespaces)
+}
