@@ -104,7 +104,29 @@ func main() {
 	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.Handle("/api/v1/", wolfapi.RequireBearerToken(token, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/v1/", wolfapi.RequireBearerToken(token, proxyHandler(&client, &ready)))
+
+	// Start HTTPS server
+	server := &http.Server{
+		Addr:    fmt.Sprintf(":%d", *serverPort),
+		Handler: mux,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		},
+	}
+
+	klog.Infof("Listening on port %d\n", *serverPort)
+	err = server.ListenAndServeTLS("", "")
+	if err != nil {
+		klog.Fatal("Failed to start server:", err)
+	}
+}
+
+// proxyHandler forwards /api/v1/ requests to Wolf over client (the unix
+// socket), streaming the response so SSE works. Callers must wrap it in
+// wolfapi.RequireBearerToken.
+func proxyHandler(client *http.Client, ready *atomic.Bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		klog.Info("Received request:", r.Method, r.URL.Path)
 		if !ready.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -179,22 +201,7 @@ func main() {
 			}
 		}
 		klog.InfoS("Request completed", "statusCode", response.StatusCode)
-	})))
-
-	// Start HTTPS server
-	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", *serverPort),
-		Handler: mux,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-		},
-	}
-
-	klog.Infof("Listening on port %d\n", *serverPort)
-	err = server.ListenAndServeTLS("", "")
-	if err != nil {
-		klog.Fatal("Failed to start server:", err)
-	}
+	})
 }
 
 // selfClient builds the wolfapi client the in-pod agent controller uses to
