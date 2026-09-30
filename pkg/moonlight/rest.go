@@ -609,12 +609,21 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		// its owner cancels. In the background: moonlight-qt waits for the
 		// whole response, so a slow cleanup must not hold the handler open
 		// past the client's own timeout. Under the slot, so a queued launch
-		// doesn't count it.
-		go func() {
-			s.launchSlot <- struct{}{}
+		// doesn't count it: take it now if free (before the next launch
+		// can), else queue for it.
+		cleanup := func() {
 			defer func() { <-s.launchSlot }()
 			s.deleteLaunch(launchCtx, launchID)
-		}()
+		}
+		select {
+		case s.launchSlot <- struct{}{}:
+			go cleanup()
+		default:
+			go func() {
+				s.launchSlot <- struct{}{}
+				cleanup()
+			}()
+		}
 		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %w", err))
 		return
 	}

@@ -341,6 +341,35 @@ func TestLaunchFailureAnswersBeforeCleanup(t *testing.T) {
 	}
 }
 
+func TestLaunchFailureCleanupHoldsSlot(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 300 * time.Millisecond})
+	// Alice's session never becomes ready; bob's does.
+	f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		get, ok := action.(k8stesting.GetAction)
+		if !ok || !strings.HasPrefix(get.GetName(), "alice-") {
+			return false, nil, nil
+		}
+		return true, &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: get.GetName(), Namespace: testNamespace}}, nil
+	})
+	// Alice's cleanup is slow to start deleting.
+	f.client.PrependReactor("list", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		list, ok := action.(k8stesting.ListAction)
+		if ok && strings.Contains(list.GetListRestrictions().Labels.String(), launchIDLabel) {
+			time.Sleep(100 * time.Millisecond) // within bob's 300ms budget
+		}
+		return false, nil, nil
+	})
+
+	if code, _ := f.launch(t, "alice"); code != http.StatusInternalServerError {
+		t.Fatalf("alice HTTP status = %d, want 500", code)
+	}
+	// Bob launches right away: he must queue behind the cleanup rather than
+	// count alice's orphan.
+	if code, resp := f.launch(t, "bob"); resp.StatusCode != http.StatusOK {
+		t.Errorf("bob = HTTP %d / %d %q, want success after alice's cleanup", code, resp.StatusCode, resp.StatusMessage)
+	}
+}
+
 func TestLaunchCountsUsersNotSessions(t *testing.T) {
 	second := sessionFor("alice")
 	second.Name = "alice-second"
