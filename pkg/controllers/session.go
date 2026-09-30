@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"reflect"
 	"slices"
@@ -1713,39 +1714,11 @@ func (c *SessionController) reconcileActiveStreams(
 		// sessions per Gateway.
 		//
 		// Create the session
-		clientIP := "10.128.1.0" // I'm  keeping this, for now...
-		if session.Spec.Config.ClientIP != "" {
-			clientIP = session.Spec.Config.ClientIP
+		wolfSession, err := wolfSessionFor(session, podIP)
+		if err != nil {
+			return err
 		}
-
-		sessionID, err := wolfclient.AddSession(ctx, wolfapi.Session{
-			VideoWidth:       session.Spec.Config.VideoWidth,
-			VideoHeight:      session.Spec.Config.VideoHeight,
-			VideoRefreshRate: session.Spec.Config.VideoRefreshRate,
-			// AppID:             appID,
-			AudioChannelCount: 2, // !TODO: parse from audio info
-
-			ClientIP: clientIP, // In the future, this will be acquired dynamically
-			//If this isn't present it crashes
-			//so, I'll keep it here until I figure out a way to pass off from moonlight client
-			ClientSettings: wolfapi.ClientSettings{
-				RunGID:              1000,
-				RunUID:              1000,
-				ControllersOverride: []string{"XBOX"},
-				MouseAcceleration:   1.0,
-				VScrollAcceleration: 1.0,
-				HScrollAcceleration: 1.0,
-			},
-			AESKey: session.Spec.Config.AESKey,
-			AESIV:  session.Spec.Config.AESIV,
-			//!TODO: not this. This is the hash of the client cert we are
-			// hardcoding into wolf config. Should call pair endpoint to genuinely
-			// add it. Though not really needed since user doesnt connect via HTTPS
-			// to wolf, we just need a client ID wolf accepts for this specific
-			// pairing/client...
-			// ClientID:   "4193251087262667199",
-			RTSPFakeIP: podIP,
-		})
+		sessionID, err := wolfclient.AddSession(ctx, wolfSession)
 
 		if err != nil {
 			return fmt.Errorf("failed to create session: %s", err)
@@ -1759,4 +1732,44 @@ func (c *SessionController) reconcileActiveStreams(
 
 	session.Status.StreamURL = "rtsp://" + net.JoinHostPort(podIP, strconv.Itoa(int(session.Status.Ports.RTSP)))
 	return nil
+}
+
+// wolfSessionFor builds the Wolf AddSession request for session. Wolf streams
+// to ClientIP, so it must be the Moonlight client's real address (recorded by
+// moonlight-proxy at /launch); there is no usable default.
+func wolfSessionFor(session *v1alpha1types.Session, podIP string) (wolfapi.Session, error) {
+	clientIP, err := netip.ParseAddr(session.Spec.Config.ClientIP)
+	if err != nil {
+		return wolfapi.Session{}, fmt.Errorf("session %s/%s has no valid spec.config.clientIP %q: %w",
+			session.Namespace, session.Name, session.Spec.Config.ClientIP, err)
+	}
+
+	return wolfapi.Session{
+		VideoWidth:       session.Spec.Config.VideoWidth,
+		VideoHeight:      session.Spec.Config.VideoHeight,
+		VideoRefreshRate: session.Spec.Config.VideoRefreshRate,
+		// AppID:             appID,
+		AudioChannelCount: 2, // !TODO: parse from audio info
+
+		ClientIP: clientIP.Unmap().String(),
+		// If this isn't present it crashes
+		// so, I'll keep it here until I figure out a way to pass off from moonlight client
+		ClientSettings: wolfapi.ClientSettings{
+			RunGID:              1000,
+			RunUID:              1000,
+			ControllersOverride: []string{"XBOX"},
+			MouseAcceleration:   1.0,
+			VScrollAcceleration: 1.0,
+			HScrollAcceleration: 1.0,
+		},
+		AESKey: session.Spec.Config.AESKey,
+		AESIV:  session.Spec.Config.AESIV,
+		//!TODO: not this. This is the hash of the client cert we are
+		// hardcoding into wolf config. Should call pair endpoint to genuinely
+		// add it. Though not really needed since user doesnt connect via HTTPS
+		// to wolf, we just need a client ID wolf accepts for this specific
+		// pairing/client...
+		// ClientID:   "4193251087262667199",
+		RTSPFakeIP: podIP,
+	}, nil
 }

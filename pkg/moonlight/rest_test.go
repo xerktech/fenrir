@@ -126,3 +126,30 @@ func heldCertPEM(t *testing.T) []byte {
 	}
 	return bytes.TrimSpace(certPEM)
 }
+
+func TestRemoteIP(t *testing.T) {
+	for _, tc := range []struct {
+		remoteAddr, want string
+		wantErr          bool
+	}{
+		{remoteAddr: "192.0.2.10:51234", want: "192.0.2.10"},
+		{remoteAddr: "[2001:db8::1]:51234", want: "2001:db8::1"},
+		{remoteAddr: "[::ffff:192.0.2.10]:51234", want: "192.0.2.10"},
+		{remoteAddr: "[fe80::1%eth0]:51234", want: "fe80::1"},
+		{remoteAddr: "", wantErr: true},
+		{remoteAddr: "192.0.2.10", wantErr: true},
+		{remoteAddr: "not-an-ip:1", wantErr: true},
+	} {
+		r := &http.Request{RemoteAddr: tc.remoteAddr}
+		got, err := remoteIP(r)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("remoteIP(%q) = %q, want error", tc.remoteAddr, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("remoteIP(%q) = %q, %v; want %q", tc.remoteAddr, got, err, tc.want)
+		}
+	}
+}
