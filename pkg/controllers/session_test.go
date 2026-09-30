@@ -268,10 +268,10 @@ func cacheWaitForSync(k8sFactory informers.SharedInformerFactory, dwFactory gene
 // the App's DRA ResourceClaim: the pod keeps spec.resourceClaims, and both the game
 // container and the wolf sidecar (NVENC) reference the claim.
 func TestSessionPodGPUFromDRAClaim(t *testing.T) {
-	_, _, _, dep := reconcileFixtures(t, "../../examples/nvidia_devices/user.yaml", "../../examples/nvidia_devices/firefox.yaml")
+	_, _, _, dep := reconcileFixtures(t, "../../examples/nvidia_devices/user.yaml", "../../examples/nvidia_devices/firefox.yaml") //nolint:dogsled // only the Deployment matters here
 	spec := dep.Spec.Template.Spec
 
-	want := corev1.PodResourceClaim{Name: "gpu", ResourceClaimTemplateName: ptr.To("nvidia-gpu")}
+	want := corev1.PodResourceClaim{Name: "gpu", ResourceClaimTemplateName: new("nvidia-gpu")}
 	if len(spec.ResourceClaims) != 1 || !reflect.DeepEqual(spec.ResourceClaims[0], want) {
 		t.Errorf("pod resourceClaims = %+v, want [%+v]", spec.ResourceClaims, want)
 	}
@@ -316,5 +316,25 @@ func TestMergeResourceRequirementsKeepsClaims(t *testing.T) {
 	}
 	if len(defaults.Claims) != 1 {
 		t.Errorf("defaults mutated: %+v", defaults.Claims)
+	}
+}
+
+// Server-side apply keys resources.claims by name alone, so one name must never
+// appear twice; a whole-claim entry wins over a single-request one.
+func TestAppendResourceClaimsOneEntryPerName(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		dst, add  []corev1.ResourceClaim
+		wantClaim []corev1.ResourceClaim
+	}{
+		{"request then whole", []corev1.ResourceClaim{{Name: "gpu", Request: "gpu"}}, []corev1.ResourceClaim{{Name: "gpu"}}, []corev1.ResourceClaim{{Name: "gpu"}}},
+		{"whole then request", []corev1.ResourceClaim{{Name: "gpu"}}, []corev1.ResourceClaim{{Name: "gpu", Request: "gpu"}}, []corev1.ResourceClaim{{Name: "gpu"}}},
+		{"two requests", nil, []corev1.ResourceClaim{{Name: "gpu", Request: "a"}, {Name: "gpu", Request: "b"}}, []corev1.ResourceClaim{{Name: "gpu"}}},
+		{"same request", nil, []corev1.ResourceClaim{{Name: "gpu", Request: "a"}, {Name: "gpu", Request: "a"}}, []corev1.ResourceClaim{{Name: "gpu", Request: "a"}}},
+		{"distinct names", []corev1.ResourceClaim{{Name: "gpu"}}, []corev1.ResourceClaim{{Name: "nic", Request: "vf"}}, []corev1.ResourceClaim{{Name: "gpu"}, {Name: "nic", Request: "vf"}}},
+	} {
+		if got := appendResourceClaims(tc.dst, tc.add...); !reflect.DeepEqual(got, tc.wantClaim) {
+			t.Errorf("%s: got %+v, want %+v", tc.name, got, tc.wantClaim)
+		}
 	}
 }

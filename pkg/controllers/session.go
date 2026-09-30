@@ -653,11 +653,18 @@ func mergeResourceRequirements(defaults corev1.ResourceRequirements, overrides *
 	return *merged
 }
 
-// appendResourceClaims appends the claims not already present in dst.
+// appendResourceClaims appends claims to dst, keeping one entry per claim name:
+// server-side apply keys resources.claims by name alone, so duplicates fail the
+// apply. When entries for one name differ (whole claim vs. a single request, or
+// two requests), the whole claim is kept, as it covers every request.
 func appendResourceClaims(dst []corev1.ResourceClaim, claims ...corev1.ResourceClaim) []corev1.ResourceClaim {
 	for _, claim := range claims {
-		if !slices.Contains(dst, claim) {
+		i := slices.IndexFunc(dst, func(c corev1.ResourceClaim) bool { return c.Name == claim.Name })
+		switch {
+		case i < 0:
 			dst = append(dst, claim)
+		case dst[i] != claim:
+			dst[i] = corev1.ResourceClaim{Name: claim.Name}
 		}
 	}
 	return dst
@@ -801,8 +808,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 	// Prepare environment variables for the wolf container.
 	// The GPU is not selected here: it comes only from the App's DRA
 	// ResourceClaims (see appResourceClaims), which the DRA driver injects via CDI.
-	// I need a better method of injecting env vars / configs to the pod
-	// TODO
+	// TODO: find a better method of injecting env vars / configs into the pod.
 	wolfEnvVars := map[string]string{
 		"PUID":                   "1000",
 		"PGID":                   "1000",
