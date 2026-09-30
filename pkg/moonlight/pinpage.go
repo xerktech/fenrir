@@ -1,7 +1,6 @@
 package moonlight
 
 import (
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"html/template"
@@ -11,10 +10,12 @@ import (
 	"regexp"
 	"time"
 
+	"k8s.io/klog/v2"
+
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	"games-on-whales.github.io/direwolf/pkg/generic"
 
-	"k8s.io/klog/v2"
+	_ "embed"
 )
 
 //go:embed pin.html
@@ -23,7 +24,7 @@ var pinHTML string
 var pinTemplate = template.Must(template.New("pin").Parse(pinHTML))
 
 // Moonlight always displays a 4-digit PIN.
-var pinPattern = regexp.MustCompile(`^[0-9]{4}$`)
+var pinPattern = regexp.MustCompile(`^\d{4}$`)
 
 // DefaultPinUserHeader is the header Authentik's proxy outpost sets to the
 // authenticated username.
@@ -178,5 +179,5 @@ func (h *pinPageHandler) submit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Write([]byte("PIN sent. Moonlight will finish pairing."))
+	_, _ = w.Write([]byte("PIN sent. Moonlight will finish pairing."))
 }

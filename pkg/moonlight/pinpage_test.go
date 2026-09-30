@@ -18,12 +18,12 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
+
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	"games-on-whales.github.io/direwolf/pkg/generic"
 	"games-on-whales.github.io/direwolf/pkg/util"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/cache"
 )
 
 const (
@@ -50,7 +50,7 @@ func newTestPinPage(t *testing.T, users ...string) (*PairingManager, http.Handle
 
 // startPhase1 runs pairPhase1 the way /pair would and waits until it is
 // blocked on the pairing page. The returned channel yields its response.
-func startPhase1(t *testing.T, ctx context.Context, m *PairingManager, cacheKey string, salt []byte) (string, <-chan PairingResponse) {
+func startPhase1(ctx context.Context, t *testing.T, m *PairingManager, cacheKey string, salt []byte) (secret string, done <-chan PairingResponse) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -63,14 +63,14 @@ func startPhase1(t *testing.T, ctx context.Context, m *PairingManager, cacheKey 
 	}
 	certHex := hex.EncodeToString(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 
-	done := make(chan PairingResponse, 1)
-	go func() { done <- m.pairPhase1(ctx, cacheKey, hex.EncodeToString(salt), certHex) }()
+	resp := make(chan PairingResponse, 1)
+	go func() { resp <- m.pairPhase1(ctx, cacheKey, hex.EncodeToString(salt), certHex) }()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, p := range m.PendingPairings() {
 			if p.Client == cacheKey {
-				return p.Secret, done
+				return p.Secret, resp
 			}
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -80,7 +80,7 @@ func startPhase1(t *testing.T, ctx context.Context, m *PairingManager, cacheKey 
 }
 
 func postPin(h http.Handler, peer, user, body string, mutate ...func(*http.Request)) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/pin/", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/pin/", strings.NewReader(body))
 	req.RemoteAddr = peer
 	req.Header.Set("Content-Type", "application/json")
 	if user != "" {
@@ -97,10 +97,10 @@ func postPin(h http.Handler, peer, user, body string, mutate ...func(*http.Reque
 func TestPinHandoffMapsPairingToAuthenticatedUser(t *testing.T) {
 	m, h := newTestPinPage(t, "alice")
 	salt := bytes.Repeat([]byte{0x42}, 16)
-	secret, done := startPhase1(t, t.Context(), m, "client@192.0.2.10", salt)
+	secret, done := startPhase1(t.Context(), t, m, "client@192.0.2.10", salt)
 
 	// The page lists the waiting request for the signed-in user.
-	req := httptest.NewRequest(http.MethodGet, "/pin/", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pin/", http.NoBody)
 	req.RemoteAddr = trustedPeer
 	req.Header.Set(DefaultPinUserHeader, "alice")
 	rec := httptest.NewRecorder()
@@ -126,7 +126,10 @@ func TestPinHandoffMapsPairingToAuthenticatedUser(t *testing.T) {
 	if !ok {
 		t.Fatal("no pairing cache entry after phase 1")
 	}
-	entry := v.(pendingPairCacheEntry)
+	entry, ok := v.(pendingPairCacheEntry)
+	if !ok {
+		t.Fatalf("pairing cache entry has type %T", v)
+	}
 	if entry.Username != "alice" {
 		t.Errorf("Username = %q, want alice", entry.Username)
 	}
@@ -166,7 +169,7 @@ func TestPinPageRejects(t *testing.T) {
 			m, h := newTestPinPage(t, "alice")
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			secret, done := startPhase1(t, ctx, m, "client@192.0.2.10", make([]byte, 16))
+			secret, done := startPhase1(ctx, t, m, "client@192.0.2.10", make([]byte, 16))
 
 			var mutate []func(*http.Request)
 			if tc.mutate != nil {
@@ -192,7 +195,7 @@ func TestPinPageRejects(t *testing.T) {
 func TestPendingPairingDroppedWhenClientGivesUp(t *testing.T) {
 	m, _ := newTestPinPage(t)
 	ctx, cancel := context.WithCancel(t.Context())
-	_, done := startPhase1(t, ctx, m, "client@192.0.2.10", make([]byte, 16))
+	_, done := startPhase1(ctx, t, m, "client@192.0.2.10", make([]byte, 16))
 
 	cancel()
 	if resp := <-done; resp.Paired != 0 {

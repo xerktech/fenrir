@@ -119,8 +119,10 @@ var errNoPendingPin = errors.New("no pending pairing request")
 func (m *PairingManager) PendingPairings() []PendingPairing {
 	var out []PendingPairing
 	m.PendingPins.Range(func(k, v any) bool {
-		p := v.(*pendingPin)
-		out = append(out, PendingPairing{Secret: k.(string), Client: p.client, Received: p.received})
+		secret, _ := k.(string)
+		if p, ok := v.(*pendingPin); ok {
+			out = append(out, PendingPairing{Secret: secret, Client: p.client, Received: p.received})
+		}
 		return true
 	})
 	slices.SortFunc(out, func(a, b PendingPairing) int { return a.Received.Compare(b.Received) })
@@ -138,11 +140,15 @@ func (m *PairingManager) PostPin(secret, pin, username string) error {
 	if !found {
 		return errNoPendingPin
 	}
+	pending, ok := v.(*pendingPin)
+	if !ok {
+		return errNoPendingPin
+	}
 
 	// Buffered with capacity 1 and only ever sent to by whoever won the
 	// LoadAndDelete above, so this never blocks.
-	v.(*pendingPin).ch <- pinSubmission{Pin: pin, Username: username}
-	klog.Infof("PIN submitted by user %s for pending pairing of %s", username, v.(*pendingPin).client)
+	pending.ch <- pinSubmission{Pin: pin, Username: username}
+	klog.Infof("PIN submitted by user %s for pending pairing of %s", username, pending.client)
 	return nil
 }
 

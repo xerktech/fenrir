@@ -179,7 +179,11 @@ func (s *RESTServer) Run(ctx context.Context) error {
 	server.Shutdown(context.Background())
 	secureServer.Shutdown(context.Background())
 	if pinServer != nil {
-		pinServer.Shutdown(context.Background())
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancelShutdown()
+		if err := pinServer.Shutdown(shutdownCtx); err != nil {
+			klog.Errorf("Pairing page shutdown: %s", err)
+		}
 	}
 
 	if err := error.Load(); err != nil {

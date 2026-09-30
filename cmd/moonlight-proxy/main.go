@@ -45,7 +45,7 @@ func main() {
 
 	var trustedProxies []netip.Prefix
 	if *pinTrustedProxies != "" {
-		for _, cidr := range strings.Split(*pinTrustedProxies, ",") {
+		for cidr := range strings.SplitSeq(*pinTrustedProxies, ",") {
 			prefix, err := netip.ParsePrefix(strings.TrimSpace(cidr))
 			if err != nil {
 				klog.Fatalf("Invalid --pin-trusted-proxies entry %q: %s", cidr, err)
