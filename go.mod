@@ -3,6 +3,7 @@ module games-on-whales.github.io/direwolf
 go 1.26.8
 
 require (
+	github.com/containerd/nri v0.12.3
 	github.com/google/go-cmp v0.7.0
 	github.com/r3labs/sse/v2 v2.10.0
 	github.com/stretchr/testify v1.12.1
@@ -23,7 +24,6 @@ require (
 
 require (
 	github.com/containerd/log v0.1.0 // indirect
-	github.com/containerd/nri v0.12.3 // indirect
 	github.com/containerd/ttrpc v1.2.7 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect

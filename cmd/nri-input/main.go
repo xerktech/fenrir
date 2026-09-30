@@ -4,8 +4,9 @@
 // /dev/hidraw nodes, without running the pod privileged.
 //
 // Only pods carrying v1alpha1.SessionPodLabel are adjusted; every other pod is
-// left untouched. Because any pod author can set a label, --namespaces should
-// be used to restrict the grant to the namespaces the operator runs sessions in.
+// left untouched. Because any pod author can set a label, the plugin refuses to
+// start unless --namespaces names the namespaces the operator runs sessions in,
+// or --all-namespaces explicitly opts in to trusting the label cluster-wide.
 package main
 
 import (
@@ -33,7 +34,7 @@ const (
 
 type plugin struct {
 	// namespaces restricts adjustment to pods in these namespaces; empty
-	// means any namespace.
+	// means any namespace (only reachable via --all-namespaces).
 	namespaces []string
 }
 
@@ -81,19 +82,39 @@ func (p *plugin) adjustment(pod *api.PodSandbox) *api.ContainerAdjustment {
 	return adjust
 }
 
+// parseNamespaces splits a comma-separated namespace list, trimming spaces and
+// dropping empty entries.
+func parseNamespaces(s string) []string {
+	var out []string
+	for ns := range strings.SplitSeq(s, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			out = append(out, ns)
+		}
+	}
+	return out
+}
+
 func main() {
 	pluginName := flag.String("name", "direwolf-nri-input", "NRI plugin name")
 	pluginIdx := flag.String("idx", "10", "NRI plugin index (two digits, orders plugins)")
 	socketPath := flag.String("socket", api.DefaultSocketPath, "Path to the runtime's NRI socket")
-	namespaces := flag.String("namespaces", "", "Comma-separated namespaces whose session pods may get input devices (empty: any)")
+	namespaces := flag.String("namespaces", "", "Comma-separated namespaces whose session pods may get input devices")
+	allNamespaces := flag.Bool("all-namespaces", false,
+		"Grant input devices to labelled pods in any namespace (anyone able to create a pod can then read and inject host input)")
 	klog.InitFlags(nil)
 	flag.Parse()
 
-	p := &plugin{}
-	if *namespaces != "" {
-		p.namespaces = strings.Split(*namespaces, ",")
-	} else {
-		klog.Warning("--namespaces not set: any pod labelled " + v1alpha1types.SessionPodLabel + " gets input devices")
+	p := &plugin{namespaces: parseNamespaces(*namespaces)}
+	switch {
+	case len(p.namespaces) > 0 && *allNamespaces:
+		klog.Fatal("--namespaces and --all-namespaces are mutually exclusive")
+	case len(p.namespaces) == 0 && !*allNamespaces:
+		klog.Fatal("--namespaces is required (or pass --all-namespaces to trust the " +
+			v1alpha1types.SessionPodLabel + " label in every namespace)")
+	case *allNamespaces:
+		klog.Warning("--all-namespaces set: any pod labelled " + v1alpha1types.SessionPodLabel + " gets input devices")
+	default:
+		klog.InfoS("Restricting input devices to namespaces", "namespaces", p.namespaces)
 	}
 
 	s, err := stub.New(p,

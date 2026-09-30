@@ -86,3 +86,9 @@ func TestAdjustmentAllowedNamespace(t *testing.T) {
 	p := &plugin{namespaces: []string{"other", "games"}}
 	require.NotNil(t, p.adjustment(sessionPod("games")))
 }
+
+func TestParseNamespaces(t *testing.T) {
+	require.Equal(t, []string{"other", "games"}, parseNamespaces(" other, games ,,"))
+	require.Empty(t, parseNamespaces(""))
+	require.Empty(t, parseNamespaces(" , "))
+}
