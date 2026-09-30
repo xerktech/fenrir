@@ -12,7 +12,6 @@ import (
 	generatedclient "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
 	generatedinformers "games-on-whales.github.io/direwolf/pkg/generated/informers/externalversions"
 	"games-on-whales.github.io/direwolf/pkg/generic"
-	"k8s.io/utils/ptr"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -54,7 +53,9 @@ func TestSessionControllerReconcilePath(t *testing.T) {
 
 	// Create fake clients pre-seeded with User and App
 	fakeDirewolf := generatedclient.NewSimpleClientset(&user, &app)
-	fakeK8s := k8sfake.NewSimpleClientset()
+	// NewClientset (not NewSimpleClientset) so server-side Apply can create
+	// objects that don't exist yet.
+	fakeK8s := k8sfake.NewClientset()
 
 	// Create informer factories
 	dwFactory := generatedinformers.NewSharedInformerFactory(fakeDirewolf, 0)
@@ -149,32 +150,13 @@ func TestSessionControllerReconcilePath(t *testing.T) {
 		t.Fatalf("reconcilePVC failed: %v", err)
 	}
 
-	// Pre-create a minimal deployment so the fake k8s client's Apply can update it
-	deployName := sc.deploymentName(sess)
-	_, err = fakeK8s.AppsV1().Deployments(user.Namespace).Create(ctx, &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      deployName,
-			Namespace: user.Namespace,
-		},
-		Spec: appsv1.DeploymentSpec{Replicas: ptr.To[int32](0)},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("failed to pre-create deployment: %v", err)
-	}
+	// Don't pre-create the Deployment: once the informer sees one,
+	// reconcilePod only patches its owners and the spec checked below is
+	// never written, so the test failed whenever the informer won the race.
 
 	// 4) reconcilePod (creates/updates Deployment)
 	if err := sc.reconcilePod(ctx, sess); err != nil {
 		t.Fatalf("reconcilePod failed: %v", err)
-	}
-
-	// Pre-create a minimal service so Apply will succeed
-	svcName := sess.Name + "-rtp"
-	_, err = fakeK8s.CoreV1().Services(user.Namespace).Create(ctx, &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: user.Namespace},
-		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "direwolf-worker"}},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("failed to pre-create service: %v", err)
 	}
 
 	// 5) reconcileService (creates Service)
