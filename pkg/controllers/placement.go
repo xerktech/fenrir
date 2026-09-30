@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // ParseTolerations parses a comma-separated list of taints to tolerate, each
@@ -31,6 +32,13 @@ func ParseTolerations(s string) ([]corev1.Toleration, error) {
 		t.Key = keyValue
 		if key, value, hasValue := strings.Cut(keyValue, "="); hasValue {
 			t.Key, t.Value, t.Operator = key, value, corev1.TolerationOpEqual
+		}
+		// Validate here as the apiserver would: a typo must stop the operator
+		// at startup, not fail every session Deployment apply later.
+		errs := validation.IsQualifiedName(t.Key)
+		errs = append(errs, validation.IsValidLabelValue(t.Value)...)
+		if len(errs) > 0 {
+			return nil, fmt.Errorf("toleration %q: %s", item, strings.Join(errs, "; "))
 		}
 		tolerations = append(tolerations, t)
 	}

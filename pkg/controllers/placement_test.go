@@ -22,7 +22,10 @@ func TestParseTolerations(t *testing.T) {
 	if got, err := ParseTolerations(""); err != nil || got != nil {
 		t.Fatalf("empty: %+v, %v", got, err)
 	}
-	for _, bad := range []string{"nvidia.com/gpu", "nvidia.com/gpu=present:Sometimes", ":NoSchedule"} {
+	for _, bad := range []string{
+		"nvidia.com/gpu", "nvidia.com/gpu=present:Sometimes", ":NoSchedule", "a:NoSchedule,",
+		"a :NoSchedule", "a = b:NoSchedule", "bad key!:NoSchedule", "a=b=c:NoSchedule", "=v:NoSchedule",
+	} {
 		if _, err := ParseTolerations(bad); err == nil {
 			t.Errorf("ParseTolerations(%q) succeeded", bad)
 		}
