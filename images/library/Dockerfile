@@ -11,6 +11,9 @@ ARG HEROIC_VERSION=v2.22.3
 # the build closed rather than installing an unverified .deb.
 ARG HEROIC_SHA256=f89eed7e0eb900fbe3051edfedbe7532db14328241cbf8c1fb766462dfc0b849
 
+# First, so the RUN below can point Heroic's own launchers at the wrapper.
+COPY --chmod=755 root/ /
+
 RUN \
   echo "**** install heroic ****" && \
   curl -fsSL -o /tmp/heroic.deb \
@@ -22,6 +25,10 @@ RUN \
   # postinst makes it setuid root or not depending on the build host; it is
   # never needed, as wrapped-heroic uses user namespaces or --no-sandbox.
   chmod 0755 /opt/Heroic/chrome-sandbox && \
+  echo "**** route every heroic launcher through wrapped-heroic ****" && \
+  update-alternatives --install /usr/bin/heroic heroic /usr/bin/wrapped-heroic 1000 && \
+  sed -i 's|^Exec=/opt/Heroic/heroic|Exec=/usr/bin/wrapped-heroic|' /usr/share/applications/heroic.desktop && \
+  ! grep -q '^Exec=/opt/Heroic' /usr/share/applications/heroic.desktop && \
   echo "**** add heroic to the openbox menus ****" && \
   for menu in /defaults/menu.xml /defaults/menu_wayland.xml; do \
     sed -i 's|</menu>|<item label="Heroic" icon="/usr/share/icons/hicolor/48x48/apps/heroic.png"><action name="Execute"><command>/usr/bin/wrapped-heroic</command></action></item>\n</menu>|' "$menu" && \
@@ -33,5 +40,3 @@ RUN \
     /var/lib/apt/lists/* \
     /var/tmp/* \
     /tmp/*
-
-COPY --chmod=755 root/ /
