@@ -604,16 +604,18 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return true, nil
 	})
 	if err != nil {
-		// Answer first, so a slow cleanup can't push the reply past the
-		// client's own timeout.
-		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %w", err))
-		if err := http.NewResponseController(w).Flush(); err != nil {
-			klog.Errorf("Failed to flush launch error: %s", err)
-		}
 		// Don't leave a Session that never became ready: it would count
 		// against the session limit and lock every other user out until
-		// its owner cancels.
-		s.deleteLaunch(launchCtx, launchID)
+		// its owner cancels. In the background: moonlight-qt waits for the
+		// whole response, so a slow cleanup must not hold the handler open
+		// past the client's own timeout. Under the slot, so a queued launch
+		// doesn't count it.
+		go func() {
+			s.launchSlot <- struct{}{}
+			defer func() { <-s.launchSlot }()
+			s.deleteLaunch(launchCtx, launchID)
+		}()
+		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %w", err))
 		return
 	}
 

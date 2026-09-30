@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -120,6 +121,22 @@ func (f *launchFixture) launch(t *testing.T, user string) (int, Response) {
 		t.Errorf("unparseable response %q: %v", rec.Body.String(), err)
 	}
 	return rec.Code, resp
+}
+
+// waitForSessionCount waits for background cleanup to settle on want.
+func (f *launchFixture) waitForSessionCount(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n := f.sessionCount(t)
+		if n == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session count = %d, want %d", n, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (f *launchFixture) sessionCount(t *testing.T) int {
@@ -276,12 +293,51 @@ func TestLaunchFailureDeletesSession(t *testing.T) {
 	if code, _ := f.launch(t, "alice"); code != http.StatusInternalServerError {
 		t.Fatalf("HTTP status = %d, want 500 on timeout", code)
 	}
-	if n := f.sessionCount(t); n != 0 {
-		t.Fatalf("session count = %d, want the unready session deleted", n)
-	}
+	f.waitForSessionCount(t, 0)
 	// And so it doesn't lock out the next user.
 	if _, resp := f.launch(t, "bob"); resp.StatusCode == busyStatusCode {
 		t.Errorf("bob got busy after alice's launch failed")
+	}
+}
+
+func TestLaunchFailureAnswersBeforeCleanup(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 300 * time.Millisecond})
+	f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		get, ok := action.(k8stesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+		return true, &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: get.GetName(), Namespace: testNamespace}}, nil
+	})
+	// The cleanup's List stalls.
+	release := make(chan struct{})
+	cleanupDone := make(chan struct{})
+	f.client.PrependReactor("list", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		list, ok := action.(k8stesting.ListAction)
+		if !ok || list.GetListRestrictions().Labels.String() == "" ||
+			!strings.Contains(list.GetListRestrictions().Labels.String(), launchIDLabel) {
+			return false, nil, nil
+		}
+		<-release
+		defer close(cleanupDone)
+		return false, nil, nil
+	})
+
+	// Released by timer too, so a regression fails instead of deadlocking.
+	var once sync.Once
+	unstall := func() { once.Do(func() { close(release) }) }
+	timer := time.AfterFunc(3*time.Second, unstall)
+	defer timer.Stop()
+
+	start := time.Now()
+	code, _ := f.launch(t, "alice")
+	elapsed := time.Since(start)
+	unstall()
+	<-cleanupDone
+
+	// moonlight-qt only accepts the reply once the handler returns.
+	if code != http.StatusInternalServerError || elapsed > 2*time.Second {
+		t.Errorf("launch = HTTP %d after %s, want 500 without waiting on the cleanup", code, elapsed)
 	}
 }
 
