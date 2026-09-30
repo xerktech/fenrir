@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -27,9 +28,10 @@ import (
 const portsTestNS = "direwolf"
 
 type portsFixture struct {
-	dw  *generatedclient.Clientset
-	sc  *SessionController
-	app string
+	dw   *generatedclient.Clientset
+	sc   *SessionController
+	app  string
+	user string
 }
 
 // newPortsFixture builds a SessionController over fake clients seeded with
@@ -41,12 +43,21 @@ func newPortsFixture(t *testing.T, k8sObjects ...runtime.Object) *portsFixture {
 		t.Fatal(err)
 	}
 	var app v1alpha1types.App
-	if err := sigsyaml.Unmarshal(steam, &app); err != nil {
+	if err = sigsyaml.Unmarshal(steam, &app); err != nil {
 		t.Fatal(err)
 	}
 	app.Namespace = portsTestNS
+	userYAML, err := os.ReadFile("../../examples/user.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var user v1alpha1types.User
+	if err = sigsyaml.Unmarshal(userYAML, &user); err != nil {
+		t.Fatal(err)
+	}
+	user.Namespace = portsTestNS
 
-	dw := generatedclient.NewSimpleClientset(&app)
+	dw := generatedclient.NewSimpleClientset(&app, &user)
 	k8s := k8sfake.NewClientset(k8sObjects...)
 	dwF := generatedinformers.NewSharedInformerFactory(dw, 0)
 	kF := informers.NewSharedInformerFactory(k8s, 0)
@@ -63,7 +74,7 @@ func newPortsFixture(t *testing.T, k8sObjects ...runtime.Object) *portsFixture {
 	if !cacheWaitForSync(kF, dwF, 5*time.Second) {
 		t.Fatal("informers failed to sync")
 	}
-	return &portsFixture{dw: dw, sc: sc, app: app.Name}
+	return &portsFixture{dw: dw, sc: sc, app: app.Name, user: user.Name}
 }
 
 func (f *portsFixture) session(name, user string) *v1alpha1types.Session {
@@ -201,4 +212,50 @@ func TestReconcileActiveStreamsUsesPortBlock(t *testing.T) {
 	if sess.Status.WolfSessionID != "4242" {
 		t.Errorf("WolfSessionID = %q", sess.Status.WolfSessionID)
 	}
+}
+
+// A Deployment built for another block (before an upgrade, or before its
+// block was released and re-allocated) is rebuilt on the session's block
+// rather than only having its owners updated.
+func TestReconcilePodRebuildsDeploymentOnOtherBlock(t *testing.T) {
+	ctx := context.Background()
+	stale := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   portsTestNS,
+			Annotations: map[string]string{portBlockAnnotation: "20000"},
+		},
+	}
+	f := newPortsFixture(t)
+	sess := f.session("s-1", f.user)
+	stale.Name = f.sc.deploymentName(sess)
+	if _, err := f.sc.K8sClient.AppsV1().Deployments(portsTestNS).Create(ctx, stale, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for range 500 {
+		if _, err := f.sc.deploymentController.Informer().Namespaced(portsTestNS).Get(stale.Name); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sess.Status.Ports = blockPorts(20000 + sessionPortBlockSize)
+	sess.Status.Conditions = []metav1.Condition{{Type: "PortsAllocated", Status: metav1.ConditionTrue, Reason: "Test"}}
+	if err := f.sc.reconcilePod(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+
+	dep, err := f.sc.K8sClient.AppsV1().Deployments(portsTestNS).Get(ctx, stale.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dep.Annotations[portBlockAnnotation]; got != "20007" {
+		t.Errorf("%s = %q, want 20007", portBlockAnnotation, got)
+	}
+	want := corev1.EnvVar{Name: "WOLF_RTSP_SETUP_PORT", Value: "20009"}
+	for _, c := range dep.Spec.Template.Spec.Containers {
+		if c.Name == "wolf" && slices.Contains(c.Env, want) {
+			return
+		}
+	}
+	t.Errorf("wolf not rebuilt with %s=%s", want.Name, want.Value)
 }

@@ -1281,6 +1281,10 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		&deploymentApplyConfig,
 		metav1.ApplyOptions{
 			FieldManager: "direwolf-session-controller-deployment",
+			// The operator owns session Deployments. Without Force, a field
+			// another manager touched (kubectl edit/scale) would make this
+			// re-apply conflict forever, leaving the pod off its port block.
+			Force: true,
 		})
 
 	if err != nil {
