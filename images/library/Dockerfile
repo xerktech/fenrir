@@ -7,13 +7,21 @@ FROM lscr.io/linuxserver/steam:latest@sha256:d1c9f2c6d522169f6dcede9b17076c0e31d
 
 # renovate: datasource=github-releases depName=Heroic-Games-Launcher/HeroicGamesLauncher
 ARG HEROIC_VERSION=v2.22.3
+# Must be updated by hand with the version: a Renovate bump without it fails
+# the build closed rather than installing an unverified .deb.
+ARG HEROIC_SHA256=f89eed7e0eb900fbe3051edfedbe7532db14328241cbf8c1fb766462dfc0b849
 
 RUN \
   echo "**** install heroic ****" && \
   curl -fsSL -o /tmp/heroic.deb \
     "https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/releases/download/${HEROIC_VERSION}/Heroic-${HEROIC_VERSION#v}-linux-amd64.deb" && \
+  echo "${HEROIC_SHA256}  /tmp/heroic.deb" | sha256sum -c - && \
   apt-get update && \
   apt-get install -y --no-install-recommends /tmp/heroic.deb && \
+  echo "**** drop setuid chrome-sandbox ****" && \
+  # postinst makes it setuid root or not depending on the build host; it is
+  # never needed, as wrapped-heroic uses user namespaces or --no-sandbox.
+  chmod 0755 /opt/Heroic/chrome-sandbox && \
   echo "**** add heroic to the openbox menus ****" && \
   for menu in /defaults/menu.xml /defaults/menu_wayland.xml; do \
     sed -i 's|</menu>|<item label="Heroic" icon="/usr/share/icons/hicolor/48x48/apps/heroic.png"><action name="Execute"><command>/usr/bin/wrapped-heroic</command></action></item>\n</menu>|' "$menu" && \

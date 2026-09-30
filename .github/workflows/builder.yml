@@ -18,6 +18,8 @@ jobs:
   build_and_push_containers:
     runs-on: ubuntu-latest
     strategy:
+      # A failed library build must not cancel the Go images the chart needs.
+      fail-fast: false
       matrix:
         app:
           - wolf-agent
@@ -87,6 +89,9 @@ jobs:
   build_and_push_chart:
     runs-on: ubuntu-latest
     needs: build_and_push_containers
+    # Runs even if a matrix leg failed: the chart only needs the Go image
+    # digests, and a missing one fails its download step below.
+    if: ${{ !cancelled() }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
