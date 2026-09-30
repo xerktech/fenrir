@@ -38,6 +38,11 @@ controllers:
                 topologyKey: kubernetes.io/hostname
     containers:
       operator:
+        args:
+          # Session pods use hostNetwork on this node and share its IP with
+          # moonlight-proxy; keep in sync with moonlight_proxy's nodeSelector.
+          - --session-node-selector=kubernetes.io/hostname=talos04
+          - --session-port-range=20000-20999
         image:
           repository: ghcr.io/games-on-whales/fenrir/direwolf-operator
           tag: main
@@ -65,6 +70,13 @@ controllers:
     forceRename: *proxyName
     serviceAccount:
       identifier: &proxyId moonlight_proxy
+    pod:
+      # Moonlight streams from the host it paired with and only accepts a port
+      # redirect, so the proxy must sit on the session pods' node IP.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: talos04
     containers:
       proxy:
         args:
@@ -94,7 +106,8 @@ controllers:
 service:
   app:
     controller: moonlight_proxy
-    type: LoadBalancer
+    # Clients reach the proxy on the node IP (hostNetwork), not through this.
+    type: ClusterIP
     ports:
       http:
         protocol: TCP

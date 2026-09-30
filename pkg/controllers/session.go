@@ -179,15 +179,10 @@ func (c *SessionController) Run(ctx context.Context) error {
 		}
 
 		c.trackedGames[session.Name] = ug
-
-		// Re-register allocations before any reconcile runs, so a new
-		// session cannot be handed a block a running pod still listens on.
-		if session.Status.Ports != (v1alpha1types.SessionPorts{}) {
-			if err := c.ports.Claim(c.deploymentName(session), session.Status.Ports); err != nil {
-				klog.Warningf("Session %s/%s: not restoring port allocation: %v", session.Namespace, session.Name, err)
-			}
-		}
 	}
+	// Before any reconcile runs, so a new session cannot be handed a block a
+	// running pod still listens on.
+	c.claimRecordedPorts(sessions)
 
 	go func() {
 		defer cancel()
@@ -347,7 +342,6 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 			Reason: "Success",
 		})
 	}
-
 
 	// Gateway not yet supported
 	// if gatewayError := c.reconcileGateway(context.TODO(), newObj); gatewayError != nil {
@@ -654,9 +648,13 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		}
 	}
 
-	// If deployment already exists, just skip
+	// If the deployment already exists on the session's port block, only
+	// update its owners. One on another block (created before an upgrade, or
+	// before the operator re-allocated the block) is re-applied in full below,
+	// which recreates its pod on the block the session's status advertises.
 	deploymentName := c.deploymentName(session)
-	if existing, getErr := c.deploymentController.Informer().Namespaced(session.Namespace).Get(deploymentName); getErr == nil {
+	if existing, getErr := c.deploymentController.Informer().Namespaced(session.Namespace).Get(deploymentName); getErr == nil &&
+		existing.Annotations[portBlockAnnotation] == strconv.Itoa(int(session.Status.Ports.HTTP)) {
 		klog.Infof("Deployment %s/%s already exists, just updating metadata", session.Namespace, deploymentName)
 		if tokenErr := c.reconcileAgentToken(ctx, existing); tokenErr != nil {
 			return tokenErr
@@ -690,7 +688,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		"PULSE_SERVER":           "unix:/tmp/.X11-unix/pulse-socket",
 		"HOST_APPS_STATE_FOLDER": "/mnt/data/wolf",
 		// "WOLF_STREAM_CLIENT_IP":  "10.128.1.0", //Need to find the correct streaming id / ingress, later.
-		"WOLF_SOCKET_PATH":       "/etc/wolf/wolf.sock", 
+		"WOLF_SOCKET_PATH": "/etc/wolf/wolf.sock",
 		// "WOLF_CFG_FILE":          "/etc/wolf/cfg/config.toml", // no longer needed
 		// "WOLF_PRIVATE_CERT_FILE": "/mnt/data/wolf/cfg/cert.pem",
 		// "WOLF_PRIVATE_KEY_FILE": "/mnt/data/wolf/cfg/key.pem",
@@ -771,8 +769,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 	wolfEnvVarsSlice := make([]corev1.EnvVar, 0, len(wolfEnvVars))
 	for k, v := range wolfEnvVars {
 		wolfEnvVarsSlice = append(wolfEnvVarsSlice, corev1.EnvVar{Name: k, Value: v})
- 	}
-
+	}
 
 	// Inject volume mounts into existing containers
 	for i := range podToCreate.Spec.Containers {
@@ -796,7 +793,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 			{Name: "WAYLAND_DISPLAY", Value: "wayland-1"},
 			{Name: "TZ", Value: wolfEnvVars["TZ"]},
 			{Name: "UNAME", Value: "retro"},
-			{Name: "XDG_RUNTIME_DIR", Value: "/tmp/.X11-unix"},			// "UID":             "1000",
+			{Name: "XDG_RUNTIME_DIR", Value: "/tmp/.X11-unix"}, // "UID":             "1000",
 			// "GID":             "1000",
 			{Name: "PULSE_SERVER", Value: "unix:/tmp/.X11-unix/pulse-socket"},
 			// PULSE_SINK & PULSE_SOURCE set at runtime calculated based off session ID.
@@ -977,8 +974,8 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 
 	podToCreate.Spec.Containers = append(podToCreate.Spec.Containers,
 		corev1.Container{
-			Name:  "wolf-agent",
-			Image: c.WolfAgentImage,
+			Name:            "wolf-agent",
+			Image:           c.WolfAgentImage,
 			ImagePullPolicy: corev1.PullAlways,
 			// ImagePullPolicy: corev1.PullIfNotPresent,
 			Args: []string{
@@ -993,47 +990,47 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 				},
 			},
 			Env: append([]corev1.EnvVar{
-					{
-						Name:  "XDG_RUNTIME_DIR",
-						Value: "/tmp/.X11-unix",
-					},
-					// {
-					// 	Name:  "PUID",
-					// 	Value: "1000",
-					// },
-					// {
-					// 	Name:  "PGID",
-					// 	Value: "1000",
-					// },
-					{
-						Name:  "WOLF_SOCKET_PATH",
-						Value: "/etc/wolf/wolf.sock",
-					},
-					{
-						Name:  "DIREWOLF_USER",
-						Value: session.Spec.UserReference.Name,
-					},
-					{
-						Name:  "DIREWOLF_APP",
-						Value: session.Spec.GameReference.Name,
-					},
-					{
-						Name: "POD_NAME",
-						ValueFrom: &corev1.EnvVarSource{
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: "metadata.name",
-							},
+				{
+					Name:  "XDG_RUNTIME_DIR",
+					Value: "/tmp/.X11-unix",
+				},
+				// {
+				// 	Name:  "PUID",
+				// 	Value: "1000",
+				// },
+				// {
+				// 	Name:  "PGID",
+				// 	Value: "1000",
+				// },
+				{
+					Name:  "WOLF_SOCKET_PATH",
+					Value: "/etc/wolf/wolf.sock",
+				},
+				{
+					Name:  "DIREWOLF_USER",
+					Value: session.Spec.UserReference.Name,
+				},
+				{
+					Name:  "DIREWOLF_APP",
+					Value: session.Spec.GameReference.Name,
+				},
+				{
+					Name: "POD_NAME",
+					ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.name",
 						},
 					},
-					{
-						Name: "POD_NAMESPACE",
-						ValueFrom: &corev1.EnvVarSource{
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: "metadata.namespace",
-							},
+				},
+				{
+					Name: "POD_NAMESPACE",
+					ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.namespace",
 						},
 					},
-				},wolfAgentEnv...
+				},
+			}, wolfAgentEnv...,
 			),
 			ReadinessProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
@@ -1239,6 +1236,9 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      c.deploymentName(session),
 			Namespace: session.Namespace,
+			Annotations: map[string]string{
+				portBlockAnnotation: strconv.Itoa(int(session.Status.Ports.HTTP)),
+			},
 			Labels: map[string]string{
 				"app":           "direwolf-worker",
 				"direwolf/app":  session.Spec.GameReference.Name,
@@ -1467,7 +1467,7 @@ func (c *SessionController) allocatePorts(
 	ctx context.Context,
 	session *v1alpha1types.Session,
 ) error {
-	owner := c.deploymentName(session)
+	owner := c.portOwner(session)
 	if session.Status.Ports != (v1alpha1types.SessionPorts{}) {
 		err := c.ports.Claim(owner, session.Status.Ports)
 		if err == nil {
@@ -1484,6 +1484,25 @@ func (c *SessionController) allocatePorts(
 	return nil
 }
 
+// claimRecordedPorts re-registers the port blocks recorded in sessions'
+// statuses, e.g. after an operator restart.
+func (c *SessionController) claimRecordedPorts(sessions []*v1alpha1types.Session) {
+	for _, session := range sessions {
+		if session.Status.Ports == (v1alpha1types.SessionPorts{}) {
+			continue
+		}
+		if err := c.ports.Claim(c.portOwner(session), session.Status.Ports); err != nil {
+			klog.Warningf("Session %s/%s: not restoring port allocation: %v", session.Namespace, session.Name, err)
+		}
+	}
+}
+
+// portOwner keys a session's port block: its Deployment, namespaced because
+// the node's ports are shared by every namespace the operator watches.
+func (c *SessionController) portOwner(session *v1alpha1types.Session) string {
+	return session.Namespace + "/" + c.deploymentName(session)
+}
+
 // releaseUnusedPorts frees the port block of every Deployment no remaining
 // Session refers to.
 func (c *SessionController) releaseUnusedPorts() error {
@@ -1493,7 +1512,7 @@ func (c *SessionController) releaseUnusedPorts() error {
 	}
 	live := sets.New[string]()
 	for _, s := range sessions {
-		live.Insert(c.deploymentName(s))
+		live.Insert(c.portOwner(s))
 	}
 	c.ports.Retain(live)
 	return nil
@@ -1665,9 +1684,9 @@ func (c *SessionController) reconcileActiveStreams(
 		}
 
 		sessionID, err := wolfclient.AddSession(ctx, wolfapi.Session{
-			VideoWidth:        session.Spec.Config.VideoWidth,
-			VideoHeight:       session.Spec.Config.VideoHeight,
-			VideoRefreshRate:  session.Spec.Config.VideoRefreshRate,
+			VideoWidth:       session.Spec.Config.VideoWidth,
+			VideoHeight:      session.Spec.Config.VideoHeight,
+			VideoRefreshRate: session.Spec.Config.VideoRefreshRate,
 			// AppID:             appID,
 			AudioChannelCount: 2, // !TODO: parse from audio info
 

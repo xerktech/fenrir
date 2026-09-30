@@ -7,18 +7,18 @@ import (
 	"os"
 	"time"
 
-	direwolfv1alpha1 "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
-	"games-on-whales.github.io/direwolf/pkg/controllers"
-	"games-on-whales.github.io/direwolf/pkg/generated/informers/externalversions"
-	"games-on-whales.github.io/direwolf/pkg/generic"
-	"games-on-whales.github.io/direwolf/pkg/util"
-
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/klog/v2"
+
+	direwolfv1alpha1 "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	"games-on-whales.github.io/direwolf/pkg/controllers"
+	"games-on-whales.github.io/direwolf/pkg/generated/informers/externalversions"
+	"games-on-whales.github.io/direwolf/pkg/generic"
+	"games-on-whales.github.io/direwolf/pkg/util"
 )
 
 func main() {
@@ -32,7 +32,10 @@ func main() {
 	wolfAgentImage := flag.String("wolf-agent-image", im, "Wolf Agent image")
 	holderIdentity := flag.String("holder-identity", os.Getenv("POD_NAME"), "Holder identity")
 	namespace := flag.String("namespace", os.Getenv("POD_NAMESPACE"), "Namespace to watch")
-	sessionPortRange := flag.String("session-port-range", "40000-40999",
+	// Below Linux's ephemeral range (32768-60999), where an outbound socket
+	// on the node could hold a port a session pod needs to bind, and below
+	// the NodePort range (30000-32767).
+	sessionPortRange := flag.String("session-port-range", "20000-20999",
 		"Host port range (MIN-MAX) session pods get their port blocks from")
 	sessionNodeSelector := flag.String("session-node-selector", "",
 		"Node labels session pods are pinned to, e.g. kubernetes.io/hostname=talos04")

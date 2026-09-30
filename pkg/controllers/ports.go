@@ -31,6 +31,10 @@ const (
 	sessionPortBlockSize
 )
 
+// portBlockAnnotation on a session Deployment records the first port of the
+// block its pod template was built for.
+const portBlockAnnotation = "direwolf.games-on-whales.github.io/port-block"
+
 // PortRange is an inclusive range of host ports session blocks are cut from.
 type PortRange struct {
 	Min, Max int32

@@ -72,7 +72,7 @@ with the currently active sessions in wolf, as well as calling `fake-udev` for
 controller support.
 
 Wolf's API is only ever served on its unix socket inside the pod. wolf-agent
-proxies it over HTTPS on `--port` (8443 in session pods) and rejects every
+proxies it over HTTPS on `--port` (the session's port block) and rejects every
 `/api/v1/` request without `Authorization: Bearer <token>`; `/readyz` and
 `/livez` stay open for kubelet probes.
 
@@ -123,11 +123,18 @@ and share that node's IP with `moonlight-proxy`, which must also be reachable on
 it at 47984/47989 (e.g. a host-networked proxy pinned to the same node).
 
 For each session Deployment the operator allocates a block of 7 host ports from
-`--session-port-range` (default `40000-40999`): Wolf HTTP, HTTPS, RTSP, control
+`--session-port-range` (default `20000-20999`, below the ephemeral and NodePort ranges): Wolf HTTP, HTTPS, RTSP, control
 (ENet), video, audio, and wolf-agent. The block is recorded in `Session.status.ports`,
 Wolf is started with the matching `WOLF_*_PORT` variables, and the RTSP URL returned
 by `/launch` carries the session's RTSP port. The block is freed once no `Session`
 uses that Deployment. Firewalls between clients and the node must allow the range.
+
+The chart runs `moonlight-proxy` host-networked with the same node selector as the
+operator's `--session-node-selector`; keep the two in sync. Host networking needs the
+release namespace to allow it (PodSecurity `privileged`). App templates must not
+declare their own container ports: on the host network they become host ports and
+collide between sessions. Wolf's mDNS responder (UDP 5353, shared via SO_REUSEPORT)
+is outside the block and advertises the node on the LAN at 47989, the proxy's port.
 
 #### Alternative Design Idea: Gateway API
 

@@ -81,7 +81,7 @@ func TestSessionControllerReconcilePath(t *testing.T) {
 		userInformer,
 		deploymentInformer,
 		SessionControllerOptions{
-			SessionPortRange:    PortRange{Min: 40000, Max: 40999},
+			SessionPortRange:    PortRange{Min: 20000, Max: 20999},
 			SessionNodeSelector: map[string]string{"kubernetes.io/hostname": "talos04"},
 		},
 	)
@@ -185,6 +185,11 @@ func TestSessionControllerReconcilePath(t *testing.T) {
 	if svcs, _ := fakeK8s.CoreV1().Services(user.Namespace).List(ctx, metav1.ListOptions{}); len(svcs.Items) != 0 {
 		t.Errorf("reconcile created Services: %+v", svcs.Items)
 	}
+	// The pre-created Deployment has no port-block annotation (like one from
+	// before this operator version), so it must have been re-applied in full.
+	if got := dep.Annotations[portBlockAnnotation]; got != strconv.Itoa(int(sess.Status.Ports.HTTP)) {
+		t.Errorf("deployment %s = %q, want %d", portBlockAnnotation, got, sess.Status.Ports.HTTP)
+	}
 	podSpec := dep.Spec.Template.Spec
 	if !podSpec.HostNetwork || podSpec.DNSPolicy != corev1.DNSClusterFirstWithHostNet {
 		t.Errorf("pod hostNetwork=%v dnsPolicy=%q, want true/%q", podSpec.HostNetwork, podSpec.DNSPolicy, corev1.DNSClusterFirstWithHostNet)
@@ -210,10 +215,10 @@ func TestSessionControllerReconcilePath(t *testing.T) {
 	// Every listener must be on the session's block, so session pods sharing
 	// the node IP never collide.
 	ports := sess.Status.Ports
-	if ports != blockPorts(40000) {
+	if ports != blockPorts(20000) {
 		t.Fatalf("session ports = %+v, want the first block", ports)
 	}
-	if !slices.Contains(agent.Args, "--port=40006") || agent.Ports[0].ContainerPort != ports.WolfAgent ||
+	if !slices.Contains(agent.Args, "--port=20006") || agent.Ports[0].ContainerPort != ports.WolfAgent ||
 		agent.ReadinessProbe.HTTPGet.Port.IntVal != ports.WolfAgent {
 		t.Errorf("wolf-agent not on port %d: args %v ports %+v", ports.WolfAgent, agent.Args, agent.Ports)
 	}
