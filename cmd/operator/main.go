@@ -38,7 +38,7 @@ func main() {
 	sessionPortRange := flag.String("session-port-range", "20000-20999",
 		"Host port range (MIN-MAX) session pods get their port blocks from")
 	sessionNodeSelector := flag.String("session-node-selector", "",
-		"Node labels session pods are pinned to, e.g. kubernetes.io/hostname=talos04")
+		"Node labels session pods are pinned to, e.g. kubernetes.io/hostname=talos04.xerktech.com")
 	klog.InitFlags(nil)
 	flag.Parse()
 

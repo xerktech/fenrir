@@ -118,8 +118,9 @@ Pod will never be `READY` and the stream is never started.
 
 Moonlight streams from the same host it paired with, and can only be redirected
 to a different *port*. So session pods run with `hostNetwork` on one node (pinned
-with the operator's `--session-node-selector`, e.g. `kubernetes.io/hostname=talos04`)
-and share that node's IP with `moonlight-proxy`, which must also be reachable on
+with the operator's `--session-node-selector`, e.g.
+`kubernetes.io/hostname=talos04.xerktech.com`; Talos nodes carry their FQDN in
+that label) and share that node's IP with `moonlight-proxy`, which must also be reachable on
 it at 47984/47989 (e.g. a host-networked proxy pinned to the same node).
 
 For each session Deployment the operator allocates a block of 7 host ports from

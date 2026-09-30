@@ -41,7 +41,7 @@ controllers:
         args:
           # Session pods use hostNetwork on this node and share its IP with
           # moonlight-proxy; keep in sync with moonlight_proxy's nodeSelector.
-          - --session-node-selector=kubernetes.io/hostname=talos04
+          - --session-node-selector=kubernetes.io/hostname=talos04.xerktech.com
           - --session-port-range=20000-20999
         image:
           repository: ghcr.io/games-on-whales/fenrir/direwolf-operator
@@ -76,7 +76,7 @@ controllers:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       nodeSelector:
-        kubernetes.io/hostname: talos04
+        kubernetes.io/hostname: talos04.xerktech.com
     containers:
       proxy:
         args:
