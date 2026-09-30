@@ -95,9 +95,6 @@ service:
   app:
     controller: moonlight_proxy
     type: LoadBalancer
-    annotations:
-      lbipam.cilium.io/sharing-key: direwolf
-      "metallb.universe.tf/allow-shared-ip": "direwolf"
     ports:
       http:
         protocol: TCP
@@ -131,7 +128,7 @@ rbac:
           resources: ["deployments"]
           verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         - apiGroups: [""]
-          resources: ["services", "persistentvolumeclaims", "configmaps"]
+          resources: ["persistentvolumeclaims", "configmaps"]
           verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
         # Per-session wolf-agent bearer token (create, replace if stale).
         - apiGroups: [""]

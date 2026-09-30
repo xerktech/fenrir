@@ -112,25 +112,22 @@ specific mounts for each of them.
 
 User's Game Container MUST have a pre-launch script that waits for the `WAYLAND_DISPLAY`
 socket to be created, otherwise the container will be in a crashloop, and the
-Pod will never be `READY` for the `Service` to forward traffic to it.
+Pod will never be `READY` and the stream is never started.
 
 ### Port Forwarding
 
-Port forwarding to the container is the lynchpin of this POC. And it actually
-currently only works for a single session at a time until work is extended to
-support additional ports.
+Moonlight streams from the same host it paired with, and can only be redirected
+to a different *port*. So session pods run with `hostNetwork` on one node (pinned
+with the operator's `--session-node-selector`, e.g. `kubernetes.io/hostname=talos04`)
+and share that node's IP with `moonlight-proxy`, which must also be reachable on
+it at 47984/47989 (e.g. a host-networked proxy pinned to the same node).
 
-#### Load Balancer Service
-
-The current method used by this POC is to use a special LoadBalancer feature
-of Cilium to implement the port forwards. The basic idea is that one set of ports
-(HTTP/HTTPS) go to `moonlight-proxy`, and the other set `RTSP/RTP/ENET` go to `wolf`
-running alongside the game. This allows us to have a single `moonlight-proxy`
-serving many sessions hosted by many whales.
-
-When a `Session` is created, `Operator` will choose a set of RTSP/RTP/ENET ports
-to use, and create a `Service` pointed at `wolf` for them with a special cilium
-annotation `lb-sharing-key` to enable sharing of the same IP used for moonlight.
+For each session Deployment the operator allocates a block of 7 host ports from
+`--session-port-range` (default `40000-40999`): Wolf HTTP, HTTPS, RTSP, control
+(ENet), video, audio, and wolf-agent. The block is recorded in `Session.status.ports`,
+Wolf is started with the matching `WOLF_*_PORT` variables, and the RTSP URL returned
+by `/launch` carries the session's RTSP port. The block is freed once no `Session`
+uses that Deployment. Firewalls between clients and the node must allow the range.
 
 #### Alternative Design Idea: Gateway API
 

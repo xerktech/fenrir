@@ -14,6 +14,7 @@ import (
 	"games-on-whales.github.io/direwolf/pkg/util"
 
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
@@ -31,9 +32,21 @@ func main() {
 	wolfAgentImage := flag.String("wolf-agent-image", im, "Wolf Agent image")
 	holderIdentity := flag.String("holder-identity", os.Getenv("POD_NAME"), "Holder identity")
 	namespace := flag.String("namespace", os.Getenv("POD_NAMESPACE"), "Namespace to watch")
-	lbSharingKey := flag.String("lb-sharing-key", os.Getenv("POD_NAMESPACE"), "LoadBalancer sharing key")
+	sessionPortRange := flag.String("session-port-range", "40000-40999",
+		"Host port range (MIN-MAX) session pods get their port blocks from")
+	sessionNodeSelector := flag.String("session-node-selector", "",
+		"Node labels session pods are pinned to, e.g. kubernetes.io/hostname=talos04")
 	klog.InitFlags(nil)
 	flag.Parse()
+
+	portRange, err := controllers.ParsePortRange(*sessionPortRange)
+	if err != nil {
+		klog.Fatalf("--session-port-range: %v", err)
+	}
+	nodeSelector, err := labels.ConvertSelectorToLabelsMap(*sessionNodeSelector)
+	if err != nil {
+		klog.Fatalf("--session-node-selector: %v", err)
+	}
 
 	k8sClient, direwolfClient, gatewayClient, _, err := util.GetKubernetesClients()
 	if err != nil {
@@ -85,8 +98,9 @@ func main() {
 		generic.NewInformer[*direwolfv1alpha1.User](userInformer),
 		generic.NewInformer[*appsv1.Deployment](deploymentInformer),
 		controllers.SessionControllerOptions{
-			WolfAgentImage: *wolfAgentImage,
-			LBSharingKey:   *lbSharingKey,
+			WolfAgentImage:      *wolfAgentImage,
+			SessionPortRange:    portRange,
+			SessionNodeSelector: nodeSelector,
 		},
 	)
 
