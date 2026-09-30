@@ -52,11 +52,12 @@ func TestRunShutdownIsBoundedAndConcurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	port, securePort := freePort(t), freePort(t)
+	port, securePort, pinPort := freePort(t), freePort(t), freePort(t)
 	s := NewRESTServer(NewPairingManager(cert, nil), nil, nil, nil, nil, nil, nil, RESTServerOptions{
 		Port:            port,
 		SecurePort:      securePort,
 		Cert:            cert,
+		PinPage:         PinPageOptions{Port: pinPort},
 		shutdownTimeout: 300 * time.Millisecond,
 	})
 
@@ -65,6 +66,7 @@ func TestRunShutdownIsBoundedAndConcurrent(t *testing.T) {
 	go func() { runErr <- s.Run(ctx) }()
 	waitListening(t, port)
 	waitListening(t, securePort)
+	waitListening(t, pinPort)
 
 	// Hold a phase 1 request open over HTTP; it blocks until a PIN arrives, so
 	// the HTTP server's graceful shutdown can't complete.
@@ -91,17 +93,19 @@ func TestRunShutdownIsBoundedAndConcurrent(t *testing.T) {
 	start := time.Now()
 	cancel()
 
-	// The HTTPS listener must stop accepting promptly, not after HTTP drains.
-	for {
-		c, err := (&net.Dialer{Timeout: 50 * time.Millisecond}).DialContext(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", securePort))
-		if err != nil {
-			break
+	// The other listeners must stop accepting promptly, not after HTTP drains.
+	for _, p := range []int{securePort, pinPort} {
+		for {
+			c, err := (&net.Dialer{Timeout: 50 * time.Millisecond}).DialContext(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", p))
+			if err != nil {
+				break
+			}
+			c.Close()
+			if time.Since(start) > 200*time.Millisecond {
+				t.Fatalf("port %d still accepting while HTTP shutdown waits on a pair request", p)
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		c.Close()
-		if time.Since(start) > 200*time.Millisecond {
-			t.Fatal("HTTPS listener still accepting while HTTP shutdown waits on a pair request")
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	select {
