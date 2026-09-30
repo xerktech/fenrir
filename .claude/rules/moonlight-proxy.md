@@ -16,9 +16,11 @@ paths:
     Tests: `TestUnstartedSessionTTLOutlastsLaunchTimeout` in `pkg/controllers/reaper_test.go`.
 - The session limit (`createSession`) holds only because the check and the Create share
   `launchSlot` and count users from a live `List`, not the informer.
-  - A failed launch deletes its Session; an orphan would lock every other user out.
+  - An orphaned Session from a failed launch would lock every other user out.
   - It is per process: running more than one moonlight-proxy replica breaks it.
   - Tests: `TestLaunchConcurrentUsersRespectLimit` in `pkg/moonlight/launch_test.go`.
-  - Work under the slot is bounded by `launchSlotTimeout`; a stalled API server must not wedge it.
+  - Work under the slot is bounded by `launchSlotTimeout` and by the launch's own deadline:
+    slot queue + slot work + readiness wait all share one `LaunchTimeout` budget.
+  - Sessions carry `direwolf/launch-id`; a failed launch (even a failed Create) deletes by it.
 - `RESTServerOptions.BusyCheck` is the hook for anything besides Sessions that holds the GPU
   (the Library pod). A check error fails the launch closed.

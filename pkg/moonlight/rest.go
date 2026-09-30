@@ -28,6 +28,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 
@@ -497,7 +498,17 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(userContextKey{}).(*v1alpha1types.User)
 	pairing := r.Context().Value(pairingContextKey{}).(*v1alpha1types.Pairing)
 
-	session, busyReason, err := s.createSession(r.Context(), user, func(ctx context.Context) (*v1alpha1types.Session, error) {
+	// One deadline for the whole launch (queueing for the slot, the slot
+	// work and the readiness wait), so the client always gets our answer
+	// before its own ClientLaunchTimeout fires.
+	launchCtx, cancelLaunch := context.WithTimeout(r.Context(), s.LaunchTimeout)
+	defer cancelLaunch()
+
+	// Tags the Session so a failed Create whose object was stored anyway
+	// (e.g. the response timed out) can still be found and removed.
+	launchID := utilrand.String(16)
+
+	session, busyReason, err := s.createSession(launchCtx, user, func(ctx context.Context) (*v1alpha1types.Session, error) {
 		//!TOOD: May want to wait here, since we need the Service to stop pointing
 		// at the old pod. It is very likely to happen before operator syncs and
 		// can create session, but perhaps should still check after operator returns
@@ -517,6 +528,7 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 						"direwolf":      "true",
 						"direwolf/app":  app.ObjectMeta.Name,
 						"direwolf/user": user.ObjectMeta.Name,
+						launchIDLabel:   launchID,
 					},
 					Annotations: map[string]string{
 						"direwolf/pairing": pairing.ObjectMeta.Name,
@@ -562,6 +574,7 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		s.deleteLaunch(launchID)
 		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %s", err))
 		return
 	}
@@ -571,11 +584,11 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 	// The budget must absorb a cold start of the session pod: image pulls
 	// (multi-GB app images), wolf boot and wolf-agent readiness easily take
 	// 30-60s, while 25s aborted every first launch (the client then cancels
-	// and the half-started session is torn down). The poll is bound to
+	// and the half-started session is torn down). launchCtx derives from
 	// r.Context(), so if the Moonlight client gives up and disconnects the
 	// wait is cancelled early regardless of this timeout.
 	var streamURL string
-	err = wait.PollUntilContextTimeout(r.Context(), 250*time.Millisecond, s.LaunchTimeout, true, func(ctx context.Context) (bool, error) {
+	err = wait.PollUntilContextCancel(launchCtx, 250*time.Millisecond, true, func(ctx context.Context) (bool, error) {
 		session, err := s.SessionClient.Get(ctx, session.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -590,10 +603,8 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Don't leave a Session that never became ready: it would count
 		// against the session limit and lock every other user out until
-		// its owner cancels. Use a fresh context, r.Context() may be done.
-		if delErr := s.SessionClient.Delete(context.Background(), session.Name, metav1.DeleteOptions{}); delErr != nil && !k8serrors.IsNotFound(delErr) {
-			klog.Errorf("Failed to delete unready session %s: %s", session.Name, delErr)
-		}
+		// its owner cancels.
+		s.deleteLaunch(launchID)
 		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %s", err))
 		return
 	}
@@ -652,6 +663,29 @@ func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User
 
 	session, err := create(ctx)
 	return session, "", err
+}
+
+// launchIDLabel marks a Session with the /launch request that created it.
+const launchIDLabel = "direwolf/launch-id"
+
+// deleteLaunch removes the Session(s) created by one /launch. It runs on a
+// fresh context: the request's may already be done.
+func (s *RESTServer) deleteLaunch(launchID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), launchSlotTimeout)
+	defer cancel()
+
+	sessions, err := s.SessionClient.List(ctx, metav1.ListOptions{
+		LabelSelector: labels.SelectorFromSet(labels.Set{launchIDLabel: launchID}).String(),
+	})
+	if err != nil {
+		klog.Errorf("Failed to list sessions of failed launch %s: %s", launchID, err)
+		return
+	}
+	for _, session := range sessions.Items {
+		if err := s.SessionClient.Delete(ctx, session.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+			klog.Errorf("Failed to delete session %s of failed launch: %s", session.Name, err)
+		}
+	}
 }
 
 func busyResponse(reason string) Response {

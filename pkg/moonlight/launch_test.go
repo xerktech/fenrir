@@ -345,8 +345,50 @@ func TestLaunchSlotWorkIsBounded(t *testing.T) {
 	// httptest requests have no deadline of their own.
 	f.launch(t, "alice")
 
-	if !hasDeadline || time.Until(deadline) > launchSlotTimeout {
-		t.Errorf("work under the launch slot has deadline %v (set=%v), want within %s", deadline, hasDeadline, launchSlotTimeout)
+	if !hasDeadline || time.Until(deadline) > 30*time.Second {
+		t.Errorf("work under the launch slot has deadline %v (set=%v), want within 30s", deadline, hasDeadline)
+	}
+}
+
+func TestLaunchDeadlineCoversWholeLaunch(t *testing.T) {
+	var deadline time.Time
+	f := newLaunchFixture(t, RESTServerOptions{
+		LaunchTimeout: 2 * time.Second,
+		BusyCheck: func(ctx context.Context) (string, error) {
+			deadline, _ = ctx.Deadline()
+			return "", nil
+		},
+	})
+
+	f.launch(t, "alice")
+
+	// The slot work shares the launch's own budget rather than adding to it,
+	// so slot time + readiness wait can't outlast the client.
+	if time.Until(deadline) > 2*time.Second {
+		t.Errorf("slot deadline %v is beyond the 2s launch timeout", deadline)
+	}
+	if DefaultLaunchTimeout >= ClientLaunchTimeout {
+		t.Errorf("DefaultLaunchTimeout %s must be under ClientLaunchTimeout %s", DefaultLaunchTimeout, ClientLaunchTimeout)
+	}
+}
+
+func TestLaunchCreateErrorDeletesStoredSession(t *testing.T) {
+	f := newLaunchFixture(t, RESTServerOptions{})
+	// The API server stores the Session but the response is lost.
+	f.client.PrependReactor("create", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		obj := action.(k8stesting.CreateAction).GetObject().(*v1alpha1types.Session)
+		obj.Name = obj.GenerateName + "stored"
+		if err := f.client.Tracker().Create(action.GetResource(), obj, action.GetNamespace()); err != nil {
+			t.Fatal(err)
+		}
+		return true, nil, fmt.Errorf("response timed out")
+	})
+
+	if code, _ := f.launch(t, "alice"); code != http.StatusInternalServerError {
+		t.Fatalf("HTTP status = %d, want 500", code)
+	}
+	if n := f.sessionCount(t); n != 0 {
+		t.Errorf("session count = %d, want the stored session cleaned up", n)
 	}
 }
 
