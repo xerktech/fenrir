@@ -66,7 +66,8 @@ func TestReconcileAgentTokenIsStableAndOwned(t *testing.T) {
 
 func TestReconcileAgentTokenReplacesStaleSecret(t *testing.T) {
 	ctx := context.Background()
-	sc := &SessionController{K8sClient: k8sfake.NewSimpleClientset()}
+	// The live Deployment is the recreated one.
+	sc := &SessionController{K8sClient: k8sfake.NewSimpleClientset(testDeployment("new-uid"))}
 
 	if err := sc.reconcileAgentToken(ctx, testDeployment("old-uid")); err != nil {
 		t.Fatal(err)
@@ -85,8 +86,17 @@ func TestReconcileAgentTokenReplacesStaleSecret(t *testing.T) {
 	if owner := metav1.GetControllerOf(secret); owner == nil || owner.UID != "new-uid" {
 		t.Errorf("secret controller = %+v, want new-uid", owner)
 	}
-	if tok, _ := sc.agentToken(ctx, dep); tok == old {
+	current, _ := sc.agentToken(ctx, dep)
+	if current == old {
 		t.Error("stale token reused for new deployment")
+	}
+
+	// A stale cached object for the old Deployment must not take the Secret back.
+	if err := sc.reconcileAgentToken(ctx, testDeployment("old-uid")); err == nil {
+		t.Error("expected error reconciling with a stale deployment object")
+	}
+	if tok, _ := sc.agentToken(ctx, dep); tok != current {
+		t.Error("stale deployment object rotated the live token")
 	}
 }
 

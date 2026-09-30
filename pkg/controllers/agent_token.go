@@ -43,6 +43,16 @@ func (c *SessionController) reconcileAgentToken(ctx context.Context, deployment 
 		if owner := metav1.GetControllerOf(existing); owner != nil && owner.UID == deployment.UID {
 			return nil
 		}
+		// Only replace the Secret on behalf of the live Deployment. A stale
+		// cached object (e.g. during a leader-election overlap) would
+		// otherwise delete the current token and re-own it to a dead UID.
+		live, getErr := c.K8sClient.AppsV1().Deployments(deployment.Namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("failed to get deployment %s/%s: %w", deployment.Namespace, deployment.Name, getErr)
+		}
+		if live.UID != deployment.UID {
+			return fmt.Errorf("deployment %s/%s changed (uid %s, have %s); not replacing token secret", deployment.Namespace, deployment.Name, live.UID, deployment.UID)
+		}
 		delErr := secrets.Delete(ctx, name, metav1.DeleteOptions{
 			Preconditions: &metav1.Preconditions{UID: &existing.UID},
 		})

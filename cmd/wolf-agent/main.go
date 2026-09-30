@@ -67,19 +67,7 @@ func main() {
 					// Call out to the proxy which handles chunked encoding
 					// properly. There may be a way to use the SSE client without
 					// it, but found this easier.
-					wolfClient := wolfapi.NewClient(
-						fmt.Sprintf("https://localhost:%d", *serverPort),
-						&http.Client{
-							Transport: &wolfapi.BearerTokenTransport{
-								Token: token,
-								Base: &http.Transport{
-									TLSClientConfig: &tls.Config{
-										InsecureSkipVerify: true, //nolint:gosec // loopback to our own self-signed listener
-									},
-								},
-							},
-						},
-					)
+					wolfClient := selfClient(*serverPort, token)
 
 					agentController := controllers.NewAgent(
 						wolfClient,
@@ -142,6 +130,9 @@ func main() {
 			return
 		}
 		request.Header = r.Header.Clone()
+		// The token authenticates to wolf-agent only; don't hand it to Wolf,
+		// which may log request headers.
+		request.Header.Del("Authorization")
 
 		// Send the request to the wolf.sock
 		klog.Info("Sending request to wolf.sock:", request.Method, request.URL.Path)
@@ -204,6 +195,24 @@ func main() {
 	if err != nil {
 		klog.Fatal("Failed to start server:", err)
 	}
+}
+
+// selfClient builds the wolfapi client the in-pod agent controller uses to
+// reach Wolf through this process's own authenticated proxy.
+func selfClient(port int, token string) wolfapi.Client {
+	return wolfapi.NewClient(
+		fmt.Sprintf("https://localhost:%d", port),
+		&http.Client{
+			Transport: &wolfapi.BearerTokenTransport{
+				Token: token,
+				Base: &http.Transport{
+					TLSClientConfig: &tls.Config{
+						InsecureSkipVerify: true, //nolint:gosec // loopback to our own self-signed listener
+					},
+				},
+			},
+		},
+	)
 }
 
 // readToken loads the bearer token from path. An unset path or an empty
