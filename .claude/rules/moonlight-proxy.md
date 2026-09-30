@@ -2,6 +2,7 @@
 paths:
   - pkg/moonlight/**
   - cmd/moonlight-proxy/**
+  - pkg/controllers/session.go
 ---
 
 # moonlight-proxy
@@ -11,8 +12,10 @@ paths:
   - moonlight-qt turns a non-2xx HTTP status into a transport error and never shows the message.
 - `--launch-timeout` must stay under moonlight-qt's 120s launch request timeout, or the client
   gives up first and shows a generic error while the session keeps starting.
+  - The operator's `unstartedSessionTTL` reaper must outlast it, or cold starts get reaped mid-launch.
 - The session limit (`createSession`) holds only because the check and the Create share
-  `launchMu` and count from a live `List`, not the informer.
+  `launchSlot` and count users from a live `List`, not the informer.
+  - A failed launch deletes its Session; an orphan would lock every other user out.
   - It is per process: running more than one moonlight-proxy replica breaks it.
   - Tests: `TestLaunchConcurrentUsersRespectLimit` in `pkg/moonlight/launch_test.go`.
 - `RESTServerOptions.BusyCheck` is the hook for anything besides Sessions that holds the GPU

@@ -110,9 +110,10 @@ func (f *launchFixture) launch(t *testing.T, user string) (int, Response) {
 	rec := httptest.NewRecorder()
 	f.server.launchHandler(rec, req.WithContext(ctx))
 
+	// Errorf, not Fatalf: this also runs on non-test goroutines.
 	var resp Response
 	if err := xml.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unparseable response %q: %v", rec.Body.String(), err)
+		t.Errorf("unparseable response %q: %v", rec.Body.String(), err)
 	}
 	return rec.Code, resp
 }
@@ -237,6 +238,81 @@ func TestLaunchBusyCheckError(t *testing.T) {
 	}
 	if f.created.Load() != 0 {
 		t.Errorf("created %d sessions, want none", f.created.Load())
+	}
+}
+
+func TestLaunchFailureDeletesSession(t *testing.T) {
+	f := newLaunchFixture(t, RESTServerOptions{LaunchTimeout: 300 * time.Millisecond})
+	// The operator never publishes a stream URL.
+	f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		name := action.(k8stesting.GetAction).GetName()
+		return true, &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}}, nil
+	})
+
+	if code, _ := f.launch(t, "alice"); code != http.StatusInternalServerError {
+		t.Fatalf("HTTP status = %d, want 500 on timeout", code)
+	}
+	if n := f.sessionCount(t); n != 0 {
+		t.Fatalf("session count = %d, want the unready session deleted", n)
+	}
+	// And so it doesn't lock out the next user.
+	if _, resp := f.launch(t, "bob"); resp.StatusCode == busyStatusCode {
+		t.Errorf("bob got busy after alice's launch failed")
+	}
+}
+
+func TestLaunchCountsUsersNotSessions(t *testing.T) {
+	second := sessionFor("alice")
+	second.Name = "alice-second"
+	f := newLaunchFixture(t, RESTServerOptions{MaxConcurrentSessions: 2}, sessionFor("alice"), second)
+
+	if code, resp := f.launch(t, "bob"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("launch = HTTP %d / %d %q, want success: alice is one user", code, resp.StatusCode, resp.StatusMessage)
+	}
+}
+
+func TestLaunchWaiterHonoursCancellation(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	f := newLaunchFixture(t, RESTServerOptions{
+		BusyCheck: func(context.Context) (string, error) {
+			select {
+			case entered <- struct{}{}:
+				<-release
+			default:
+			}
+			return "", nil
+		},
+	})
+	aliceDone := make(chan struct{})
+	go func() {
+		defer close(aliceDone)
+		f.launch(t, "alice")
+	}()
+	<-entered
+	// Let alice finish before the test returns; she reports through t.
+	defer func() {
+		close(release)
+		<-aliceDone
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := f.server.createSession(ctx, &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "bob"}}, func() (*v1alpha1types.Session, error) {
+			return nil, nil
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Errorf("createSession succeeded while the slot was held")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter ignored its context and stayed blocked on the launch slot")
 	}
 }
 

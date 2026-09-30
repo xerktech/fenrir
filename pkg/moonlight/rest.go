@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -91,9 +90,10 @@ type RESTServer struct {
 
 	SessionClient v1alpha1client.SessionInterface
 
-	// launchMu serializes the busy check with Session creation so two
-	// concurrent launches can't both pass the limit.
-	launchMu sync.Mutex
+	// launchSlot (capacity 1) serializes the busy check with Session
+	// creation so two concurrent launches can't both pass the limit. A channel
+	// rather than a mutex so a waiter can give up when its client does.
+	launchSlot chan struct{}
 
 	RESTServerOptions
 }
@@ -125,6 +125,7 @@ func NewRESTServer(
 		SessionLister:     sessionLister,
 		PodLister:         podsLister,
 		SessionClient:     sessionClient,
+		launchSlot:        make(chan struct{}, 1),
 		RESTServerOptions: opts,
 	}
 
@@ -553,7 +554,7 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeErrorResponse(w, 500, fmt.Errorf("failed to create session: %s", err))
+		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %s", err))
 		return
 	}
 
@@ -579,6 +580,12 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return true, nil
 	})
 	if err != nil {
+		// Don't leave a Session that never became ready: it would count
+		// against the session limit and lock every other user out until
+		// its owner cancels. Use a fresh context, r.Context() may be done.
+		if delErr := s.SessionClient.Delete(context.Background(), session.Name, metav1.DeleteOptions{}); delErr != nil && !k8serrors.IsNotFound(delErr) {
+			klog.Errorf("Failed to delete unready session %s: %s", session.Name, delErr)
+		}
 		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %s", err))
 		return
 	}
@@ -594,10 +601,14 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 
 // createSession runs create unless the host is busy for user, in which case
 // it returns a non-empty reason and create is not called. The check and the
-// create happen under launchMu so the session limit holds under concurrency.
+// create happen under launchSlot so the session limit holds under concurrency.
 func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User, create func() (*v1alpha1types.Session, error)) (*v1alpha1types.Session, string, error) {
-	s.launchMu.Lock()
-	defer s.launchMu.Unlock()
+	select {
+	case s.launchSlot <- struct{}{}:
+		defer func() { <-s.launchSlot }()
+	case <-ctx.Done():
+		return nil, "", ctx.Err()
+	}
 
 	if s.BusyCheck != nil {
 		reason, err := s.BusyCheck(ctx)
@@ -616,13 +627,14 @@ func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to list sessions: %w", err)
 		}
-		others := 0
+		// The limit is on users streaming, not Session objects.
+		others := map[string]struct{}{}
 		for _, session := range sessions.Items {
 			if session.Spec.UserReference.Name != user.Name {
-				others++
+				others[session.Spec.UserReference.Name] = struct{}{}
 			}
 		}
-		if others >= s.MaxConcurrentSessions {
+		if len(others) >= s.MaxConcurrentSessions {
 			return nil, busyMessage, nil
 		}
 	}
