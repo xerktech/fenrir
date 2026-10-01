@@ -17,11 +17,12 @@ import (
 type stoppingClient struct {
 	fakeEventsClient
 	stopped chan string
+	err     error
 }
 
 func (f *stoppingClient) StopSession(_ context.Context, id string) error {
 	f.stopped <- id
-	return nil
+	return f.err
 }
 
 func hotplugAgent(t *testing.T, client wolfapi.Client) *Agent {
@@ -34,9 +35,20 @@ func hotplugAgent(t *testing.T, client wolfapi.Client) *Agent {
 // Wolf destroys a stopped stream's devices without unplug events, so a
 // pause must drop their nodes and udev entries itself.
 func TestAgentPauseClearsDevices(t *testing.T) {
+	testAgentPause(t, nil)
+}
+
+// A stream Wolf did not stop still has its devices.
+func TestAgentFailedPauseKeepsDevices(t *testing.T) {
+	testAgentPause(t, errors.New("wolf refused"))
+}
+
+func testAgentPause(t *testing.T, stopErr error) {
+	t.Helper()
 	client := &stoppingClient{
 		fakeEventsClient: fakeEventsClient{events: make(chan *sse.Event)},
 		stopped:          make(chan string, 1),
+		err:              stopErr,
 	}
 	a := hotplugAgent(t, client)
 	for _, f := range []string{filepath.Join(a.inputDevPath, "event5"), filepath.Join(a.udevDataPath, "c13:69")} {
@@ -60,9 +72,13 @@ func TestAgentPauseClearsDevices(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("pause did not stop the Wolf session")
 	}
+	want := 0
+	if stopErr != nil {
+		want = 1
+	}
 	for _, dir := range []string{a.inputDevPath, a.udevDataPath} {
-		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
-			t.Errorf("%s still has %d entries", dir, len(entries))
+		if entries, _ := os.ReadDir(dir); len(entries) != want {
+			t.Errorf("%s has %d entries, want %d", dir, len(entries), want)
 		}
 	}
 }

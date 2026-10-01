@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -409,6 +410,9 @@ func TestValidateNoHotplugOverride(t *testing.T) {
 		"/dev/input":       true,
 		"/dev/input/":      true,
 		"/dev/input/event": true,
+		"dev/input":        true,
+		"run/udev/data":    true,
+		"dev/../dev/input": true,
 		"/run/udev":        true,
 		"/run/udev/data":   true,
 		"/dev/inputs":      false,
@@ -419,5 +423,27 @@ func TestValidateNoHotplugOverride(t *testing.T) {
 		if (err != nil) != wantErr {
 			t.Errorf("mount at %s: err = %v, want error %v", p, err, wantErr)
 		}
+	}
+}
+
+func TestWithHotplugMountsSeesRelativePaths(t *testing.T) {
+	got := withHotplugMounts([]corev1.VolumeMount{{Name: "own", MountPath: "dev/input"}})
+	if len(got) != 2 || got[1].MountPath != "/run/udev" {
+		t.Errorf("mounts = %+v, want the App's dev/input kept and only /run/udev added", got)
+	}
+}
+
+func TestBuildPodRejectsWolfAgentHotplugOverride(t *testing.T) {
+	sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml")
+	user, err := sc.UserInformer.Namespaced(sess.Namespace).Get(sess.Spec.UserReference.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The informer's copy: buildPod reads it back below.
+	user.Spec.SidecarPolicies.WolfAgent = &v1alpha1api.SidecarPolicy{
+		VolumeMounts: []corev1.VolumeMount{{Name: user.Spec.Volumes[0].Name, MountPath: "run/udev/data"}},
+	}
+	if _, err := sc.buildPod(sess); err == nil || !strings.Contains(err.Error(), "reserves for hotplugged devices") {
+		t.Errorf("buildPod err = %v, want the hotplug override rejected", err)
 	}
 }

@@ -1590,7 +1590,7 @@ const (
 // what the App's containers see, such as the host's /dev/input.
 func validateNoHotplugOverride(mounts []corev1.VolumeMount) error {
 	for _, m := range mounts {
-		p := path.Clean(m.MountPath)
+		p := mountTarget(&m)
 		for _, reserved := range []string{InputDevPath, path.Dir(UdevDataPath)} {
 			if p == reserved || strings.HasPrefix(p, reserved+"/") {
 				return fmt.Errorf("validation failed: volumeMount %q in wolfAgent sidecar policy mounts over %s, which the operator reserves for hotplugged devices", m.Name, reserved)
@@ -1598,6 +1598,12 @@ func validateNoHotplugOverride(mounts []corev1.VolumeMount) error {
 		}
 	}
 	return nil
+}
+
+// mountTarget is where m lands in the container. The apiserver accepts a
+// relative mountPath, which the runtime resolves against the container root.
+func mountTarget(m *corev1.VolumeMount) string {
+	return path.Join("/", m.MountPath)
 }
 
 // withHotplugMounts adds the hotplug volume mounts to mounts, except where
@@ -1608,7 +1614,7 @@ func withHotplugMounts(mounts []corev1.VolumeMount) []corev1.VolumeMount {
 		{Name: hotplugDevVolume, MountPath: InputDevPath},
 		{Name: hotplugUdevVolume, MountPath: path.Dir(UdevDataPath)},
 	} {
-		if !slices.ContainsFunc(mounts, func(o corev1.VolumeMount) bool { return path.Clean(o.MountPath) == m.MountPath }) {
+		if !slices.ContainsFunc(mounts, func(o corev1.VolumeMount) bool { return mountTarget(&o) == m.MountPath }) {
 			mounts = append(mounts, m)
 		}
 	}
