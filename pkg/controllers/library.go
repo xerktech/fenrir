@@ -132,6 +132,8 @@ type LibraryController struct {
 	SessionClient v1alpha1client.SessionInterface
 	PodInformer   generic.Informer[*corev1.Pod]
 	Exec          PodExecutor
+	// Catalogue, if set, is scanned while the Library runs and as it stops.
+	Catalogue *Catalogue
 
 	controller generic.Controller[*corev1.Pod]
 	now        func() time.Time
@@ -176,7 +178,14 @@ func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) e
 	if pod == nil || name != LibraryPodName || pod.DeletionTimestamp != nil {
 		return nil
 	}
-	requeueAfter, err := c.reconcileIdle(context.Background(), pod)
+	ctx := context.Background()
+	if c.Catalogue != nil && podReady(pod) && c.Catalogue.ScanDue() {
+		c.scanCatalogue(ctx, pod)
+	}
+	requeueAfter, err := c.reconcileIdle(ctx, pod)
+	if c.Catalogue != nil && requeueAfter > catalogueScanInterval {
+		requeueAfter = catalogueScanInterval
+	}
 	if requeueAfter > 0 {
 		c.controller.EnqueueAfter(namespace, name, requeueAfter)
 	}
@@ -244,6 +253,10 @@ func (c *LibraryController) stop(ctx context.Context, pod *corev1.Pod) error {
 		if err != nil {
 			klog.Errorf("Steam did not shut down cleanly, deleting the Library pod anyway: %v", err)
 		}
+		// Last look, now Steam has written its manifests out.
+		if c.Catalogue != nil {
+			c.scanCatalogue(ctx, pod)
+		}
 	}
 	err := c.K8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
 		Preconditions: &metav1.Preconditions{UID: &pod.UID},
@@ -252,6 +265,14 @@ func (c *LibraryController) stop(ctx context.Context, pod *corev1.Pod) error {
 		return fmt.Errorf("failed to delete Library pod: %w", err)
 	}
 	return nil
+}
+
+// scanCatalogue syncs the catalogue from the Library. A failed scan changes
+// nothing and never holds up the Library (or its shutdown).
+func (c *LibraryController) scanCatalogue(ctx context.Context, pod *corev1.Pod) {
+	if err := c.Catalogue.Scan(ctx, pod); err != nil {
+		klog.Errorf("Catalogue scan failed: %v", err)
+	}
 }
 
 // steamShutdownCommand runs `steam -shutdown` as the desktop user (only if
