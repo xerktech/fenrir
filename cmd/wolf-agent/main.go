@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -42,7 +43,7 @@ func main() {
 
 	// The /api/v1/ proxy drives Wolf, which can run arbitrary containers, so
 	// refuse to start without a token rather than serve it unauthenticated.
-	token, err := readToken(*tokenFile)
+	token, err := newTokenFile(*tokenFile)
 	if err != nil {
 		klog.Fatal("Failed to load bearer token: ", err)
 	}
@@ -67,7 +68,7 @@ func main() {
 					// Call out to the proxy which handles chunked encoding
 					// properly. There may be a way to use the SSE client without
 					// it, but found this easier.
-					wolfClient := selfClient(*serverPort, token)
+					wolfClient := selfClient(*serverPort, token.Token)
 
 					agentController := controllers.NewAgent(
 						wolfClient,
@@ -104,7 +105,7 @@ func main() {
 	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.Handle("/api/v1/", wolfapi.RequireBearerToken(token, proxyHandler(&client, &ready)))
+	mux.Handle("/api/v1/", wolfapi.RequireBearerToken(token.Token, proxyHandler(&client, &ready)))
 
 	// Start HTTPS server
 	server := &http.Server{
@@ -206,7 +207,7 @@ func proxyHandler(client *http.Client, ready *atomic.Bool) http.Handler {
 
 // selfClient builds the wolfapi client the in-pod agent controller uses to
 // reach Wolf through this process's own authenticated proxy.
-func selfClient(port int, token string) wolfapi.Client {
+func selfClient(port int, token func() string) wolfapi.Client {
 	return wolfapi.NewClient(
 		fmt.Sprintf("https://localhost:%d", port),
 		&http.Client{
@@ -237,6 +238,63 @@ func readToken(path string) (string, error) {
 		return "", fmt.Errorf("token file %s is empty", path)
 	}
 	return token, nil
+}
+
+// tokenFile serves the bearer token from a file, re-reading it when the file
+// changes. The token Secret's mount is updated in place by the kubelet when the
+// operator regenerates the Secret, and the operator immediately uses the new
+// token, so a token read once at startup would 401 it until the pod restarts.
+type tokenFile struct {
+	path string
+
+	mu    sync.Mutex
+	info  os.FileInfo // of the file token was read from; nil forces a re-read
+	token string
+}
+
+// newTokenFile loads the token at path, failing if it is unreadable or empty
+// so wolf-agent refuses to start rather than reject every request.
+func newTokenFile(path string) (*tokenFile, error) {
+	f := &tokenFile{path: path}
+	if _, err := f.load(); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// Token returns the current token, or "" (which rejects every request) when
+// the file cannot be read or is empty. It stats the file on every call and
+// re-reads it only when the stat changes. Secret volumes swap a symlink to a
+// new file, so os.SameFile catches a rotation even when mtime and size match.
+func (f *tokenFile) Token() string {
+	tok, err := f.load()
+	if err != nil {
+		klog.ErrorS(err, "Bearer token unavailable; rejecting requests", "path", f.path)
+	}
+	return tok
+}
+
+func (f *tokenFile) load() (string, error) {
+	info, err := os.Stat(f.path)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err != nil {
+		f.info = nil
+		return "", fmt.Errorf("stat token file: %w", err)
+	}
+	if f.info != nil && os.SameFile(f.info, info) &&
+		info.ModTime().Equal(f.info.ModTime()) && info.Size() == f.info.Size() {
+		return f.token, nil
+	}
+	tok, err := readToken(f.path)
+	if err != nil {
+		f.info, f.token = nil, ""
+		return "", err
+	}
+	// If the file changed between Stat and read, info is stale and the next
+	// call re-reads, so the newer token is never masked.
+	f.info, f.token = info, tok
+	return tok, nil
 }
 
 func UnixHTTPClient(sockAddr string) http.Client {

@@ -45,7 +45,7 @@ func TestReadToken(t *testing.T) {
 // TestSelfClientSendsToken guards the in-pod agent controller: it reaches
 // Wolf through this process's own authenticated proxy, so it must send the token.
 func TestSelfClientSendsToken(t *testing.T) {
-	srv := httptest.NewTLSServer(wolfapi.RequireBearerToken("s3cret",
+	srv := httptest.NewTLSServer(wolfapi.RequireBearerToken(wolfapi.StaticToken("s3cret"),
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "sessions": []any{}})
 		})))
@@ -60,10 +60,10 @@ func TestSelfClientSendsToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := selfClient(port, "s3cret").ListSessions(context.Background()); err != nil {
+	if _, err := selfClient(port, wolfapi.StaticToken("s3cret")).ListSessions(context.Background()); err != nil {
 		t.Errorf("with token: %v", err)
 	}
-	if _, err := selfClient(port, "wrong").ListSessions(context.Background()); err == nil {
+	if _, err := selfClient(port, wolfapi.StaticToken("wrong")).ListSessions(context.Background()); err == nil {
 		t.Error("with wrong token: expected error")
 	}
 }
@@ -90,7 +90,7 @@ func TestProxyDoesNotForwardToken(t *testing.T) {
 	var ready atomic.Bool
 	ready.Store(true)
 	client := UnixHTTPClient(sock)
-	agent := httptest.NewServer(wolfapi.RequireBearerToken("s3cret", proxyHandler(&client, &ready)))
+	agent := httptest.NewServer(wolfapi.RequireBearerToken(wolfapi.StaticToken("s3cret"), proxyHandler(&client, &ready)))
 	defer agent.Close()
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, agent.URL+"/api/v1/sessions", http.NoBody)
@@ -108,5 +108,72 @@ func TestProxyDoesNotForwardToken(t *testing.T) {
 	}
 	if auth := <-gotAuth; auth != "" {
 		t.Errorf("Wolf received Authorization %q; want none", auth)
+	}
+}
+
+// TestTokenFileRotation reproduces XERK-1325: the kubelet rewrites the token
+// Secret's mount when the operator regenerates it, and the agent must accept
+// the new token (and reject the old one) without a restart. Secret volumes
+// swap a symlink to a fresh file, which is what this mimics.
+func TestTokenFileRotation(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "token")
+	swap := func(name, content string) {
+		t.Helper()
+		target := filepath.Join(dir, name)
+		if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		tmp := link + ".tmp"
+		if err := os.Symlink(target, tmp); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	swap("v1", "old\n")
+
+	f, err := newTokenFile(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := wolfapi.RequireBearerToken(f.Token, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	status := func(tok string) int {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/sessions", http.NoBody)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := status("old"); got != http.StatusNoContent {
+		t.Fatalf("old token before rotation: status %d", got)
+	}
+	// Same size as the old token, so only the file identity changes.
+	swap("v2", "new\n")
+	if got := status("new"); got != http.StatusNoContent {
+		t.Errorf("new token after rotation: status %d, want 204", got)
+	}
+	if got := status("old"); got != http.StatusUnauthorized {
+		t.Errorf("old token after rotation: status %d, want 401", got)
+	}
+
+	// An emptied or missing file fails closed rather than keeping the old token.
+	swap("v3", "")
+	if got := status("new"); got != http.StatusUnauthorized {
+		t.Errorf("empty token file: status %d, want 401", got)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if got := status("new"); got != http.StatusUnauthorized {
+		t.Errorf("missing token file: status %d, want 401", got)
+	}
+	swap("v4", "again\n")
+	if got := status("again"); got != http.StatusNoContent {
+		t.Errorf("token file restored: status %d, want 204", got)
 	}
 }
