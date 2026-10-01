@@ -91,7 +91,7 @@ func main() {
 			klog.Fatalf("--library-trusted-proxies: %s would trust every peer", p)
 		}
 	}
-	if pathErr := controllers.ValidateLibraryGamesPath(*libraryGamesPath); pathErr != nil {
+	if pathErr := controllers.ValidateLibraryGamesPath(*libraryGamesPath); *libraryPort != 0 && pathErr != nil {
 		klog.Fatalf("--library-games-path: %v", pathErr)
 	}
 	if *libraryIdleTimeout <= 0 {

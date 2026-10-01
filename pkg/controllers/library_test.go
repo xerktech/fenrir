@@ -418,6 +418,13 @@ func TestLibraryServer(t *testing.T) {
 			t.Errorf("HTTP %d, pod created %v; want 303 and a pod", rec.Code, f.podExists(t))
 		}
 	})
+	t.Run("GET on the start path is refused", func(t *testing.T) {
+		f := newLibraryFixture(t, nil)
+		rec := serveLibraryRequest(f.server(t), http.MethodGet, libraryStartPath, "10.1.0.5:5555", userVisit)
+		if rec.Code != http.StatusForbidden || f.podExists(t) {
+			t.Errorf("HTTP %d, pod created %v; want 403 and no pod", rec.Code, f.podExists(t))
+		}
+	})
 	t.Run("cross-site start is refused", func(t *testing.T) {
 		f := newLibraryFixture(t, nil)
 		rec := serveLibraryRequest(f.server(t), http.MethodPost, libraryStartPath, "10.1.0.5:5555", http.Header{"Sec-Fetch-Site": {"cross-site"}})
@@ -450,6 +457,7 @@ func TestLibraryServer(t *testing.T) {
 		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Selkies' nginx demands the operator-held password.
 			if user, pass, ok := r.BasicAuth(); !ok || user != libraryAuthUser || pass != wantPassword {
+				w.Header().Set("WWW-Authenticate", `Basic realm="Login"`)
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -477,6 +485,18 @@ func TestLibraryServer(t *testing.T) {
 		}
 		if s.lastSeen.Load() == 0 {
 			t.Error("proxied traffic not counted as activity")
+		}
+
+		// A pod started with another password: the stale cache is dropped on
+		// the 401 and the next request re-reads the Secret.
+		stale := "stale"
+		s.password.Store(&stale)
+		rec = serveLibrary(s, "10.1.0.5:5555", nil)
+		if rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") != "" {
+			t.Errorf("stale password: HTTP %d, WWW-Authenticate %q; want a 401 without a browser prompt", rec.Code, rec.Header().Get("WWW-Authenticate"))
+		}
+		if rec = serveLibrary(s, "10.1.0.5:5555", nil); rec.Body.String() != "selkies" {
+			t.Errorf("after a 401: HTTP %d %q, want the pod's page with the re-read password", rec.Code, rec.Body.String())
 		}
 	})
 }

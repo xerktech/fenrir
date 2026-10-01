@@ -84,8 +84,10 @@ func NewLibraryServer(library *LibraryController, pods generic.NamespacedLister[
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if resp.StatusCode == http.StatusUnauthorized {
-				// The pod started with another password; re-read it.
+				// The pod started with another password; re-read it. The
+				// browser can't answer the challenge, so don't prompt it.
 				s.password.Store(nil)
+				resp.Header.Del("WWW-Authenticate")
 			}
 			return nil
 		},

@@ -135,7 +135,7 @@ service:
         protocol: TCP
         port: 47989
   # The Library page (operator --library-port). The Ingress points here, behind
-  # Authentik: the desktop has no login of its own.
+  # Authentik; the operator adds the pod's own basic-auth password.
   library:
     enabled: false
     controller: direwolf_operator
