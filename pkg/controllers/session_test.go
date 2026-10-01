@@ -414,7 +414,7 @@ func TestWolfCommandPicksClaimedRenderNode(t *testing.T) {
 	script := strings.ReplaceAll(wolfCommand[2], "/dev/dri/", dri+"/")
 	script = strings.ReplaceAll(script, "exec /entrypoint.sh", `echo "$WOLF_RENDER_NODE"`)
 	run := func(env ...string) string {
-		cmd := exec.Command("sh", "-c", script)
+		cmd := exec.CommandContext(t.Context(), "sh", "-c", script)
 		cmd.Env = env
 		out, err := cmd.Output()
 		if err != nil {
