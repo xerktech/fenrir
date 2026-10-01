@@ -241,15 +241,20 @@ func selfClient(port int, token *tokenFile) wolfapi.Client {
 		&http.Client{
 			Transport: &wolfapi.BearerTokenTransport{
 				Token: token.Token,
-				Base: &http.Transport{
-					TLSClientConfig: &tls.Config{
-						InsecureSkipVerify: true, //nolint:gosec // loopback to our own self-signed listener
-					},
-					IdleConnTimeout: selfClientIdleTimeout,
-				},
+				Base:  selfTransport(),
 			},
 		},
 	)
+}
+
+// selfTransport is selfClient's transport to this process's own listener.
+func selfTransport() *http.Transport {
+	return &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // loopback to our own self-signed listener
+		},
+		IdleConnTimeout: selfClientIdleTimeout,
+	}
 }
 
 // readToken loads the bearer token from path. An unset path or an empty

@@ -392,8 +392,8 @@ func TestServerTimeouts(t *testing.T) {
 	if srv.IdleTimeout <= 0 || srv.IdleTimeout > 5*time.Minute {
 		t.Errorf("IdleTimeout = %v, want (0, 5m]", srv.IdleTimeout)
 	}
-	if selfClientIdleTimeout >= srv.IdleTimeout {
-		t.Errorf("loopback client idles %v, not less than the server's %v", selfClientIdleTimeout, srv.IdleTimeout)
+	if idle := selfTransport().IdleConnTimeout; idle <= 0 || idle >= srv.IdleTimeout {
+		t.Errorf("loopback client idles %v, want (0, server's %v)", idle, srv.IdleTimeout)
 	}
 	if srv.WriteTimeout != 0 {
 		t.Error("WriteTimeout would cut off the /api/v1/events stream")
