@@ -58,9 +58,7 @@ func testAgentPause(t *testing.T, stopErr error) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	if err := a.Run(ctx); err != nil {
-		t.Fatal(err)
-	}
+	go a.Run(ctx)
 	client.events <- &sse.Event{Event: []byte(wolfapi.PauseStreamEventType), Data: []byte(`{"session_id":"42"}`)}
 	// The loop is unbuffered: once this is taken, the pause is handled.
 	client.events <- &sse.Event{Event: []byte("Done")}

@@ -68,9 +68,7 @@ func TestAgentEventLoopOmitsEventData(t *testing.T) {
 	agent := NewAgent(client)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	if err := agent.Run(ctx); err != nil {
-		t.Fatal(err)
-	}
+	go agent.Run(ctx)
 	data := []byte(`{"aes_key":"SECRETKEY0123","aes_iv":"SECRETIV42"}`)
 	client.events <- &sse.Event{Event: []byte("StreamSession"), Data: data}
 	client.events <- &sse.Event{Event: []byte("Done")}
