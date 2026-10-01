@@ -108,6 +108,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
 
 ## CI (`.github/workflows`)
 
+- Open PRs on the fork: `gh pr create -R xerktech/fenrir`. With the `upstream` remote, gh may
+  otherwise target games-on-whales/fenrir.
 - PRs: `go test -race`, govulncheck, golangci-lint, Docker build of all three images, chart
   lint/template/package, and codegen drift (path-filtered).
 - Push to main / release (`builder.yml`): pushes images to `ghcr.io/<owner>/fenrir/*` (operator image
