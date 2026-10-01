@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +42,11 @@ func fixtureExec(t *testing.T, dir string) PodExecutor {
 		if pod != LibraryPodName || container != libraryContainer {
 			return "", errors.New("exec into the wrong container")
 		}
-		args := slices.Clone(command)
+		// The pod runs it as the desktop user; here, as whoever runs the test.
+		if len(command) < 2 || command[0] != "s6-setuidgid" || command[1] != libraryAuthUser {
+			return "", errors.New("scan not run as the desktop user: " + strings.Join(command, " "))
+		}
+		args := slices.Clone(command[2:])
 		for i, a := range args {
 			switch {
 			case a == libraryHome || strings.HasPrefix(a, libraryHome+"/"):
@@ -256,7 +262,9 @@ func TestFetchArt(t *testing.T) {
 		case "/html":
 			_, _ = w.Write([]byte("<html>not an image</html>"))
 		case "/redirect-out":
-			http.Redirect(w, r, "https://169.254.169.254/latest/meta-data", http.StatusFound)
+			// Served (the transport dials this server for every host), so
+			// only the client's redirect check refuses it.
+			http.Redirect(w, r, "https://169.254.169.254/ok.png", http.StatusFound)
 		case "/redirect-in":
 			http.Redirect(w, r, "https://cdn1.epicgames.com/ok.png", http.StatusFound)
 		default:
@@ -478,6 +486,10 @@ func TestLibraryScansCatalogue(t *testing.T) {
 		t.Errorf("stop: %d scans, pod exists %v; want 1 scan after shutdown and the pod gone", scans, f.podExists(t))
 	}
 	cf.app(t, "steam-570")
+	// It runs while the Library holds the Steam lock: no art.
+	if len(cf.fetched) != 0 {
+		t.Errorf("stop's scan fetched art: %v", cf.fetched)
+	}
 
 	// A periodic scan is rate limited.
 	cf.catalogue.lastScan = libraryTestNow.Add(-time.Minute)
@@ -637,8 +649,21 @@ func TestCatalogueScanRejectsHostileFiles(t *testing.T) {
 		t.Error("dangling symlinked store: scan succeeded")
 	}
 
-	if _, err := parseVDF([]byte(strings.Repeat(`"a"{`, 1_000_000))); err == nil {
-		t.Error("parseVDF accepted a million nested objects")
+	deep := strings.Repeat(`"a"{`, vdfMaxDepth+1) + strings.Repeat("}", vdfMaxDepth+1)
+	if _, err := parseVDF([]byte(deep)); err == nil {
+		t.Error("parseVDF accepted nesting past vdfMaxDepth")
+	}
+	ok := strings.Repeat(`"a"{`, vdfMaxDepth) + strings.Repeat("}", vdfMaxDepth)
+	if _, err := parseVDF([]byte(ok)); err != nil {
+		t.Errorf("parseVDF at vdfMaxDepth: %v", err)
+	}
+	// Errors are logged: they must not quote the file, which may be a
+	// symlink to something secret.
+	if _, err := parseVDF([]byte("root:secrethash:19000")); err == nil || strings.Contains(err.Error(), "secret") {
+		t.Errorf("parseVDF error quotes the file: %v", err)
+	}
+	if _, _, err := parseAppManifest([]byte(`"AppState" { "appid" "secret" }`)); err == nil || strings.Contains(err.Error(), "secret") {
+		t.Errorf("parseAppManifest error quotes the file: %v", err)
 	}
 }
 
@@ -694,6 +719,9 @@ func TestPublicAddressOnly(t *testing.T) {
 		"[::1]:443":             false,
 		"[fd00::1]:443":         false,
 		"[::ffff:10.0.0.1]:443": false,
+		"100.64.0.1:443":        false,
+		"[64:ff9b::a00:1]:443":  false,
+		"[2002:a00:1::]:443":    false,
 		"0.0.0.0:443":           false,
 	} {
 		if got := publicAddressOnly("tcp", addr, nil) == nil; got != ok {
@@ -741,6 +769,71 @@ func TestCatalogueSyncNameTakenByHandMadeApp(t *testing.T) {
 		}
 	}
 	f.app(t, "steam-1245620") // the rest are still catalogued
+}
+
+// readTar takes regular files within the cap only, whatever the script let by.
+func TestReadTarRejects(t *testing.T) {
+	for name, hdr := range map[string]*tar.Header{
+		"symlink":  {Name: "config/x.json", Typeflag: tar.TypeSymlink, Linkname: "/etc/shadow"},
+		"oversize": {Name: "config/x.json", Typeflag: tar.TypeReg, Size: catalogueMaxStoreBytes + 1},
+	} {
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if hdr.Size > 0 {
+			if _, err := tw.Write(make([]byte, hdr.Size)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readTar(buf.String()); err == nil {
+			t.Errorf("%s: readTar accepted it", name)
+		}
+	}
+}
+
+// client-go only logs a failed stream copy, so a truncated stream must be
+// turned into an error here, or a cut-off tar reads as fewer games.
+func TestExecResultFailsOnOverflow(t *testing.T) {
+	for _, stream := range []string{"stdout", "stderr"} {
+		stdout, stderr := &cappedBuffer{max: 4}, &cappedBuffer{max: 4}
+		over := map[string]*cappedBuffer{"stdout": stdout, "stderr": stderr}[stream]
+		_, _ = io.Copy(over, strings.NewReader("abcdef"))
+		if out, err := execResult(stdout, stderr, nil); err == nil {
+			t.Errorf("%s over its cap: execResult = %q, nil", stream, out)
+		}
+	}
+	if out, err := execResult(&cappedBuffer{max: 4}, &cappedBuffer{max: 4}, nil); err != nil || out != "" {
+		t.Errorf("execResult within caps = %q, %v", out, err)
+	}
+}
+
+// Two games on one Moonlight ID would launch the same App; the second is
+// refused, not catalogued.
+func TestCatalogueSyncRefusesDuplicateMoonlightID(t *testing.T) {
+	seen := map[int]string{}
+	var a, b string
+	for i := 1; a == ""; i++ {
+		id := strconv.Itoa(i)
+		h := catalogueMoonlightID(v1alpha1types.CatalogueStoreGOG, id)
+		if other, ok := seen[h]; ok {
+			a, b = other, id
+		}
+		seen[h] = id
+	}
+	f := newCatalogueFixture(t, baseApp("heroic-base", nil))
+	games := []catalogueGame{{Store: v1alpha1types.CatalogueStoreGOG, ID: a, Title: "A"}, {Store: v1alpha1types.CatalogueStoreGOG, ID: b, Title: "B"}}
+	if err := f.catalogue.Sync(context.Background(), games, 0); err == nil {
+		t.Error("Sync reported no error for the ID collision")
+	}
+	f.app(t, catalogueAppName(v1alpha1types.CatalogueStoreGOG, a))
+	if _, err := f.dw.DirewolfV1alpha1().Apps(libraryTestNS).Get(context.Background(), catalogueAppName(v1alpha1types.CatalogueStoreGOG, b), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("second game on the same ID got an App (err %v)", err)
+	}
 }
 
 func TestCappedBuffer(t *testing.T) {

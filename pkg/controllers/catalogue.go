@@ -19,6 +19,7 @@ import (
 	"path"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -156,6 +157,17 @@ func NewCatalogue(apps v1alpha1client.AppInterface, exec PodExecutor, gamesPath 
 	}
 }
 
+// nonPublicPrefixes are routable-looking ranges that are not the public
+// internet: carrier-grade NAT (often cluster/VPN space), benchmarking, and
+// IPv6 translations that can reach private IPv4 (NAT64, 6to4).
+var nonPublicPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2002::/16"),
+}
+
 // publicAddressOnly is a net.Dialer Control refusing non-public peers.
 func publicAddressOnly(_, address string, _ syscall.RawConn) error {
 	host, _, err := net.SplitHostPort(address)
@@ -166,7 +178,7 @@ func publicAddressOnly(_, address string, _ syscall.RawConn) error {
 	if err != nil {
 		return fmt.Errorf("box art address %q: %w", address, err)
 	}
-	if ip = ip.Unmap(); !ip.IsGlobalUnicast() || ip.IsPrivate() {
+	if ip = ip.Unmap(); !ip.IsGlobalUnicast() || ip.IsPrivate() || slices.ContainsFunc(nonPublicPrefixes, func(p netip.Prefix) bool { return p.Contains(ip) }) {
 		return fmt.Errorf("box art host resolves to non-public address %s", ip)
 	}
 	return nil
@@ -224,9 +236,11 @@ func (c *Catalogue) Scan(ctx context.Context, pod *corev1.Pod, artBudget time.Du
 // each file with its size, and fails (exit 1) on a file that changed while
 // read, so a torn read fails the scan rather than parsing as fewer games.
 // Symlinks are followed (-h; tar would otherwise archive an empty entry); a
-// dangling one, or a file over its size cap, fails the scan.
+// dangling one, an unreadable one, or a file over its size cap fails the scan.
 func catalogueScanCommand(gamesPath string) []string {
-	return []string{"sh", "-c", `
+	// As the desktop user (exec runs as root): -h follows symlinks that user
+	// planted, which must not reach files only root can read.
+	return []string{"s6-setuidgid", libraryAuthUser, "sh", "-c", `
 max_manifest=$1 max_store=$2 home=$3 games=$4; shift 4
 set -- "$@" "$home"/.local/share/Steam/steamapps/appmanifest_*.acf "$games"/steamapps/appmanifest_*.acf "$games"/*/steamapps/appmanifest_*.acf
 for f do
@@ -320,7 +334,7 @@ func parseAppManifest(data []byte) (game catalogueGame, ok bool, err error) {
 	id, _ := state["appid"].(string)
 	// Canonical only: "0570" would be a second App for game 570.
 	if n, convErr := strconv.ParseUint(id, 10, 32); convErr != nil || n == 0 || strconv.FormatUint(n, 10) != id {
-		return game, false, fmt.Errorf("bad appid %q", id)
+		return game, false, errors.New("appid is not a canonical non-zero number")
 	}
 	flags, _ := strconv.ParseUint(fmt.Sprint(state["stateflags"]), 10, 32)
 	name, _ := state["name"].(string)
@@ -397,7 +411,9 @@ func (p *vdfParser) object(depth int) (map[string]any, error) {
 			}
 			obj[key] = child
 		case (val == "" || val == "}") && !valQuoted:
-			return nil, fmt.Errorf("key %q has no value", key)
+			// Never quote the file: errors are logged, and the file may be
+			// a symlink to something the operator's log must not show.
+			return nil, errors.New("key without a value")
 		default:
 			obj[key] = val
 		}

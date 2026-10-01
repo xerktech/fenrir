@@ -81,22 +81,41 @@ type PodExecutor func(ctx context.Context, namespace, pod, container string, com
 // write the files the catalogue scan reads, and the operator has 256Mi.
 const maxExecOutput = 32 << 20
 
-// cappedBuffer collects output and fails writes past max bytes, which aborts
-// the exec stream. It wraps rather than embeds bytes.Buffer: an embedded
-// ReadFrom or WriteString would let io.Copy and friends skip the cap.
+// cappedBuffer collects output and fails writes past max bytes. It wraps
+// rather than embeds bytes.Buffer: an embedded ReadFrom or WriteString would
+// let io.Copy and friends skip the cap. The overflow is also recorded:
+// client-go only logs a failed stdout/stderr copy and returns no error, so
+// the caller must check Overflowed or get silently truncated output.
 type cappedBuffer struct {
-	buf bytes.Buffer
-	max int
+	buf        bytes.Buffer
+	max        int
+	overflowed bool
 }
 
 func (b *cappedBuffer) Write(p []byte) (int, error) {
-	if b.buf.Len()+len(p) > b.max {
+	if b.overflowed || b.buf.Len()+len(p) > b.max {
+		b.overflowed = true
 		return 0, fmt.Errorf("exec output over %d bytes", b.max)
 	}
 	return b.buf.Write(p) //nolint:wrapcheck // bytes.Buffer only fails on OOM
 }
 
 func (b *cappedBuffer) String() string { return b.buf.String() }
+
+// Overflowed reports whether output was dropped past max.
+func (b *cappedBuffer) Overflowed() bool { return b.overflowed }
+
+// execResult is an exec's stdout, or an error if it failed or either stream
+// went over its cap (truncated output must never pass for the whole of it).
+func execResult(stdout, stderr *cappedBuffer, err error) (string, error) {
+	if err == nil && (stdout.Overflowed() || stderr.Overflowed()) {
+		err = fmt.Errorf("exec output over its cap (stdout %d, stderr %d bytes)", stdout.max, stderr.max)
+	}
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
 
 // NewPodExecutor execs through the API server (pods/exec).
 func NewPodExecutor(config *rest.Config, client kubernetes.Interface) PodExecutor {
@@ -115,10 +134,8 @@ func NewPodExecutor(config *rest.Config, client kubernetes.Interface) PodExecuto
 		}
 		stdout := &cappedBuffer{max: maxExecOutput}
 		stderr := &cappedBuffer{max: 64 << 10}
-		if err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: stdout, Stderr: stderr}); err != nil {
-			return stdout.String(), fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-		}
-		return stdout.String(), nil
+		err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: stdout, Stderr: stderr})
+		return execResult(stdout, stderr, err)
 	}
 }
 
