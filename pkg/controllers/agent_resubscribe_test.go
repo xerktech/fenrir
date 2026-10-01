@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -166,27 +167,69 @@ func TestAgentResubscribeResetsAfterLongStream(t *testing.T) {
 	}
 }
 
+// slowConnect is a stream whose headers take d to arrive and which then
+// closes at once, as through a proxy that holds them until the first event.
+func slowConnect(d time.Duration) func(context.Context) (<-chan *sse.Event, error) {
+	return func(context.Context) (<-chan *sse.Event, error) {
+		time.Sleep(d)
+		ch := make(chan *sse.Event)
+		close(ch)
+		return ch, nil
+	}
+}
+
+// A stream is timed from the subscribe request, not from its headers: one
+// whose headers came late was still up all along.
+func TestAgentResubscribeResetsAfterSlowHeaders(t *testing.T) {
+	const minDelay, maxDelay = 20 * time.Millisecond, 160 * time.Millisecond
+	client := &scriptedEventsClient{
+		steps: []func(context.Context) (<-chan *sse.Event, error){refused, refused, refused, refused, refused, slowConnect(maxDelay)},
+		calls: make(chan time.Time, 8),
+	}
+	a := NewAgent(client)
+	a.minResubscribeDelay, a.maxResubscribeDelay = minDelay, maxDelay
+	calls := runScripted(t, a, client)
+	if d := calls[6].Sub(calls[5]) - maxDelay; d > maxDelay/2 {
+		t.Errorf("resubscribed %s after a slow-header stream closed, want about the %s minimum", d, minDelay)
+	}
+}
+
 // Cancelling Run must not wait for Wolf to answer a StopSession.
 func TestAgentRunReturnsDuringStopSession(t *testing.T) {
+	stopping := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/events" {
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprintf(w, "event: %s\ndata: {\"session_id\":\"42\"}\n\n", wolfapi.PauseStreamEventType)
+			if err := http.NewResponseController(w).Flush(); err != nil {
+				t.Error(err)
+			}
+		} else {
+			stopping <- struct{}{}
 		}
 		// StopSession, and the stream once its event is sent: a Wolf that
-		// never answers.
+		// never answers. Reading the body lets the server see the client go.
+		_, _ = io.Copy(io.Discard, r.Body)
 		<-r.Context().Done()
 	}))
 	t.Cleanup(srv.Close)
+	// Runs first: a hung StopSession must not hang Close too.
+	t.Cleanup(srv.CloseClientConnections)
 
 	a := hotplugAgent(t, wolfapi.NewClient(srv.URL, srv.Client()))
-	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		a.Run(ctx)
 	}()
+	select {
+	case <-stopping:
+	case <-time.After(10 * time.Second):
+		t.Fatal("pause never reached StopSession")
+	}
+	cancel()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
