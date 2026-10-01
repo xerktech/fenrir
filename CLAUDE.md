@@ -36,7 +36,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
   - Pairing creates a `Pairing` CR mapping client-cert fingerprint → `User`; HTTPS requests are
     authorized by fingerprint lookup.
   - The PIN is entered on the pairing page (`pkg/moonlight/pinpage.go`, own `--pin-port`) behind
-    Authentik; the username header is trusted only from `--pin-trusted-proxies` peers.
+    Authentik; the username header is trusted only from `--pin-trusted-proxies` peers that also
+    send the `--pin-proxy-secret-file` secret.
     - Never serve it on the Moonlight ports: those are on the LoadBalancer, where SNAT can make
       an internet client look like a trusted in-cluster peer.
   - App list is rendered from `App` CRs.
@@ -93,6 +94,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
   - The same Secret holds wolf-agent's per-session serving cert, which the operator pins
     (RootCAs + ServerName `wolf-agent`). Never dial it with InsecureSkipVerify: other
     host-networked processes can bind the agent port and would collect the token.
+  - wolf-agent re-reads its token and its cert on every request/handshake: the operator may
+    regenerate the Secret under a running pod and uses the new token and cert at once.
   - `fakeudev` is Linux-only for real work (`fakeudev_linux.go` vs `fakeudev_other.go` stub);
     tests touching it behave differently on Windows/macOS.
 - **`pkg/generic`**: typed generic wrappers over client-go informers/listers plus a reusable
