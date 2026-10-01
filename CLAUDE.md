@@ -97,6 +97,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     host-networked processes can bind the agent port and would collect the token.
   - wolf-agent re-reads its token and its cert on every request/handshake: the operator may
     regenerate the Secret under a running pod and uses the new token and cert at once.
+  - `Agent.Run` resubscribes to Wolf's `/api/v1/events` itself; `SubscribeToEvents` is one
+    connection whose channel closes when it ends. r3labs/sse never retries an EOF'd stream.
   - `fakeudev` is Linux-only for real work (`fakeudev_linux.go` vs `fakeudev_other.go` stub);
     tests touching it behave differently on Windows/macOS.
 - **`pkg/generic`**: typed generic wrappers over client-go informers/listers plus a reusable

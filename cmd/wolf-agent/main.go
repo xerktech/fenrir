@@ -74,6 +74,7 @@ func main() {
 						wolfClient,
 					)
 
+					// Run resubscribes to Wolf's events itself until appContext ends.
 					go agentController.Run(appContext)
 
 					// Set ready to true

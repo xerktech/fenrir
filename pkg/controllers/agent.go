@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"games-on-whales.github.io/direwolf/pkg/fakeudev"
 	"games-on-whales.github.io/direwolf/pkg/wolfapi"
@@ -29,6 +30,11 @@ type Agent struct {
 	// Where hotplugged devices are published; InputDevPath and
 	// UdevDataPath outside tests.
 	inputDevPath, udevDataPath string
+
+	// Bounds of the delay before resubscribing after Wolf's event stream
+	// ends or a subscribe fails. A stream that stayed up for maxDelay resets
+	// it to minDelay.
+	minResubscribeDelay, maxResubscribeDelay time.Duration
 }
 
 func NewAgent(
@@ -38,82 +44,101 @@ func NewAgent(
 		WolfClient:   wolfClient,
 		inputDevPath: InputDevPath,
 		udevDataPath: UdevDataPath,
+
+		minResubscribeDelay: 200 * time.Millisecond,
+		maxResubscribeDelay: 10 * time.Second,
 	}
 
 	return res
 }
 
-func (a *Agent) Run(ctx context.Context) error {
+// Run handles Wolf's events until ctx ends. Whenever the stream closes or a
+// subscribe fails it resubscribes, with backoff: without the stream, pause
+// events would no longer stop Wolf's session or clear the devices.
+func (a *Agent) Run(ctx context.Context) {
 	klog.Infof("Starting Agent")
-	if err := a.watchEvents(ctx); err != nil {
-		return err
-	}
-
-	klog.Infof("Agent started")
-	return nil
-}
-
-func (a *Agent) watchEvents(ctx context.Context) error {
-	ch, err := a.WolfClient.SubscribeToEvents(ctx)
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case ev, ok := <-ch:
-				if !ok || ev == nil {
-					klog.Infof("Event channel closed")
-					return
-				}
-
-				logEvent(ev)
-
-				switch wolfapi.WolfEventType(ev.Event) {
-				// Wolf handles a moonlight disconnect as a "Pause".
-				// When moonlight disconnects from Wolf we should reflect that
-				// into the state in Kubernetes so things can be cleaned up.
-				case wolfapi.PauseStreamEventType:
-					var pauseEvent wolfapi.PauseStreamEvent
-					if err := json.Unmarshal(ev.Data, &pauseEvent); err != nil {
-						utilruntime.HandleError(fmt.Errorf("failed to unmarshal pause stream event: %w", err))
-						continue
-					}
-
-					if err := a.WolfClient.StopSession(ctx, pauseEvent.SessionID); err != nil {
-						utilruntime.HandleError(fmt.Errorf("failed to stop session: %w", err))
-						continue
-					}
-					a.clearDevices()
-				// Wolf hotplugged a virtual input device. Play the role of
-				// fake-udev: publish the udev db entry and broadcast a
-				// synthetic udev netlink event in the pod's network
-				// namespace so the app container's SDL/Steam notices it.
-				case wolfapi.PlugDeviceEventType:
-					var plugEvent wolfapi.PlugDeviceEvent
-					if err := json.Unmarshal(ev.Data, &plugEvent); err != nil {
-						utilruntime.HandleError(fmt.Errorf("failed to unmarshal plug device event: %w", err))
-						continue
-					}
-					a.handleDevicePlug(plugEvent)
-				case wolfapi.UnplugDeviceEventType:
-					var unplugEvent wolfapi.UnplugDeviceEvent
-					if err := json.Unmarshal(ev.Data, &unplugEvent); err != nil {
-						utilruntime.HandleError(fmt.Errorf("failed to unmarshal unplug device event: %w", err))
-						continue
-					}
-					a.handleDeviceUnplug(unplugEvent)
-				default:
-					continue
-				}
+	delay := a.minResubscribeDelay
+	for {
+		ch, err := a.WolfClient.SubscribeToEvents(ctx)
+		if err != nil {
+			utilruntime.HandleError(fmt.Errorf("failed to subscribe to Wolf events: %w", err))
+		} else {
+			klog.Infof("Subscribed to Wolf events")
+			start := time.Now()
+			a.handleEvents(ctx, ch)
+			if time.Since(start) >= a.maxResubscribeDelay {
+				delay = a.minResubscribeDelay
 			}
 		}
-	}()
+		if ctx.Err() != nil {
+			return
+		}
+		klog.Infof("Resubscribing to Wolf events in %s", delay)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		delay = min(2*delay, a.maxResubscribeDelay)
+	}
+}
 
-	return nil
+// handleEvents handles ch's events until it is closed or ctx ends.
+func (a *Agent) handleEvents(ctx context.Context, ch <-chan *sse.Event) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				klog.Infof("Wolf event stream closed")
+				return
+			}
+			if ev == nil {
+				continue
+			}
+
+			logEvent(ev)
+
+			switch wolfapi.WolfEventType(ev.Event) {
+			// Wolf handles a moonlight disconnect as a "Pause".
+			// When moonlight disconnects from Wolf we should reflect that
+			// into the state in Kubernetes so things can be cleaned up.
+			case wolfapi.PauseStreamEventType:
+				var pauseEvent wolfapi.PauseStreamEvent
+				if err := json.Unmarshal(ev.Data, &pauseEvent); err != nil {
+					utilruntime.HandleError(fmt.Errorf("failed to unmarshal pause stream event: %w", err))
+					continue
+				}
+
+				if err := a.WolfClient.StopSession(ctx, pauseEvent.SessionID); err != nil {
+					utilruntime.HandleError(fmt.Errorf("failed to stop session: %w", err))
+					continue
+				}
+				a.clearDevices()
+			// Wolf hotplugged a virtual input device. Play the role of
+			// fake-udev: publish the udev db entry and broadcast a
+			// synthetic udev netlink event in the pod's network
+			// namespace so the app container's SDL/Steam notices it.
+			case wolfapi.PlugDeviceEventType:
+				var plugEvent wolfapi.PlugDeviceEvent
+				if err := json.Unmarshal(ev.Data, &plugEvent); err != nil {
+					utilruntime.HandleError(fmt.Errorf("failed to unmarshal plug device event: %w", err))
+					continue
+				}
+				a.handleDevicePlug(plugEvent)
+			case wolfapi.UnplugDeviceEventType:
+				var unplugEvent wolfapi.UnplugDeviceEvent
+				if err := json.Unmarshal(ev.Data, &unplugEvent); err != nil {
+					utilruntime.HandleError(fmt.Errorf("failed to unmarshal unplug device event: %w", err))
+					continue
+				}
+				a.handleDeviceUnplug(unplugEvent)
+			default:
+				continue
+			}
+		}
+	}
 }
 
 // logEvent logs ev without its data: Wolf's session events carry the

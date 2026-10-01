@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 
 	"github.com/r3labs/sse/v2"
+	"gopkg.in/cenkalti/backoff.v1"
 )
 
 type Session struct {
@@ -57,6 +59,8 @@ type Client interface {
 	StopSession(ctx context.Context, sessionID string) error
 	ListSessions(ctx context.Context) ([]Session, error)
 	ListApps(ctx context.Context) ([]App, error)
+	// SubscribeToEvents's channel is closed when the stream ends; the caller
+	// resubscribes.
 	SubscribeToEvents(ctx context.Context) (<-chan *sse.Event, error)
 }
 
@@ -255,18 +259,50 @@ func (c *client) StopSession(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// SubscribeToEvents opens one connection to Wolf's event stream. It returns
+// once Wolf has answered; the channel is closed when that connection ends,
+// for whatever reason, so the caller sees every disconnect and resubscribes.
+// The SSE library's own retry is off: it never runs when the stream ends
+// with EOF, and it would hide a failing first connection for 15 minutes.
 func (c *client) SubscribeToEvents(ctx context.Context) (<-chan *sse.Event, error) {
 	events := make(chan *sse.Event)
+	// Only the first value is read: the response status, or why the request
+	// never got one.
+	answered := make(chan error, 1)
 	sseClient := sse.NewClient(c.apiURL+"/api/v1/events", func(cl *sse.Client) {
 		cl.Connection = c.httpClient
+		cl.ReconnectStrategy = &backoff.StopBackOff{}
+		cl.ResponseValidator = func(_ *sse.Client, resp *http.Response) error {
+			var err error
+			if resp.StatusCode != http.StatusOK {
+				resp.Body.Close()
+				err = fmt.Errorf("could not connect to event stream: %s", resp.Status)
+			}
+			answered <- err
+			return err
+		}
 	})
 
-	err := sseClient.SubscribeChanRawWithContext(ctx, events)
-	if err != nil {
-		close(events)
+	go func() {
+		defer close(events)
+		err := sseClient.SubscribeRawWithContext(ctx, func(ev *sse.Event) {
+			select {
+			case events <- ev:
+			case <-ctx.Done():
+			}
+		})
+		if err == nil {
+			err = errors.New("event stream ended before a response")
+		}
+		select {
+		case answered <- err:
+		default:
+		}
+	}()
+
+	if err := <-answered; err != nil {
 		return nil, err
 	}
-
 	return events, nil
 }
 
