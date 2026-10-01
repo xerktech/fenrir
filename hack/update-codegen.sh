@@ -20,7 +20,10 @@ set -o pipefail
 
 
 SCRIPT_ROOT=$( cd "$(dirname "${BASH_SOURCE[0]}")/.." ; pwd -P )
+# go list -m prints an empty Dir unless the module is already in the module cache, and only
+# hack/tools.go (behind the tools build tag) imports it, so a fresh clone or CI runner lacks it.
 CODEGEN_PKG=${CODEGEN_PKG:-$(
+  go mod download k8s.io/code-generator
   go list -m -f "{{.Dir}}" k8s.io/code-generator
 )}
 
@@ -67,6 +70,10 @@ pushd "${SCRIPT_ROOT}" >/dev/null
 
 # Generate CRD manifests for all types using controller-gen
 echo "Generating crd manifests..." >&2
+# Neither controller-gen nor openapi2jsonschema.py deletes outputs, so clear them first: a removed
+# kind's CRD would otherwise keep shipping in the chart.
+rm -f crds/*.yaml
+rm -f schemas/*/*.json
 go run sigs.k8s.io/controller-tools/cmd/controller-gen \
   crd:generateEmbeddedObjectMeta=true \
   paths="${PKG_NAME}/..." \

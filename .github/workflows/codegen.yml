@@ -4,7 +4,8 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - 'pkg/api/**'
+      # The generators scan the whole module for markers, not just pkg/api.
+      - '**.go'
       - 'hack/**'
       - 'crds/**'
       - 'schemas/**'
