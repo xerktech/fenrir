@@ -2,12 +2,14 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -513,5 +515,38 @@ func TestBuildPodRejectsWolfAgentHotplugOverride(t *testing.T) {
 	}
 	if _, err := sc.buildPod(sess); err == nil || !strings.Contains(err.Error(), "reserves for hotplugged devices") {
 		t.Errorf("buildPod err = %v, want the hotplug override rejected", err)
+	}
+}
+
+// TestBuildPodLeavesCachedAppLabels builds pods for two sessions of one App at
+// once, as the controller's two workers can. The App template's labels map is
+// the informer cache's own, so building a pod must copy it, not write into it.
+func TestBuildPodLeavesCachedAppLabels(t *testing.T) {
+	sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml")
+	app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+	if err != nil {
+		t.Fatalf("get cached app: %v", err)
+	}
+	app.Spec.Template.Labels = map[string]string{"team": "games"}
+
+	var wg sync.WaitGroup
+	for i := range 2 {
+		s := sess.DeepCopy()
+		s.Name = fmt.Sprintf("sess-%d", i)
+		wg.Go(func() {
+			pod, err := sc.buildPod(s)
+			if err != nil {
+				t.Errorf("buildPod: %v", err)
+				return
+			}
+			if pod.Labels["team"] != "games" {
+				t.Errorf("pod labels %v lost the App's own", pod.Labels)
+			}
+		})
+	}
+	wg.Wait()
+
+	if want := map[string]string{"team": "games"}; !reflect.DeepEqual(app.Spec.Template.Labels, want) {
+		t.Errorf("cached App template labels = %v, want %v", app.Spec.Template.Labels, want)
 	}
 }

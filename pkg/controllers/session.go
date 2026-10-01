@@ -874,7 +874,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	}
 	var podToCreate corev1.PodTemplateSpec
 	if app.Spec.Template != nil {
-		podToCreate.ObjectMeta = app.Spec.Template.ObjectMeta
+		// Deep-copied: the App is the informer cache's, and the labels below are
+		// written into this map by concurrent workers.
+		podToCreate.ObjectMeta = *app.Spec.Template.ObjectMeta.DeepCopy()
 		podToCreate.Spec = *app.Spec.Template.Spec.DeepCopy()
 	}
 	if err := addAppGPUClaim(&podToCreate.Spec, app, session); err != nil {
