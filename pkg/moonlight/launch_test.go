@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -510,10 +511,29 @@ func TestLaunchDrainStopsAtCallerDeadline(t *testing.T) {
 		t.Errorf("drain took %s, want it to stop at the caller's 300ms deadline", elapsed)
 	}
 	f.server.cleanupMu.Lock()
-	left := len(f.server.pendingCleanups)
+	left := f.server.pendingCleanups
 	f.server.cleanupMu.Unlock()
-	if left == 0 || left == 5 {
-		t.Errorf("%d cleanups left queued, want the unfinished ones kept for the next slot holder", left)
+	// stale0 finished at 200ms; stale1 was in flight at the deadline and
+	// must be kept along with the rest.
+	if want := []string{"stale1", "stale2", "stale3", "stale4"}; !slices.Equal(left, want) {
+		t.Errorf("left queued = %v, want %v", left, want)
+	}
+}
+
+func TestLaunchStalledCleanupsDontOutlastLaunch(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: time.Second})
+	f.slowCleanupList(10 * time.Second)
+	for i := range 3 {
+		f.server.queueCleanup(fmt.Sprintf("stale%d", i))
+	}
+
+	start := time.Now()
+	f.launch(t, "bob")
+
+	// The drain in createSession shares bob's budget; detached, each stalled
+	// cleanup would take its own time.
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Errorf("launch took %s, want an answer within its 1s budget", elapsed)
 	}
 }
 
