@@ -36,8 +36,11 @@ func captureKlog(t *testing.T) *bytes.Buffer {
 // while the handler still sees the real value.
 func TestLoggingMiddlewareRedactsSecrets(t *testing.T) {
 	buf := captureKlog(t)
+	// Spelled out, not secretQueryParams: dropping a name from that list
+	// must fail this test.
+	secrets := []string{"rikey", "rikeyid", "salt", "clientcert", "clientchallenge", "serverchallengeresp", "clientpairingsecret", "pin"}
 	q := url.Values{"appid": {"firefox"}}
-	for i, k := range secretQueryParams {
+	for i, k := range secrets {
 		q.Set(k, "SECRETVALUE"+string(rune('A'+i)))
 	}
 
@@ -51,7 +54,7 @@ func TestLoggingMiddlewareRedactsSecrets(t *testing.T) {
 	if !strings.Contains(logged, "appid:[firefox]") {
 		t.Fatalf("request not logged with its query: %q", logged)
 	}
-	for _, k := range secretQueryParams {
+	for _, k := range secrets {
 		if strings.Contains(logged, q.Get(k)) {
 			t.Errorf("log contains %s's value: %q", k, logged)
 		}
