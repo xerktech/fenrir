@@ -1,0 +1,49 @@
+name: Codegen Drift
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      # The generators scan the whole module for markers, not just pkg/api.
+      - '**.go'
+      - 'hack/**'
+      - 'crds/**'
+      - 'schemas/**'
+      - 'pkg/generated/**'
+      # Generator versions are pinned here; a bump can change the output.
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/codegen.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  codegen:
+    name: generated files are up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # hack/openapi2jsonschema.py imports yaml; the runner's system python rejects pip (PEP 668).
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: Install PyYAML
+        run: python3 -m pip install pyyaml
+
+      - name: Run codegen
+        run: bash hack/update-codegen.sh
+
+      # status catches new untracked files too, which diff alone misses.
+      - name: Fail on drift
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            git diff
+            echo "::error::Generated files are stale or hand-edited; run hack/update-codegen.sh and commit the result."
+            exit 1
+          fi
