@@ -26,8 +26,6 @@ import (
 	"games-on-whales.github.io/direwolf/pkg/generic"
 )
 
-const testNamespace = "direwolf"
-
 type launchFixture struct {
 	server  *RESTServer
 	client  *fake.Clientset

@@ -3,7 +3,11 @@ package main
 import (
 	"context"
 	"flag"
+	"net/netip"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
 	direwolfv1alpha1 "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -18,7 +22,9 @@ import (
 )
 
 func main() {
-	appContext, appCancel := context.WithCancel(context.Background())
+	// SIGTERM (pod stop) cancels the context so Run shuts the servers down
+	// instead of the process dying mid-request.
+	appContext, appCancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer appCancel()
 
 	serverCertPath := flag.String("tls-cert", "server.crt", "Path to server cert")
@@ -27,6 +33,9 @@ func main() {
 	securePort := flag.Int("secure-port", 47984, "Secure port to listen on")
 	launchTimeout := flag.Duration("launch-timeout", moonlight.DefaultLaunchTimeout, "How long to wait for a session to become ready when launching an app (must be under moonlight-qt's 120s launch timeout)")
 	maxSessions := flag.Int("max-concurrent-sessions", 1, "How many users may stream at once; further launches get Moonlight's busy error (-1 = unlimited)")
+	pinPort := flag.Int("pin-port", 0, "Port for the pairing page, to be reached only through the Authentik outpost. 0 disables it")
+	pinTrustedProxies := flag.String("pin-trusted-proxies", "", "Comma-separated CIDRs of the proxy allowed to assert the user via --pin-user-header. Required with --pin-port")
+	pinUserHeader := flag.String("pin-user-header", moonlight.DefaultPinUserHeader, "Header carrying the authenticated username; must match a User name")
 	namespace := flag.String("namespace", os.Getenv("POD_NAMESPACE"), "Namespace to watch")
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -46,6 +55,22 @@ func main() {
 	klog.Info("Launch timeout: ", *launchTimeout)
 	klog.Info("Max concurrent sessions: ", *maxSessions)
 	klog.Info("Namespace: ", *namespace)
+
+	var trustedProxies []netip.Prefix
+	if *pinTrustedProxies != "" {
+		for cidr := range strings.SplitSeq(*pinTrustedProxies, ",") {
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+			if err != nil {
+				klog.Fatalf("Invalid --pin-trusted-proxies entry %q: %s", cidr, err)
+			}
+			trustedProxies = append(trustedProxies, prefix.Masked())
+		}
+	}
+	if *pinPort != 0 && len(trustedProxies) == 0 {
+		klog.Fatal("--pin-port requires --pin-trusted-proxies")
+	}
+	klog.Info("Pairing page port: ", *pinPort)
+	klog.Info("Pairing page trusted proxies: ", trustedProxies)
 
 	tlsCert, err := util.LoadCertificates(*serverCertPath, *serverKeyPath)
 	if err != nil {
@@ -78,6 +103,10 @@ func main() {
 	klog.Info("Waiting for caches to sync")
 	k8sFactory.WaitForCacheSync(appContext.Done())
 	direwolfFactory.WaitForCacheSync(appContext.Done())
+	if appContext.Err() != nil {
+		klog.Info("Shutting down before caches synced")
+		return
+	}
 	klog.Info("Caches synced")
 
 	pairingManager := moonlight.NewPairingManager(
@@ -99,14 +128,18 @@ func main() {
 			Cert:                  tlsCert,
 			LaunchTimeout:         *launchTimeout,
 			MaxConcurrentSessions: *maxSessions,
+			PinPage: moonlight.PinPageOptions{
+				Port:           *pinPort,
+				TrustedProxies: trustedProxies,
+				UserHeader:     *pinUserHeader,
+			},
 		},
 	)
 
-	go func() {
-		defer appCancel()
-		restServer.Run(appContext)
-	}()
-
-	<-appContext.Done()
-	klog.Info("Shutting down")
+	// Run returns once its servers are shut down; its graceful shutdown is
+	// bounded, so this cannot hang the pod stop.
+	if err := restServer.Run(appContext); err != nil {
+		klog.Fatalf("Server failed: %s", err)
+	}
+	klog.Info("Shut down")
 }

@@ -6,13 +6,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"image/png"
 	"io"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,12 +32,7 @@ import (
 	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
 	"games-on-whales.github.io/direwolf/pkg/generic"
 	"games-on-whales.github.io/direwolf/pkg/util"
-
-	_ "embed"
 )
-
-//go:embed pin.html
-var pinHTML string
 
 type RESTServerOptions struct {
 	Port       int
@@ -61,6 +56,15 @@ type RESTServerOptions struct {
 	// limit. A non-empty reason makes the launch fail with the busy error
 	// carrying that reason (e.g. a running Library pod holds the GPU).
 	BusyCheck BusyCheck
+
+	// PinPage serves the pairing page on its own listener. Disabled when
+	// PinPage.Port is 0; there is deliberately no fallback onto Port, which
+	// Moonlight clients reach directly.
+	PinPage PinPageOptions
+
+	// shutdownTimeout bounds graceful shutdown; defaults to 5s. Overridden by
+	// tests.
+	shutdownTimeout time.Duration
 }
 
 // BusyCheck reports whether something outside the Session count occupies the
@@ -148,7 +152,6 @@ func NewRESTServer(
 	ps.router.HandleFunc("/serverinfo", ps.serverInfoHandler)
 	ps.router.HandleFunc("/pair", ps.pairHandler)
 	ps.router.HandleFunc("/unpair", ps.unpairHandler)
-	ps.router.HandleFunc("/pin/", ps.pinHandler)
 
 	ps.router.HandleFunc("/readyz", ps.readyzHandler)
 	ps.router.HandleFunc("/livez", ps.livezHandler)
@@ -186,6 +189,15 @@ func (s *RESTServer) Run(ctx context.Context) error {
 		},
 	}
 
+	var pinServer *http.Server
+	if s.PinPage.Port != 0 {
+		pinServer = &http.Server{
+			Addr:              fmt.Sprintf(":%d", s.PinPage.Port),
+			Handler:           loggingMiddleware(NewPinPageHandler(s.manager, s.UserLister, s.PinPage)),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	var error atomic.Pointer[error]
 	go func() {
@@ -206,10 +218,43 @@ func (s *RESTServer) Run(ctx context.Context) error {
 		}
 	}()
 
+	if pinServer != nil {
+		go func() {
+			defer cancel()
+			klog.Infof("Pairing page listening on %s", pinServer.Addr)
+			if err := pinServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				klog.Errorf("Pairing page server failed: %s", err)
+				error.CompareAndSwap(nil, &err)
+			}
+		}()
+	}
+
 	<-ctx.Done()
 	klog.Info("Shutting down server...")
-	server.Shutdown(context.Background())
-	secureServer.Shutdown(context.Background())
+
+	// Shut every listener down at once, with a deadline. A pair request can
+	// block indefinitely waiting for its PIN; shutting down one server after
+	// another would leave the next one (HTTPS: /launch) serving until the
+	// process is killed.
+	timeout := s.shutdownTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancelShutdown()
+	var wg sync.WaitGroup
+	for _, srv := range []*http.Server{server, secureServer, pinServer} {
+		if srv == nil {
+			continue
+		}
+		wg.Go(func() {
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				klog.Warningf("Server %s did not shut down gracefully (%s), closing", srv.Addr, err)
+				_ = srv.Close()
+			}
+		})
+	}
+	wg.Wait()
 
 	if err := error.Load(); err != nil {
 		klog.Errorf("Server failed: %s", *err)
@@ -299,7 +344,11 @@ func (s *RESTServer) pairHandler(w http.ResponseWriter, r *http.Request) {
 	klog.Infof("Handling pair request from %s", r.RemoteAddr)
 
 	clientID := r.URL.Query().Get("uniqueid")
-	clientIP := strings.Split(r.RemoteAddr, ":")[0]
+	clientIP, err := remoteIP(r)
+	if err != nil {
+		sendXML(w, failPair(err.Error()))
+		return
+	}
 	cacheKey := fmt.Sprintf("%s@%s", clientID, clientIP)
 
 	if clientID == "" {
@@ -312,7 +361,7 @@ func (s *RESTServer) pairHandler(w http.ResponseWriter, r *http.Request) {
 		salt := r.URL.Query().Get("salt")
 		clientCertStr := r.URL.Query().Get("clientcert")
 
-		sendXML(w, s.manager.pairPhase1(cacheKey, salt, clientCertStr))
+		sendXML(w, s.manager.pairPhase1(r.Context(), cacheKey, salt, clientCertStr))
 		return
 	} else if r.URL.Query().Has("clientchallenge") {
 		klog.Infof("Pairing phase 2 with %s\n", cacheKey)
@@ -348,7 +397,11 @@ func (s *RESTServer) pairHandler(w http.ResponseWriter, r *http.Request) {
 func (s *RESTServer) unpairHandler(w http.ResponseWriter, r *http.Request) {
 	klog.Infof("Handling unpair request from %s", r.RemoteAddr)
 	if r.Method == "GET" {
-		clientIP := strings.Split(r.RemoteAddr, ":")[0]
+		clientIP, err := remoteIP(r)
+		if err != nil {
+			writeErrorResponse(w, 400, err)
+			return
+		}
 		clientID := r.URL.Query().Get("uniqueid")
 		cacheKey := fmt.Sprintf("%s@%s", clientID, clientIP)
 
@@ -359,54 +412,6 @@ func (s *RESTServer) unpairHandler(w http.ResponseWriter, r *http.Request) {
 
 		sendXML(w, Response{StatusCode: 200})
 	}
-}
-
-func (s *RESTServer) pinHandler(w http.ResponseWriter, r *http.Request) {
-	klog.Infof("Handling %v pin request from %s", r.Method, r.RemoteAddr)
-	// Handle GET /pin/<secret>
-	if r.Method == "GET" {
-		// Just post the static pin page
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(pinHTML))
-		return
-	}
-
-	// Handle POST /pin
-	if r.Method == "POST" {
-		type PinRequest struct {
-			Pin    string `json:"pin"`
-			Secret string `secret:"secret"`
-		}
-
-		var req PinRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("Invalid request"))
-			return
-		}
-
-		if req.Pin == "" || req.Secret == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("Invalid request"))
-			return
-		}
-
-		// Provide the pin to the pair manager
-		klog.Infof("Received pin %s for secret %s", req.Pin, req.Secret)
-		err := s.manager.PostPin(req.Secret, req.Pin)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(err.Error()))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-		return
-	}
-
-	w.WriteHeader(http.StatusBadRequest)
-	w.Write([]byte("Invalid pin request"))
 }
 
 func (s *RESTServer) appListHandler(w http.ResponseWriter, r *http.Request) {
@@ -431,8 +436,25 @@ func (s *RESTServer) appListHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// remoteIP returns the Moonlight client's IP from r.RemoteAddr. moonlight-proxy
+// is host-networked, so this is the real peer Wolf must stream to (it is not
+// derived from headers, which the client controls). The port is stripped,
+// IPv4-mapped IPv6 from a dual-stack listener is unmapped so Wolf sees the
+// IPv4 form, and any zone is dropped.
+func remoteIP(r *http.Request) (string, error) {
+	peer, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return "", fmt.Errorf("unparseable client address %q: %w", r.RemoteAddr, err)
+	}
+	return peer.Addr().Unmap().WithZone("").String(), nil
+}
+
 func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
-	clientIP := strings.Split(r.RemoteAddr, ":")[0]
+	clientIP, err := remoteIP(r)
+	if err != nil {
+		writeErrorResponse(w, 400, err)
+		return
+	}
 
 	// 2025/03/03 11:34:48 HTTP/2.0 GET /launch map[additionalStates:[1] appid:[firefox] localAudioPlayMode:[0] mode:[1920x1080x60] rikey:[773448F67992470C5C62848D361E1025] rikeyid:[1311662065] sops:[0] surroundAudioInfo:[196610] uniqueid:[0123456789ABCDEF]] 127.0.0.1:65314
 	// 2025/03/03 11:34:48 &{GET /launch?uniqueid=0123456789ABCDEF&appid=firefox&mode=1920x1080x60&additionalStates=1&sops=0&rikey=773448F67992470C5C62848D361E1025&rikeyid=1311662065&localAudioPlayMode=0&surroundAudioInfo=196610 HTTP/2.0 2 0 map[Accept:[*/*] Accept-Encoding:[gzip, deflate, br] Accept-Language:[en-US,en;q=0.9] User-Agent:[Moonlight/1243 CFNetwork/1568.100.1 Darwin/24.0.0]] 0x14000296570 <nil> 0 [] false 127.0.0.1:47984 map[] map[] <nil> map[] 127.0.0.1:65314 /launch?uniqueid=0123456789ABCDEF&appid=firefox&mode=1920x1080x60&additionalStates=1&sops=0&rikey=773448F67992470C5C62848D361E1025&rikeyid=1311662065&localAudioPlayMode=0&surroundAudioInfo=196610 0x1400016a540 <nil> <nil> /launch 0x140001ce0f0 0x14000186540 [] map[]}

@@ -36,8 +36,19 @@ is currently authenticated.
 
 #### PIN Codes
 
-moonlight-proxy presents the same PIN code page as wolf with nothing special
-attached. Eventually it should be protected by HTTPS Oauth proxy to associate user to client.
+While Moonlight shows its PIN, the pair request waits on the pairing page
+(`/pin/` on `--pin-port`). That page is meant to sit behind an Authentik proxy
+outpost: the outpost authenticates the user and sets `--pin-user-header`
+(default `X-Authentik-Username`), whose value must be the name of a `User` in the
+proxy's namespace. The `Pairing` created for the client belongs to that `User`.
+
+- The header is honoured only when the TCP peer is in `--pin-trusted-proxies`;
+  any other peer gets a 403. `X-Forwarded-For` is ignored.
+- The page has its own listener and is not served on the Moonlight ports, so it
+  must not be put on the LoadBalancer Service. Point the outpost at a ClusterIP
+  Service for `--pin-port`, and set `--pin-trusted-proxies` to the outpost pods'
+  range only.
+- Each pending request accepts one PIN; a wrong PIN fails the handshake.
 
 ### App Lists
 
@@ -62,6 +73,9 @@ to have an `rtsp` URL added to its status by the `operator` to hand back to the 
 | `--tls-cert` | `server.crt` | Path to the server TLS certificate. |
 | `--tls-key` | `server.key` | Path to the server TLS key. |
 | `--namespace` | `$POD_NAMESPACE` | Namespace to watch for CRDs. |
+| `--pin-port` | `0` (off) | Port for the pairing page. Requires `--pin-trusted-proxies`. |
+| `--pin-trusted-proxies` | | Comma-separated CIDRs of the proxy (Authentik outpost) allowed to assert the user. |
+| `--pin-user-header` | `X-Authentik-Username` | Header carrying the authenticated username; must equal a `User` name. |
 | `--launch-timeout` | `60s` | How long `/launch` waits for the operator to create a session and expose its stream URL before giving up. The wait is still bounded by the client connection, so a disconnecting Moonlight client cancels it early. Raise this if cold starts (image pull + wolf boot + `wolf-agent` readiness) are getting cancelled with an HTTP 500; lower it to fail faster. |
 
 ## wolf-agent
@@ -118,8 +132,9 @@ Pod will never be `READY` and the stream is never started.
 
 Moonlight streams from the same host it paired with, and can only be redirected
 to a different *port*. So session pods run with `hostNetwork` on one node (pinned
-with the operator's `--session-node-selector`, e.g. `kubernetes.io/hostname=talos04`)
-and share that node's IP with `moonlight-proxy`, which must also be reachable on
+with the operator's `--session-node-selector`, e.g.
+`kubernetes.io/hostname=talos04.xerktech.com`; Talos nodes carry their FQDN in
+that label) and share that node's IP with `moonlight-proxy`, which must also be reachable on
 it at 47984/47989 (e.g. a host-networked proxy pinned to the same node).
 
 For each session Deployment the operator allocates a block of 7 host ports from
@@ -129,8 +144,9 @@ Wolf is started with the matching `WOLF_*_PORT` variables, and the RTSP URL retu
 by `/launch` carries the session's RTSP port. The block is freed once no `Session`
 uses that Deployment. Firewalls between clients and the node must allow the range.
 
-The chart runs `moonlight-proxy` host-networked with the same node selector as the
-operator's `--session-node-selector`; keep the two in sync. Host networking needs the
+The chart runs `moonlight-proxy` host-networked with the same node selector and
+tolerations as the operator's `--session-node-selector` and `--session-tolerations`
+(talos04 carries `nvidia.com/gpu=present:NoSchedule`); keep them in sync. Host networking needs the
 release namespace to allow it (PodSecurity `privileged`). App templates must not
 declare their own container ports: on the host network they become host ports and
 collide between sessions. Wolf's mDNS responder (UDP 5353, shared via SO_REUSEPORT)
@@ -207,7 +223,7 @@ Next get the ip of the loadbalancer service to connect with moonlight:
 `kubectl get svc direwolf -n direwolf -o jsonpath='{.status.loadBalancer.ingress[0].ip}'`
 
 open moonlight to pair with the acquired ip  
-then get the moonlight-proxy pairing url through the logs:  
-`kubectl logs -n direwolf deployments/direwolf-moonlight-proxy`
+then open the pairing page (through Authentik), pick the waiting client and enter the PIN
+Moonlight shows.
 
 use it to pair and then connect with the app, it'll take a moment to pull the image, so the first pairing might fail.

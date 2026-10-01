@@ -31,6 +31,10 @@ Three binaries in `cmd/`, all sharing `pkg/`:
 - **moonlight-proxy** (`pkg/moonlight`): the Moonlight HTTP/HTTPS server users connect to.
   - Pairing creates a `Pairing` CR mapping client-cert fingerprint → `User`; HTTPS requests are
     authorized by fingerprint lookup.
+  - The PIN is entered on the pairing page (`pkg/moonlight/pinpage.go`, own `--pin-port`) behind
+    Authentik; the username header is trusted only from `--pin-trusted-proxies` peers.
+    - Never serve it on the Moonlight ports: those are on the LoadBalancer, where SNAT can make
+      an internet client look like a trusted in-cluster peer.
   - App list is rendered from `App` CRs.
   - `/launch` / `/resume` create a `Session` CR, then block until the operator writes an RTSP URL
     into `Session.status` (bounded by `--launch-timeout` and the client connection).
@@ -47,8 +51,10 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     - A Deployment records its block in the `port-block` annotation; `reconcilePod` re-applies
       one whose block differs from `status.ports`, else the advertised ports go unserved.
     - Exception: Wolf's mDNS (UDP 5353, SO_REUSEPORT) is hardcoded and outside the block.
-  - Chart: moonlight-proxy is host-networked with a nodeSelector that must match the operator's
-    `--session-node-selector`.
+  - Chart: moonlight-proxy is host-networked with a nodeSelector and tolerations that must match
+    the operator's `--session-node-selector` / `--session-tolerations`.
+    - Talos labels `kubernetes.io/hostname` with the FQDN (`talos04.xerktech.com`), and talos04
+      is tainted `nvidia.com/gpu=present:NoSchedule`; miss either and every pod stays Pending.
   - Gateway API code in `session.go` is commented-out experimentation.
   - Also watches `App`, `User`, `Deployment` to clean up dependent sessions.
 - **wolf-agent** (`pkg/controllers/agent.go`, `pkg/wolfapi`, `pkg/fakeudev`): sidecar talking to
