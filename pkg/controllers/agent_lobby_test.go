@@ -463,3 +463,172 @@ func TestAgentResubscribeDuringSettle(t *testing.T) {
 	<-client.subs
 	client.wantJoin(t)
 }
+
+// nJoinClient blocks join i until rel[i] is closed, then returns errs[i];
+// joins past len(errs) succeed at once.
+type nJoinClient struct {
+	*lobbyClient
+	mu   sync.Mutex
+	n    int
+	rel  []chan struct{}
+	errs []error
+}
+
+func newNJoin(errs ...error) *nJoinClient {
+	c := &nJoinClient{lobbyClient: newLobbyClient(), errs: errs}
+	for range errs {
+		c.rel = append(c.rel, make(chan struct{}))
+	}
+	return c
+}
+
+func (c *nJoinClient) JoinLobby(_ context.Context, lobbyID, sessionID string) error {
+	c.mu.Lock()
+	i := c.n
+	c.n++
+	c.mu.Unlock()
+	c.joined <- [2]string{lobbyID, sessionID}
+	if i < len(c.rel) {
+		<-c.rel[i]
+		return c.errs[i]
+	}
+	return nil
+}
+
+// joinReturned waits for a released join's result to be handled.
+func joinReturned() { time.Sleep(60 * time.Millisecond) }
+
+func pauseStream(c *nJoinClient) {
+	c.send(wolfapi.PauseStreamEventType, `{"session_id":"`+wolfStreamID+`"}`)
+}
+
+// B's join succeeds after A's stale return: B's moved-to-lobby unplug must never be acted on.
+func TestAgentStaleThenNextJoinKeepsDevice(t *testing.T) {
+	c := newNJoin(nil, nil)
+	a := hotplugAgent(t, c)
+	a.lobby.settle = 0
+	go a.Run(t.Context())
+	c.startStream()
+	c.wantJoin(t)
+	pauseStream(c)
+	c.startStream()
+	c.wantJoin(t)
+	entry := deviceEntry(t, a)
+	c.send(wolfapi.UnplugDeviceEventType, unplugEvent(wolfStreamID))
+	c.send("Done", "")
+	close(c.rel[0])
+	joinReturned()
+	if _, err := os.Stat(entry); err != nil {
+		t.Fatalf("stale A return acted on B's held unplug while B in flight: %v", err)
+	}
+	close(c.rel[1])
+	joinReturned()
+	if _, err := os.Stat(entry); err != nil {
+		t.Fatalf("B joined OK but its moved-to-lobby unplug was acted on: %v", err)
+	}
+	c.wantNoJoin(t)
+}
+
+// A's own held unplug (held before A ended) must not leak into B's failure replay:
+// device names are reused by the next stream.
+func TestAgentEndedStreamsHeldUnplugDoesNotLeak(t *testing.T) {
+	c := newNJoin(nil, errors.New("B failed"))
+	a := hotplugAgent(t, c)
+	a.lobby.settle = 0
+	go a.Run(t.Context())
+	c.startStream()
+	c.wantJoin(t)
+	c.send(wolfapi.UnplugDeviceEventType, unplugEvent(wolfStreamID)) // A's, held
+	c.send("Done", "")
+	pauseStream(c)
+	c.startStream()
+	c.wantJoin(t)
+	entry := deviceEntry(t, a) // B's device, same name
+	close(c.rel[0])
+	joinReturned()
+	close(c.rel[1])
+	joinReturned()
+	if _, err := os.Stat(entry); err != nil {
+		t.Fatalf("A's held unplug replayed on B's failure, removed B's device: %v", err)
+	}
+}
+
+// Three streams: A and B stale, C's held unplug is C's alone.
+func TestAgentHeldUnplugsAcrossThreeStreams(t *testing.T) {
+	for _, cFails := range []bool{true, false} {
+		t.Run(map[bool]string{true: "C fails", false: "C ok"}[cFails], func(t *testing.T) {
+			var cErr error
+			if cFails {
+				cErr = errors.New("C failed")
+			}
+			c := newNJoin(nil, errors.New("B failed"), cErr)
+			a := hotplugAgent(t, c)
+			a.lobby.settle = 0
+			go a.Run(t.Context())
+			c.startStream()
+			c.wantJoin(t) // A
+			pauseStream(c)
+			c.startStream()
+			c.wantJoin(t)                                                    // B
+			c.send(wolfapi.UnplugDeviceEventType, unplugEvent(wolfStreamID)) // B's held
+			c.send("Done", "")
+			pauseStream(c)
+			c.startStream()
+			c.wantJoin(t) // C
+			entry := deviceEntry(t, a)
+			c.send(wolfapi.UnplugDeviceEventType, unplugEvent(wolfStreamID)) // C's held
+			c.send("Done", "")
+			close(c.rel[0])
+			joinReturned()
+			close(c.rel[1])
+			joinReturned()
+			if _, err := os.Stat(entry); err != nil {
+				t.Fatalf("stale A/B return acted on C's held unplug: %v", err)
+			}
+			close(c.rel[2])
+			joinReturned()
+			_, err := os.Stat(entry)
+			if cFails && !os.IsNotExist(err) {
+				t.Fatalf("C failed but its held unplug was not replayed: %v", err)
+			}
+			if !cFails && err != nil {
+				t.Fatalf("C joined but its unplug was acted on: %v", err)
+			}
+			if cFails {
+				c.send(wolfapi.RTPVideoPingEventType, `{}`)
+				c.send(wolfapi.RTPAudioPingEventType, `{}`)
+				c.wantJoin(t) // C retried
+			} else {
+				c.wantNoJoin(t)
+			}
+		})
+	}
+}
+
+// A failed join's replayed unplugs are not replayed again by the retry's failure:
+// the device may have been re-plugged under the same name in between.
+func TestAgentRetryFailureDoesNotReplayAgain(t *testing.T) {
+	c := newNJoin(errors.New("1 failed"), errors.New("2 failed"))
+	a := hotplugAgent(t, c)
+	a.lobby.settle = 0
+	go a.Run(t.Context())
+	c.startStream()
+	c.wantJoin(t)
+	entry := deviceEntry(t, a)
+	c.send(wolfapi.UnplugDeviceEventType, unplugEvent(wolfStreamID))
+	c.send("Done", "")
+	close(c.rel[0])
+	joinReturned()
+	if _, err := os.Stat(entry); !os.IsNotExist(err) {
+		t.Fatalf("held unplug not replayed after failure: %v", err)
+	}
+	entry = deviceEntry(t, a) // re-plugged, same name
+	c.send(wolfapi.RTPVideoPingEventType, `{}`)
+	c.send(wolfapi.RTPAudioPingEventType, `{}`)
+	c.wantJoin(t)
+	close(c.rel[1])
+	joinReturned()
+	if _, err := os.Stat(entry); err != nil {
+		t.Fatalf("retry failure replayed the first attempt's unplug again: %v", err)
+	}
+}
