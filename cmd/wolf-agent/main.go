@@ -107,13 +107,7 @@ func main() {
 	mux.Handle("/api/v1/", apiHandler(token, &client, &ready))
 
 	// Start HTTPS server
-	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", *serverPort),
-		Handler: mux,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-		},
-	}
+	server := newServer(*serverPort, mux, &tls.Config{Certificates: []tls.Certificate{cert}})
 
 	klog.Infof("Listening on port %d\n", *serverPort)
 	err = server.ListenAndServeTLS("", "")
@@ -127,6 +121,33 @@ func main() {
 // *tokenFile rather than a token so the file can't be snapshotted at startup.
 func apiHandler(token *tokenFile, client *http.Client, ready *atomic.Bool) http.Handler {
 	return wolfapi.RequireBearerToken(token.Token, proxyHandler(client, ready))
+}
+
+// Under hostNetwork the agent port is on the node IP, so anyone who can reach
+// the node can open connections without the token. Bound how long one may sit
+// in the TLS handshake / headers, sending a request (ReadTimeout also covers
+// net/http draining an unread body after e.g. a 401), or idle between
+// requests. ReadTimeout does not cut off a response still streaming once the
+// request is read (/api/v1/events); TestServerStreamsPastReadTimeout holds
+// that. No WriteTimeout: it would.
+const (
+	serverReadHeaderTimeout = 10 * time.Second
+	serverReadTimeout       = 10 * time.Second
+	serverIdleTimeout       = 90 * time.Second
+	// The loopback client must drop idle connections before the server does,
+	// or a request racing the server's close could fail.
+	selfClientIdleTimeout = 30 * time.Second
+)
+
+func newServer(port int, handler http.Handler, tlsConfig *tls.Config) *http.Server {
+	return &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           handler,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		IdleTimeout:       serverIdleTimeout,
+		TLSConfig:         tlsConfig,
+	}
 }
 
 // proxyHandler forwards /api/v1/ requests to Wolf over client (the unix
@@ -224,6 +245,7 @@ func selfClient(port int, token *tokenFile) wolfapi.Client {
 					TLSClientConfig: &tls.Config{
 						InsecureSkipVerify: true, //nolint:gosec // loopback to our own self-signed listener
 					},
+					IdleConnTimeout: selfClientIdleTimeout,
 				},
 			},
 		},
