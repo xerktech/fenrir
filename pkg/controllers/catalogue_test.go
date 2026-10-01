@@ -885,6 +885,7 @@ func TestCatalogueScanUnreadableDirFails(t *testing.T) {
 		{"listed with spaces", spacedVDF, "games/Steam Lib", 0o000, true},
 		{"listed with spaces, readable", spacedVDF, "games/Steam Lib", 0o755, false},
 		{"unreadable libraryfolders.vdf", steamappsVDF, "home/.local/share/Steam/steamapps/libraryfolders.vdf", 0o000, true},
+		{"unreadable config/ holding the list", configVDF, "home/.local/share/Steam/config", 0o000, true},
 		{"heroic store dir", steamappsVDF, "home/.config/heroic/gog_store", 0o000, true},
 		{"games volume", steamappsVDF, "games", 0o000, true},
 		{"lost+found", steamappsVDF, "games/lost+found", 0o000, false},
@@ -945,10 +946,25 @@ func libraryFolders(paths ...string) string {
 	var sb strings.Builder
 	sb.WriteString("\"libraryfolders\"\n{\n")
 	for i, p := range paths {
-		fmt.Fprintf(&sb, "\t\"%d\"\n\t{\n\t\t\"path\"\t\t\"%s\"\n\t\t\"label\"\t\t\"\"\n\t}\n", i, p)
+		// With its apps block: numeric keys, as in the pre-2021 format,
+		// whose values are not paths.
+		fmt.Fprintf(&sb, "\t\"%d\"\n\t{\n\t\t\"path\"\t\t\"%s\"\n\t\t\"label\"\t\t\"\"\n"+
+			"\t\t\"apps\"\n\t\t{\n\t\t\t\"570\"\t\t\"39871233412\"\n\t\t\t\"228980\"\t\t\"0\"\n\t\t}\n\t}\n", i, p)
 	}
 	sb.WriteString("}\n")
 	return sb.String()
+}
+
+// The script must end itself before the exec gives up on it: a cancelled
+// exec leaves its process running in the pod.
+func TestCatalogueScanTimeoutWithinExecTimeout(t *testing.T) {
+	secs, err := strconv.Atoi(catalogueScanTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Duration(secs)*time.Second >= libraryExecTimeout {
+		t.Errorf("catalogueScanTimeout %ss is not under libraryExecTimeout %s", catalogueScanTimeout, libraryExecTimeout)
+	}
 }
 
 func TestCappedBuffer(t *testing.T) {

@@ -273,7 +273,13 @@ for f in "$@" "$home/.local/share/Steam/steamapps/x" "$games/x" "$games/steamapp
 # Only absolute paths: Steam on Linux can't use anything else (e.g. a copied
 # Windows "D:\\Games"), so they are not libraries to check.
 for lf in "$home/.local/share/Steam/config/libraryfolders.vdf" "$home/.local/share/Steam/steamapps/libraryfolders.vdf"; do
-  [ -f "$lf" ] || continue
+  reachable "$lf" # an unreadable config/ must not hide its list
+  if [ ! -f "$lf" ]; then
+    [ -L "$lf" ] && { echo "$lf is a dangling symlink" >&2; exit 1; }
+    continue
+  fi
+  n=$(wc -c < "$lf") || exit 1
+  [ "$n" -gt "$max_store" ] && { echo "$lf is $n bytes, over $max_store" >&2; exit 1; }
   libs=$(sed -n -e 's/^[[:space:]]*"path"[[:space:]]*"\(\/.*\)"[[:space:]]*$/\1/p' \
     -e 's/^[[:space:]]*"[0-9][0-9]*"[[:space:]]*"\(\/.*\)"[[:space:]]*$/\1/p' "$lf") || exit 1
   set -f; IFS='
