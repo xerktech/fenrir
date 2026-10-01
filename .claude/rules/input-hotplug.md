@@ -25,6 +25,8 @@ paths:
   - Compare mounts via `mountTarget`: the apiserver accepts relative mountPaths (`run/udev/data`),
     which the runtime resolves against `/`; `/var/run` (Alpine symlink) is reserved as an alias.
   - It guards misconfiguration only: a User can already mount hostPath into sidecars.
+  - Keep the hotplug mounts appended after policy mounts: a policy mount at `/var/run` or `/run`
+    only loses to `/run/udev` because it is mounted first.
 - Wolf sends no unplug when a stream stops: it destroys the devices on StopStream. The agent
   clears both dirs on pause (`clearDevices`), or a stale 0666 node would open whatever device the
   kernel gives that minor next (another session's keyboard). Tests: `TestAgentPauseClearsDevices`.
