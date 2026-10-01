@@ -219,14 +219,37 @@ func CreateDeviceNode(devDir string, props map[string]string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale node: %w", err)
 	}
-	if err := mknodChar(path, uint32(major), uint32(minor)); err != nil {
+	if err := makeCharNode(path, uint32(major), uint32(minor)); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	// mknod's mode is filtered by the umask.
-	if err := os.Chmod(path, 0o666); err != nil {
-		return fmt.Errorf("chmod device node: %w", err)
-	}
 	return nil
+}
+
+// makeCharNode creates a 0666 char device node at path. The directory is
+// writable by the app container, which can swap the new node for a symlink
+// at any moment, so the mode must not be set by path. A variable so tests
+// can check what is (not) created without CAP_MKNOD.
+var makeCharNode = mknodChar
+
+// ClearDir removes every entry directly in dir (not following symlinks).
+// Wolf destroys a session's devices when its stream stops without sending
+// unplug events, so their nodes and udev entries go with it, before the
+// kernel hands their minors to another session's devices.
+func ClearDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", dir, err)
+	}
+	var errs []error
+	for _, e := range entries {
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // RemoveDeviceNode deletes the node CreateDeviceNode made for props.

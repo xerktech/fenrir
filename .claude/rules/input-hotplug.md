@@ -21,5 +21,16 @@ paths:
 - Only char major 13 under `/dev/input/` is created (`CreateDeviceNode`); a Wolf event can't make
   a disk node. `/dev/hidraw*` is not handled: pads are uinput Xbox pads (no uhid on Talos).
 - An App that mounts its own `/dev/input` keeps it (`withHotplugMounts` skips taken paths).
-- Tests: `TestSessionPodSharesHotplugVolumes`, `TestSessionPodKeepsAppsOwnInputMount`
+  A wolfAgent sidecar policy may not mount there (`validateNoHotplugOverride`).
+- Wolf sends no unplug when a stream stops: it destroys the devices on StopStream. The agent
+  clears both dirs on pause (`clearDevices`), or a stale 0666 node would open whatever device the
+  kernel gives that minor next (another session's keyboard). Tests: `TestAgentPauseClearsDevices`.
+- The dirs are writable by the app container, which can swap a node for a symlink at any moment:
+  never chmod/chown by path after mknod (`setNodeMode` goes through an O_PATH fd).
+  Tests: `TestSetNodeModeRefusesSwappedNode`.
+- CI runs tests non-root, so mknod EPERMs there: logic tests stub `makeCharNode`, or a refusal
+  test passes for the wrong reason.
+- The udev netlink send (`SendEvent`) gets EPERM under hostNetwork without CAP_NET_ADMIN on the
+  host netns, and with it reaches every hostNetwork pod on the node (XERK-1337).
+- Pod-spec tests: `TestSessionPodSharesHotplugVolumes`, `TestSessionPodKeepsAppsOwnInputMount`
   (`pkg/controllers/session_test.go`); `TestCreateAndRemoveDeviceNode` (`pkg/fakeudev`).

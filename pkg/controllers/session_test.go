@@ -403,3 +403,21 @@ func TestSessionPodKeepsAppsOwnInputMount(t *testing.T) {
 		t.Errorf("app /run/udev = %q, want %s", got["/run/udev"], hotplugUdevVolume)
 	}
 }
+
+func TestValidateNoHotplugOverride(t *testing.T) {
+	for p, wantErr := range map[string]bool{
+		"/dev/input":       true,
+		"/dev/input/":      true,
+		"/dev/input/event": true,
+		"/run/udev":        true,
+		"/run/udev/data":   true,
+		"/dev/inputs":      false,
+		"/run":             false,
+		"/etc/wolf":        false,
+	} {
+		err := validateNoHotplugOverride([]corev1.VolumeMount{{Name: "v", MountPath: p}})
+		if (err != nil) != wantErr {
+			t.Errorf("mount at %s: err = %v, want error %v", p, err, wantErr)
+		}
+	}
+}

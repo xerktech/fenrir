@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -1043,6 +1044,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 			if err := validateVolumeMounts(policies.WolfAgent.VolumeMounts, validVolumes, "wolfAgent"); err != nil {
 				return nil, err
 			}
+			if err := validateNoHotplugOverride(policies.WolfAgent.VolumeMounts); err != nil {
+				return nil, err
+			}
 			wolfAgentEnv = policies.WolfAgent.Env
 			// klog.debug("User defined env vars: %+v", wolfAgentEnv)
 			wolfAgentResources = mergeResourceRequirements(wolfAgentDefaultResources, policies.WolfAgent.Resources)
@@ -1580,6 +1584,21 @@ const (
 	hotplugDevVolume  = "direwolf-dev-input"
 	hotplugUdevVolume = "direwolf-udev"
 )
+
+// validateNoHotplugOverride rejects wolf-agent mounts at or under the hotplug
+// paths: wolf-agent would then mknod into (and clear) something other than
+// what the App's containers see, such as the host's /dev/input.
+func validateNoHotplugOverride(mounts []corev1.VolumeMount) error {
+	for _, m := range mounts {
+		p := path.Clean(m.MountPath)
+		for _, reserved := range []string{InputDevPath, path.Dir(UdevDataPath)} {
+			if p == reserved || strings.HasPrefix(p, reserved+"/") {
+				return fmt.Errorf("validation failed: volumeMount %q in wolfAgent sidecar policy mounts over %s, which the operator reserves for hotplugged devices", m.Name, reserved)
+			}
+		}
+	}
+	return nil
+}
 
 // withHotplugMounts adds the hotplug volume mounts to mounts, except where
 // mounts already has something at that path (e.g. an App mounting the host's
