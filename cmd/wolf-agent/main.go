@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -240,61 +239,39 @@ func readToken(path string) (string, error) {
 	return token, nil
 }
 
-// tokenFile serves the bearer token from a file, re-reading it when the file
-// changes. The token Secret's mount is updated in place by the kubelet when the
-// operator regenerates the Secret, and the operator immediately uses the new
-// token, so a token read once at startup would 401 it until the pod restarts.
+// tokenFile serves the bearer token from a file, re-read on every request.
+// The kubelet rewrites the token Secret's mount when the operator regenerates
+// the Secret, and the operator uses the new token at once, so a token read once
+// at startup would 401 it until the pod restarts. The file is a few bytes on
+// tmpfs; caching on its stat misses a same-size rewrite within one mtime tick.
 type tokenFile struct {
-	path string
-
-	mu    sync.Mutex
-	info  os.FileInfo // of the file token was read from; nil forces a re-read
-	token string
+	path    string
+	failing atomic.Bool // logs only on transitions, not on every request
 }
 
-// newTokenFile loads the token at path, failing if it is unreadable or empty
-// so wolf-agent refuses to start rather than reject every request.
+// newTokenFile checks the token at path is usable, so wolf-agent refuses to
+// start rather than reject every request.
 func newTokenFile(path string) (*tokenFile, error) {
-	f := &tokenFile{path: path}
-	if _, err := f.load(); err != nil {
+	if _, err := readToken(path); err != nil {
 		return nil, err
 	}
-	return f, nil
+	return &tokenFile{path: path}, nil
 }
 
 // Token returns the current token, or "" (which rejects every request) when
-// the file cannot be read or is empty. It stats the file on every call and
-// re-reads it only when the stat changes. Secret volumes swap a symlink to a
-// new file, so os.SameFile catches a rotation even when mtime and size match.
+// the file cannot be read or is empty.
 func (f *tokenFile) Token() string {
-	tok, err := f.load()
-	if err != nil {
-		klog.ErrorS(err, "Bearer token unavailable; rejecting requests", "path", f.path)
-	}
-	return tok
-}
-
-func (f *tokenFile) load() (string, error) {
-	info, err := os.Stat(f.path)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err != nil {
-		f.info = nil
-		return "", fmt.Errorf("stat token file: %w", err)
-	}
-	if f.info != nil && os.SameFile(f.info, info) &&
-		info.ModTime().Equal(f.info.ModTime()) && info.Size() == f.info.Size() {
-		return f.token, nil
-	}
 	tok, err := readToken(f.path)
 	if err != nil {
-		f.info, f.token = nil, ""
-		return "", err
+		if !f.failing.Swap(true) {
+			klog.ErrorS(err, "Bearer token unavailable; rejecting requests", "path", f.path)
+		}
+		return ""
 	}
-	// If the file changed between Stat and read, info is stale and the next
-	// call re-reads, so the newer token is never masked.
-	f.info, f.token = info, tok
-	return tok, nil
+	if f.failing.Swap(false) {
+		klog.InfoS("Bearer token available again", "path", f.path)
+	}
+	return tok
 }
 
 func UnixHTTPClient(sockAddr string) http.Client {

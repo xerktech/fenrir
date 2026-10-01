@@ -66,6 +66,17 @@ func TestSelfClientSendsToken(t *testing.T) {
 	if _, err := selfClient(port, wolfapi.StaticToken("wrong")).ListSessions(context.Background()); err == nil {
 		t.Error("with wrong token: expected error")
 	}
+
+	// The source is consulted per request, so a rotated token is sent (XERK-1325).
+	tok := "wrong"
+	rotating := selfClient(port, func() string { return tok })
+	if _, err := rotating.ListSessions(context.Background()); err == nil {
+		t.Error("before rotation: expected error")
+	}
+	tok = "s3cret"
+	if _, err := rotating.ListSessions(context.Background()); err != nil {
+		t.Errorf("after rotation: %v", err)
+	}
 }
 
 // TestProxyDoesNotForwardToken checks the bearer token authenticates to
@@ -161,16 +172,40 @@ func TestTokenFileRotation(t *testing.T) {
 		t.Errorf("old token after rotation: status %d, want 401", got)
 	}
 
-	// An emptied or missing file fails closed rather than keeping the old token.
-	swap("v3", "")
-	if got := status("new"); got != http.StatusUnauthorized {
-		t.Errorf("empty token file: status %d, want 401", got)
-	}
-	if err := os.Remove(link); err != nil {
+	// A missing file fails closed rather than keeping the last good token.
+	if err = os.Remove(link); err != nil {
 		t.Fatal(err)
 	}
 	if got := status("new"); got != http.StatusUnauthorized {
 		t.Errorf("missing token file: status %d, want 401", got)
+	}
+	swap("v3", "new\n")
+	if got := status("new"); got != http.StatusNoContent {
+		t.Fatalf("token file restored: status %d, want 204", got)
+	}
+	// So does an emptied one.
+	swap("v3b", "")
+	if got := status("new"); got != http.StatusUnauthorized {
+		t.Errorf("empty token file: status %d, want 401", got)
+	}
+	// An in-place, same-size rewrite: same inode and, within one mtime tick,
+	// the same stat, so only re-reading the content catches it.
+	inPlace := filepath.Join(dir, "inplace")
+	if err = os.WriteFile(inPlace, []byte("aaaa"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ip, err := newTokenFile(inPlace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ip.Token(); got != "aaaa" {
+		t.Fatalf("in-place: Token() = %q, want aaaa", got)
+	}
+	if err := os.WriteFile(inPlace, []byte("bbbb"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ip.Token(); got != "bbbb" {
+		t.Errorf("in-place rewrite: Token() = %q, want bbbb", got)
 	}
 	swap("v4", "again\n")
 	if got := status("again"); got != http.StatusNoContent {
