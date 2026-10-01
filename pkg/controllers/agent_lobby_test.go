@@ -303,3 +303,163 @@ func TestAgentForgetsEndedStream(t *testing.T) {
 		client.wantNoJoin(t)
 	})
 }
+
+// A settle timer left by an ended stream must not join the next stream
+// early, before its own settle.
+func TestAgentStaleTimerDoesNotJoinNextStreamEarly(t *testing.T) {
+	client := newLobbyClient()
+	a := hotplugAgent(t, client)
+	a.lobby.settle = 300 * time.Millisecond
+	go a.Run(t.Context())
+	client.startStream()
+	time.Sleep(20 * time.Millisecond)
+	client.send(wolfapi.PauseStreamEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	time.Sleep(200 * time.Millisecond)
+	client.startStream()
+	bPings := time.Now()
+	select {
+	case <-client.joined:
+		if d := time.Since(bPings); d < 250*time.Millisecond {
+			t.Errorf("stream B joined %v after its pings, settle is 300ms (stale timer)", d)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("B never joined")
+	}
+}
+
+// seqJoinClient blocks its first join until rel1 (then succeeds) and its
+// second until rel2 (then fails).
+type seqJoinClient struct {
+	*lobbyClient
+	mu2        sync.Mutex
+	n          int
+	rel1, rel2 chan struct{}
+}
+
+func (c *seqJoinClient) JoinLobby(_ context.Context, lobbyID, sessionID string) error {
+	c.mu2.Lock()
+	c.n++
+	n := c.n
+	c.mu2.Unlock()
+	c.joined <- [2]string{lobbyID, sessionID}
+	switch n {
+	case 1:
+		<-c.rel1
+		return nil
+	case 2:
+		<-c.rel2
+		return errors.New("B failed")
+	}
+	return nil
+}
+
+// overlap runs stream A's join, which outlasts A's pause and stream B's
+// in-flight join (holding an unplug for B); A's returns OK, then B's fails.
+func overlap(t *testing.T) (client *seqJoinClient, entry string) {
+	t.Helper()
+	client = &seqJoinClient{lobbyClient: newLobbyClient(), rel1: make(chan struct{}), rel2: make(chan struct{})}
+	a := hotplugAgent(t, client)
+	a.lobby.settle = 0
+	go a.Run(t.Context())
+	client.startStream()
+	client.wantJoin(t) // A in flight
+	client.send(wolfapi.PauseStreamEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	client.startStream()
+	client.wantJoin(t) // B in flight
+	entry = deviceEntry(t, a)
+	client.send(wolfapi.UnplugDeviceEventType, unplugEvent(wolfStreamID))
+	client.send("Done", "")
+	close(client.rel1) // A's stale join returns OK
+	time.Sleep(50 * time.Millisecond)
+	close(client.rel2) // B's join fails
+	time.Sleep(50 * time.Millisecond)
+	return client, entry
+}
+
+// An ended stream's late join success must not mark the next stream joined:
+// the next stream's failed join is retried.
+func TestAgentStaleJoinResultDoesNotClobberNextStream(t *testing.T) {
+	client, _ := overlap(t)
+	client.send(wolfapi.RTPVideoPingEventType, `{}`)
+	client.send(wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+}
+
+// The next stream's held unplugs are handled when its join fails, even though
+// the ended stream's join returned meanwhile.
+func TestAgentStaleJoinDoesNotStealHeldUnplugs(t *testing.T) {
+	_, entry := overlap(t)
+	if _, err := os.Stat(entry); !os.IsNotExist(err) {
+		t.Errorf("B's held unplug was never handled after B's join failed: %v", err)
+	}
+}
+
+// resubClient hands out a fresh event channel per subscribe: closing one
+// makes the agent resubscribe (XERK-1367).
+type resubClient struct {
+	*lobbyClient
+	subs chan chan *sse.Event
+}
+
+func (c *resubClient) SubscribeToEvents(context.Context) (<-chan *sse.Event, error) {
+	ch := make(chan *sse.Event)
+	c.subs <- ch
+	return ch, nil
+}
+
+func sendOn(ch chan *sse.Event, typ wolfapi.WolfEventType, data string) {
+	ch <- &sse.Event{Event: []byte(typ), Data: []byte(data)}
+}
+
+// The joiner's state outlives a resubscribe.
+func TestAgentResubscribeBetweenSetupAndPings(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a := hotplugAgent(t, client)
+	a.lobby.settle = 0
+	a.minResubscribeDelay = time.Millisecond
+	go a.Run(t.Context())
+	ch := <-client.subs
+	sendOn(ch, wolfapi.VideoSessionEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	sendOn(ch, wolfapi.AudioSessionEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	close(ch)
+	ch = <-client.subs
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+	// joined state survives another resubscribe: the stream's own unplug stays held
+	entry := deviceEntry(t, a)
+	close(ch)
+	ch = <-client.subs
+	sendOn(ch, wolfapi.UnplugDeviceEventType, unplugEvent(wolfStreamID))
+	sendOn(ch, "Done", "")
+	if _, err := os.Stat(entry); err != nil {
+		t.Errorf("joined state lost across resubscribe: %v", err)
+	}
+	// next stream after resubscribe still joins
+	sendOn(ch, wolfapi.PauseStreamEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	close(ch)
+	ch = <-client.subs
+	for _, e := range []wolfapi.WolfEventType{wolfapi.VideoSessionEventType, wolfapi.AudioSessionEventType} {
+		sendOn(ch, e, `{"session_id":"`+wolfStreamID+`"}`)
+	}
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+}
+
+func TestAgentResubscribeDuringSettle(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a := hotplugAgent(t, client)
+	a.lobby.settle = 100 * time.Millisecond
+	a.minResubscribeDelay = time.Millisecond
+	go a.Run(t.Context())
+	ch := <-client.subs
+	for _, e := range []wolfapi.WolfEventType{wolfapi.VideoSessionEventType, wolfapi.AudioSessionEventType} {
+		sendOn(ch, e, `{"session_id":"`+wolfStreamID+`"}`)
+	}
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	close(ch)
+	<-client.subs
+	client.wantJoin(t)
+}

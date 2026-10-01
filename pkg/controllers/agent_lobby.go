@@ -117,25 +117,25 @@ func (j *lobbyJoiner) join(ctx context.Context, ticket int) {
 	lobbyID, err := j.joinLobby(ctx, stream)
 
 	j.mu.Lock()
-	held := j.held
-	j.held = nil
 	current := j.state == lobbyJoinInFlight && j.ticket == ticket
+	var held []wolfapi.UnplugDeviceEvent
 	switch {
 	case !current:
-		// The stream ended meanwhile; its devices went with it.
+		// The stream ended meanwhile; its devices went with it. Unplugs
+		// held now belong to the next stream's join.
 	case err != nil:
+		held, j.held = j.held, nil
 		klog.Errorf("Session %s: joining the lobby (attempt %d/%d): %v", stream, j.attempts, maxLobbyJoinAttempts, err)
 		j.state = lobbyJoinWaiting
 	default:
 		klog.Infof("Session %s joined lobby %s", stream, lobbyID)
 		j.state = lobbyJoinDone
+		j.held = nil
 	}
 	j.mu.Unlock()
-	if current && err != nil {
-		// Not joined, so these were the stream's own unplugs.
-		for _, ev := range held {
-			j.unplug(ev)
-		}
+	// Not joined, so these were the stream's own unplugs.
+	for _, ev := range held {
+		j.unplug(ev)
 	}
 }
 
