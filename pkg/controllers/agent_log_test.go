@@ -3,6 +3,7 @@ package controllers
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"flag"
 	"os"
 	"strings"
@@ -70,7 +71,8 @@ func TestAgentEventLoopOmitsEventData(t *testing.T) {
 	if err := agent.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	client.events <- &sse.Event{Event: []byte("StreamSession"), Data: []byte(`{"aes_key":"SECRETKEY0123","aes_iv":"SECRETIV42"}`)}
+	data := []byte(`{"aes_key":"SECRETKEY0123","aes_iv":"SECRETIV42"}`)
+	client.events <- &sse.Event{Event: []byte("StreamSession"), Data: data}
 	// A second event is only received once the first has been logged.
 	client.events <- &sse.Event{Event: []byte("Done")}
 
@@ -85,7 +87,11 @@ func TestAgentEventLoopOmitsEventData(t *testing.T) {
 	if !strings.Contains(logged, "StreamSession") {
 		t.Fatalf("event not logged at all: %q", logged)
 	}
-	if strings.Contains(logged, "SECRETKEY0123") || strings.Contains(logged, "SECRETIV42") {
-		t.Errorf("event data logged: %q", logged)
+	// Also in the encodings a format verb would print []byte in.
+	// "83 69 67 82 69 84" is %v of "SECRET".
+	for _, secret := range []string{"SECRETKEY0123", "SECRETIV42", hex.EncodeToString([]byte("SECRETKEY0123")), "83 69 67 82 69 84"} {
+		if strings.Contains(logged, secret) {
+			t.Errorf("event data logged (%q): %q", secret, logged)
+		}
 	}
 }
