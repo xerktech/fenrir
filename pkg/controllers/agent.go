@@ -60,7 +60,9 @@ func (a *Agent) watchEvents(ctx context.Context) error {
 
 				klog.Infof("Received event: %s", ev.Event)
 				klog.Infof("Event ID: %s", ev.ID)
-				klog.Infof("Event Data: %s", ev.Data)
+				// Not ev.Data: Wolf's session events carry the stream's
+				// AES key and IV.
+				klog.Infof("Event Data: %d bytes", len(ev.Data))
 				klog.Infof("Event Retry: %d", ev.Retry)
 				klog.Infof("Event Comment: %v", ev.Comment)
 

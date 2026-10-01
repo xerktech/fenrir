@@ -923,11 +923,9 @@ func sendXMLWithHTTPStatus(w http.ResponseWriter, httpStatus int, resp Responsab
 	w.Write([]byte(xml.Header))
 	w.Write(bytes)
 
-	if resp.GetStatusCode() != 200 {
-		klog.Info("Sent response", string(bytes))
-	} else {
-		klog.Info("Sent response", string(bytes))
-	}
+	// Status only: bodies carry the server's half of the pairing handshake
+	// (challengeresponse, pairingsecret).
+	klog.Infof("Sent response: status %d", resp.GetStatusCode())
 }
 
 // secretQueryParams carry key material: the stream's AES key/IV (/launch,
