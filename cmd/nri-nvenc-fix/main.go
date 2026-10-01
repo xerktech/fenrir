@@ -104,9 +104,11 @@ func (p *plugin) adjustment(pod *api.PodSandbox, ctr *api.Container) *api.Contai
 		return nil
 	}
 	for _, m := range ctr.GetMounts() {
-		if dst := m.GetDestination(); covers(dst, containerPreloadPath) || covers(dst, containerShimDir) {
+		dst := m.GetDestination()
+		if covers(dst, containerPreloadPath) || covers(dst, containerShimDir) || covers(containerShimDir, dst) {
 			// Our mount on or under a pod volume either collides with it or
-			// cannot create its mountpoint in a read-only one; both fail
+			// cannot create its mountpoint in a read-only one, and a pod volume
+			// under our read-only shim dir cannot create its own; each fails
 			// container creation. The pod's own volume wins.
 			klog.InfoS("Container mounts "+dst+", not injecting NVENC fix",
 				"namespace", pod.GetNamespace(), "pod", pod.GetName(), "container", ctr.GetName())
@@ -146,6 +148,13 @@ func install(srcDir, hostDir string) error {
 		dir := filepath.Join(hostDir, shimDir, plat)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("creating %s: %w", dir, err)
+		}
+		// Explicit, as the umask applies to MkdirAll: containers run as any
+		// user and must be able to traverse to the shim.
+		for _, d := range []string{hostDir, filepath.Join(hostDir, shimDir), dir} {
+			if err := os.Chmod(d, 0o755); err != nil {
+				return fmt.Errorf("chmod %s: %w", d, err)
+			}
 		}
 		errs = append(errs, writeFileAtomic(filepath.Join(dir, shimFile), shim))
 	}

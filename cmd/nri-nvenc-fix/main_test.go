@@ -55,6 +55,7 @@ func TestAdjustmentUntouched(t *testing.T) {
 		"volume at /etc":                     {pod: annotatedPod("true"), ctr: mountAt("/etc/")},
 		"volume at the shim dir":             {pod: annotatedPod("true"), ctr: mountAt("/usr/lib/nvenc-fix")},
 		"volume at a parent of the shim dir": {pod: annotatedPod("true"), ctr: mountAt("/usr/lib")},
+		"volume under the shim dir":          {pod: annotatedPod("true"), ctr: mountAt("/usr/lib/nvenc-fix/sub")},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -86,6 +87,11 @@ func TestInstall(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "nvenc-fix")
 	require.NoError(t, install(writeShims(t, "v1"), dir))
 
+	for _, d := range []string{dir, filepath.Join(dir, "lib"), filepath.Join(dir, "lib", "x86_64")} {
+		info, err := os.Stat(d)
+		require.NoError(t, err)
+		require.Equal(t, os.FileMode(0o755), info.Mode().Perm(), d)
+	}
 	for _, plat := range platforms {
 		path := filepath.Join(dir, "lib", plat, "libnvenc_fix.so")
 		data, err := os.ReadFile(path)

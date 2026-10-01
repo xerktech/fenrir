@@ -26,8 +26,9 @@ paths:
   - glibc names x86_64 CPUs `x86_64`, `haswell` or `xeon_phi`, so the extra names are symlinks.
     A missing one means "cannot open shared object" on every exec. Checked on Debian 13, Ubuntu
     24.04, Fedora 42, Arch, and i386 Debian 12.
-- A pod volume at or above `/etc/ld.so.preload` or `/usr/lib/nvenc-fix` (`/etc`, `/usr/lib`) makes the
-  plugin skip that container: mounting under a read-only volume fails container creation.
+- A pod volume at, above or below `/etc/ld.so.preload` or `/usr/lib/nvenc-fix` (`/etc`, `/usr/lib`,
+  `/usr/lib/nvenc-fix/x`) makes the plugin skip that container: runc cannot create a mountpoint
+  inside a read-only bind, so container creation would fail.
 - **The shim is built on `manylinux_2_28`, not the Go toolchain's Debian.** A current glibc binds
   `dlsym@GLIBC_2.34` and `__isoc23_sscanf@GLIBC_2.38`; the preload then fails in older images.
   The built object needs only `GLIBC_2.17`.
