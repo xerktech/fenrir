@@ -407,17 +407,19 @@ func TestSessionPodKeepsAppsOwnInputMount(t *testing.T) {
 
 func TestValidateNoHotplugOverride(t *testing.T) {
 	for p, wantErr := range map[string]bool{
-		"/dev/input":       true,
-		"/dev/input/":      true,
-		"/dev/input/event": true,
-		"dev/input":        true,
-		"run/udev/data":    true,
-		"dev/../dev/input": true,
-		"/run/udev":        true,
-		"/run/udev/data":   true,
-		"/dev/inputs":      false,
-		"/run":             false,
-		"/etc/wolf":        false,
+		"/dev/input":        true,
+		"/dev/input/":       true,
+		"/dev/input/event":  true,
+		"dev/input":         true,
+		"run/udev/data":     true,
+		"dev/../dev/input":  true,
+		"/var/run/udev":     true,
+		"var/run/udev/data": true,
+		"/run/udev":         true,
+		"/run/udev/data":    true,
+		"/dev/inputs":       false,
+		"/run":              false,
+		"/etc/wolf":         false,
 	} {
 		err := validateNoHotplugOverride([]corev1.VolumeMount{{Name: "v", MountPath: p}})
 		if (err != nil) != wantErr {

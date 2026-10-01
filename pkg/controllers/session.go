@@ -1588,10 +1588,15 @@ const (
 // validateNoHotplugOverride rejects wolf-agent mounts at or under the hotplug
 // paths: wolf-agent would then mknod into (and clear) something other than
 // what the App's containers see, such as the host's /dev/input.
+//
+// It catches misconfiguration, not a hostile User: a User can already mount
+// hostPath volumes into sidecars. Paths are compared as strings, so only the
+// image's known alias of /run (Alpine's /var/run symlink) is covered too.
 func validateNoHotplugOverride(mounts []corev1.VolumeMount) error {
+	udevDir := path.Dir(UdevDataPath)
 	for _, m := range mounts {
 		p := mountTarget(&m)
-		for _, reserved := range []string{InputDevPath, path.Dir(UdevDataPath)} {
+		for _, reserved := range []string{InputDevPath, udevDir, "/var" + udevDir} {
 			if p == reserved || strings.HasPrefix(p, reserved+"/") {
 				return fmt.Errorf("validation failed: volumeMount %q in wolfAgent sidecar policy mounts over %s, which the operator reserves for hotplugged devices", m.Name, reserved)
 			}
