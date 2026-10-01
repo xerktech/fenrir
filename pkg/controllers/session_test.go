@@ -640,3 +640,25 @@ func TestBuildPodLeavesCachedObjects(t *testing.T) {
 		t.Errorf("buildPod wrote %q into the cached User's wolf-agent mounts", spare.Name)
 	}
 }
+
+// A stream's pipeline starts on its own producer and switches to the lobby's
+// (lobbyBufferCaps); with zero copy their caps differ and on VA every second
+// switch kills the stream's video (XERK-1363).
+func TestSessionPodRunsWolfWithoutZeroCopy(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	for _, c := range pod.Spec.Containers {
+		if c.Name != "wolf" {
+			continue
+		}
+		for _, e := range c.Env {
+			if e.Name == "WOLF_USE_ZERO_COPY" {
+				if e.Value != "FALSE" { // Wolf matches exactly "FALSE"
+					t.Errorf("WOLF_USE_ZERO_COPY = %q, want FALSE", e.Value)
+				}
+				return
+			}
+		}
+		t.Fatal("wolf container runs with zero copy")
+	}
+	t.Fatal("no wolf container")
+}

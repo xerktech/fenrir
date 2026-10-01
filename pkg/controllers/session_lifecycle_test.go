@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	"games-on-whales.github.io/direwolf/pkg/generic"
+	"games-on-whales.github.io/direwolf/pkg/wolfapi"
 )
 
 // lifecycleFixture is a portsFixture holding sess (stored in the fake API)
@@ -556,5 +558,86 @@ func TestFailedEndSessionDoesNotRecreatePod(t *testing.T) {
 	}
 	if pods, _ := f.sc.K8sClient.CoreV1().Pods(portsTestNS).List(context.Background(), metav1.ListOptions{}); len(pods.Items) != 0 {
 		t.Errorf("pod recreated: %+v", pods.Items)
+	}
+}
+
+// The game runs on the lobby's display, which outlives the Moonlight
+// streams: the first attach creates the lobby, before the first stream, so
+// that the lobby's socket is wayland-1, the display the game waits for.
+func TestFirstAttachCreatesLobbyBeforeStream(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.lobbies = "[]"
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Generation = 1
+		s.Status.Ports = blockPorts(agent.base(t))
+		s.Spec.Config.VideoWidth, s.Spec.Config.VideoHeight, s.Spec.Config.VideoRefreshRate = 2560, 1440, 120
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatal(err)
+	}
+	created, added := slices.Index(agent.calls, "/api/v1/lobbies/create"), slices.Index(agent.calls, "/api/v1/sessions/add")
+	if created < 0 || added < created {
+		t.Fatalf("calls %v: want the lobby created before the stream", agent.calls)
+	}
+	l := agent.lobby
+	if l.StopWhenEveryoneLeaves {
+		t.Error("lobby stops when its stream leaves: a disconnect would end the game")
+	}
+	if v := l.VideoSettings; v.Width != 2560 || v.Height != 1440 || v.RefreshRate != 120 || v.WaylandNode != "/dev/dri/renderD129" || v.RunnerNode != "/dev/dri/renderD129" {
+		t.Errorf("video settings %+v: want the session's mode on Wolf's render node", v)
+	}
+	if l.Runner.Type != "process" || l.Runner.RunCmd == "" || l.ProfileID != wolfapi.MoonlightProfileID {
+		t.Errorf("lobby %+v", l)
+	}
+	if st := sess.Status; st.WolfSessionID != "4242" || st.StreamURL == "" {
+		t.Errorf("not attached: %+v", st)
+	}
+}
+
+// A lobby already there (an attach whose status write was lost, or a resume)
+// is the pod's: no second one, whose display the game isn't on.
+func TestAttachReusesLobby(t *testing.T) {
+	agent := newFakeAgent(t)
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Generation = 1
+		s.Status.Ports = blockPorts(agent.base(t))
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatal(err)
+	}
+	if agent.lobby != nil || agent.added != 1 {
+		t.Errorf("lobby create %+v, adds %d: want the existing lobby used", agent.lobby, agent.added)
+	}
+}
+
+// Resuming a pod whose lobby is gone can't bring the game back: its display
+// died with the lobby. End the Session rather than stream an empty display.
+func TestResumeWithoutLobbyEndsSession(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.lobbies = "[]"
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := attachedSession(f, agent.base(t))
+		s.Status.WolfSessionID = ""
+		s.Status.StreamURL = ""
+		s.Status.DisconnectedAt = &metav1.Time{Time: time.Now().Add(-time.Minute)}
+		s.Generation = 2
+		s.Spec.Config.AESKey = "new-key"
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); !errors.Is(err, errSessionEnded) {
+		t.Fatalf("err = %v, want errSessionEnded", err)
+	}
+	if agent.added != 0 || agent.lobby != nil {
+		t.Errorf("adds %d, lobby %+v: want neither", agent.added, agent.lobby)
+	}
+	if f.sessionExists(t, sess.Name) {
+		t.Error("session kept without its game display")
 	}
 }

@@ -846,6 +846,11 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		"PULSE_SERVER":           "unix:/tmp/.X11-unix/pulse-socket",
 		"HOST_APPS_STATE_FOLDER": "/mnt/data/wolf",
 		"WOLF_SOCKET_PATH":       "/etc/wolf/wolf.sock",
+		// A stream's pipeline starts on its own producer, then switches to
+		// the lobby's (lobbyBufferCaps). With zero copy their caps differ
+		// (DMABuf/CUDAMemory vs system memory) and on VA every second
+		// switch fails to renegotiate, killing the stream's video.
+		"WOLF_USE_ZERO_COPY": "FALSE",
 		// "WOLF_CFG_FILE":          "/etc/wolf/cfg/config.toml", // no longer needed
 		// "WOLF_PRIVATE_CERT_FILE": "/mnt/data/wolf/cfg/cert.pem",
 		// "WOLF_PRIVATE_KEY_FILE": "/mnt/data/wolf/cfg/key.pem",
@@ -1759,7 +1764,8 @@ func (c *SessionController) releaseUnusedPorts() error {
 // reconcileActiveStreams calls out to wolf-agent on the session's pod to keep
 // Wolf's session in step with the Session:
 //   - attach: add a Wolf session for spec.config (first launch, or /resume
-//     after it put the client's new keys there);
+//     after it put the client's new keys there), creating the pod's lobby
+//     first (ensureLobby); wolf-agent joins the stream to it;
 //   - detect the client going away (wolf-agent stops Wolf's session when
 //     Moonlight disconnects), and record it in status.disconnectedAt, starting
 //     the grace period Reconcile ends the session after.
@@ -1958,6 +1964,9 @@ func (c *SessionController) reconcileActiveStreams(
 		if err != nil {
 			return err
 		}
+		if lobbyErr := c.ensureLobby(ctx, wolfclient, session); lobbyErr != nil {
+			return lobbyErr
+		}
 		sessionID, err := wolfclient.AddSession(ctx, wolfSession)
 
 		if err != nil {
@@ -1969,6 +1978,74 @@ func (c *SessionController) reconcileActiveStreams(
 	}
 
 	status.StreamURL = "rtsp://" + net.JoinHostPort(podIP, strconv.Itoa(int(status.Ports.RTSP)))
+	return nil
+}
+
+// lobbyBufferCaps is the frame format of the lobby's compositor. Wolf's API
+// doesn't expose the caps it picks for its own sessions, so the pod runs Wolf
+// without zero copy (WOLF_USE_ZERO_COPY), whose caps are these: a stream's
+// switch from its own producer to the lobby's then keeps the same caps.
+const lobbyBufferCaps = "video/x-raw"
+
+// lobbyRunner keeps the lobby alive: Wolf stops a lobby whose runner exits.
+// The game runs in its own container, not under Wolf.
+var lobbyRunner = wolfapi.Runner{Type: "process", RunCmd: `sh -c "while :; do sleep 3600; done"`}
+
+// ensureLobby creates the pod's Wolf lobby before its first stream. The lobby
+// owns the Wayland display the game runs on, which outlives the Moonlight
+// streams joined to it (wolf-agent joins them; see lobbyJoiner). A stream's
+// own display dies when the stream is stopped, which is what every
+// disconnect does.
+//
+// Created before the first stream, the lobby's socket is the first one Wolf
+// opens, wayland-1: the WAYLAND_DISPLAY the game containers wait for.
+func (c *SessionController) ensureLobby(ctx context.Context, wolfclient wolfapi.Client, session *v1alpha1types.Session) error {
+	lobbies, err := wolfclient.ListLobbies(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list wolf lobbies: %w", err)
+	}
+	if len(lobbies) > 0 {
+		// Ours: created by an attach whose status write was lost, or
+		// the one earlier attaches used.
+		return nil
+	}
+	if session.Status.AttachedGeneration != 0 {
+		// Attached before, so the game ran on a lobby (or, from before
+		// lobbies, on a stream's display) that is gone, and its display
+		// with it.
+		return c.endSessionErr(ctx, session, "Wolf lobby holding the game's display is gone")
+	}
+	// Render on the node Wolf picked for its own sessions: the wolf
+	// container resolves the claimed GPU's node at startup (wolfCommand).
+	apps, err := wolfclient.ListApps(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list wolf apps: %w", err)
+	}
+	if len(apps) == 0 || apps[0].RenderNode == "" {
+		return stderrors.New("wolf lists no app to take the render node from")
+	}
+	renderNode := apps[0].RenderNode
+	cfg := session.Spec.Config
+	id, err := wolfclient.CreateLobby(ctx, &wolfapi.CreateLobbyRequest{
+		ProfileID:              wolfapi.MoonlightProfileID,
+		Name:                   session.Name,
+		StopWhenEveryoneLeaves: false,
+		VideoSettings: wolfapi.LobbyVideoSettings{
+			Width:       cfg.VideoWidth,
+			Height:      cfg.VideoHeight,
+			RefreshRate: cfg.VideoRefreshRate,
+			WaylandNode: renderNode,
+			RunnerNode:  renderNode,
+			BufferCaps:  lobbyBufferCaps,
+		},
+		AudioSettings:     wolfapi.LobbyAudioSettings{ChannelCount: 2},
+		RunnerStateFolder: "direwolf-lobby",
+		Runner:            lobbyRunner,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create wolf lobby: %w", err)
+	}
+	klog.Infof("Session %s/%s: created Wolf lobby %s", session.Namespace, session.Name, id)
 	return nil
 }
 
