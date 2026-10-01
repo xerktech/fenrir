@@ -22,6 +22,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Codegen after editing `pkg/api/v1alpha1/*.go`: `hack/update-codegen.sh` (bash + python3).
   - Regenerates `zz_generated.*`, `pkg/generated/` (clientset/listers/informers/applyconfig),
     `crds/`, and `schemas/`. All are committed — never hand-edit them.
+  - CI (`codegen.yml`) reruns it and fails on any diff or untracked file; commit the regen.
   - Keep `crd:generateEmbeddedObjectMeta=true`: without it an embedded template's `metadata` is a
     bare `{type: object}` and the API server prunes its labels/annotations on admission (XERK-1347).
     Unit tests seed fake clients that never prune; `TestCRDsKeepEmbeddedMetadata` guards it.
@@ -105,8 +106,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
 
 ## CI (`.github/workflows`)
 
-- PRs: `go test -race`, govulncheck, golangci-lint, Docker build of all three images, and chart
-  lint/template/package.
+- PRs: `go test -race`, govulncheck, golangci-lint, Docker build of all three images, chart
+  lint/template/package, and codegen drift (path-filtered).
 - Push to main / release (`builder.yml`): pushes images to `ghcr.io/<owner>/fenrir/*` (operator image
   is named `direwolf-operator`), then rewrites chart `values.yaml` image refs to digests and pushes
   the chart as OCI.
