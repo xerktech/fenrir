@@ -955,6 +955,33 @@ func libraryFolders(paths ...string) string {
 	return sb.String()
 }
 
+// Steam's library list: a dangling symlink, or one over the store cap, fails
+// the scan; one exactly at the cap is read.
+func TestCatalogueScanLibraryFoldersChecks(t *testing.T) {
+	newDir := func() string {
+		dir := t.TempDir()
+		writeFixture(t, dir, map[string]string{"games/.keep": "", "home/.local/share/Steam/config/.keep": ""})
+		return dir
+	}
+
+	dir := newDir()
+	if err := os.Symlink("/nonexistent", filepath.Join(dir, configVDFRel)); err != nil {
+		t.Fatal(err)
+	}
+	if err := scanFixtureErr(t, dir); err == nil {
+		t.Error("dangling libraryfolders.vdf symlink: scan succeeded")
+	}
+
+	for size, wantErr := range map[int]bool{catalogueMaxStoreBytes: false, catalogueMaxStoreBytes + 1: true} {
+		dir = newDir()
+		vdf := libraryFolders(filepath.Join(dir, "games", "SteamLibrary"))
+		writeFixture(t, dir, map[string]string{configVDFRel: vdf + strings.Repeat(" ", size-len(vdf))})
+		if err := scanFixtureErr(t, dir); (err != nil) != wantErr {
+			t.Errorf("libraryfolders.vdf of %d bytes: scan err = %v, want error %v", size, err, wantErr)
+		}
+	}
+}
+
 // The script must end itself before the exec gives up on it: a cancelled
 // exec leaves its process running in the pod.
 func TestCatalogueScanTimeoutWithinExecTimeout(t *testing.T) {

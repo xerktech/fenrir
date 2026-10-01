@@ -275,7 +275,7 @@ for f in "$@" "$home/.local/share/Steam/steamapps/x" "$games/x" "$games/steamapp
 for lf in "$home/.local/share/Steam/config/libraryfolders.vdf" "$home/.local/share/Steam/steamapps/libraryfolders.vdf"; do
   reachable "$lf" # an unreadable config/ must not hide its list
   if [ ! -f "$lf" ]; then
-    [ -L "$lf" ] && { echo "$lf is a dangling symlink" >&2; exit 1; }
+    [ -L "$lf" ] && { echo "$lf is a symlink to no readable file" >&2; exit 1; }
     continue
   fi
   n=$(wc -c < "$lf") || exit 1
