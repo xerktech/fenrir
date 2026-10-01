@@ -220,8 +220,11 @@ func (r *RomM) list(ctx context.Context) ([]rommROM, error) {
 	if total == 0 {
 		return nil, errors.New("RomM reports no ROMs")
 	}
-	if !slices.ContainsFunc(roms, func(r rommROM) bool { return !r.MissingFromFS }) {
-		return nil, errors.New("RomM reports every ROM missing from its library")
+	if !slices.ContainsFunc(roms, func(r rommROM) bool {
+		_, playable := retroArchPlatforms[r.PlatformSlug]
+		return playable && !r.MissingFromFS
+	}) {
+		return nil, errors.New("RomM reports every ROM of a RetroArch platform missing from its library")
 	}
 	seen := make(map[int]bool, len(roms))
 	for _, rom := range roms {

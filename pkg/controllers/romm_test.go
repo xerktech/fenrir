@@ -150,6 +150,8 @@ func TestRomMSync(t *testing.T) {
 		// RomM 4's IGDB slug for what RomM 5 calls genesis.
 		rommTestROM(11, "genesis-slash-megadrive", "Sonic", "roms/genesis/sonic.md"),
 		rommTestROM(12, "genesis", "Sonic 2", "roms/genesis/sonic2.md"),
+		// The live library's folder, which RomM 5.3.1 has no alias for.
+		rommTestROM(13, "turbografx-16-slash-pc-engine-cd", "Ys", "roms/pce/Ys.cue"),
 	}
 	roms[0]["url_cover"] = "//images.igdb.com/igdb/image/upload/t_cover_big/kirby.jpg"
 	roms[1]["url_cover"] = "https://images.igdb.com/missing.jpg"
@@ -187,7 +189,7 @@ func TestRomMSync(t *testing.T) {
 	if _, ok := apps["steam-570"]; !ok {
 		t.Error("the Library catalogue's steam-570 was deleted by the RomM sync")
 	}
-	if got, want := len(apps), 2+7+rommPageSize; got != want { // base + steam + ROMs
+	if got, want := len(apps), 2+8+rommPageSize; got != want { // base + steam + ROMs
 		t.Errorf("%d Apps, want %d", got, want)
 	}
 
@@ -199,6 +201,7 @@ func TestRomMSync(t *testing.T) {
 		"romm-8":  {"Advance Wars (USA) [GBA]", core("mgba") + `'/romm/library/roms/gba/Advance Wars.gba'`},
 		"romm-11": {"Sonic [Genesis]", core("genesis_plus_gx") + `'/romm/library/roms/genesis/sonic.md'`},
 		"romm-12": {"Sonic 2 [Genesis]", core("genesis_plus_gx") + `'/romm/library/roms/genesis/sonic2.md'`},
+		"romm-13": {"Ys [PC Engine CD]", core("mednafen_pce_fast") + `'/romm/library/roms/pce/Ys.cue'`},
 		"romm-10": {strings.TrimSpace(strings.Repeat("Long Title ", 10)[:catalogueMaxTitle-len(" [N64]")]) + " [N64]", core("mupen64plus_next") + `'/romm/library/roms/n64/long.z64'`},
 	} {
 		app := apps[name]
@@ -275,6 +278,19 @@ func TestRomMScanFailsClosed(t *testing.T) {
 			}
 			body["items"] = items
 		}},
+		// An unplayable ROM left over doesn't make the rest uninstalled.
+		"all playable missing": {roms: twoPages, page: func(offset int, body map[string]any) {
+			items := []map[string]any{}
+			for i, item := range body["items"].([]map[string]any) { //nolint:forcetypeassert // the fake's own type
+				item = maps.Clone(item)
+				item["missing_from_fs"] = true
+				if offset == 0 && i == 0 {
+					item["missing_from_fs"], item["platform_slug"] = false, "3do"
+				}
+				items = append(items, item)
+			}
+			body["items"] = items
+		}, want: "missing"},
 		"oversize page": {roms: twoPages, page: func(_ int, body map[string]any) {
 			body["padding"] = strings.Repeat(" ", rommMaxPageBytes)
 		}, want: "bytes"},
