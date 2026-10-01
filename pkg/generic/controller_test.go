@@ -551,3 +551,50 @@ func TestInformerList(t *testing.T) {
 	_, err = myController.Informer().Namespaced("fakenamespace").Get("fakeobjectname")
 	require.True(t, k8serrors.IsNotFound(err))
 }
+
+// Reconcilers write status into the object they are given. It must be their
+// own copy, not the informer cache's, or state the API server never accepted
+// stays visible to every other cache reader (XERK-1365).
+func TestReconcilerGetsCopyOfCachedObject(t *testing.T) {
+	testContext, testCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer testCancel()
+
+	tracker, myController, informer, waitForReconcile, verifyNoMoreEvents := setupTest(testContext,
+		func(_, _ string, obj runtime.Object) error {
+			u, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				return fmt.Errorf("reconciled %T", obj)
+			}
+			u.Object["status"] = map[string]any{"written": "by reconciler"}
+			return nil
+		})
+
+	initialObject := &unstructured.Unstructured{}
+	initialObject.SetUnstructuredContent(map[string]any{
+		"metadata": map[string]any{
+			"name":            "object1",
+			"resourceVersion": "1",
+		},
+	})
+	initialObject.SetGroupVersionKind(fakeGVK)
+	require.NoError(t, tracker.Add(initialObject))
+
+	wg := sync.WaitGroup{}
+	wg.Go(func() { informer.Run(testContext.Done()) })
+	wg.Go(func() {
+		require.ErrorIs(t, myController.Run(testContext), context.Canceled)
+	})
+
+	require.NoError(t, waitForReconcile(initialObject))
+	cached, exists, err := informer.GetStore().GetByKey("object1")
+	require.NoError(t, err)
+	require.True(t, exists)
+	cachedObj, ok := cached.(*unstructured.Unstructured)
+	require.True(t, ok)
+	require.NotContains(t, cachedObj.Object, "status",
+		"reconciler's write reached the informer cache")
+
+	testCancel()
+	wg.Wait()
+	verifyNoMoreEvents()
+}

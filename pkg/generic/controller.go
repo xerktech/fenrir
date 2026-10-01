@@ -296,6 +296,16 @@ func (c *controller[T]) reconcile(key string) error {
 		}
 
 		// Deleted object. Inform reconciler with empty
+	} else {
+		// The lister returns the informer cache's own object. Reconcilers
+		// write status into what they are given, so hand them a copy:
+		// otherwise state the API server never accepted lingers in the
+		// cache, seen by every other reader until the next watch event.
+		copied, ok := newObj.DeepCopyObject().(T)
+		if !ok {
+			return fmt.Errorf("deep copy of %s returned %T", key, newObj.DeepCopyObject())
+		}
+		newObj = copied
 	}
 
 	return c.reconciler(namespace, name, newObj)

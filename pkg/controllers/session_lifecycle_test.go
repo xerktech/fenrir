@@ -490,3 +490,71 @@ func TestSteadyStateReconcileDoesNotWriteStatus(t *testing.T) {
 		t.Errorf("%d status writes over 3 steady reconciles, want 1", writes)
 	}
 }
+
+// endSession decides from the Session as read, which may be a cached copy
+// older than an attach or /resume that just landed. Its delete must carry that
+// read's resourceVersion so a stale decision conflicts instead of deleting.
+func TestEndSessionPreconditionsResourceVersion(t *testing.T) {
+	f := newPortsFixture(t)
+	var got *metav1.Preconditions
+	f.dw.PrependReactor("delete", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if d, ok := action.(k8stesting.DeleteAction); ok {
+			got = d.GetDeleteOptions().Preconditions
+		}
+		return true, nil, nil
+	})
+	sess := f.session("alex-1", "alex")
+	sess.ResourceVersion = "42"
+	if err := f.sc.endSession(context.Background(), sess, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.UID == nil || *got.UID != sess.UID ||
+		got.ResourceVersion == nil || *got.ResourceVersion != "42" {
+		t.Errorf("delete preconditions = %+v, want UID %s and resourceVersion 42", got, sess.UID)
+	}
+}
+
+// A delete that fails (here, the Session changed since it was read) must not
+// be recorded as PodCreated=False: the next reconcile would then recreate the
+// gone pod instead of ending the Session.
+func TestFailedEndSessionDoesNotRecreatePod(t *testing.T) {
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := podReadySession(f)
+		s.CreationTimestamp = metav1.Now() // not yet past the unstarted TTL
+		return s
+	}, nil)
+	f.waitInformer(t, sess.Name, true)
+	refuse := true
+	var statusWrites int
+	f.dw.PrependReactor("*", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		switch {
+		case action.GetVerb() == "delete" && refuse:
+			return true, nil, apierrors.NewConflict(v1alpha1types.Resource("sessions"), sess.Name, errors.New("resourceVersion changed"))
+		case action.GetVerb() == "update" && action.GetSubresource() == "status":
+			statusWrites++
+		}
+		return false, nil, nil
+	})
+
+	cached, err := f.sc.SessionInformer.Namespaced(portsTestNS).Get(sess.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sc.Reconcile(portsTestNS, sess.Name, cached.DeepCopy()); !apierrors.IsConflict(err) {
+		t.Fatalf("Reconcile = %v, want the delete's conflict", err)
+	}
+	if statusWrites != 0 {
+		t.Errorf("%d status writes after a failed delete, want 0", statusWrites)
+	}
+
+	refuse = false
+	if err := f.sc.Reconcile(portsTestNS, sess.Name, cached.DeepCopy()); err != nil {
+		t.Fatalf("requeued Reconcile: %v", err)
+	}
+	if f.sessionExists(t, sess.Name) {
+		t.Error("session not deleted on requeue")
+	}
+	if pods, _ := f.sc.K8sClient.CoreV1().Pods(portsTestNS).List(context.Background(), metav1.ListOptions{}); len(pods.Items) != 0 {
+		t.Errorf("pod recreated: %+v", pods.Items)
+	}
+}
