@@ -7,14 +7,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"k8s.io/klog/v2"
 )
 
 // captureKlog sends klog output to a buffer for the rest of the test.
-func captureKlog(t *testing.T) *bytes.Buffer {
+func captureKlog(t *testing.T) *lockedBuffer {
 	t.Helper()
 	fs := flag.NewFlagSet("klog", flag.ContinueOnError)
 	klog.InitFlags(fs)
@@ -23,13 +25,33 @@ func captureKlog(t *testing.T) *bytes.Buffer {
 			t.Fatal(err)
 		}
 	}
-	var buf bytes.Buffer
-	klog.SetOutput(&buf)
+	buf := &lockedBuffer{}
+	klog.SetOutput(buf)
 	t.Cleanup(func() {
 		klog.Flush()
+		klog.SetOutput(os.Stderr)
 		_ = fs.Set("logtostderr", "true")
+		_ = fs.Set("stderrthreshold", "ERROR")
 	})
-	return &buf
+	return buf
+}
+
+// lockedBuffer is a bytes.Buffer safe for klog's writer and the test reader.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p) //nolint:wrapcheck // io.Writer passthrough
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // Every secret query parameter is redacted in what loggingMiddleware logs,
