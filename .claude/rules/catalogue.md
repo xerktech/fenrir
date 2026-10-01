@@ -26,8 +26,11 @@ paths:
     follow a planted symlink to a root-only file. Parse errors never quote file content.
   - As abc, an unreadable directory would make a glob come up empty (no games, Apps deleted);
     the script's `reachable` fails the scan instead, for the stores, the default libraries and
-    each library in `libraryfolders.vdf`. Never for every folder on the games volume: ext4's
-    root-only `lost+found` would fail every scan. `TestCatalogueScanUnreadableDirFails` skips
+    each library in `libraryfolders.vdf` (both the `config/` and `steamapps/` copies, current
+    and pre-2021 formats, absolute paths only). Never for every folder on the games volume:
+    ext4's root-only `lost+found` would fail every scan.
+  - Library paths come from a user-writable file; a relative one once hung `reachable`
+    forever. The script runs under `timeout`: a cancelled exec leaves its process running. `TestCatalogueScanUnreadableDirFails` skips
     as root, so run it as a non-root user (CI is).
   - A launcher whose base App is missing is skipped: its Apps stay, never "uninstalled".
   - Only Apps labelled `direwolf/catalogue=<store>` are ever updated or deleted.

@@ -81,6 +81,9 @@ const (
 	// none: it runs while the Library holds the Steam lock.
 	catalogueArtBudget  = 20 * time.Second
 	catalogueArtTimeout = 10 * time.Second
+	// catalogueScanTimeout ends the scan script in the pod (coreutils
+	// timeout), inside libraryExecTimeout.
+	catalogueScanTimeout = "25"
 	// vdfMaxDepth bounds the parser's recursion; appmanifests nest 3 deep.
 	vdfMaxDepth = 16
 )
@@ -248,10 +251,13 @@ func catalogueScanCommand(gamesPath string) []string {
 	// games, Apps deleted): reachable checks the deepest existing directory
 	// on the way to it can be read and searched. It covers the stores, the
 	// default libraries and every library in Steam's libraryfolders.vdf.
-	return []string{"s6-setuidgid", libraryUnixUser, "sh", "-c", `
+	// timeout: cancelling an exec does not kill its process in the pod, so a
+	// stuck scan must end itself before libraryExecTimeout.
+	return []string{"s6-setuidgid", libraryUnixUser, "timeout", catalogueScanTimeout, "sh", "-c", `
 reachable() {
   p=$1
-  while [ ! -e "$p" ] && [ ! -L "$p" ]; do
+  case $p in /*) ;; *) echo "reachable: $p is not absolute" >&2; exit 1 ;; esac
+  while [ ! -e "$p" ] && [ ! -L "$p" ] && [ "$p" != / ]; do
     p=${p%/*}; [ -n "$p" ] || p=/
   done
   if [ -d "$p" ] && { [ ! -r "$p" ] || [ ! -x "$p" ]; }; then
@@ -262,14 +268,19 @@ max_manifest=$1 max_store=$2 home=$3 games=$4; shift 4
 for f in "$@" "$home/.local/share/Steam/steamapps/x" "$games/x" "$games/steamapps/x"; do reachable "$f"; done
 # Only folders Steam lists as libraries must be readable: an unrelated one
 # (ext4's root-only lost+found) is none of the scan's business.
-lf=$home/.local/share/Steam/steamapps/libraryfolders.vdf
-if [ -f "$lf" ]; then
-  libs=$(sed -n 's/^[[:space:]]*"path"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$lf") || exit 1
+# Steam keeps the list in config/ and copies it to steamapps/; read both, in
+# the current format ("path" "<dir>") and the pre-2021 one ("1" "<dir>").
+# Only absolute paths: Steam on Linux can't use anything else (e.g. a copied
+# Windows "D:\\Games"), so they are not libraries to check.
+for lf in "$home/.local/share/Steam/config/libraryfolders.vdf" "$home/.local/share/Steam/steamapps/libraryfolders.vdf"; do
+  [ -f "$lf" ] || continue
+  libs=$(sed -n -e 's/^[[:space:]]*"path"[[:space:]]*"\(\/.*\)"[[:space:]]*$/\1/p' \
+    -e 's/^[[:space:]]*"[0-9][0-9]*"[[:space:]]*"\(\/.*\)"[[:space:]]*$/\1/p' "$lf") || exit 1
   set -f; IFS='
 '
   for lib in $libs; do reachable "$lib/steamapps/x"; done
   set +f; unset IFS
-fi
+done
 set -- "$@" "$home"/.local/share/Steam/steamapps/appmanifest_*.acf "$games"/steamapps/appmanifest_*.acf "$games"/*/steamapps/appmanifest_*.acf
 for f do
   shift

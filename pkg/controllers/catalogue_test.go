@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,10 @@ import (
 // pod's /config (home) and /games mounts mapped onto testdata/catalogue.
 func fixtureExec(t *testing.T, dir string) PodExecutor {
 	t.Helper()
+	dir, err := filepath.Abs(dir) // the pod's paths are absolute
+	if err != nil {
+		t.Fatal(err)
+	}
 	home, games := filepath.Join(dir, "home"), filepath.Join(dir, "games")
 	return func(ctx context.Context, _, pod, container string, command []string) (string, error) {
 		if pod != LibraryPodName || container != libraryContainer {
@@ -49,6 +54,9 @@ func fixtureExec(t *testing.T, dir string) PodExecutor {
 			return "", errors.New("scan not run as the desktop user: " + strings.Join(command, " "))
 		}
 		args := slices.Clone(command[2:])
+		if len(args) < 2 || args[0] != "timeout" {
+			return "", errors.New("scan not bounded by timeout: " + strings.Join(command, " "))
+		}
 		for i, a := range args {
 			switch {
 			case a == libraryHome || strings.HasPrefix(a, libraryHome+"/"):
@@ -864,34 +872,72 @@ func TestCatalogueScanUnreadableDirFails(t *testing.T) {
 		t.Skip("root reads everything; permissions can't be tested")
 	}
 	for _, tc := range []struct {
+		name    string
+		vdf     func(dir string) map[string]string
 		rel     string
 		mode    os.FileMode
 		wantErr bool
 	}{
-		{"games/SteamLibrary", 0o000, true}, // listed in libraryfolders.vdf
-		{"games/SteamLibrary", 0o600, true}, // readable, not searchable
-		{"home/.config/heroic/gog_store", 0o000, true},
-		{"games", 0o000, true},
-		{"games/lost+found", 0o000, false},
-		{"games/other", 0o000, false},
+		{"listed library", steamappsVDF, "games/SteamLibrary", 0o000, true},
+		{"listed library, not searchable", steamappsVDF, "games/SteamLibrary", 0o600, true},
+		{"listed in config/ only", configVDF, "games/SteamLibrary", 0o000, true},
+		{"listed in the pre-2021 format", oldFormatVDF, "games/SteamLibrary", 0o000, true},
+		{"listed with spaces", spacedVDF, "games/Steam Lib", 0o000, true},
+		{"listed with spaces, readable", spacedVDF, "games/Steam Lib", 0o755, false},
+		{"unreadable libraryfolders.vdf", steamappsVDF, "home/.local/share/Steam/steamapps/libraryfolders.vdf", 0o000, true},
+		{"heroic store dir", steamappsVDF, "home/.config/heroic/gog_store", 0o000, true},
+		{"games volume", steamappsVDF, "games", 0o000, true},
+		{"lost+found", steamappsVDF, "games/lost+found", 0o000, false},
+		{"unlisted folder", steamappsVDF, "games/other", 0o000, false},
+		{"relative path listed", relativeVDF, "games/other", 0o000, false},
 	} {
 		dir := t.TempDir()
-		writeFixture(t, dir, map[string]string{
-			"home/.local/share/Steam/steamapps/libraryfolders.vdf": libraryFolders(filepath.Join(dir, "home", ".local", "share", "Steam"), filepath.Join(dir, "games", "SteamLibrary")),
-			"games/SteamLibrary/steamapps/appmanifest_570.acf":     `"AppState" { "appid" "570" "name" "Dota 2" "StateFlags" "4" }`,
-			"games/lost+found/.keep":                               "",
-			"games/other/.keep":                                    "",
-			gogInstalledRel:                                        gogStore,
-		})
+		files := map[string]string{
+			"games/SteamLibrary/steamapps/appmanifest_570.acf": `"AppState" { "appid" "570" "name" "Dota 2" "StateFlags" "4" }`,
+			"games/Steam Lib/steamapps/appmanifest_571.acf":    `"AppState" { "appid" "571" "name" "Spaced" "StateFlags" "4" }`,
+			"games/lost+found/.keep":                           "",
+			"games/other/.keep":                                "",
+			gogInstalledRel:                                    gogStore,
+		}
+		maps.Copy(files, tc.vdf(dir))
+		writeFixture(t, dir, files)
 		p := filepath.Join(dir, tc.rel)
 		if err := os.Chmod(p, tc.mode); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(p, 0o755) }) // restore, so TempDir can be removed
 		if err := scanFixtureErr(t, dir); (err != nil) != tc.wantErr {
-			t.Errorf("%s at %o: scan err = %v, want error %v", tc.rel, tc.mode, err, tc.wantErr)
+			t.Errorf("%s (%s at %o): scan err = %v, want error %v", tc.name, tc.rel, tc.mode, err, tc.wantErr)
 		}
 	}
+}
+
+const (
+	steamappsVDFRel = "home/.local/share/Steam/steamapps/libraryfolders.vdf"
+	configVDFRel    = "home/.local/share/Steam/config/libraryfolders.vdf"
+)
+
+func steamappsVDF(dir string) map[string]string {
+	return map[string]string{steamappsVDFRel: libraryFolders(filepath.Join(dir, "games", "SteamLibrary"))}
+}
+
+func configVDF(dir string) map[string]string {
+	return map[string]string{configVDFRel: libraryFolders(filepath.Join(dir, "games", "SteamLibrary"))}
+}
+
+func spacedVDF(dir string) map[string]string {
+	return map[string]string{steamappsVDFRel: libraryFolders(filepath.Join(dir, "games", "Steam Lib"))}
+}
+
+func oldFormatVDF(dir string) map[string]string {
+	return map[string]string{steamappsVDFRel: "\"LibraryFolders\"\n{\n\t\"TimeNextStatsReport\"\t\t\"0\"\n\t\"1\"\t\t\"" +
+		filepath.Join(dir, "games", "SteamLibrary") + "\"\n}\n"}
+}
+
+// A relative (or Windows) path is no library on Linux; it must neither fail
+// the scan nor hang it.
+func relativeVDF(string) map[string]string {
+	return map[string]string{steamappsVDFRel: libraryFolders("SteamLibrary", `D:\\SteamLibrary`)}
 }
 
 // libraryFolders is a libraryfolders.vdf as Steam writes it.
