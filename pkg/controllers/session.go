@@ -657,6 +657,21 @@ func (c *SessionController) writeStatus(ctx context.Context, session *v1alpha1ty
 	return nil
 }
 
+// confirmFresh fails unless session is the live object. It guards every
+// change to Wolf: the informer can still hold the Session from before our own
+// last status write, and acting on that (re-adding or stopping a stream the
+// write already superseded) would leave Wolf and the recorded status apart.
+func (c *SessionController) confirmFresh(ctx context.Context, session *v1alpha1types.Session) error {
+	live, err := c.SessionClient.Get(ctx, session.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get session %s/%s: %w", session.Namespace, session.Name, err)
+	}
+	if live.ResourceVersion != session.ResourceVersion {
+		return fmt.Errorf("session %s/%s changed since it was read (resourceVersion %s, have %s), retrying", session.Namespace, session.Name, live.ResourceVersion, session.ResourceVersion)
+	}
+	return nil
+}
+
 // expiredReason says why session should be deleted without further
 // reconciling, or "" if it should not:
 //   - its client disconnected longer than the grace period ago;
@@ -1670,6 +1685,9 @@ func (c *SessionController) reconcileActiveStreams(
 		// The stream we attached is gone: the client disconnected, or
 		// resumed before Wolf noticed, in which case its old stream must go.
 		if resumed {
+			if freshErr := c.confirmFresh(ctx, session); freshErr != nil {
+				return freshErr
+			}
 			if stopErr := wolfclient.StopSession(ctx, status.WolfSessionID); stopErr != nil {
 				klog.Warningf("Session %s/%s: stopping superseded Wolf session %s: %v", session.Namespace, session.Name, status.WolfSessionID, stopErr)
 			}
@@ -1685,12 +1703,8 @@ func (c *SessionController) reconcileActiveStreams(
 	if found {
 		// Wolf has a stream for our keys that we never recorded. First rule
 		// out a stale cached Session from before our own status write.
-		live, getErr := c.SessionClient.Get(ctx, session.Name, metav1.GetOptions{})
-		if getErr != nil {
-			return fmt.Errorf("failed to get session %s/%s: %w", session.Namespace, session.Name, getErr)
-		}
-		if live.ResourceVersion != session.ResourceVersion {
-			return fmt.Errorf("session %s/%s changed since it was read, retrying", session.Namespace, session.Name)
+		if freshErr := c.confirmFresh(ctx, session); freshErr != nil {
+			return freshErr
 		}
 		// The status update after AddSession was lost. The stream's ID is
 		// unknown, so it cannot be stopped or adopted: end the session.
@@ -1701,6 +1715,9 @@ func (c *SessionController) reconcileActiveStreams(
 		// Waiting for /resume; Reconcile ends the session after the grace
 		// period.
 		return nil
+	}
+	if freshErr := c.confirmFresh(ctx, session); freshErr != nil {
+		return freshErr
 	}
 
 	// Will need this for later

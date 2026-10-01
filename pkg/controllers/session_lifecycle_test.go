@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	"games-on-whales.github.io/direwolf/pkg/generic"
 )
 
 // lifecycleFixture is a portsFixture holding sess (stored in the fake API)
@@ -389,5 +391,102 @@ func TestWriteStatusKeepsNewerStatus(t *testing.T) {
 	got, _ := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Get(context.Background(), sess.Name, metav1.GetOptions{})
 	if got.Status.WolfSessionID != "1002" || got.Status.DisconnectedAt != nil {
 		t.Errorf("newer status overwritten: %+v", got.Status)
+	}
+}
+
+// Wolf is only changed on behalf of the live Session: a stale cached read
+// (from before our own last status write) must not stop or add streams.
+func TestStaleReadDoesNotTouchWolf(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		session func(*portsFixture, int32) *v1alpha1types.Session
+	}{
+		{"first attach", func(f *portsFixture, base int32) *v1alpha1types.Session {
+			s := f.session("alex-1", f.user)
+			s.Status.Ports = blockPorts(base)
+			return s
+		}},
+		{"resume while attached", func(f *portsFixture, base int32) *v1alpha1types.Session {
+			s := attachedSession(f, base)
+			s.Generation = 2
+			s.Spec.Config.AESKey = "new-key"
+			return s
+		}},
+		{"resume after disconnect", func(f *portsFixture, base int32) *v1alpha1types.Session {
+			s := attachedSession(f, base)
+			s.Status.WolfSessionID = ""
+			s.Status.DisconnectedAt = &metav1.Time{Time: time.Now()}
+			s.Generation = 2
+			s.Spec.Config.AESKey = "new-key"
+			return s
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := newFakeAgent(t)
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session { return tc.session(f, agent.base(t)) },
+				func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+			stale := sess.DeepCopy()
+			stale.ResourceVersion = "stale"
+
+			if err := f.sc.reconcileActiveStreams(context.Background(), stale, readyPod(stale)); err == nil {
+				t.Error("stale read reconciled without error")
+			}
+			if agent.added != 0 || len(agent.stopped) != 0 {
+				t.Errorf("stale read changed Wolf: %d adds, stops %v", agent.added, agent.stopped)
+			}
+		})
+	}
+}
+
+// recordingController stands in for the session workqueue in tests calling
+// Reconcile directly.
+type recordingController struct {
+	generic.Controller[*v1alpha1types.Session]
+}
+
+func (recordingController) EnqueueAfter(string, string, time.Duration) {}
+
+// Once nothing changes, reconciling (every streamPollInterval while
+// attached) does not rewrite the Session's status.
+func TestSteadyStateReconcileDoesNotWriteStatus(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.sessions = `[{"aes_key":"k","aes_iv":"i"}]`
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := attachedSession(f, agent.base(t))
+		s.Status.StreamURL = fmt.Sprintf("rtsp://127.0.0.1:%d", s.Status.Ports.RTSP)
+		s.Status.Conditions = []metav1.Condition{{Type: podCreatedCondition, Status: metav1.ConditionTrue, Reason: "Test"}}
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s), readyPod(s)} })
+	f.sc.controller = recordingController{}
+	// The fake agent's port decides the block; let the allocator hand it out.
+	base := sess.Status.Ports.HTTP
+	f.sc.ports = newPortAllocator(PortRange{Min: base, Max: base + sessionPortBlockSize - 1})
+	for range 500 {
+		if _, err := f.sc.podController.Informer().Namespaced(portsTestNS).Get(sess.Name); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var writes int
+	f.dw.PrependReactor("update", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() == "status" {
+			writes++
+		}
+		return false, nil, nil
+	})
+	sessions := f.dw.DirewolfV1alpha1().Sessions(portsTestNS)
+	for i := range 3 {
+		live, err := sessions.Get(context.Background(), sess.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.sc.Reconcile(portsTestNS, sess.Name, live); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+	}
+	// The first reconcile records the conditions; later ones change nothing.
+	if writes != 1 {
+		t.Errorf("%d status writes over 3 steady reconciles, want 1", writes)
 	}
 }

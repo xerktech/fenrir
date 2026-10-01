@@ -243,6 +243,9 @@ func TestReconcileActiveStreamsUsesPortBlock(t *testing.T) {
 	sess.Status.Ports = blockPorts(agent.base(t))
 	sess.Spec.Config.ClientIP = "192.0.2.10"
 	f := newPortsFixture(t, tokenSecret(sess))
+	if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Create(context.Background(), sess, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
 		t.Fatal(err)
