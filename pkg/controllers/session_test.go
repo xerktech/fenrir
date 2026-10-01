@@ -183,7 +183,7 @@ func reconcileFixtures(t *testing.T, userPath, appPath string) (*SessionControll
 
 	// Create fake clients pre-seeded with User and App
 	fakeDirewolf := generatedclient.NewSimpleClientset(&user, &app)
-	fakeK8s := k8sfake.NewSimpleClientset()
+	fakeK8s := k8sfake.NewClientset()
 
 	// Create informer factories
 	dwFactory := generatedinformers.NewSharedInformerFactory(fakeDirewolf, 0)
@@ -558,6 +558,32 @@ func TestSessionPodCarriesAppTemplateMetadata(t *testing.T) {
 	}
 	if want := map[string]string{"xerktech.com/gpu-claim": "direwolf-gpu", "direwolf/user": "spoof"}; !reflect.DeepEqual(app.Spec.Template.Labels, want) {
 		t.Errorf("cached App template labels = %v, want them untouched: %v", app.Spec.Template.Labels, want)
+	}
+}
+
+func TestSessionPVCCarriesAppTemplateMetadata(t *testing.T) {
+	sc, k8s, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "testdata/app-pod-labels.yaml")
+	pvc, err := k8s.CoreV1().PersistentVolumeClaims(sess.Namespace).Get(context.Background(), sc.pvcName(sess), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get PVC: %v", err)
+	}
+	if got := pvc.Labels["example.com/backup"]; got != "daily" {
+		t.Errorf("PVC label example.com/backup = %q, want the App template's daily", got)
+	}
+	if got := pvc.Annotations["example.com/note"]; got != "pvc-kept" {
+		t.Errorf("PVC annotation example.com/note = %q, want the App template's pvc-kept", got)
+	}
+	if got := pvc.Labels["direwolf/app"]; got != sess.Spec.GameReference.Name {
+		t.Errorf("PVC label direwolf/app = %q, want the operator's %q over the template's", got, sess.Spec.GameReference.Name)
+	}
+
+	// The operator's own labels must not leak back into the informer's App.
+	app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"example.com/backup": "daily", "direwolf/app": "spoof"}; !reflect.DeepEqual(app.Spec.VolumeClaimTemplate.Labels, want) {
+		t.Errorf("cached App volumeClaimTemplate labels = %v, want them untouched: %v", app.Spec.VolumeClaimTemplate.Labels, want)
 	}
 }
 
