@@ -1066,7 +1066,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 			wolfAgentEnv = policies.WolfAgent.Env
 			// klog.debug("User defined env vars: %+v", wolfAgentEnv)
 			wolfAgentResources = mergeResourceRequirements(wolfAgentDefaultResources, policies.WolfAgent.Resources)
-			wolfAgentVolumeMounts = policies.WolfAgent.VolumeMounts
+			// Cloned: hotplug mounts are appended to it, which would write the
+			// cached User's spare capacity from concurrent workers.
+			wolfAgentVolumeMounts = slices.Clone(policies.WolfAgent.VolumeMounts)
 			wolfAgentSecurityContext = policies.WolfAgent.SecurityContext
 			if policies.WolfAgent.HostIPC != nil && *policies.WolfAgent.HostIPC {
 				podHostIPC = true
@@ -1770,7 +1772,7 @@ func (c *SessionController) reconcileActiveStreams(
 	wolfclient := wolfapi.NewClient("https://"+net.JoinHostPort(podIP, strconv.Itoa(int(session.Status.Ports.WolfAgent))), &http.Client{
 		Timeout: wolfAgentTimeout,
 		Transport: &wolfapi.BearerTokenTransport{
-			Token: token,
+			Token: wolfapi.StaticToken(token),
 			// Pinned to the session's own cert: a stranger bound to the
 			// agent port fails the handshake before seeing the token.
 			Base: &http.Transport{TLSClientConfig: tlsConfig},
