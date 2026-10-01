@@ -24,6 +24,8 @@ import (
 
 // AppGPUApplyConfiguration represents a declarative configuration of the AppGPU type for use
 // with apply.
+//
+// AppGPU is the GPU share a session of the App gets.
 type AppGPUApplyConfiguration struct {
 	// VRAM to reserve on one card (the claim's capacity.requests.memory).
 	// Omitted: the whole card.

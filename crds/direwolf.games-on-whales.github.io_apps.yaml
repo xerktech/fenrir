@@ -50,6 +50,8 @@ spec:
                   deviceClassName:
                     default: gpu.nvidia.com
                     description: DRA DeviceClass to allocate from.
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                     type: string
                   memory:
                     anyOf:
@@ -61,6 +63,9 @@ spec:
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                 type: object
+                x-kubernetes-validations:
+                - message: memory must be positive
+                  rule: '!has(self.memory) || quantity(string(self.memory)).isGreaterThan(quantity(''0''))'
               hidden:
                 description: |-
                   Hidden Apps are left out of the Moonlight app list (e.g. the base Apps

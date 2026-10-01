@@ -36,6 +36,9 @@ func addAppGPUClaim(spec *corev1.PodSpec, app *v1alpha1types.App, session *v1alp
 	if app.Spec.GPU == nil {
 		return nil
 	}
+	if m := app.Spec.GPU.Memory; m != nil && m.Sign() <= 0 {
+		return fmt.Errorf("app %s: spec.gpu.memory must be positive, got %s", app.Name, m.String())
+	}
 	if slices.ContainsFunc(spec.ResourceClaims, func(c corev1.PodResourceClaim) bool { return c.Name == appGPUClaim }) {
 		return fmt.Errorf("app %s: spec.gpu and a template resourceClaim named %q conflict", app.Name, appGPUClaim)
 	}

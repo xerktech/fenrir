@@ -6,6 +6,7 @@ import (
 	"errors"
 	"image"
 	"image/png"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -64,7 +65,7 @@ func scanFixture(t *testing.T, dir string) []catalogueGame {
 	if err != nil {
 		t.Fatalf("scan command: %v", err)
 	}
-	files, err := readTar([]byte(out))
+	files, err := readTar(out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,6 +249,10 @@ func TestFetchArt(t *testing.T) {
 			_, _ = w.Write(pngData)
 		case "/big.png":
 			_, _ = w.Write(append(slices.Clone(pngData), make([]byte, catalogueMaxArtBytes)...))
+		case "/wide.png":
+			var buf bytes.Buffer
+			_ = png.Encode(&buf, image.NewGray(image.Rect(0, 0, catalogueMaxArtSide+1, 1)))
+			_, _ = w.Write(buf.Bytes())
 		case "/html":
 			_, _ = w.Write([]byte("<html>not an image</html>"))
 		case "/redirect-out":
@@ -269,14 +274,15 @@ func TestFetchArt(t *testing.T) {
 		return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
 	}
 	transport.TLSClientConfig.InsecureSkipVerify = true // the test server stands in for every host
-	client := &http.Client{Transport: transport, CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-		return checkArtURL(req.URL)
-	}}
+	// The production client (its redirect check), dialling the test server.
+	client := newArtClient()
+	client.Transport = transport
 
 	for path, wantOK := range map[string]bool{
 		"/ok.png":       true,
 		"/redirect-in":  true,
 		"/big.png":      false,
+		"/wide.png":     false,
 		"/html":         false,
 		"/missing":      false,
 		"/redirect-out": false,
@@ -346,7 +352,7 @@ func (f *catalogueFixture) app(t *testing.T, name string) *v1alpha1types.App {
 
 func (f *catalogueFixture) scan(t *testing.T) {
 	t.Helper()
-	if err := f.catalogue.Scan(context.Background(), libraryPod(0, true)); err != nil {
+	if err := f.catalogue.Scan(context.Background(), libraryPod(0, true), catalogueArtBudget); err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
 }
@@ -441,7 +447,7 @@ func TestCatalogueSyncMissingBaseKeepsApps(t *testing.T) {
 		Labels: map[string]string{v1alpha1types.CatalogueLabel: v1alpha1types.CatalogueStoreGOG},
 	}}
 	f := newCatalogueFixture(t, baseApp("steam-base", nil), heroicApp)
-	if err := f.catalogue.Scan(context.Background(), libraryPod(0, true)); err == nil {
+	if err := f.catalogue.Scan(context.Background(), libraryPod(0, true), catalogueArtBudget); err == nil {
 		t.Error("Scan with a missing base App reported no error")
 	}
 	f.app(t, "gog-1")
@@ -568,5 +574,193 @@ func TestGPUClaimFromEarlierSessionIsNotReused(t *testing.T) {
 	}
 	if _, err := k8s.ResourceV1().ResourceClaims(sess.Namespace).Get(context.Background(), gpuClaimName(sess.Name), metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		t.Error("no claim created after the earlier one was gone")
+	}
+}
+
+func writeFixture(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, data := range files {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func scanFixtureErr(t *testing.T, dir string) error {
+	t.Helper()
+	out, err := fixtureExec(t, dir)(context.Background(), libraryTestNS, LibraryPodName, libraryContainer, catalogueScanCommand("/games"))
+	if err != nil {
+		return err
+	}
+	files, err := readTar(out)
+	if err != nil {
+		return err
+	}
+	_, err = parseInstalls(files)
+	return err
+}
+
+const (
+	gogInstalledRel = "home/.config/heroic/gog_store/installed.json"
+	gogStore        = `{"installed": [{"appName": "1207658924", "is_dlc": false}]}`
+)
+
+// Files a Library user could plant: each must fail the scan (so nothing is
+// deleted), never crash the operator or read as fewer games.
+func TestCatalogueScanRejectsHostileFiles(t *testing.T) {
+	for name, files := range map[string]map[string]string{
+		"deep nesting":       {"games/steamapps/appmanifest_9.acf": strings.Repeat(`"a"{`, 1000)},
+		"oversized manifest": {"games/steamapps/appmanifest_9.acf": `"AppState" { "appid" "9" }` + strings.Repeat(" ", catalogueMaxManifestBytes)},
+		"empty store":        {gogInstalledRel: ""},
+	} {
+		dir := t.TempDir()
+		writeFixture(t, dir, map[string]string{"home/.keep": "", "games/.keep": ""})
+		writeFixture(t, dir, files)
+		if err := scanFixtureErr(t, dir); err == nil {
+			t.Errorf("%s: scan succeeded", name)
+		}
+	}
+
+	dir := t.TempDir()
+	writeFixture(t, dir, map[string]string{"games/.keep": ""})
+	if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(gogInstalledRel)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/nonexistent", filepath.Join(dir, gogInstalledRel)); err != nil {
+		t.Fatal(err)
+	}
+	if err := scanFixtureErr(t, dir); err == nil {
+		t.Error("dangling symlinked store: scan succeeded")
+	}
+
+	if _, err := parseVDF([]byte(strings.Repeat(`"a"{`, 1_000_000))); err == nil {
+		t.Error("parseVDF accepted a million nested objects")
+	}
+}
+
+// A symlinked store is read through, not archived as an empty entry (which
+// would read as no games and delete their Apps).
+func TestCatalogueScanFollowsSymlinkedStore(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, map[string]string{"games/.keep": "", "home/real.json": gogStore})
+	if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(gogInstalledRel)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "home", "real.json"), filepath.Join(dir, gogInstalledRel)); err != nil {
+		t.Fatal(err)
+	}
+	games := scanFixture(t, dir)
+	if len(games) != 1 || games[0].ID != "1207658924" {
+		t.Errorf("games = %+v, want the GOG game through the symlink", games)
+	}
+}
+
+func TestParseAppManifestFilters(t *testing.T) {
+	manifest := func(id, name string) []byte {
+		return []byte(`"AppState" { "appid" "` + id + `" "name" "` + name + `" "StateFlags" "4" }`)
+	}
+	for _, tc := range []struct {
+		id, name string
+		ok, err  bool
+	}{
+		{"570", "Proton Pulse", true, false}, // a game, not a Proton build
+		{"1493710", "Proton Experimental", false, false},
+		{"2805730", "Proton 9.0", false, false},
+		{"1628350", "Steam Linux Runtime 3.0 (sniper)", false, false},
+		{"0", "Zero", false, true},
+		{"0570", "Dota 2", false, true}, // would duplicate 570
+	} {
+		_, ok, err := parseAppManifest(manifest(tc.id, tc.name))
+		if ok != tc.ok || (err != nil) != tc.err {
+			t.Errorf("%s %q: ok=%v err=%v, want ok=%v err=%v", tc.id, tc.name, ok, err, tc.ok, tc.err)
+		}
+	}
+	if got := truncateTitle("bad\x01ctl\n"); got != "badctl" {
+		t.Errorf("truncateTitle kept control characters: %q", got)
+	}
+}
+
+func TestPublicAddressOnly(t *testing.T) {
+	for addr, ok := range map[string]bool{
+		"23.45.67.89:443":       true,
+		"[2600:1f18::1]:443":    true,
+		"10.0.0.1:443":          false,
+		"127.0.0.1:443":         false,
+		"169.254.169.254:443":   false,
+		"[::1]:443":             false,
+		"[fd00::1]:443":         false,
+		"[::ffff:10.0.0.1]:443": false,
+		"0.0.0.0:443":           false,
+	} {
+		if got := publicAddressOnly("tcp", addr, nil) == nil; got != ok {
+			t.Errorf("publicAddressOnly(%s) allowed = %v, want %v", addr, got, ok)
+		}
+	}
+}
+
+// A game whose art can't be had (none, or out of budget) still gets its App,
+// with the base App's cover (the CRD rejects an empty one).
+func TestCatalogueSyncWithoutArt(t *testing.T) {
+	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil))
+	if err := f.catalogue.Scan(context.Background(), libraryPod(0, true), 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.fetched) != 0 {
+		t.Errorf("a scan with no art budget fetched %v", f.fetched)
+	}
+	dota := f.app(t, "steam-570")
+	if !bytes.Equal(dota.Spec.AppAssetWebP, []byte("base-art")) || dota.Annotations[catalogueArtAnnotation] != "" {
+		t.Errorf("art = %q from %q, want the base App's", dota.Spec.AppAssetWebP, dota.Annotations[catalogueArtAnnotation])
+	}
+	// The next scan with a budget fetches it.
+	f.scan(t)
+	if dota = f.app(t, "steam-570"); dota.Annotations[catalogueArtAnnotation] == "" || bytes.Equal(dota.Spec.AppAssetWebP, []byte("base-art")) {
+		t.Errorf("art not fetched on the next scan: from %q", dota.Annotations[catalogueArtAnnotation])
+	}
+}
+
+// A hand-made App holding a game's name is never overwritten, and no art is
+// fetched for a game that can't get an App.
+func TestCatalogueSyncNameTakenByHandMadeApp(t *testing.T) {
+	handMade := &v1alpha1types.App{ObjectMeta: metav1.ObjectMeta{Name: "steam-570", Namespace: libraryTestNS},
+		Spec: v1alpha1types.AppSpec{Title: "mine"}}
+	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil), handMade)
+	if err := f.catalogue.Scan(context.Background(), libraryPod(0, true), catalogueArtBudget); err == nil {
+		t.Error("Scan reported no error for the name collision")
+	}
+	if app := f.app(t, "steam-570"); app.Spec.Title != "mine" || app.Labels[v1alpha1types.CatalogueLabel] != "" {
+		t.Errorf("hand-made App changed: %+v", app)
+	}
+	for _, u := range f.fetched {
+		if strings.Contains(u, "/570/") {
+			t.Errorf("fetched art for the colliding game: %s", u)
+		}
+	}
+	f.app(t, "steam-1245620") // the rest are still catalogued
+}
+
+func TestCappedBuffer(t *testing.T) {
+	b := &cappedBuffer{max: 4}
+	// io.Copy is how exec streams write: it must not find a way round Write.
+	if _, err := io.Copy(b, strings.NewReader("abcd")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(b, strings.NewReader("e")); err == nil {
+		t.Error("write past the cap succeeded")
+	}
+	if b.String() != "abcd" {
+		t.Errorf("buffer = %q", b.String())
+	}
+}
+
+func TestAppGPUMemoryMustBePositive(t *testing.T) {
+	neg := resource.MustParse("-1Gi")
+	app := &v1alpha1types.App{Spec: v1alpha1types.AppSpec{GPU: &v1alpha1types.AppGPU{Memory: &neg}}}
+	if err := addAppGPUClaim(&corev1.PodSpec{}, app, &v1alpha1types.Session{}); err == nil {
+		t.Error("negative gpu.memory accepted")
 	}
 }

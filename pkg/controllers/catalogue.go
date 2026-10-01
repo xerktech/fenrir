@@ -12,7 +12,9 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path"
 	"reflect"
@@ -20,7 +22,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/image/webp"
@@ -62,6 +66,22 @@ const (
 	catalogueArtRetry = 6 * time.Hour
 	// Moonlight's app title limit (App.spec.title MaxLength).
 	catalogueMaxTitle = 63
+	// Biggest cover accepted, per side: moonlight-proxy decodes it in full
+	// on every /appasset request.
+	catalogueMaxArtSide = 4096
+
+	// Size caps on what the Library (user-writable) may hand the operator,
+	// whose memory limit is 256Mi: an appmanifest is ~1KiB, Heroic's library
+	// caches a few MiB. A file over its cap fails the scan, never drops a game.
+	catalogueMaxManifestBytes = 64 << 10
+	catalogueMaxStoreBytes    = 8 << 20
+	// The art fetched in one periodic scan shares this budget, so new games
+	// delay the idle check by at most this. The final scan in stop() fetches
+	// none: it runs while the Library holds the Steam lock.
+	catalogueArtBudget  = 20 * time.Second
+	catalogueArtTimeout = 10 * time.Second
+	// vdfMaxDepth bounds the parser's recursion; appmanifests nest 3 deep.
+	vdfMaxDepth = 16
 )
 
 // Heroic's stores under the Library's ~/.config/heroic (the .deb build).
@@ -76,9 +96,9 @@ const (
 // put into a shell command line and a heroic:// URL.
 var heroicAppName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
-// steamTools are Steam appmanifests that are not games (Proton, runtimes,
-// redistributables), matched by name prefix.
-var steamTools = []string{"Proton", "Steam Linux Runtime", "Steamworks Common Redistributables", "SteamVR"}
+// steamTools matches the names of Steam appmanifests that are not games
+// (Proton builds, runtimes, redistributables), not games named "Proton ...".
+var steamTools = regexp.MustCompile(`^(Proton( [0-9].*| Experimental| Hotfix| Next| EasyAntiCheat Runtime| BattlEye Runtime)?|Steam Linux Runtime( .*)?|Steamworks Common Redistributables|SteamVR)$`)
 
 // steamFullyInstalled is the StateFlags bit Steam sets once a game is
 // installed and not mid-download or mid-update-from-scratch.
@@ -124,12 +144,7 @@ type Catalogue struct {
 }
 
 func NewCatalogue(apps v1alpha1client.AppInterface, exec PodExecutor, gamesPath string, options CatalogueOptions) *Catalogue {
-	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return errors.New("too many redirects")
-		}
-		return checkArtURL(req.URL)
-	}}
+	client := newArtClient()
 	return &Catalogue{
 		Apps:             apps,
 		Exec:             exec,
@@ -141,23 +156,58 @@ func NewCatalogue(apps v1alpha1client.AppInterface, exec PodExecutor, gamesPath 
 	}
 }
 
+// publicAddressOnly is a net.Dialer Control refusing non-public peers.
+func publicAddressOnly(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("box art address %q: %w", address, err)
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("box art address %q: %w", address, err)
+	}
+	if ip = ip.Unmap(); !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return fmt.Errorf("box art host resolves to non-public address %s", ip)
+	}
+	return nil
+}
+
+// newArtClient fetches box art from artHosts only: every redirect is
+// re-checked, and it only connects to public addresses, so an allowed name
+// resolving to a cluster or metadata address gets nowhere either.
+func newArtClient() *http.Client {
+	dialer := &net.Dialer{Timeout: catalogueArtTimeout, Control: publicAddressOnly}
+	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // net/http's own type
+	transport.DialContext = dialer.DialContext
+	transport.Proxy = nil // the address check must see the real peer
+	return &http.Client{Timeout: catalogueArtTimeout, Transport: transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many redirects")
+		}
+		return checkArtURL(req.URL)
+	}}
+}
+
 // ScanDue reports whether a periodic scan is due.
 func (c *Catalogue) ScanDue() bool {
 	return c.now().Sub(c.lastScan) >= catalogueScanInterval
 }
 
 // Scan reads the installed games from the running Library pod and syncs the
-// catalogue Apps to them. A scan that can't read or parse every file changes
-// nothing, so a half-written store never uninstalls a game.
-func (c *Catalogue) Scan(ctx context.Context, pod *corev1.Pod) error {
+// catalogue Apps to them, fetching box art for at most artBudget (0: none).
+// A scan that can't read or parse every file changes nothing, so a
+// half-written store never uninstalls a game.
+func (c *Catalogue) Scan(ctx context.Context, pod *corev1.Pod, artBudget time.Duration) error {
 	c.lastScan = c.now()
-	execCtx, cancel := context.WithTimeout(ctx, libraryExecTimeout)
+	ctx, cancel := context.WithTimeout(ctx, libraryExecTimeout+artBudget+30*time.Second)
+	defer cancel()
+	execCtx, execCancel := context.WithTimeout(ctx, libraryExecTimeout)
 	out, err := c.Exec(execCtx, pod.Namespace, pod.Name, libraryContainer, catalogueScanCommand(c.GamesPath))
-	cancel()
+	execCancel()
 	if err != nil {
 		return fmt.Errorf("reading the Library's installs: %w", err)
 	}
-	files, err := readTar([]byte(out))
+	files, err := readTar(out)
 	if err != nil {
 		return err
 	}
@@ -165,7 +215,7 @@ func (c *Catalogue) Scan(ctx context.Context, pod *corev1.Pod) error {
 	if err != nil {
 		return err
 	}
-	return c.Sync(ctx, games)
+	return c.Sync(ctx, games, artBudget)
 }
 
 // catalogueScanCommand tars every appmanifest in the default Steam library
@@ -173,23 +223,37 @@ func (c *Catalogue) Scan(ctx context.Context, pod *corev1.Pod) error {
 // for downloads), plus Heroic's installed-games and library stores. tar frames
 // each file with its size, and fails (exit 1) on a file that changed while
 // read, so a torn read fails the scan rather than parsing as fewer games.
+// Symlinks are followed (-h; tar would otherwise archive an empty entry); a
+// dangling one, or a file over its size cap, fails the scan.
 func catalogueScanCommand(gamesPath string) []string {
 	return []string{"sh", "-c", `
-home=$1 games=$2; shift 2
+max_manifest=$1 max_store=$2 home=$3 games=$4; shift 4
 set -- "$@" "$home"/.local/share/Steam/steamapps/appmanifest_*.acf "$games"/steamapps/appmanifest_*.acf "$games"/*/steamapps/appmanifest_*.acf
-for f do shift; [ -f "$f" ] && set -- "$@" "$f"; done
+for f do
+  shift
+  if [ ! -f "$f" ]; then
+    [ -L "$f" ] && { echo "$f is a dangling symlink" >&2; exit 1; }
+    continue
+  fi
+  case $f in *.acf) max=$max_manifest ;; *) max=$max_store ;; esac
+  n=$(wc -c < "$f") || exit 1
+  [ "$n" -gt "$max" ] && { echo "$f is $n bytes, over $max" >&2; exit 1; }
+  set -- "$@" "$f"
+done
 [ $# -eq 0 ] && exit 0
-exec tar -cf - -- "$@"
-`, "sh", libraryHome, gamesPath, heroicLegendaryInstalled, heroicGOGInstalled, heroicLegendaryLibrary, heroicGOGLibrary}
+exec tar -chf - -- "$@"
+`, "sh", strconv.Itoa(catalogueMaxManifestBytes), strconv.Itoa(catalogueMaxStoreBytes), libraryHome, gamesPath,
+		heroicLegendaryInstalled, heroicGOGInstalled, heroicLegendaryLibrary, heroicGOGLibrary}
 }
 
 // readTar returns the archive's files by name (tar drops the leading /).
-func readTar(data []byte) (map[string][]byte, error) {
+// Only regular files within the store size cap are accepted.
+func readTar(data string) (map[string][]byte, error) {
 	files := map[string][]byte{}
-	if len(data) == 0 {
+	if data == "" {
 		return files, nil
 	}
-	tr := tar.NewReader(bytes.NewReader(data))
+	tr := tar.NewReader(strings.NewReader(data))
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -197,6 +261,9 @@ func readTar(data []byte) (map[string][]byte, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("reading the Library's installs: %w", err)
+		}
+		if hdr.Typeflag != tar.TypeReg || hdr.Size > catalogueMaxStoreBytes {
+			return nil, fmt.Errorf("%s is not a regular file within %d bytes", hdr.Name, catalogueMaxStoreBytes)
 		}
 		body, err := io.ReadAll(tr)
 		if err != nil {
@@ -251,7 +318,8 @@ func parseAppManifest(data []byte) (game catalogueGame, ok bool, err error) {
 		return game, false, errors.New("no AppState")
 	}
 	id, _ := state["appid"].(string)
-	if _, convErr := strconv.ParseUint(id, 10, 32); convErr != nil {
+	// Canonical only: "0570" would be a second App for game 570.
+	if n, convErr := strconv.ParseUint(id, 10, 32); convErr != nil || n == 0 || strconv.FormatUint(n, 10) != id {
 		return game, false, fmt.Errorf("bad appid %q", id)
 	}
 	flags, _ := strconv.ParseUint(fmt.Sprint(state["stateflags"]), 10, 32)
@@ -259,10 +327,8 @@ func parseAppManifest(data []byte) (game catalogueGame, ok bool, err error) {
 	if flags&steamFullyInstalled == 0 || name == "" {
 		return game, false, nil
 	}
-	for _, tool := range steamTools {
-		if strings.HasPrefix(name, tool) {
-			return game, false, nil
-		}
+	if steamTools.MatchString(name) {
+		return game, false, nil
 	}
 	return catalogueGame{
 		Store: v1alpha1types.CatalogueStoreSteam,
@@ -279,7 +345,7 @@ func parseAppManifest(data []byte) (game catalogueGame, ok bool, err error) {
 // nested maps, keys lowercased (Steam's own lookups are case-insensitive).
 func parseVDF(data []byte) (map[string]any, error) {
 	p := vdfParser{data: data}
-	root, err := p.object(false)
+	root, err := p.object(0)
 	if err != nil {
 		return nil, fmt.Errorf("vdf: %w at byte %d", err, p.pos)
 	}
@@ -291,7 +357,13 @@ type vdfParser struct {
 	pos  int
 }
 
-func (p *vdfParser) object(nested bool) (map[string]any, error) {
+// object parses keys and values up to the closing brace (depth > 0) or the
+// end of input (depth 0).
+func (p *vdfParser) object(depth int) (map[string]any, error) {
+	if depth > vdfMaxDepth {
+		return nil, errors.New("nested too deep")
+	}
+	nested := depth > 0
 	obj := map[string]any{}
 	for {
 		tok, quoted, err := p.token()
@@ -319,7 +391,7 @@ func (p *vdfParser) object(nested bool) (map[string]any, error) {
 		}
 		switch {
 		case val == "{" && !valQuoted:
-			child, err := p.object(true)
+			child, err := p.object(depth + 1)
 			if err != nil {
 				return nil, err
 			}
@@ -418,10 +490,12 @@ func parseHeroic(files map[string][]byte) ([]catalogueGame, error) {
 		heroicLegendaryLibrary:   &epicLibrary,
 		heroicGOGLibrary:         &gogLibrary,
 	} {
-		data := bytes.TrimSpace(heroicFile(files, name))
-		if len(data) == 0 {
-			continue
+		data, ok := heroicFile(files, name)
+		if !ok {
+			continue // not there: no games from that store
 		}
+		// Present but empty is not "no games": electron-store writes
+		// atomically, so it is a torn or truncated file.
 		if err := json.Unmarshal(data, into); err != nil {
 			return nil, fmt.Errorf("parsing %s: %w", name, err)
 		}
@@ -474,14 +548,14 @@ func parseHeroic(files map[string][]byte) ([]catalogueGame, error) {
 
 // heroicFile finds a Heroic store among the scanned files by its path below
 // the home directory (tar keeps the path relative to /).
-func heroicFile(files map[string][]byte, store string) []byte {
+func heroicFile(files map[string][]byte, store string) ([]byte, bool) {
 	rel := strings.TrimPrefix(store, libraryHome)
 	for name, data := range files {
 		if strings.HasSuffix(name, rel) {
-			return data
+			return data, true
 		}
 	}
-	return nil
+	return nil, false
 }
 
 func firstNonEmpty(s ...string) string {
@@ -537,7 +611,13 @@ func launchCommand(game catalogueGame) string {
 }
 
 func truncateTitle(s string) string {
-	s = strings.ToValidUTF8(strings.TrimSpace(s), "")
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(s, ""))
+	s = strings.TrimSpace(s)
 	for utf8.RuneCountInString(s) > catalogueMaxTitle {
 		_, size := utf8.DecodeLastRuneInString(s)
 		s = s[:len(s)-size]
@@ -547,8 +627,8 @@ func truncateTitle(s string) string {
 
 // Sync makes the catalogue Apps match games: creates the missing, updates
 // the changed and deletes those whose game is gone, for each launcher whose
-// base App is set and readable.
-func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame) error {
+// base App is set and readable. Box art is fetched for at most artBudget.
+func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame, artBudget time.Duration) error {
 	bases := map[string]*v1alpha1types.App{}
 	var errs []error
 	for _, b := range []struct {
@@ -597,7 +677,10 @@ func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame) error {
 		existing[list.Items[i].Name] = &list.Items[i]
 	}
 
+	artCtx, cancel := context.WithTimeout(ctx, artBudget)
+	defer cancel()
 	wanted := map[string]bool{}
+	ids := map[int]string{}
 	for _, game := range games {
 		base := bases[game.Store]
 		if base == nil {
@@ -608,7 +691,14 @@ func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame) error {
 			continue // the same game in two Steam library folders
 		}
 		wanted[name] = true
-		if err := c.syncApp(ctx, base, game, name, existing[name]); err != nil {
+		// Moonlight launches by ID; two games on one ID would launch one.
+		id := catalogueMoonlightID(game.Store, game.ID)
+		if other, dup := ids[id]; dup {
+			errs = append(errs, fmt.Errorf("%s and %s hash to Moonlight ID %d; not cataloguing %s", other, name, id, name))
+			continue
+		}
+		ids[id] = name
+		if err := c.syncApp(ctx, artCtx, base, game, name, existing[name]); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -627,13 +717,25 @@ func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame) error {
 
 // syncApp creates or updates one game's App from its launcher's base App.
 // The per-game settings (hidden, gpu) are the user's once the App exists;
-// everything else follows the base App and the scan.
-func (c *Catalogue) syncApp(ctx context.Context, base *v1alpha1types.App, game catalogueGame, name string, existing *v1alpha1types.App) error {
+// everything else follows the base App and the scan. Box art is the
+// scanner's: the fetched cover, or the base App's until one is fetched.
+func (c *Catalogue) syncApp(ctx, artCtx context.Context, base *v1alpha1types.App, game catalogueGame, name string, existing *v1alpha1types.App) error {
+	if existing == nil {
+		// A hand-made App may hold the name; never overwrite it (and don't
+		// fetch art for an App that can't be created).
+		_, err := c.Apps.Get(ctx, name, metav1.GetOptions{})
+		switch {
+		case err == nil:
+			return fmt.Errorf("an App named %s exists but is not a catalogue App; not cataloguing %s over it", name, game.Title)
+		case !apierrors.IsNotFound(err):
+			return fmt.Errorf("getting App %s: %w", name, err)
+		}
+	}
+
 	spec := base.Spec.DeepCopy()
 	spec.Title = firstNonEmpty(truncateTitle(game.Title), truncateTitle(game.ID))
 	spec.ID = catalogueMoonlightID(game.Store, game.ID)
 	spec.Hidden = false
-	spec.AppAssetWebP = []byte{}
 	for i := range spec.Template.Spec.Containers {
 		ctr := &spec.Template.Spec.Containers[i]
 		ctr.Env = setEnv(ctr.Env, LaunchCommandEnv, launchCommand(game))
@@ -644,7 +746,6 @@ func (c *Catalogue) syncApp(ctx context.Context, base *v1alpha1types.App, game c
 		app = existing.DeepCopy()
 		spec.Hidden = existing.Spec.Hidden
 		spec.GPU = existing.Spec.GPU
-		spec.AppAssetWebP = existing.Spec.AppAssetWebP
 	}
 	if app.Labels == nil {
 		app.Labels = map[string]string{}
@@ -654,7 +755,12 @@ func (c *Catalogue) syncApp(ctx context.Context, base *v1alpha1types.App, game c
 	}
 	app.Labels[v1alpha1types.CatalogueLabel] = game.Store
 	app.Annotations[catalogueIDAnnotation] = game.ID
-	if art, from := c.art(ctx, game, app.Annotations[catalogueArtAnnotation], len(spec.AppAssetWebP) > 0); art != nil {
+	// Keep fetched art; the base App's stands in until there is some (the
+	// CRD rejects an empty appAssetWebP).
+	if existing != nil && app.Annotations[catalogueArtAnnotation] != "" && len(existing.Spec.AppAssetWebP) > 0 {
+		spec.AppAssetWebP = existing.Spec.AppAssetWebP
+	}
+	if art, from := c.art(artCtx, game, app.Annotations[catalogueArtAnnotation]); art != nil {
 		spec.AppAssetWebP = art
 		app.Annotations[catalogueArtAnnotation] = from
 	}
@@ -662,7 +768,7 @@ func (c *Catalogue) syncApp(ctx context.Context, base *v1alpha1types.App, game c
 	if existing == nil {
 		app.Spec = *spec
 		klog.Infof("Catalogue: %s is installed, creating App %s", app.Spec.Title, name)
-		if _, err := c.Apps.Create(ctx, app, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		if _, err := c.Apps.Create(ctx, app, metav1.CreateOptions{}); err != nil {
 			return fmt.Errorf("creating App %s: %w", name, err)
 		}
 		return nil
@@ -680,15 +786,15 @@ func (c *Catalogue) syncApp(ctx context.Context, base *v1alpha1types.App, game c
 }
 
 // art returns new box art for the game and the URL it came from, or nil to
-// keep what the App has: art set by hand (no fetched-from URL), art already
-// fetched from the first URL that worked, or every URL failing (retried
-// after catalogueArtRetry).
-func (c *Catalogue) art(ctx context.Context, game catalogueGame, fetchedFrom string, have bool) (art []byte, from string) {
-	if have && fetchedFrom == "" {
-		return nil, ""
-	}
+// keep what the App has: art already fetched from the first URL that works,
+// every URL failing (retried after catalogueArtRetry), or ctx (the scan's
+// art budget) done.
+func (c *Catalogue) art(ctx context.Context, game catalogueGame, fetchedFrom string) (art []byte, from string) {
 	for _, u := range game.ArtURL {
-		if have && u == fetchedFrom {
+		if u == fetchedFrom {
+			return nil, ""
+		}
+		if ctx.Err() != nil {
 			return nil, ""
 		}
 		if parsed, err := url.Parse(u); err != nil || checkArtURL(parsed) != nil {
@@ -699,6 +805,9 @@ func (c *Catalogue) art(ctx context.Context, game catalogueGame, fetchedFrom str
 		}
 		data, err := c.FetchArt(ctx, u)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, "" // out of budget, not the URL's fault
+			}
 			klog.V(2).Infof("Catalogue: no box art for %s from %s: %v", game.Title, u, err)
 			c.artFailed[u] = c.now()
 			continue
@@ -765,16 +874,17 @@ func fetchArt(ctx context.Context, client *http.Client, rawURL string) ([]byte, 
 		return nil, fmt.Errorf("box art is over %d bytes", catalogueMaxArtBytes)
 	}
 	if !isCoverImage(data) {
-		return nil, errors.New("box art is not a PNG, JPEG or WebP")
+		return nil, errors.New("box art is not a PNG, JPEG or WebP of at most 4096x4096")
 	}
 	return data, nil
 }
 
-// isCoverImage reports whether data is an image moonlight-proxy can serve.
+// isCoverImage reports whether data is an image moonlight-proxy can serve,
+// of a size it can afford to decode on every request.
 func isCoverImage(data []byte) bool {
 	for _, decode := range []func(io.Reader) (image.Config, error){png.DecodeConfig, jpeg.DecodeConfig, webp.DecodeConfig} {
-		if _, err := decode(bytes.NewReader(data)); err == nil {
-			return true
+		if cfg, err := decode(bytes.NewReader(data)); err == nil {
+			return cfg.Width > 0 && cfg.Height > 0 && cfg.Width <= catalogueMaxArtSide && cfg.Height <= catalogueMaxArtSide
 		}
 	}
 	return false

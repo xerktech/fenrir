@@ -24,6 +24,8 @@
             "deviceClassName": {
               "default": "gpu.nvidia.com",
               "description": "DRA DeviceClass to allocate from.",
+              "maxLength": 253,
+              "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
               "type": "string"
             },
             "memory": {
@@ -41,6 +43,12 @@
             }
           },
           "type": "object",
+          "x-kubernetes-validations": [
+            {
+              "message": "memory must be positive",
+              "rule": "!has(self.memory) || quantity(string(self.memory)).isGreaterThan(quantity('0'))"
+            }
+          ],
           "additionalProperties": false
         },
         "hidden": {

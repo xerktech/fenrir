@@ -68,6 +68,8 @@ type AppSpec struct {
 	GPU *AppGPU `json:"gpu,omitempty" xml:"-"`
 }
 
+// AppGPU is the GPU share a session of the App gets.
+// +kubebuilder:validation:XValidation:rule="!has(self.memory) || quantity(string(self.memory)).isGreaterThan(quantity('0'))",message="memory must be positive"
 type AppGPU struct {
 	// VRAM to reserve on one card (the claim's capacity.requests.memory).
 	// Omitted: the whole card.
@@ -77,6 +79,8 @@ type AppGPU struct {
 	// DRA DeviceClass to allocate from.
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default="gpu.nvidia.com"
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	DeviceClassName string `json:"deviceClassName,omitempty"`
 }
 
