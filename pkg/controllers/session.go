@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path"
 	"reflect"
 	"slices"
 	"strconv"
@@ -1102,6 +1103,12 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	}
 	podToCreate.Spec.Tolerations = append(podToCreate.Spec.Tolerations, c.SessionTolerations...)
 
+	// The App's containers only: they see hotplugged controllers.
+	for i := range podToCreate.Spec.Containers {
+		ctr := &podToCreate.Spec.Containers[i]
+		ctr.VolumeMounts = withHotplugMounts(ctr.VolumeMounts)
+	}
+
 	podToCreate.Spec.Containers = append(podToCreate.Spec.Containers,
 		corev1.Container{
 			Name:            "wolf-agent",
@@ -1196,7 +1203,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 					MountPath: wolfAgentTokenMountPath,
 					ReadOnly:  true,
 				},
-			}, wolfAgentVolumeMounts...),
+			}, withHotplugMounts(wolfAgentVolumeMounts)...),
 		},
 		corev1.Container{
 			Name:  "pulseaudio",
@@ -1310,6 +1317,14 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		corev1.Volume{
 			Name:         "wolf-data",
 			VolumeSource: wolfDataVolumeSource,
+		},
+		corev1.Volume{
+			Name:         hotplugDevVolume,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+		corev1.Volume{
+			Name:         hotplugUdevVolume,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
 		// Created by reconcileAgentToken before the pod.
 		corev1.Volume{
@@ -1556,6 +1571,31 @@ func (c *SessionController) pvcName(session *v1alpha1types.Session) string {
 }
 
 // podName is the session's own: each Session runs exactly one pod.
+// Volumes through which wolf-agent hands hotplugged controllers to the App's
+// containers: it mknods their /dev/input nodes into one and writes their udev
+// database entries into the other (pkg/fakeudev). A device node in an
+// emptyDir opens like one in /dev: the device cgroup, granted by
+// cmd/nri-input, is what decides.
+const (
+	hotplugDevVolume  = "direwolf-dev-input"
+	hotplugUdevVolume = "direwolf-udev"
+)
+
+// withHotplugMounts adds the hotplug volume mounts to mounts, except where
+// mounts already has something at that path (e.g. an App mounting the host's
+// /dev/input itself), which a second mount would collide with.
+func withHotplugMounts(mounts []corev1.VolumeMount) []corev1.VolumeMount {
+	for _, m := range []corev1.VolumeMount{
+		{Name: hotplugDevVolume, MountPath: InputDevPath},
+		{Name: hotplugUdevVolume, MountPath: path.Dir(UdevDataPath)},
+	} {
+		if !slices.ContainsFunc(mounts, func(o corev1.VolumeMount) bool { return path.Clean(o.MountPath) == m.MountPath }) {
+			mounts = append(mounts, m)
+		}
+	}
+	return mounts
+}
+
 func (c *SessionController) podName(session *v1alpha1types.Session) string {
 	return session.Name
 }

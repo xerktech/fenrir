@@ -3,6 +3,7 @@ package fakeudev
 import (
 	"bytes"
 	"encoding/binary"
+	"os"
 	"testing"
 )
 
@@ -50,5 +51,46 @@ func TestEncodeProperties(t *testing.T) {
 	want := []byte("ACTION=add\x00DEVNAME=/dev/input/event3\x00")
 	if !bytes.Equal(got, want) {
 		t.Errorf("encodeProperties = %q, want %q", got, want)
+	}
+}
+
+func TestDeviceNodePath(t *testing.T) {
+	cases := map[string]string{
+		"/dev/input/event3": "/d/event3",
+		"/dev/input/js0":    "/d/js0",
+		"/dev/hidraw0":      "",
+		"/dev/input/":       "",
+		"/dev/input/..":     "",
+		"/dev/input/a/b":    "",
+		"/dev/input/../sda": "",
+		"":                  "",
+	}
+	for devname, want := range cases {
+		got, err := deviceNodePath("/d", devname)
+		if want == "" {
+			if err == nil {
+				t.Errorf("deviceNodePath(%q) = %q, want error", devname, got)
+			}
+		} else if err != nil || got != want {
+			t.Errorf("deviceNodePath(%q) = %q, %v; want %q", devname, got, err, want)
+		}
+	}
+}
+
+func TestCreateDeviceNodeRefuses(t *testing.T) {
+	dir := t.TempDir()
+	for _, props := range []map[string]string{
+		{"DEVNAME": "/dev/input/event3", "MAJOR": "8", "MINOR": "0"}, // a disk
+		{"DEVNAME": "/dev/input/event3", "MAJOR": "0", "MINOR": "0"}, // unresolved
+		{"DEVNAME": "/dev/input/event3", "MAJOR": "13", "MINOR": "x"},
+		{"DEVNAME": "/dev/input/event3", "MAJOR": "13"},
+		{"DEVNAME": "/dev/hidraw0", "MAJOR": "13", "MINOR": "67"},
+	} {
+		if err := CreateDeviceNode(dir, props); err == nil {
+			t.Errorf("CreateDeviceNode(%v) succeeded, want error", props)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("refused creates left %d entries", len(entries))
 	}
 }

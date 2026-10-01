@@ -347,3 +347,59 @@ func TestAppendResourceClaimsOneEntryPerName(t *testing.T) {
 		}
 	}
 }
+
+// mountsAt maps each mount path of the named container to its volume name.
+func mountsAt(t *testing.T, spec corev1.PodSpec, name string) map[string]string {
+	t.Helper()
+	for _, c := range spec.Containers {
+		if c.Name != name {
+			continue
+		}
+		out := map[string]string{}
+		for _, m := range c.VolumeMounts {
+			if prev, dup := out[m.MountPath]; dup {
+				t.Errorf("container %s mounts %s twice (%s, %s)", name, m.MountPath, prev, m.Name)
+			}
+			out[m.MountPath] = m.Name
+		}
+		return out
+	}
+	t.Fatalf("no container %s", name)
+	return nil
+}
+
+func TestSessionPodSharesHotplugVolumes(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/nvidia_devices/user.yaml", "../../examples/nvidia_devices/firefox.yaml") //nolint:dogsled // only the Pod matters here
+	spec := pod.Spec
+
+	for _, v := range []string{hotplugDevVolume, hotplugUdevVolume} {
+		i := slices.IndexFunc(spec.Volumes, func(vol corev1.Volume) bool { return vol.Name == v })
+		if i < 0 || spec.Volumes[i].EmptyDir == nil {
+			t.Errorf("volume %s missing or not an emptyDir", v)
+		}
+	}
+	for _, name := range []string{"app", "wolf-agent"} {
+		got := mountsAt(t, spec, name)
+		if got["/dev/input"] != hotplugDevVolume || got["/run/udev"] != hotplugUdevVolume {
+			t.Errorf("container %s mounts /dev/input=%q /run/udev=%q", name, got["/dev/input"], got["/run/udev"])
+		}
+	}
+	for _, name := range []string{"wolf", "pulseaudio"} {
+		got := mountsAt(t, spec, name)
+		if _, ok := got["/dev/input"]; ok {
+			t.Errorf("container %s should not mount /dev/input", name)
+		}
+	}
+}
+
+func TestSessionPodKeepsAppsOwnInputMount(t *testing.T) {
+	// steam.yaml mounts the host's /dev/input into the app itself.
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	got := mountsAt(t, pod.Spec, "app")
+	if got["/dev/input"] != "input-events" {
+		t.Errorf("app /dev/input = %q, want the App's own input-events", got["/dev/input"])
+	}
+	if got["/run/udev"] != hotplugUdevVolume {
+		t.Errorf("app /run/udev = %q, want %s", got["/run/udev"], hotplugUdevVolume)
+	}
+}

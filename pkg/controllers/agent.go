@@ -17,6 +17,11 @@ import (
 // /run/udev there) for libudev consumers (SDL/Steam) to see them.
 const UdevDataPath = "/run/udev/data"
 
+// InputDevPath is where the agent creates the /dev/input nodes of hotplugged
+// devices. It must be a volume shared with the app container, mounted at
+// /dev/input in both (see inputDevVolume).
+const InputDevPath = "/dev/input"
+
 // Represents the controller that runs inside the Pod itself
 type Agent struct {
 	WolfClient wolfapi.Client
@@ -120,6 +125,17 @@ func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
 	// the netlink event and the hwdb filename are correct.
 	for _, udevEvent := range ev.UdevEvents {
 		fakeudev.ResolveDevNumbers(udevEvent)
+		// Before the event is sent: SDL opens DEVNAME as soon as it hears it.
+		// Events without a /dev/input node (the parent input device, hidraw)
+		// have nothing to create here.
+		if !fakeudev.IsInputDeviceNode(udevEvent) {
+			continue
+		}
+		if err := fakeudev.CreateDeviceNode(InputDevPath, udevEvent); err != nil {
+			utilruntime.HandleError(fmt.Errorf("failed to create device node: %w", err))
+		} else {
+			klog.InfoS("Created device node", "devname", udevEvent["DEVNAME"], "session", ev.SessionID)
+		}
 	}
 
 	for _, entry := range ev.UdevHwDbEntries {
@@ -150,6 +166,12 @@ func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
 func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 	for _, udevEvent := range ev.UdevEvents {
 		fakeudev.ResolveDevNumbers(udevEvent)
+		if !fakeudev.IsInputDeviceNode(udevEvent) {
+			continue
+		}
+		if err := fakeudev.RemoveDeviceNode(InputDevPath, udevEvent); err != nil {
+			utilruntime.HandleError(fmt.Errorf("failed to remove device node: %w", err))
+		}
 	}
 
 	for _, entry := range ev.UdevHwDbEntries {

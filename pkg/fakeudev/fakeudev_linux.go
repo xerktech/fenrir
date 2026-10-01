@@ -24,3 +24,7 @@ func sendNetlink(msg []byte) error {
 	}
 	return nil
 }
+
+func mknodChar(path string, major, minor uint32) error {
+	return unix.Mknod(path, unix.S_IFCHR|0o666, int(unix.Mkdev(major, minor)))
+}
