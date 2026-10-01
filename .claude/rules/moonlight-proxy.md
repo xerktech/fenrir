@@ -24,5 +24,7 @@ paths:
   - Sessions carry `direwolf/launch-id`; a failed launch (even a failed Create) deletes by it.
     A failed Create is cleaned up under the slot; a failed wait queues its launch-id, answers,
     and the next slot holder (or a background drainer) deletes it before counting.
+  - A drain shares its caller's deadline and requeues what it didn't finish; never detach it
+    inside `createSession`, or stalled cleanups eat the next launch's budget.
 - `RESTServerOptions.BusyCheck` is the hook for anything besides Sessions that holds the GPU
   (the Library pod). A check error fails the launch closed.

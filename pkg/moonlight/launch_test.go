@@ -134,7 +134,12 @@ type slowListSessions struct {
 
 func (s slowListSessions) List(ctx context.Context, opts metav1.ListOptions) (*v1alpha1types.SessionList, error) { //nolint:gocritic // interface signature
 	if strings.Contains(opts.LabelSelector, launchIDLabel) {
-		time.Sleep(s.delay)
+		// Like a real client, give up when ctx does.
+		select {
+		case <-time.After(s.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err() //nolint:wrapcheck // as client-go returns it
+		}
 	}
 	return s.SessionInterface.List(ctx, opts) //nolint:wrapcheck // test passthrough
 }
@@ -434,6 +439,81 @@ func TestLaunchFailureCleanupQueuesForBusySlot(t *testing.T) {
 
 	if resp := <-bobDone; resp.StatusCode != http.StatusOK {
 		t.Errorf("bob = %d %q, want success after alice's cleanup", resp.StatusCode, resp.StatusMessage)
+	}
+}
+
+func TestLaunchQueuedBeforeFailureStillDrainsCleanup(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int32
+	f := newLaunchFixture(t, &RESTServerOptions{
+		LaunchTimeout: time.Second,
+		BusyCheck: func(context.Context) (string, error) {
+			// Call 2 is carol's: she holds the slot while alice fails.
+			if calls.Add(1) == 2 {
+				<-release
+				return "held", nil
+			}
+			return "", nil
+		},
+	})
+	f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		get, ok := action.(k8stesting.GetAction)
+		if !ok || !strings.HasPrefix(get.GetName(), "alice-") {
+			return false, nil, nil
+		}
+		return true, &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: get.GetName(), Namespace: testNamespace}}, nil
+	})
+
+	aliceDone := make(chan int, 1)
+	go func() {
+		code, _ := f.launch(t, "alice")
+		aliceDone <- code
+	}()
+	time.Sleep(100 * time.Millisecond) // alice is in her readiness wait
+	carolDone := make(chan struct{})
+	go func() {
+		defer close(carolDone)
+		f.launch(t, "carol")
+	}()
+	time.Sleep(50 * time.Millisecond)
+	// Bob queues for the slot before alice fails, so he's ahead of her
+	// cleanup goroutine: only the drain in createSession can save him.
+	bobDone := make(chan Response, 1)
+	go func() {
+		_, resp := f.launch(t, "bob")
+		bobDone <- resp
+	}()
+	if code := <-aliceDone; code != http.StatusInternalServerError {
+		t.Fatalf("alice HTTP status = %d, want 500", code)
+	}
+	close(release)
+	<-carolDone
+
+	if resp := <-bobDone; resp.StatusCode != http.StatusOK {
+		t.Errorf("bob = %d %q, want success: alice's orphan must be drained before counting", resp.StatusCode, resp.StatusMessage)
+	}
+}
+
+func TestLaunchDrainStopsAtCallerDeadline(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{})
+	f.slowCleanupList(200 * time.Millisecond)
+	for i := range 5 {
+		f.server.queueCleanup(fmt.Sprintf("stale%d", i))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	f.server.drainCleanups(ctx)
+
+	if elapsed := time.Since(start); elapsed > 600*time.Millisecond {
+		t.Errorf("drain took %s, want it to stop at the caller's 300ms deadline", elapsed)
+	}
+	f.server.cleanupMu.Lock()
+	left := len(f.server.pendingCleanups)
+	f.server.cleanupMu.Unlock()
+	if left == 0 || left == 5 {
+		t.Errorf("%d cleanups left queued, want the unfinished ones kept for the next slot holder", left)
 	}
 }
 

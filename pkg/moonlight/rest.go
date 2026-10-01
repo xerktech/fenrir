@@ -573,7 +573,12 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 	}, func() {
 		// The Create may have been stored even though it errored (e.g. the
 		// response timed out); remove it before the next launch counts it.
-		s.deleteLaunch(launchCtx, launchID)
+		// Detached: the launch's deadline has usually passed by now.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(launchCtx), launchSlotTimeout)
+		defer cancel()
+		if cleanupErr := s.deleteLaunch(ctx, launchID); cleanupErr != nil {
+			klog.Errorf("Failed to clean up failed launch %s: %s", launchID, cleanupErr)
+		}
 	})
 	if busyReason != "" {
 		klog.Infof("Refusing launch of app %s for user %s: %s", app.Name, user.Name, busyReason)
@@ -620,7 +625,10 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			s.launchSlot <- struct{}{}
 			defer func() { <-s.launchSlot }()
-			s.drainCleanups(launchCtx)
+			// Detached and bounded: launchCtx is done by now.
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(launchCtx), launchSlotTimeout)
+			defer cancel()
+			s.drainCleanups(ctx)
 		}()
 		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %w", err))
 		return
@@ -707,39 +715,47 @@ func (s *RESTServer) queueCleanup(launchID string) {
 }
 
 // drainCleanups deletes the Sessions of queued failed launches. The caller
-// must hold launchSlot.
+// must hold launchSlot. It stops when ctx is done and leaves what it didn't
+// finish queued for the next slot holder, so it never outlasts the caller's
+// own budget.
 func (s *RESTServer) drainCleanups(ctx context.Context) {
 	s.cleanupMu.Lock()
 	ids := s.pendingCleanups
 	s.pendingCleanups = nil
 	s.cleanupMu.Unlock()
 
-	for _, id := range ids {
-		s.deleteLaunch(ctx, id)
+	for i, id := range ids {
+		err := s.deleteLaunch(ctx, id)
+		if err != nil && ctx.Err() != nil {
+			s.cleanupMu.Lock()
+			s.pendingCleanups = append(s.pendingCleanups, ids[i:]...)
+			s.cleanupMu.Unlock()
+			return
+		}
+		if err != nil {
+			// Not retried; the operator's unstarted-session reaper is the backstop.
+			klog.Errorf("Failed to clean up failed launch %s: %s", id, err)
+		}
 	}
 }
 
 // launchIDLabel marks a Session with the /launch request that created it.
 const launchIDLabel = "direwolf/launch-id"
 
-// deleteLaunch removes the Session(s) created by one /launch. It detaches
-// from ctx's cancellation: the launch's deadline has usually passed by now.
-func (s *RESTServer) deleteLaunch(ctx context.Context, launchID string) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), launchSlotTimeout)
-	defer cancel()
-
+// deleteLaunch removes the Session(s) created by one /launch.
+func (s *RESTServer) deleteLaunch(ctx context.Context, launchID string) error {
 	sessions, err := s.SessionClient.List(ctx, metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(labels.Set{launchIDLabel: launchID}).String(),
 	})
 	if err != nil {
-		klog.Errorf("Failed to list sessions of failed launch %s: %s", launchID, err)
-		return
+		return fmt.Errorf("failed to list sessions: %w", err)
 	}
 	for _, session := range sessions.Items {
 		if err := s.SessionClient.Delete(ctx, session.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-			klog.Errorf("Failed to delete session %s of failed launch: %s", session.Name, err)
+			return fmt.Errorf("failed to delete session %s: %w", session.Name, err)
 		}
 	}
+	return nil
 }
 
 func busyResponse(reason string) Response {
