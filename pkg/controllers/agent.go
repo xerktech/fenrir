@@ -35,6 +35,8 @@ type Agent struct {
 	// ends or a subscribe fails. A stream that stayed up for maxDelay resets
 	// it to minDelay.
 	minResubscribeDelay, maxResubscribeDelay time.Duration
+
+	lobby *lobbyJoiner
 }
 
 func NewAgent(
@@ -48,6 +50,7 @@ func NewAgent(
 		minResubscribeDelay: 200 * time.Millisecond,
 		maxResubscribeDelay: 10 * time.Second,
 	}
+	res.lobby = &lobbyJoiner{client: wolfClient, settle: lobbyJoinSettle, unplug: res.handleDeviceUnplug}
 
 	return res
 }
@@ -103,9 +106,10 @@ func (a *Agent) handleEvents(ctx context.Context, ch <-chan *sse.Event) {
 			logEvent(ev)
 
 			switch wolfapi.WolfEventType(ev.Event) {
-			// Wolf handles a moonlight disconnect as a "Pause".
-			// When moonlight disconnects from Wolf we should reflect that
-			// into the state in Kubernetes so things can be cleaned up.
+			// Wolf handles a moonlight disconnect as a "Pause" (and takes
+			// the stream out of the lobby itself). The stream can't be
+			// resumed with the client's new keys, so stop it; the game
+			// keeps running on the lobby's display.
 			case wolfapi.PauseStreamEventType:
 				var pauseEvent wolfapi.PauseStreamEvent
 				if err := json.Unmarshal(ev.Data, &pauseEvent); err != nil {
@@ -113,6 +117,7 @@ func (a *Agent) handleEvents(ctx context.Context, ch <-chan *sse.Event) {
 					continue
 				}
 
+				a.lobby.ended(pauseEvent.SessionID)
 				if err := a.WolfClient.StopSession(ctx, pauseEvent.SessionID); err != nil {
 					utilruntime.HandleError(fmt.Errorf("failed to stop session: %w", err))
 					continue
@@ -135,7 +140,26 @@ func (a *Agent) handleEvents(ctx context.Context, ch <-chan *sse.Event) {
 					utilruntime.HandleError(fmt.Errorf("failed to unmarshal unplug device event: %w", err))
 					continue
 				}
+				if a.lobby.holdsUnplug(unplugEvent) {
+					continue
+				}
 				a.handleDeviceUnplug(unplugEvent)
+			case wolfapi.StopStreamEventType:
+				var stopEvent wolfapi.PauseStreamEvent
+				if err := json.Unmarshal(ev.Data, &stopEvent); err != nil {
+					utilruntime.HandleError(fmt.Errorf("failed to unmarshal stop stream event: %w", err))
+					continue
+				}
+				a.lobby.ended(stopEvent.SessionID)
+			case wolfapi.VideoSessionEventType, wolfapi.AudioSessionEventType:
+				var setup wolfapi.StreamSetupEvent
+				if err := json.Unmarshal(ev.Data, &setup); err != nil {
+					utilruntime.HandleError(fmt.Errorf("failed to unmarshal %s: %w", ev.Event, err))
+					continue
+				}
+				a.lobby.streamSetup(setup.SessionID, wolfapi.WolfEventType(ev.Event) == wolfapi.VideoSessionEventType)
+			case wolfapi.RTPVideoPingEventType, wolfapi.RTPAudioPingEventType:
+				a.lobby.ping(ctx, wolfapi.WolfEventType(ev.Event) == wolfapi.RTPVideoPingEventType)
 			default:
 				continue
 			}
@@ -146,6 +170,11 @@ func (a *Agent) handleEvents(ctx context.Context, ch <-chan *sse.Event) {
 // logEvent logs ev without its data: Wolf's session events carry the
 // stream's AES key and IV.
 func logEvent(ev *sse.Event) {
+	if t := wolfapi.WolfEventType(ev.Event); t == wolfapi.RTPVideoPingEventType || t == wolfapi.RTPAudioPingEventType {
+		// Several a second for the whole stream.
+		klog.V(5).Infof("Received event: %s", ev.Event)
+		return
+	}
 	klog.Infof("Received event: %s", ev.Event)
 	klog.Infof("Event ID: %s", ev.ID)
 	klog.Infof("Event Data: %d bytes", len(ev.Data))

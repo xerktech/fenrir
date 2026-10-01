@@ -159,10 +159,12 @@ func TestClaimRecordedPortsOnStart(t *testing.T) {
 }
 
 // fakeAgent is a wolf-agent stand-in: it lists the Wolf sessions in sessions
-// and records adds and stops.
+// and the lobbies in lobbies (by default the pod's lobby already exists), and
+// records adds, stops, lobby creates and the order of every call.
 type fakeAgent struct {
 	*httptest.Server
 	sessions string // JSON array for /api/v1/sessions
+	lobbies  string // JSON array for /api/v1/lobbies
 
 	open atomic.Int32 // client connections not yet closed
 
@@ -170,13 +172,31 @@ type fakeAgent struct {
 	added   int
 	last    wolfapi.Session // body of the last add
 	stopped []string
+	lobby   *wolfapi.CreateLobbyRequest // body of the last lobby create
+	calls   []string                    // request paths, in order
 }
 
 func newFakeAgent(t *testing.T) *fakeAgent {
 	t.Helper()
-	a := &fakeAgent{sessions: "[]"}
+	a := &fakeAgent{sessions: "[]", lobbies: `[{"id":"lobby-1","name":"alex-1","connected_sessions":[]}]`}
 	a.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		a.calls = append(a.calls, r.URL.Path)
+		a.mu.Unlock()
 		switch r.URL.Path {
+		case "/api/v1/lobbies":
+			fmt.Fprintf(w, `{"success":true,"lobbies":%s}`, a.lobbies)
+		case "/api/v1/lobbies/create":
+			var req wolfapi.CreateLobbyRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decoding CreateLobby body: %v", err)
+			}
+			a.mu.Lock()
+			a.lobby = &req
+			a.mu.Unlock()
+			fmt.Fprint(w, `{"success":true,"lobby_id":"lobby-new"}`)
+		case "/api/v1/apps":
+			fmt.Fprint(w, `{"success":true,"apps":[{"id":"1","title":"Wolf UI","render_node":"/dev/dri/renderD129"}]}`)
 		case "/api/v1/sessions":
 			fmt.Fprintf(w, `{"success":true,"sessions":%s}`, a.sessions)
 		case "/api/v1/sessions/add":

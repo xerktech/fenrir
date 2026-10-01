@@ -59,6 +59,9 @@ type Client interface {
 	StopSession(ctx context.Context, sessionID string) error
 	ListSessions(ctx context.Context) ([]Session, error)
 	ListApps(ctx context.Context) ([]App, error)
+	ListLobbies(ctx context.Context) ([]Lobby, error)
+	CreateLobby(ctx context.Context, lobby *CreateLobbyRequest) (string, error)
+	JoinLobby(ctx context.Context, lobbyID, sessionID string) error
 	// SubscribeToEvents's channel is closed when the stream ends; the caller
 	// resubscribes.
 	SubscribeToEvents(ctx context.Context) (<-chan *sse.Event, error)
@@ -346,11 +349,33 @@ type WolfEventType string
 
 const (
 	PauseStreamEventType  WolfEventType = "wolf::core::events::PauseStreamEvent"
+	StopStreamEventType   WolfEventType = "wolf::core::events::StopStreamEvent"
 	PlugDeviceEventType   WolfEventType = "wolf::core::events::PlugDeviceEvent"
 	UnplugDeviceEventType WolfEventType = "wolf::core::events::UnplugDeviceEvent"
+	// VideoSessionEventType and AudioSessionEventType fire when the client's
+	// RTSP setup asks for the video/audio stream; the pipeline itself starts
+	// on the stream's first RTP ping.
+	VideoSessionEventType WolfEventType = "wolf::core::events::VideoSession"
+	AudioSessionEventType WolfEventType = "wolf::core::events::AudioSession"
+	// RTPVideoPingEventType and RTPAudioPingEventType are the client's RTP
+	// pings, sent every 500ms for the whole stream. They carry the client
+	// address, not the session ID.
+	RTPVideoPingEventType WolfEventType = "wolf::core::events::RTPVideoPingEvent"
+	RTPAudioPingEventType WolfEventType = "wolf::core::events::RTPAudioPingEvent"
 )
 
+// PauseStreamEvent also decodes StopStreamEvent.
+//
+// Every stream Wolf's API adds has the same session ID (a hash of the
+// paired client's cert, empty for API sessions), so a pod's launch and its
+// resumes share one ID.
 type PauseStreamEvent struct {
+	SessionID string `json:"session_id"`
+}
+
+// StreamSetupEvent is the session ID of a VideoSession or AudioSession event;
+// the rest (AudioSession carries the AES key) is left undecoded.
+type StreamSetupEvent struct {
 	SessionID string `json:"session_id"`
 }
 

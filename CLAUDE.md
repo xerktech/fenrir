@@ -60,6 +60,17 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     - A disconnect sets `status.disconnectedAt`; the pod is kept for `--disconnect-grace-period`
       (default 10m) for `/resume`, then the Session is deleted. Tests: `session_lifecycle_test.go`.
     - The unstarted-session reaper must skip disconnected sessions (`expiredReason`).
+    - The game runs on the pod's Wolf lobby display, not a stream's: stopping a stream destroys
+      its display, and every disconnect stops it (XERK-1363).
+      - `ensureLobby` creates it before the first AddSession, so its socket is `wayland-1`, the
+        `WAYLAND_DISPLAY` the game waits for. `stop_when_everyone_leaves` must stay false.
+      - wolf-agent joins each stream (`lobbyJoiner`) only after both pipelines start (setup events,
+        then RTP pings): Wolf switches only running pipelines to the lobby's producers.
+      - Wolf runs with `WOLF_USE_ZERO_COPY=FALSE` so a stream's own producer has the lobby's caps
+        (`video/x-raw`); mismatched caps break every second producer switch on VA.
+      - Every stream Wolf's API adds on a pod has the same session ID (hash of an empty client
+        cert): tell streams apart by events (setup, pause, stop), never by ID.
+      - Tests: `TestFirstAttachCreatesLobbyBeforeStream`, `agent_lobby_test.go`.
   - Every pod listener (Wolf HTTP/HTTPS too, wolf-agent) must come from the session's port block
     (`pkg/controllers/ports.go`, `--session-port-range`), or pods on the node collide.
     - Blocks are keyed by pod and freed when its Session is deleted; `status.ports` is the
