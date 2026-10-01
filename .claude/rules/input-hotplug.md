@@ -19,7 +19,7 @@ paths:
     the `cmd/nri-input` grant (13:* rwm). Re-check `nodev` if Talos or kubelet changes.
 - wolf-agent needs CAP_MKNOD (runtime default; dropping ALL in its sidecar policy breaks hotplug).
 - Only char major 13 under `/dev/input/` is created (`CreateDeviceNode`); a Wolf event can't make
-  a disk node. `/dev/hidraw*` nodes are not handled (no shared `/dev` to put them in).
+  a disk node. `/dev/hidraw*` is not handled: pads are uinput Xbox pads (no uhid on Talos).
 - An App that mounts its own `/dev/input` keeps it (`withHotplugMounts` skips taken paths).
 - Tests: `TestSessionPodSharesHotplugVolumes`, `TestSessionPodKeepsAppsOwnInputMount`
   (`pkg/controllers/session_test.go`); `TestCreateAndRemoveDeviceNode` (`pkg/fakeudev`).
