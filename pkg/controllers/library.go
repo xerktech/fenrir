@@ -3,8 +3,11 @@ package controllers
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -32,6 +35,13 @@ const (
 	LibraryPodName = "direwolf-library"
 
 	libraryContainer = "library"
+	// libraryAuthSecret holds the password Selkies' nginx demands (basic
+	// auth, user libraryAuthUser) on the pod's ports. The operator's proxy
+	// adds it; nothing else knows it, so reaching the pod IP directly gets
+	// nowhere even where NetworkPolicy isn't enforced.
+	libraryAuthSecret = "direwolf-library-auth"
+	libraryAuthKey    = "password"
+	libraryAuthUser   = "abc"
 	// libraryHTTPPort is Selkies' plain-HTTP port in linuxserver images.
 	libraryHTTPPort = 3000
 	// libraryHome is HOME for the image's abc user, so the Steam home PVC
@@ -176,6 +186,13 @@ func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) e
 // reconcileIdle stops the Library once it is idle, and otherwise says when to
 // look again.
 func (c *LibraryController) reconcileIdle(ctx context.Context, pod *corev1.Pod) (time.Duration, error) {
+	// A failed or evicted Library serves nobody but would hold the Steam lock
+	// (and block launches) until it idled out.
+	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
+		klog.Infof("Library pod is %s, removing it", pod.Status.Phase)
+		return 0, c.stop(ctx, pod)
+	}
+
 	idleFor := c.now().Sub(libraryLastActivity(pod))
 	if idleFor < c.IdleTimeout {
 		return c.IdleTimeout - idleFor, nil
@@ -196,8 +213,24 @@ func (c *LibraryController) reconcileIdle(ctx context.Context, pod *corev1.Pod) 
 		}
 	}
 
+	// The informer copy may predate a browser coming back; ask the API server
+	// before killing Steam under them.
+	fresh, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to re-read Library pod: %w", err)
+	}
+	if fresh.UID != pod.UID {
+		return 0, nil
+	}
+	if idleFor = c.now().Sub(libraryLastActivity(fresh)); idleFor < c.IdleTimeout {
+		return c.IdleTimeout - idleFor, nil
+	}
+
 	klog.Infof("Library idle for %s with no downloads, stopping it", idleFor.Round(time.Second))
-	return 0, c.stop(ctx, pod)
+	return 0, c.stop(ctx, fresh)
 }
 
 // stop asks Steam to shut down cleanly (it writes to the shared home), waits
@@ -348,6 +381,9 @@ func (c *LibraryController) EnsurePod(ctx context.Context) (*corev1.Pod, string,
 	if busy, checkErr := c.gameRunning(ctx); checkErr != nil || busy {
 		return nil, libraryBusyReasonIf(busy), checkErr
 	}
+	if _, authErr := c.AuthPassword(ctx); authErr != nil {
+		return nil, "", authErr
+	}
 
 	pod, err = pods.Create(ctx, c.buildPod(), metav1.CreateOptions{})
 	if errors.IsAlreadyExists(err) {
@@ -441,6 +477,13 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 				Name:  libraryContainer,
 				Image: c.Image,
 				Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: libraryHTTPPort, Protocol: corev1.ProtocolTCP}},
+				Env: []corev1.EnvVar{
+					{Name: "CUSTOM_USER", Value: libraryAuthUser},
+					{Name: "PASSWORD", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: libraryAuthSecret},
+						Key:                  libraryAuthKey,
+					}}},
+				},
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
 						TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(libraryHTTPPort)},
@@ -455,4 +498,48 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 			}},
 		},
 	}
+}
+
+// AuthPassword returns the Library's basic-auth password (see
+// libraryAuthSecret), creating it on first use. It is never rotated by the
+// operator: a running pod keeps the value it started with.
+func (c *LibraryController) AuthPassword(ctx context.Context) (string, error) {
+	secrets := c.K8sClient.CoreV1().Secrets(c.Namespace)
+	secret, err := secrets.Get(ctx, libraryAuthSecret, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		raw := make([]byte, 32)
+		if _, err = rand.Read(raw); err != nil {
+			return "", fmt.Errorf("generating Library password: %w", err)
+		}
+		secret, err = secrets.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: libraryAuthSecret, Namespace: c.Namespace},
+			Data:       map[string][]byte{libraryAuthKey: []byte(hex.EncodeToString(raw))},
+		}, metav1.CreateOptions{})
+		if errors.IsAlreadyExists(err) {
+			secret, err = secrets.Get(ctx, libraryAuthSecret, metav1.GetOptions{})
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to get Library auth secret: %w", err)
+	}
+	password := string(secret.Data[libraryAuthKey])
+	if password == "" {
+		return "", fmt.Errorf("library auth secret %s has no %q key", libraryAuthSecret, libraryAuthKey)
+	}
+	return password, nil
+}
+
+// ValidateLibraryGamesPath rejects a games mount the pod spec can't hold: it
+// must be absolute and clear of the Library's other mounts.
+func ValidateLibraryGamesPath(p string) error {
+	if !path.IsAbs(p) || path.Clean(p) == "/" {
+		return fmt.Errorf("%q must be an absolute path below /", p)
+	}
+	p = path.Clean(p)
+	for _, other := range []string{libraryHome, "/dev/shm"} {
+		if p == other || strings.HasPrefix(p, other+"/") || strings.HasPrefix(other, p+"/") {
+			return fmt.Errorf("%q overlaps the Library's %s mount", p, other)
+		}
+	}
+	return nil
 }

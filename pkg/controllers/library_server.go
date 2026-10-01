@@ -24,10 +24,14 @@ import (
 // written to the pod. Far below the idle timeout, so the lag doesn't matter.
 const libraryActivityFlushInterval = 30 * time.Second
 
+// libraryStartPath is where the stopped page's Start button posts.
+const libraryStartPath = "/.direwolf/library/start"
+
 // LibraryServer is the Library page's HTTP front end; the Ingress points
-// here, not at the pod. With no pod it starts one (unless a game holds the
-// Steam lock) and serves a "Starting…" page until the pod is ready, then
-// reverse-proxies the Selkies page and its WebSocket to the pod.
+// here, not at the pod. A visit with no pod starts one (unless a game holds
+// the Steam lock) and serves a "Starting…" page until the pod is ready, then
+// reverse-proxies the Selkies page and its WebSocket to the pod, adding the
+// pod's basic-auth credentials.
 type LibraryServer struct {
 	library *LibraryController
 	pods    generic.NamespacedLister[*corev1.Pod]
@@ -36,12 +40,20 @@ type LibraryServer struct {
 	trusted []netip.Prefix
 	proxy   *httputil.ReverseProxy
 
+	// password caches the pod's basic-auth password; cleared on a 401.
+	password atomic.Pointer[string]
+
 	// lastSeen is the unix-nano time of the last byte to or from the pod.
 	lastSeen    atomic.Int64
 	lastFlushed int64
 }
 
 type libraryTargetKey struct{}
+
+type libraryTarget struct {
+	url      *url.URL
+	password string
+}
 
 func NewLibraryServer(library *LibraryController, pods generic.NamespacedLister[*corev1.Pod], trusted []netip.Prefix) *LibraryServer {
 	s := &LibraryServer{library: library, pods: pods, trusted: trusted}
@@ -64,14 +76,22 @@ func NewLibraryServer(library *LibraryController, pods generic.NamespacedLister[
 	s.proxy = &httputil.ReverseProxy{
 		Transport: transport,
 		Rewrite: func(r *httputil.ProxyRequest) {
-			if target, ok := r.In.Context().Value(libraryTargetKey{}).(*url.URL); ok {
-				r.SetURL(target)
+			if target, ok := r.In.Context().Value(libraryTargetKey{}).(libraryTarget); ok {
+				r.SetURL(target.url)
+				r.Out.SetBasicAuth(libraryAuthUser, target.password)
 			}
 			r.SetXForwarded()
 		},
+		ModifyResponse: func(resp *http.Response) error {
+			if resp.StatusCode == http.StatusUnauthorized {
+				// The pod started with another password; re-read it.
+				s.password.Store(nil)
+			}
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			klog.V(2).Infof("Library proxy error: %v", err)
-			writeLibraryPage(w, http.StatusBadGateway, "The Library isn't answering yet. Retrying…", true)
+			writeLibraryPage(w, http.StatusBadGateway, "The Library isn't answering yet. Retrying…", true, false)
 		},
 	}
 	return s
@@ -136,36 +156,73 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		pod = nil
 	}
+	start := r.URL.Path == libraryStartPath
+	if start && (r.Method != http.MethodPost || r.Header.Get("Sec-Fetch-Site") == "cross-site") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	if pod == nil {
-		// Only a page visit starts the Library. A WebSocket reconnect or an
-		// XHR from a tab left open after an idle shutdown must not.
-		if r.Method != http.MethodGet || r.Header.Get("Upgrade") != "" {
-			writeLibraryPage(w, http.StatusServiceUnavailable, "The Library is stopped. Reload the page to start it.", false)
+		if !start && !userNavigation(r) {
+			// Selkies reloads its tab when the stream drops, so a tab left
+			// open across an idle shutdown would restart the Library at once.
+			writeLibraryPage(w, http.StatusServiceUnavailable, "The Library is stopped.", false, true)
 			return
 		}
 		var busy string
 		pod, busy, err = s.library.EnsurePod(r.Context())
 		if err != nil {
 			klog.Errorf("Failed to start the Library: %v", err)
-			writeLibraryPage(w, http.StatusInternalServerError, "The Library could not be started. Try again in a minute.", false)
+			writeLibraryPage(w, http.StatusInternalServerError, "The Library could not be started. Try again in a minute.", false, false)
 			return
 		}
 		if busy != "" {
-			writeLibraryPage(w, http.StatusConflict, busy, false)
+			writeLibraryPage(w, http.StatusConflict, busy, false, false)
 			return
 		}
+	}
+	if start {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
 	}
 
 	switch {
 	case pod.DeletionTimestamp != nil:
-		writeLibraryPage(w, http.StatusServiceUnavailable, "The Library is shutting down. It will start again in a moment…", true)
+		writeLibraryPage(w, http.StatusServiceUnavailable, "The Library is shutting down…", true, false)
 	case !podReady(pod) || pod.Status.PodIP == "":
-		writeLibraryPage(w, http.StatusServiceUnavailable, "Starting the Library…", true)
+		writeLibraryPage(w, http.StatusServiceUnavailable, "Starting the Library…", true, false)
 	default:
+		password, err := s.authPassword(r.Context())
+		if err != nil {
+			klog.Errorf("Failed to read the Library password: %v", err)
+			writeLibraryPage(w, http.StatusInternalServerError, "The Library is unavailable. Try again in a minute.", false, false)
+			return
+		}
 		s.touch()
-		target := &url.URL{Scheme: "http", Host: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(libraryHTTPPort))}
+		target := libraryTarget{
+			url:      &url.URL{Scheme: "http", Host: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(libraryHTTPPort))},
+			password: password,
+		}
 		s.proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), libraryTargetKey{}, target)))
 	}
+}
+
+// userNavigation reports whether r is a page load the user asked for (typed
+// URL, link, reload button): browsers send Sec-Fetch-User only for those,
+// never for a script's location.reload().
+func userNavigation(r *http.Request) bool {
+	return r.Method == http.MethodGet && r.Header.Get("Upgrade") == "" && r.Header.Get("Sec-Fetch-User") == "?1"
+}
+
+func (s *LibraryServer) authPassword(ctx context.Context) (string, error) {
+	if p := s.password.Load(); p != nil {
+		return *p, nil
+	}
+	password, err := s.library.AuthPassword(ctx)
+	if err != nil {
+		return "", err
+	}
+	s.password.Store(&password)
+	return password, nil
 }
 
 func (s *LibraryServer) isTrusted(addr netip.Addr) bool {
@@ -178,8 +235,12 @@ func (s *LibraryServer) isTrusted(addr netip.Addr) bool {
 }
 
 // writeLibraryPage serves a minimal status page; refresh reloads it until the
-// Library is up.
-func writeLibraryPage(w http.ResponseWriter, status int, message string, refresh bool) {
+// Library is up, startButton offers to start it.
+func writeLibraryPage(w http.ResponseWriter, status int, message string, refresh, startButton bool) {
+	button := ""
+	if startButton {
+		button = `<form method="post" action="` + libraryStartPath + `"><button type="submit">Start the Library</button></form>`
+	}
 	meta := ""
 	if refresh {
 		meta = `<meta http-equiv="refresh" content="3">`
@@ -190,9 +251,9 @@ func writeLibraryPage(w http.ResponseWriter, status int, message string, refresh
 	w.WriteHeader(status)
 	_, _ = fmt.Fprintf(w, `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">%s<title>Library</title>
-<style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0;padding:0 16px}p{max-width:32em;text-align:center;font-size:1.2em}</style>
-</head><body><p>%s</p></body></html>
-`, meta, html.EscapeString(message))
+<style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0;padding:0 16px}p{max-width:32em;text-align:center;font-size:1.2em}button{font-size:1.1em;padding:.6em 1.4em}main{display:grid;justify-items:center}</style>
+</head><body><main><p>%s</p>%s</main></body></html>
+`, meta, html.EscapeString(message), button)
 }
 
 // activityConn calls touch on every read or write.

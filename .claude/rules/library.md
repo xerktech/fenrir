@@ -20,10 +20,14 @@ paths:
     operator replica serves the page, only the leader runs the idle check.
   - Any doubt (exec failure, unparseable Heroic store) keeps the Library up.
   - Shutdown deletes the pod even if `steam -shutdown` fails: a stuck pod would hold the lock.
-- Only a plain GET starts the Library: a tab left open after an idle shutdown keeps
-  reconnecting its WebSocket and must not restart it.
-- Selkies has no login. The page is trusted only from `--library-trusted-proxies` (the Ingress
-  behind Authentik) and the chart's NetworkPolicy lets only the operator reach the pod.
+- Only a user-activated page load (`Sec-Fetch-User: ?1`) or the stopped page's Start button
+  (POST `libraryStartPath`) starts the Library.
+  - Selkies calls `location.reload()` when its stream drops, so a tab left open across an idle
+    shutdown would restart it at once. A plain GET or a WebSocket must never start it.
+- The pod's nginx demands basic auth (`PASSWORD` from Secret `direwolf-library-auth`); only the
+  operator's proxy adds it. k8x's flannel does not enforce the chart's NetworkPolicy, so this
+  password is the pod's real protection. Selkies itself binds localhost, behind nginx.
+- The page is trusted only from `--library-trusted-proxies` (the Ingress behind Authentik).
 - Tests: `TestLibraryIdleRule`, `TestLibraryEnsurePod*`, `TestLibraryServer` in
   `pkg/controllers/library_test.go`; `TestLaunchBacksOutWhenBusyAfterCreate` in
   `pkg/moonlight/library_test.go`.

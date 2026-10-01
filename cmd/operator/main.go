@@ -83,6 +83,17 @@ func main() {
 	if *libraryPort != 0 && (len(libraryTrusted) == 0 || *libraryHomePVC == "" || *libraryGamesPVC == "") {
 		klog.Fatal("--library-port requires --library-trusted-proxies, --library-home-pvc and --library-games-pvc")
 	}
+	if *libraryPort < 0 || *libraryPort > 65535 {
+		klog.Fatalf("--library-port must be 0-65535, got %d", *libraryPort)
+	}
+	for _, p := range libraryTrusted {
+		if p.Bits() == 0 {
+			klog.Fatalf("--library-trusted-proxies: %s would trust every peer", p)
+		}
+	}
+	if pathErr := controllers.ValidateLibraryGamesPath(*libraryGamesPath); pathErr != nil {
+		klog.Fatalf("--library-games-path: %v", pathErr)
+	}
 	if *libraryIdleTimeout <= 0 {
 		klog.Fatalf("--library-idle-timeout must be positive, got %s", *libraryIdleTimeout)
 	}

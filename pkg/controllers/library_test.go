@@ -185,6 +185,7 @@ func TestLibraryIdleRule(t *testing.T) {
 		steam        string
 		heroic       string
 		execErr      error
+		phase        corev1.PodPhase
 		wantStopped  bool
 		wantRequeue  time.Duration
 		wantShutdown bool
@@ -203,9 +204,11 @@ func TestLibraryIdleRule(t *testing.T) {
 			execErr: errors.New("container not running"), wantRequeue: libraryCheckInterval},
 		// Never came up: nothing to ask, nothing to shut down cleanly.
 		{name: "idle, never ready", lastActivity: time.Hour, ready: false, wantStopped: true},
+		{name: "failed while browser active", lastActivity: time.Minute, phase: corev1.PodFailed, wantStopped: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := libraryPod(tc.lastActivity, tc.ready)
+			pod.Status.Phase = tc.phase
 			f := newLibraryFixture(t, []runtime.Object{pod})
 			f.exec.steam, f.exec.heroic, f.exec.err = tc.steam, tc.heroic, tc.execErr
 
@@ -277,6 +280,17 @@ func TestLibraryEnsurePodStartsLibrary(t *testing.T) {
 		if got := claims[mounts[path]]; got != want {
 			t.Errorf("%s is backed by %q, want %q", path, got, want)
 		}
+	}
+	var passwordFrom *corev1.SecretKeySelector
+	for _, e := range pod.Spec.Containers[0].Env {
+		if e.Name == "PASSWORD" && e.ValueFrom != nil {
+			passwordFrom = e.ValueFrom.SecretKeyRef
+		}
+	}
+	if passwordFrom == nil || passwordFrom.Name != libraryAuthSecret {
+		t.Error("Library pod's Selkies login is not set from the auth secret")
+	} else if secret, getErr := f.k8s.CoreV1().Secrets(libraryTestNS).Get(context.Background(), libraryAuthSecret, metav1.GetOptions{}); getErr != nil || len(secret.Data[passwordFrom.Key]) < 32 {
+		t.Errorf("auth secret = %v, %v; want a generated password", secret, getErr)
 	}
 	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
 		t.Error("Library pod gets a service account token")
@@ -356,8 +370,15 @@ func (f *libraryFixture) server(t *testing.T, pods ...*corev1.Pod) *LibraryServe
 	return NewLibraryServer(f.library, lister, []netip.Prefix{netip.MustParsePrefix("10.1.0.0/16")})
 }
 
+// userVisit is what a browser sends on a page load the user asked for.
+var userVisit = http.Header{"Sec-Fetch-User": {"?1"}, "Sec-Fetch-Mode": {"navigate"}}
+
 func serveLibrary(s *LibraryServer, peer string, header http.Header) *httptest.ResponseRecorder {
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+	return serveLibraryRequest(s, http.MethodGet, "/", peer, header)
+}
+
+func serveLibraryRequest(s *LibraryServer, method, target, peer string, header http.Header) *httptest.ResponseRecorder {
+	req := httptest.NewRequestWithContext(context.Background(), method, target, http.NoBody)
 	req.RemoteAddr = peer
 	maps.Copy(req.Header, header)
 	rec := httptest.NewRecorder()
@@ -375,9 +396,33 @@ func TestLibraryServer(t *testing.T) {
 	})
 	t.Run("visit starts the Library", func(t *testing.T) {
 		f := newLibraryFixture(t, nil)
-		rec := serveLibrary(f.server(t), "10.1.0.5:5555", nil)
+		rec := serveLibrary(f.server(t), "10.1.0.5:5555", userVisit)
 		if !f.podExists(t) || !strings.Contains(rec.Body.String(), "Starting") {
 			t.Errorf("HTTP %d %q, pod created %v; want the Starting page", rec.Code, rec.Body.String(), f.podExists(t))
+		}
+	})
+	// Selkies reloads its tab (location.reload(), no Sec-Fetch-User) when the
+	// stream drops: a tab left open across an idle shutdown would otherwise
+	// restart the Library at once and hold the Steam lock indefinitely.
+	t.Run("script reload does not start the Library", func(t *testing.T) {
+		f := newLibraryFixture(t, nil)
+		rec := serveLibrary(f.server(t), "10.1.0.5:5555", http.Header{"Sec-Fetch-Mode": {"navigate"}})
+		if f.podExists(t) || !strings.Contains(rec.Body.String(), libraryStartPath) {
+			t.Errorf("HTTP %d %q, pod created %v; want the stopped page with a Start button", rec.Code, rec.Body.String(), f.podExists(t))
+		}
+	})
+	t.Run("Start button starts the Library", func(t *testing.T) {
+		f := newLibraryFixture(t, nil)
+		rec := serveLibraryRequest(f.server(t), http.MethodPost, libraryStartPath, "10.1.0.5:5555", http.Header{"Sec-Fetch-Site": {"same-origin"}})
+		if rec.Code != http.StatusSeeOther || !f.podExists(t) {
+			t.Errorf("HTTP %d, pod created %v; want 303 and a pod", rec.Code, f.podExists(t))
+		}
+	})
+	t.Run("cross-site start is refused", func(t *testing.T) {
+		f := newLibraryFixture(t, nil)
+		rec := serveLibraryRequest(f.server(t), http.MethodPost, libraryStartPath, "10.1.0.5:5555", http.Header{"Sec-Fetch-Site": {"cross-site"}})
+		if rec.Code != http.StatusForbidden || f.podExists(t) {
+			t.Errorf("HTTP %d, pod created %v; want 403 and no pod", rec.Code, f.podExists(t))
 		}
 	})
 	// A tab left open after an idle shutdown keeps reconnecting its
@@ -391,17 +436,26 @@ func TestLibraryServer(t *testing.T) {
 	})
 	t.Run("game running", func(t *testing.T) {
 		f := newLibraryFixture(t, nil, &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: libraryTestNS}})
-		rec := serveLibrary(f.server(t), "10.1.0.5:5555", nil)
+		rec := serveLibrary(f.server(t), "10.1.0.5:5555", userVisit)
 		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "one place") || f.podExists(t) {
 			t.Errorf("HTTP %d %q; want 409 with the Steam lock message", rec.Code, rec.Body.String())
 		}
 	})
 	t.Run("ready pod is proxied", func(t *testing.T) {
-		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		f := newLibraryFixture(t, nil)
+		wantPassword, err := f.library.AuthPassword(context.Background())
+		if err != nil || wantPassword == "" {
+			t.Fatalf("AuthPassword = %q, %v", wantPassword, err)
+		}
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Selkies' nginx demands the operator-held password.
+			if user, pass, ok := r.BasicAuth(); !ok || user != libraryAuthUser || pass != wantPassword {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			_, _ = w.Write([]byte("selkies"))
 		}))
 		defer backend.Close()
-		f := newLibraryFixture(t, nil)
 		pod := libraryPod(time.Hour, true)
 		s := f.server(t, pod)
 		// Point the proxy's dialer at the test backend whatever the pod IP.
@@ -417,7 +471,7 @@ func TestLibraryServer(t *testing.T) {
 			return &activityConn{Conn: conn, touch: s.touch}, nil
 		}
 
-		rec := serveLibrary(s, "10.1.0.5:5555", nil)
+		rec := serveLibrary(s, "10.1.0.5:5555", http.Header{"Authorization": {"Basic YWJjOndyb25n"}})
 		if rec.Body.String() != "selkies" {
 			t.Errorf("HTTP %d %q, want the pod's page", rec.Code, rec.Body.String())
 		}
@@ -425,4 +479,34 @@ func TestLibraryServer(t *testing.T) {
 			t.Error("proxied traffic not counted as activity")
 		}
 	})
+}
+
+// The idle decision is made on the informer's copy; a browser that came back
+// since (activity already on the pod) must not have Steam killed under it.
+func TestLibraryStopRechecksFreshActivity(t *testing.T) {
+	stale := libraryPod(time.Hour, true)
+	fresh := libraryPod(time.Minute, true)
+	f := newLibraryFixture(t, []runtime.Object{fresh})
+
+	requeue, err := f.library.reconcileIdle(context.Background(), stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.podExists(t) || f.exec.shutdowns != 0 {
+		t.Errorf("stopped a Library whose browser came back (shutdowns=%d)", f.exec.shutdowns)
+	}
+	if requeue <= 0 {
+		t.Errorf("requeue = %v, want the rest of the idle timeout", requeue)
+	}
+}
+
+func TestValidateLibraryGamesPath(t *testing.T) {
+	for path, ok := range map[string]bool{
+		"/games": true, "/mnt/games": true,
+		"games": false, "/": false, "/config": false, "/config/games": false, "/dev/shm": false, "/dev": false,
+	} {
+		if err := ValidateLibraryGamesPath(path); (err == nil) != ok {
+			t.Errorf("ValidateLibraryGamesPath(%q) = %v, want ok=%v", path, err, ok)
+		}
+	}
 }

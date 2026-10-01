@@ -121,6 +121,9 @@ controllers:
             memory: 256Mi
 service:
   app:
+    # Keeps the Service named "direwolf" (the cert's dnsNames) when
+    # service.library is enabled too.
+    forceRename: '{{ include "bjw-s.common.lib.chart.names.fullname" $ }}'
     controller: moonlight_proxy
     # Clients reach the proxy on the node IP (hostNetwork), not through this.
     type: ClusterIP
@@ -165,7 +168,8 @@ rbac:
         - apiGroups: [""]
           resources: ["persistentvolumeclaims", "configmaps"]
           verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-        # Per-session wolf-agent bearer token (create, replace if stale).
+        # Per-session wolf-agent bearer token (create, replace if stale), and
+        # the Library's basic-auth password.
         - apiGroups: [""]
           resources: ["secrets"]
           verbs: ["get", "create", "delete"]
@@ -208,8 +212,9 @@ rbac:
       subjects:
         - identifier: *proxyId
 rawResources:
-  # Selkies serves the Library desktop without a login: only the operator,
-  # which sits behind the authenticating Ingress, may reach it.
+  # Only the operator, which sits behind the authenticating Ingress, may reach
+  # the Library desktop. Defence in depth: the pod also demands a password only
+  # the operator knows, as not every CNI enforces NetworkPolicy.
   library-ingress:
     apiVersion: networking.k8s.io/v1
     kind: NetworkPolicy
