@@ -19,11 +19,19 @@ paths:
   would replace ours; glibc always reads the file. musl ignores it, so Alpine sidecars are safe.
   - Verified on talos04: a container with its own `LD_PRELOAD` still gets the fix, and an Alpine
     sidecar in an annotated pod runs normally.
+  - It hides a `/etc/ld.so.preload` the image ships itself (the plugin can only see mounts).
+- **The preload entry is `/usr/lib/nvenc-fix/$PLATFORM/libnvenc_fix.so`.** One 64-bit path made every
+  32-bit process (Steam client, Wine) print `wrong ELF class` on each exec.
+  - `i686/` holds an EMPTY object: no 32-bit process encodes, and the shim's RM structs are 64-bit.
+  - glibc names x86_64 CPUs `x86_64`, `haswell` or `xeon_phi`, so the extra names are symlinks.
+    A missing one means "cannot open shared object" on every exec. Checked on Debian 13, Ubuntu
+    24.04, Fedora 42, Arch, and i386 Debian 12.
+- A pod volume at or above `/etc/ld.so.preload` or `/usr/lib/nvenc-fix` (`/etc`, `/usr/lib`) makes the
+  plugin skip that container: mounting under a read-only volume fails container creation.
 - **The shim is built on `manylinux_2_28`, not the Go toolchain's Debian.** A current glibc binds
   `dlsym@GLIBC_2.34` and `__isoc23_sscanf@GLIBC_2.38`; the preload then fails in older images.
-  The built object needs only `GLIBC_2.14`.
-- `shim/nvenc_fix.c` is vendored (GPLv3, `shim/COPYING`) with two local changes listed in its
-  header. It is built into a separate `.so`; nothing in fenrir links it.
+  The built object needs only `GLIBC_2.17`.
+- `shim/nvenc_fix.c` is vendored (GPLv3, `shim/COPYING`) with local changes listed in its header. It is built into a separate `.so`; nothing in fenrir links it.
   - It fails open: if it cannot map a GPU ID to a device node it leaves the list unfiltered.
   - IDs map to minors via `/proc/driver/nvidia/gpus` by full PCI domain:bus:device; its
     `GET_ID_INFO` path returns status 0x1f on driver 595 and is only a first attempt.

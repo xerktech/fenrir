@@ -8,6 +8,12 @@
  *     number in different domains cannot be confused.
  *   - the /proc GPU map is loaded under pthread_once: any thread may issue the
  *     first RM control.
+ *   - an ioctl is treated as an RM control only if its type is NVIDIA's 'F'.
+ *     Upstream matched the number (0x2A) alone, so any other driver's successful
+ *     ioctl 0x2A (e.g. TCGETS2) had its argument read, and possibly written, as
+ *     NVOS54_PARAMETERS.
+ *   - NVENC_FIX_DEBUG is read with secure_getenv: /etc/ld.so.preload also loads
+ *     this into setuid programs, which must not open a file the caller names.
  *
  * nvenc_fix.c - LD_PRELOAD interposer to fix NVENC in multi-GPU containers
  *
@@ -119,7 +125,7 @@ static void log_init(void) {
         return;
     log_initialized = 1;
 
-    const char *val = getenv("NVENC_FIX_DEBUG");
+    const char *val = secure_getenv("NVENC_FIX_DEBUG");
     if (!val || val[0] == '\0') {
         log_enabled = 0;
         return;
@@ -368,7 +374,7 @@ int ioctl(int fd, unsigned long request, ...) {
     /* Check if this is an NV_ESC_RM_CONTROL ioctl.
      * The ioctl number encodes the escape code in bits 0-7 of the NR field. */
     unsigned int nr = _IOC_NR(request);
-    if (nr != NV_ESC_RM_CONTROL)
+    if (_IOC_TYPE(request) != NV_IOCTL_MAGIC || nr != NV_ESC_RM_CONTROL)
         return ret;
 
     /* It's an RM_CONTROL. Check the cmd field. */
