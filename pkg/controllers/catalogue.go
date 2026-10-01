@@ -161,6 +161,10 @@ func NewCatalogue(apps v1alpha1client.AppInterface, exec PodExecutor, gamesPath 
 // internet: carrier-grade NAT (often cluster/VPN space), benchmarking, and
 // IPv6 translations that can reach private IPv4 (NAT64, 6to4).
 var nonPublicPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("::/96"),        // IPv4-compatible (deprecated)
+	netip.MustParsePrefix("2001::/32"),    // Teredo
+	netip.MustParsePrefix("240.0.0.0/4"),  // reserved
+	netip.MustParsePrefix("192.0.0.0/24"), // IETF protocol assignments
 	netip.MustParsePrefix("100.64.0.0/10"),
 	netip.MustParsePrefix("198.18.0.0/15"),
 	netip.MustParsePrefix("64:ff9b::/96"),
@@ -240,8 +244,22 @@ func (c *Catalogue) Scan(ctx context.Context, pod *corev1.Pod, artBudget time.Du
 func catalogueScanCommand(gamesPath string) []string {
 	// As the desktop user (exec runs as root): -h follows symlinks that user
 	// planted, which must not reach files only root can read.
-	return []string{"s6-setuidgid", libraryAuthUser, "sh", "-c", `
+	// A path the user can't reach must fail the scan, not read as missing (no
+	// games, Apps deleted): reachable checks the deepest existing directory
+	// on the way to it can be read and searched.
+	return []string{"s6-setuidgid", libraryUnixUser, "sh", "-c", `
+reachable() {
+  p=$1
+  while [ ! -e "$p" ] && [ ! -L "$p" ]; do
+    p=${p%/*}; [ -n "$p" ] || p=/
+  done
+  if [ -d "$p" ] && { [ ! -r "$p" ] || [ ! -x "$p" ]; }; then
+    echo "$p is not readable by $(id -un)" >&2; exit 1
+  fi
+}
 max_manifest=$1 max_store=$2 home=$3 games=$4; shift 4
+for f in "$@" "$home/.local/share/Steam/steamapps/x" "$games/x" "$games/steamapps/x"; do reachable "$f"; done
+for d in "$games"/*/; do [ -d "$d" ] && reachable "${d}steamapps/x"; done
 set -- "$@" "$home"/.local/share/Steam/steamapps/appmanifest_*.acf "$games"/steamapps/appmanifest_*.acf "$games"/*/steamapps/appmanifest_*.acf
 for f do
   shift

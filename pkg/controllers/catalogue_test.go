@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/tools/remotecommand"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	dwfake "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
@@ -43,7 +44,7 @@ func fixtureExec(t *testing.T, dir string) PodExecutor {
 			return "", errors.New("exec into the wrong container")
 		}
 		// The pod runs it as the desktop user; here, as whoever runs the test.
-		if len(command) < 2 || command[0] != "s6-setuidgid" || command[1] != libraryAuthUser {
+		if len(command) < 2 || command[0] != "s6-setuidgid" || command[1] != libraryUnixUser {
 			return "", errors.New("scan not run as the desktop user: " + strings.Join(command, " "))
 		}
 		args := slices.Clone(command[2:])
@@ -711,18 +712,24 @@ func TestParseAppManifestFilters(t *testing.T) {
 
 func TestPublicAddressOnly(t *testing.T) {
 	for addr, ok := range map[string]bool{
-		"23.45.67.89:443":       true,
-		"[2600:1f18::1]:443":    true,
-		"10.0.0.1:443":          false,
-		"127.0.0.1:443":         false,
-		"169.254.169.254:443":   false,
-		"[::1]:443":             false,
-		"[fd00::1]:443":         false,
-		"[::ffff:10.0.0.1]:443": false,
-		"100.64.0.1:443":        false,
-		"[64:ff9b::a00:1]:443":  false,
-		"[2002:a00:1::]:443":    false,
-		"0.0.0.0:443":           false,
+		"23.45.67.89:443":        true,
+		"[2600:1f18::1]:443":     true,
+		"10.0.0.1:443":           false,
+		"127.0.0.1:443":          false,
+		"169.254.169.254:443":    false,
+		"[::1]:443":              false,
+		"[fd00::1]:443":          false,
+		"[::ffff:10.0.0.1]:443":  false,
+		"100.64.0.1:443":         false,
+		"198.18.0.1:443":         false,
+		"[64:ff9b:1::a00:1]:443": false,
+		"[::7f00:1]:443":         false,
+		"[2001:0:1::1]:443":      false,
+		"240.0.0.1:443":          false,
+		"192.0.0.8:443":          false,
+		"[64:ff9b::a00:1]:443":   false,
+		"[2002:a00:1::]:443":     false,
+		"0.0.0.0:443":            false,
 	} {
 		if got := publicAddressOnly("tcp", addr, nil) == nil; got != ok {
 			t.Errorf("publicAddressOnly(%s) allowed = %v, want %v", addr, got, ok)
@@ -833,6 +840,42 @@ func TestCatalogueSyncRefusesDuplicateMoonlightID(t *testing.T) {
 	f.app(t, catalogueAppName(v1alpha1types.CatalogueStoreGOG, a))
 	if _, err := f.dw.DirewolfV1alpha1().Apps(libraryTestNS).Get(context.Background(), catalogueAppName(v1alpha1types.CatalogueStoreGOG, b), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("second game on the same ID got an App (err %v)", err)
+	}
+}
+
+// What the real executor runs: client-go returns nil after a failed write,
+// and streamCapped must still fail.
+func TestStreamCappedFailsOnOverflow(t *testing.T) {
+	out, err := streamCapped(func(opts remotecommand.StreamOptions) error {
+		_, _ = io.Copy(opts.Stdout, strings.NewReader(strings.Repeat("x", maxExecOutput+1)))
+		return nil
+	})
+	if err == nil {
+		t.Errorf("streamCapped over the cap = %d bytes, nil", len(out))
+	}
+}
+
+// A Library path the scan user can't read fails the scan rather than reading
+// as no games (which would delete their Apps).
+func TestCatalogueScanUnreadableDirFails(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads everything; permissions can't be tested")
+	}
+	for _, rel := range []string{"games/SteamLibrary", "home/.config/heroic/gog_store", "games"} {
+		dir := t.TempDir()
+		writeFixture(t, dir, map[string]string{
+			"home/.keep": "",
+			"games/SteamLibrary/steamapps/appmanifest_570.acf": `"AppState" { "appid" "570" "name" "Dota 2" "StateFlags" "4" }`,
+			gogInstalledRel: gogStore,
+		})
+		p := filepath.Join(dir, rel)
+		if err := os.Chmod(p, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(p, 0o755) }) //nolint:gosec // restore so TempDir can be removed
+		if err := scanFixtureErr(t, dir); err == nil {
+			t.Errorf("%s unreadable: scan succeeded", rel)
+		}
 	}
 }
 

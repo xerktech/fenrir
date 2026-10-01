@@ -42,6 +42,9 @@ const (
 	libraryAuthSecret = "direwolf-library-auth"
 	libraryAuthKey    = "password"
 	libraryAuthUser   = "abc"
+	// libraryUnixUser is the image's desktop (and Steam) user, not to be
+	// confused with the basic-auth name above.
+	libraryUnixUser = "abc"
 	// libraryHTTPPort is Selkies' plain-HTTP port in linuxserver images.
 	libraryHTTPPort = 3000
 	// libraryHome is HOME for the image's abc user, so the Steam home PVC
@@ -132,11 +135,18 @@ func NewPodExecutor(config *rest.Config, client kubernetes.Interface) PodExecuto
 		if err != nil {
 			return "", fmt.Errorf("creating exec stream: %w", err)
 		}
-		stdout := &cappedBuffer{max: maxExecOutput}
-		stderr := &cappedBuffer{max: 64 << 10}
-		err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: stdout, Stderr: stderr})
-		return execResult(stdout, stderr, err)
+		return streamCapped(func(opts remotecommand.StreamOptions) error {
+			return executor.StreamWithContext(ctx, opts) //nolint:wrapcheck // streamCapped wraps it
+		})
 	}
+}
+
+// streamCapped runs an exec stream into capped buffers and returns its
+// stdout through execResult.
+func streamCapped(stream func(remotecommand.StreamOptions) error) (string, error) {
+	stdout := &cappedBuffer{max: maxExecOutput}
+	stderr := &cappedBuffer{max: 64 << 10}
+	return execResult(stdout, stderr, stream(remotecommand.StreamOptions{Stdout: stdout, Stderr: stderr}))
 }
 
 type LibraryControllerOptions struct {

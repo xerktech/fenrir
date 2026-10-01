@@ -24,6 +24,9 @@ paths:
     Apps (with their per-game settings) get deleted. A dangling symlink fails the scan.
   - The scan runs as the desktop user (`s6-setuidgid abc`): exec is root, and `-h` would
     follow a planted symlink to a root-only file. Parse errors never quote file content.
+  - As abc, an unreadable directory would make a glob come up empty (no games, Apps deleted);
+    the script's `reachable` fails the scan instead. `TestCatalogueScanUnreadableDirFails`
+    skips as root, so run it as a non-root user (CI is).
   - A launcher whose base App is missing is skipped: its Apps stay, never "uninstalled".
   - Only Apps labelled `direwolf/catalogue=<store>` are ever updated or deleted.
 - Generated Apps are a copy of `--catalogue-steam-app` / `--catalogue-heroic-app`.
@@ -38,7 +41,7 @@ paths:
   - More than `catalogueMaxGames` games fails the scan.
   - Size caps: per manifest/store in the script and `readTar`, and `maxExecOutput` on every exec.
     `cappedBuffer` must not embed `bytes.Buffer`: its `ReadFrom` lets `io.Copy` skip the cap.
-  - client-go only logs a failed stream write and returns no error, so `execResult` must turn
+  - client-go only logs a failed stream write and returns no error, so `streamCapped` must turn
     an overflowed `cappedBuffer` into one; else a cut-off tar reads as fewer games, and deletes.
   - `vdfMaxDepth` bounds the parser's recursion: deep nesting is a Go stack overflow,
     which kills the whole operator, not just the scan.
