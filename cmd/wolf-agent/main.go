@@ -109,11 +109,9 @@ func main() {
 
 	// Start HTTPS server
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", *serverPort),
-		Handler: mux,
-		TLSConfig: &tls.Config{
-			GetCertificate: certs.GetCertificate,
-		},
+		Addr:      fmt.Sprintf(":%d", *serverPort),
+		Handler:   mux,
+		TLSConfig: serverTLSConfig(certs),
 	}
 
 	klog.Infof("Listening on port %d\n", *serverPort)
@@ -292,6 +290,12 @@ type certFile struct {
 	certPath, keyPath string
 	last              atomic.Pointer[tls.Certificate]
 	failing           atomic.Bool // logs only on transitions, not on every handshake
+}
+
+// serverTLSConfig serves certs' current cert. It takes the *certFile rather
+// than a cert so the cert can't be snapshotted at startup.
+func serverTLSConfig(certs *certFile) *tls.Config {
+	return &tls.Config{GetCertificate: certs.GetCertificate}
 }
 
 func newCertFile(certPath, keyPath string, initial *tls.Certificate) *certFile {

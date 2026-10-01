@@ -288,9 +288,36 @@ func TestCertFileFollowsRotation(t *testing.T) {
 		t.Error("not serving the initial cert")
 	}
 
+	// The server's TLS config, built before the rotation as main() builds it.
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	tlsLn := tls.NewListener(ln, serverTLSConfig(f))
+	go func() {
+		for {
+			c, acceptErr := tlsLn.Accept()
+			if acceptErr != nil {
+				return
+			}
+			_ = c.(*tls.Conn).HandshakeContext(context.Background()) //nolint:forcetypeassert // tls.NewListener yields *tls.Conn
+			_ = c.Close()
+		}
+	}()
+
 	second := write()
 	if !bytes.Equal(served(f), second) {
 		t.Error("still serving the old cert after rotation")
+	}
+	d := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // inspecting the served cert
+	conn, err := d.DialContext(context.Background(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if !bytes.Equal(conn.(*tls.Conn).ConnectionState().PeerCertificates[0].Raw, second) { //nolint:forcetypeassert // tls.Dialer yields *tls.Conn
+		t.Error("server's TLS config serves a stale cert")
 	}
 
 	// Half-swapped: a key that doesn't match the cert.
