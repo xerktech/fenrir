@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"image/png"
 	"io"
@@ -44,7 +45,7 @@ func fixtureExec(t *testing.T, dir string) PodExecutor {
 			return "", errors.New("exec into the wrong container")
 		}
 		// The pod runs it as the desktop user; here, as whoever runs the test.
-		if len(command) < 2 || command[0] != "s6-setuidgid" || command[1] != libraryUnixUser {
+		if len(command) < 2 || command[0] != "s6-setuidgid" || command[1] != "abc" { // the image's desktop user
 			return "", errors.New("scan not run as the desktop user: " + strings.Join(command, " "))
 		}
 		args := slices.Clone(command[2:])
@@ -856,27 +857,52 @@ func TestStreamCappedFailsOnOverflow(t *testing.T) {
 }
 
 // A Library path the scan user can't read fails the scan rather than reading
-// as no games (which would delete their Apps).
+// as no games (which would delete their Apps); a folder that is not a Steam
+// library (ext4's root-only lost+found) does not.
 func TestCatalogueScanUnreadableDirFails(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root reads everything; permissions can't be tested")
 	}
-	for _, rel := range []string{"games/SteamLibrary", "home/.config/heroic/gog_store", "games"} {
+	for _, tc := range []struct {
+		rel     string
+		mode    os.FileMode
+		wantErr bool
+	}{
+		{"games/SteamLibrary", 0o000, true}, // listed in libraryfolders.vdf
+		{"games/SteamLibrary", 0o600, true}, // readable, not searchable
+		{"home/.config/heroic/gog_store", 0o000, true},
+		{"games", 0o000, true},
+		{"games/lost+found", 0o000, false},
+		{"games/other", 0o000, false},
+	} {
 		dir := t.TempDir()
 		writeFixture(t, dir, map[string]string{
-			"home/.keep": "",
-			"games/SteamLibrary/steamapps/appmanifest_570.acf": `"AppState" { "appid" "570" "name" "Dota 2" "StateFlags" "4" }`,
-			gogInstalledRel: gogStore,
+			"home/.local/share/Steam/steamapps/libraryfolders.vdf": libraryFolders(filepath.Join(dir, "home/.local/share/Steam"), filepath.Join(dir, "games/SteamLibrary")),
+			"games/SteamLibrary/steamapps/appmanifest_570.acf":     `"AppState" { "appid" "570" "name" "Dota 2" "StateFlags" "4" }`,
+			"games/lost+found/.keep":                               "",
+			"games/other/.keep":                                    "",
+			gogInstalledRel:                                        gogStore,
 		})
-		p := filepath.Join(dir, rel)
-		if err := os.Chmod(p, 0o000); err != nil {
+		p := filepath.Join(dir, tc.rel)
+		if err := os.Chmod(p, tc.mode); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(p, 0o755) }) // restore, so TempDir can be removed
-		if err := scanFixtureErr(t, dir); err == nil {
-			t.Errorf("%s unreadable: scan succeeded", rel)
+		if err := scanFixtureErr(t, dir); (err != nil) != tc.wantErr {
+			t.Errorf("%s at %o: scan err = %v, want error %v", tc.rel, tc.mode, err, tc.wantErr)
 		}
 	}
+}
+
+// libraryFolders is a libraryfolders.vdf as Steam writes it.
+func libraryFolders(paths ...string) string {
+	var sb strings.Builder
+	sb.WriteString("\"libraryfolders\"\n{\n")
+	for i, p := range paths {
+		fmt.Fprintf(&sb, "\t\"%d\"\n\t{\n\t\t\"path\"\t\t\"%s\"\n\t\t\"label\"\t\t\"\"\n\t}\n", i, p)
+	}
+	sb.WriteString("}\n")
+	return sb.String()
 }
 
 func TestCappedBuffer(t *testing.T) {

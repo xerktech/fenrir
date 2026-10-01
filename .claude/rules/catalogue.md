@@ -25,8 +25,10 @@ paths:
   - The scan runs as the desktop user (`s6-setuidgid abc`): exec is root, and `-h` would
     follow a planted symlink to a root-only file. Parse errors never quote file content.
   - As abc, an unreadable directory would make a glob come up empty (no games, Apps deleted);
-    the script's `reachable` fails the scan instead. `TestCatalogueScanUnreadableDirFails`
-    skips as root, so run it as a non-root user (CI is).
+    the script's `reachable` fails the scan instead, for the stores, the default libraries and
+    each library in `libraryfolders.vdf`. Never for every folder on the games volume: ext4's
+    root-only `lost+found` would fail every scan. `TestCatalogueScanUnreadableDirFails` skips
+    as root, so run it as a non-root user (CI is).
   - A launcher whose base App is missing is skipped: its Apps stay, never "uninstalled".
   - Only Apps labelled `direwolf/catalogue=<store>` are ever updated or deleted.
 - Generated Apps are a copy of `--catalogue-steam-app` / `--catalogue-heroic-app`.

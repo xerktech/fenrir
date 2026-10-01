@@ -246,7 +246,8 @@ func catalogueScanCommand(gamesPath string) []string {
 	// planted, which must not reach files only root can read.
 	// A path the user can't reach must fail the scan, not read as missing (no
 	// games, Apps deleted): reachable checks the deepest existing directory
-	// on the way to it can be read and searched.
+	// on the way to it can be read and searched. It covers the stores, the
+	// default libraries and every library in Steam's libraryfolders.vdf.
 	return []string{"s6-setuidgid", libraryUnixUser, "sh", "-c", `
 reachable() {
   p=$1
@@ -259,7 +260,16 @@ reachable() {
 }
 max_manifest=$1 max_store=$2 home=$3 games=$4; shift 4
 for f in "$@" "$home/.local/share/Steam/steamapps/x" "$games/x" "$games/steamapps/x"; do reachable "$f"; done
-for d in "$games"/*/; do [ -d "$d" ] && reachable "${d}steamapps/x"; done
+# Only folders Steam lists as libraries must be readable: an unrelated one
+# (ext4's root-only lost+found) is none of the scan's business.
+lf=$home/.local/share/Steam/steamapps/libraryfolders.vdf
+if [ -f "$lf" ]; then
+  libs=$(sed -n 's/^[[:space:]]*"path"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$lf") || exit 1
+  set -f; IFS='
+'
+  for lib in $libs; do reachable "$lib/steamapps/x"; done
+  set +f; unset IFS
+fi
 set -- "$@" "$home"/.local/share/Steam/steamapps/appmanifest_*.acf "$games"/steamapps/appmanifest_*.acf "$games"/*/steamapps/appmanifest_*.acf
 for f do
   shift
