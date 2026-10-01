@@ -42,6 +42,25 @@ func TestReadToken(t *testing.T) {
 	}
 }
 
+// testTokenFile writes token to a temp file and returns a tokenFile on it and
+// a function that rewrites the file in place.
+func testTokenFile(t *testing.T, token string) (f *tokenFile, write func(string)) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "token")
+	write = func(tok string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(tok), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(token)
+	var err error
+	if f, err = newTokenFile(path); err != nil {
+		t.Fatal(err)
+	}
+	return f, write
+}
+
 // TestSelfClientSendsToken guards the in-pod agent controller: it reaches
 // Wolf through this process's own authenticated proxy, so it must send the token.
 func TestSelfClientSendsToken(t *testing.T) {
@@ -60,22 +79,15 @@ func TestSelfClientSendsToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := selfClient(port, wolfapi.StaticToken("s3cret")).ListSessions(context.Background()); err != nil {
+	f, write := testTokenFile(t, "s3cret")
+	client := selfClient(port, f)
+	if _, err := client.ListSessions(context.Background()); err != nil {
 		t.Errorf("with token: %v", err)
 	}
-	if _, err := selfClient(port, wolfapi.StaticToken("wrong")).ListSessions(context.Background()); err == nil {
+	// The file is read per request, so a rewritten token is sent (XERK-1325).
+	write("wrong")
+	if _, err := client.ListSessions(context.Background()); err == nil {
 		t.Error("with wrong token: expected error")
-	}
-
-	// The source is consulted per request, so a rotated token is sent (XERK-1325).
-	tok := "wrong"
-	rotating := selfClient(port, func() string { return tok })
-	if _, err := rotating.ListSessions(context.Background()); err == nil {
-		t.Error("before rotation: expected error")
-	}
-	tok = "s3cret"
-	if _, err := rotating.ListSessions(context.Background()); err != nil {
-		t.Errorf("after rotation: %v", err)
 	}
 }
 
@@ -101,7 +113,8 @@ func TestProxyDoesNotForwardToken(t *testing.T) {
 	var ready atomic.Bool
 	ready.Store(true)
 	client := UnixHTTPClient(sock)
-	agent := httptest.NewServer(wolfapi.RequireBearerToken(wolfapi.StaticToken("s3cret"), proxyHandler(&client, &ready)))
+	f, write := testTokenFile(t, "s3cret")
+	agent := httptest.NewServer(apiHandler(f, &client, &ready))
 	defer agent.Close()
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, agent.URL+"/api/v1/sessions", http.NoBody)
@@ -119,6 +132,18 @@ func TestProxyDoesNotForwardToken(t *testing.T) {
 	}
 	if auth := <-gotAuth; auth != "" {
 		t.Errorf("Wolf received Authorization %q; want none", auth)
+	}
+
+	// The handler main serves checks the file per request (XERK-1325): after
+	// a rewrite the old token is refused before reaching Wolf.
+	write("rotated")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("old token after rotation: status = %d, want 401", resp.StatusCode)
 	}
 }
 
@@ -176,8 +201,10 @@ func TestTokenFileRotation(t *testing.T) {
 	if err = os.Remove(link); err != nil {
 		t.Fatal(err)
 	}
-	if got := status("new"); got != http.StatusUnauthorized {
-		t.Errorf("missing token file: status %d, want 401", got)
+	for _, tok := range []string{"new", "old"} {
+		if got := status(tok); got != http.StatusUnauthorized {
+			t.Errorf("missing token file, token %q: status %d, want 401", tok, got)
+		}
 	}
 	swap("v3", "new\n")
 	if got := status("new"); got != http.StatusNoContent {
@@ -185,8 +212,10 @@ func TestTokenFileRotation(t *testing.T) {
 	}
 	// So does an emptied one.
 	swap("v3b", "")
-	if got := status("new"); got != http.StatusUnauthorized {
-		t.Errorf("empty token file: status %d, want 401", got)
+	for _, tok := range []string{"new", "old"} {
+		if got := status(tok); got != http.StatusUnauthorized {
+			t.Errorf("empty token file, token %q: status %d, want 401", tok, got)
+		}
 	}
 	// An in-place, same-size rewrite: same inode and, within one mtime tick,
 	// the same stat, so only re-reading the content catches it.

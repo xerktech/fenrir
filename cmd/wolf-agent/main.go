@@ -67,7 +67,7 @@ func main() {
 					// Call out to the proxy which handles chunked encoding
 					// properly. There may be a way to use the SSE client without
 					// it, but found this easier.
-					wolfClient := selfClient(*serverPort, token.Token)
+					wolfClient := selfClient(*serverPort, token)
 
 					agentController := controllers.NewAgent(
 						wolfClient,
@@ -104,7 +104,7 @@ func main() {
 	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.Handle("/api/v1/", wolfapi.RequireBearerToken(token.Token, proxyHandler(&client, &ready)))
+	mux.Handle("/api/v1/", apiHandler(token, &client, &ready))
 
 	// Start HTTPS server
 	server := &http.Server{
@@ -122,9 +122,16 @@ func main() {
 	}
 }
 
+// apiHandler serves /api/v1/: the Wolf proxy behind the bearer token, checked
+// against the token file's current contents on every request. It takes the
+// *tokenFile rather than a token so the file can't be snapshotted at startup.
+func apiHandler(token *tokenFile, client *http.Client, ready *atomic.Bool) http.Handler {
+	return wolfapi.RequireBearerToken(token.Token, proxyHandler(client, ready))
+}
+
 // proxyHandler forwards /api/v1/ requests to Wolf over client (the unix
 // socket), streaming the response so SSE works. Callers must wrap it in
-// wolfapi.RequireBearerToken.
+// wolfapi.RequireBearerToken; see apiHandler.
 func proxyHandler(client *http.Client, ready *atomic.Bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		klog.Info("Received request:", r.Method, r.URL.Path)
@@ -205,13 +212,14 @@ func proxyHandler(client *http.Client, ready *atomic.Bool) http.Handler {
 }
 
 // selfClient builds the wolfapi client the in-pod agent controller uses to
-// reach Wolf through this process's own authenticated proxy.
-func selfClient(port int, token func() string) wolfapi.Client {
+// reach Wolf through this process's own authenticated proxy. It sends the
+// token file's current contents, so it keeps working after a rotation.
+func selfClient(port int, token *tokenFile) wolfapi.Client {
 	return wolfapi.NewClient(
 		fmt.Sprintf("https://localhost:%d", port),
 		&http.Client{
 			Transport: &wolfapi.BearerTokenTransport{
-				Token: token,
+				Token: token.Token,
 				Base: &http.Transport{
 					TLSClientConfig: &tls.Config{
 						InsecureSkipVerify: true, //nolint:gosec // loopback to our own self-signed listener
