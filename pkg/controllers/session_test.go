@@ -349,7 +349,7 @@ func TestAppendResourceClaimsOneEntryPerName(t *testing.T) {
 }
 
 // mountsAt maps each mount path of the named container to its volume name.
-func mountsAt(t *testing.T, spec corev1.PodSpec, name string) map[string]string {
+func mountsAt(t *testing.T, spec *corev1.PodSpec, name string) map[string]string {
 	t.Helper()
 	for _, c := range spec.Containers {
 		if c.Name != name {
@@ -379,13 +379,13 @@ func TestSessionPodSharesHotplugVolumes(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"app", "wolf-agent"} {
-		got := mountsAt(t, spec, name)
+		got := mountsAt(t, &spec, name)
 		if got["/dev/input"] != hotplugDevVolume || got["/run/udev"] != hotplugUdevVolume {
 			t.Errorf("container %s mounts /dev/input=%q /run/udev=%q", name, got["/dev/input"], got["/run/udev"])
 		}
 	}
 	for _, name := range []string{"wolf", "pulseaudio"} {
-		got := mountsAt(t, spec, name)
+		got := mountsAt(t, &spec, name)
 		if _, ok := got["/dev/input"]; ok {
 			t.Errorf("container %s should not mount /dev/input", name)
 		}
@@ -395,7 +395,7 @@ func TestSessionPodSharesHotplugVolumes(t *testing.T) {
 func TestSessionPodKeepsAppsOwnInputMount(t *testing.T) {
 	// steam.yaml mounts the host's /dev/input into the app itself.
 	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
-	got := mountsAt(t, pod.Spec, "app")
+	got := mountsAt(t, &pod.Spec, "app")
 	if got["/dev/input"] != "input-events" {
 		t.Errorf("app /dev/input = %q, want the App's own input-events", got["/dev/input"])
 	}

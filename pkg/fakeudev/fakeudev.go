@@ -217,13 +217,16 @@ func CreateDeviceNode(devDir string, props map[string]string) error {
 		return fmt.Errorf("refusing to create %q with major %d (only %d)", props["DEVNAME"], major, inputMajor)
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
+		return fmt.Errorf("remove stale node: %w", err)
 	}
 	if err := mknodChar(path, uint32(major), uint32(minor)); err != nil {
-		return fmt.Errorf("mknod %s: %w", path, err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	// mknod's mode is filtered by the umask.
-	return os.Chmod(path, 0o666)
+	if err := os.Chmod(path, 0o666); err != nil {
+		return fmt.Errorf("chmod device node: %w", err)
+	}
+	return nil
 }
 
 // RemoveDeviceNode deletes the node CreateDeviceNode made for props.
@@ -233,7 +236,7 @@ func RemoveDeviceNode(devDir string, props map[string]string) error {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
+		return fmt.Errorf("remove device node: %w", err)
 	}
 	return nil
 }

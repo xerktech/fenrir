@@ -26,5 +26,11 @@ func sendNetlink(msg []byte) error {
 }
 
 func mknodChar(path string, major, minor uint32) error {
-	return unix.Mknod(path, unix.S_IFCHR|0o666, int(unix.Mkdev(major, minor)))
+	// Mkdev of two 32-bit numbers fits in 64 bits; int is 64-bit on every
+	// platform Wolf runs on.
+	//nolint:gosec // see above
+	if err := unix.Mknod(path, unix.S_IFCHR|0o666, int(unix.Mkdev(major, minor))); err != nil {
+		return fmt.Errorf("mknod: %w", err)
+	}
+	return nil
 }
