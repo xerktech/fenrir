@@ -1,6 +1,6 @@
-# An App whose pod template carries its own labels and annotations, which the
-# operator must copy onto the session pod alongside its own labels — which win
-# when the template sets the same key.
+# An App whose pod and volume claim templates carry their own labels and
+# annotations, which the operator must copy onto the session pod and PVC
+# alongside its own labels — which win when a template sets the same key.
 apiVersion: direwolf.games-on-whales.github.io/v1alpha1
 kind: App
 metadata:
@@ -21,3 +21,12 @@ spec:
       containers:
         - name: app
           image: ghcr.io/games-on-whales/firefox:edge
+  volumeClaimTemplate:
+    metadata:
+      labels:
+        example.com/backup: daily
+        direwolf/app: spoof
+      annotations:
+        example.com/note: pvc-kept
+    spec:
+      accessModes: ["ReadWriteOnce"]

@@ -1565,6 +1565,11 @@ func (c *SessionController) reconcilePVC(ctx context.Context, session *v1alpha1t
 	_, err = c.K8sClient.CoreV1().PersistentVolumeClaims(session.Namespace).Apply(
 		ctx,
 		v1ac.PersistentVolumeClaim(pvcName, session.Namespace).
+			// The template's metadata first, so the operator's labels win.
+			// With* copy into the apply configuration's own maps, leaving the
+			// informer cache's App untouched.
+			WithLabels(app.Spec.VolumeClaimTemplate.Labels).
+			WithAnnotations(app.Spec.VolumeClaimTemplate.Annotations).
 			WithLabels(map[string]string{
 				"app":           "direwolf-worker",
 				"direwolf/app":  session.Spec.GameReference.Name,
