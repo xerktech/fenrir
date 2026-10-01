@@ -136,7 +136,7 @@ func NewPodExecutor(config *rest.Config, client kubernetes.Interface) PodExecuto
 			return "", fmt.Errorf("creating exec stream: %w", err)
 		}
 		return streamCapped(func(opts remotecommand.StreamOptions) error {
-			return executor.StreamWithContext(ctx, opts) //nolint:wrapcheck // streamCapped wraps it
+			return executor.StreamWithContext(ctx, opts)
 		})
 	}
 }

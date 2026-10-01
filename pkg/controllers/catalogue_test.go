@@ -872,7 +872,7 @@ func TestCatalogueScanUnreadableDirFails(t *testing.T) {
 		if err := os.Chmod(p, 0o000); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = os.Chmod(p, 0o755) }) //nolint:gosec // restore so TempDir can be removed
+		t.Cleanup(func() { _ = os.Chmod(p, 0o755) }) // restore, so TempDir can be removed
 		if err := scanFixtureErr(t, dir); err == nil {
 			t.Errorf("%s unreadable: scan succeeded", rel)
 		}
