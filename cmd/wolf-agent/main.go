@@ -208,6 +208,9 @@ func proxyHandler(client *http.Client, ready *atomic.Bool) http.Handler {
 			klog.Error("Flushing not supported! Aborting writing response")
 			return
 		}
+		// Send the headers now: Wolf's event stream may be idle for long, and
+		// the agent only sees it is subscribed once they arrive.
+		flusher.Flush()
 
 		// Stream response body manually. io.Copy doesn't eagerly flush
 		// which breaks SSE stream.

@@ -59,12 +59,14 @@ func (a *Agent) Run(ctx context.Context) {
 	klog.Infof("Starting Agent")
 	delay := a.minResubscribeDelay
 	for {
+		// Timed from the request: a proxy may hold the response headers
+		// back until the stream's first event.
+		start := time.Now()
 		ch, err := a.WolfClient.SubscribeToEvents(ctx)
 		if err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to subscribe to Wolf events: %w", err))
 		} else {
 			klog.Infof("Subscribed to Wolf events")
-			start := time.Now()
 			a.handleEvents(ctx, ch)
 			if time.Since(start) >= a.maxResubscribeDelay {
 				delay = a.minResubscribeDelay

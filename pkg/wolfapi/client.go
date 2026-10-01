@@ -94,7 +94,7 @@ func (c *client) AddSession(
 		return "", err
 	}
 
-	req, err := http.NewRequest("POST", u, bytes.NewBuffer(encodedSession))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewBuffer(encodedSession))
 	if err != nil {
 		return "", err
 	}
@@ -131,7 +131,7 @@ func (c *client) ListSessions(ctx context.Context) ([]Session, error) {
 		return nil, err
 	}
 
-	req, err := http.NewRequest("GET", u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ func (c *client) ListApps(ctx context.Context) ([]App, error) {
 		return nil, err
 	}
 
-	req, err := http.NewRequest("GET", u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +196,7 @@ func (c *client) AddApp(ctx context.Context, app App) error {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", u, bytes.NewBuffer(encodedApp))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewBuffer(encodedApp))
 	if err != nil {
 		return err
 	}
@@ -238,7 +238,7 @@ func (c *client) StopSession(ctx context.Context, sessionID string) error {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", u, bytes.NewBuffer(encodedStopSessionReq))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewBuffer(encodedStopSessionReq))
 	if err != nil {
 		return err
 	}

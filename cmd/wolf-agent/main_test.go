@@ -484,3 +484,47 @@ func TestServerTimeouts(t *testing.T) {
 		t.Error("WriteTimeout would cut off the /api/v1/events stream")
 	}
 }
+
+// An idle event stream's headers must pass the proxy at once (XERK-1367):
+// the agent controller only counts itself subscribed once they arrive.
+func TestProxyFlushesHeadersOfIdleStream(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "w.sock")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wolf := &httptest.Server{
+		Listener: ln,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if flushErr := http.NewResponseController(w).Flush(); flushErr != nil {
+				t.Error(flushErr)
+			}
+			<-r.Context().Done()
+		})},
+	}
+	wolf.Start()
+	defer wolf.Close()
+
+	var ready atomic.Bool
+	ready.Store(true)
+	client := UnixHTTPClient(sock)
+	f, _ := testTokenFile(t, "s3cret")
+	agent := httptest.NewServer(apiHandler(f, &client, &ready))
+	defer agent.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agent.URL+"/api/v1/events", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer s3cret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("no headers before the first event: %v", err)
+	}
+	cancel()
+	resp.Body.Close()
+}
