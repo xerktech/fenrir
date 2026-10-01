@@ -1742,7 +1742,7 @@ func wolfSessionFor(session *v1alpha1types.Session, podIP string) (wolfapi.Sessi
 	}
 	clientIP = clientIP.Unmap()
 	if !clientIP.Is4() || clientIP.IsUnspecified() {
-		return wolfapi.Session{}, fmt.Errorf("session %s/%s: spec.config.clientIP %s is not a unicast IPv4 address; Wolf streams over IPv4 only",
+		return wolfapi.Session{}, fmt.Errorf("session %s/%s: spec.config.clientIP %s is not an IPv4 address; Wolf streams over IPv4 only",
 			session.Namespace, session.Name, clientIP)
 	}
 
