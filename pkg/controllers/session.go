@@ -74,6 +74,12 @@ const wolfAgentTimeout = 10 * time.Second
 // its pod finished, so there is nothing left to reconcile.
 var errSessionEnded = stderrors.New("session ended")
 
+// errEndSessionFailed wraps a failed attempt to delete the Session (e.g. a
+// resourceVersion conflict). Reconcile must requeue without writing status:
+// recording it as PodCreated=False would make the next reconcile recreate a
+// pod that is gone instead of ending the Session.
+var errEndSessionFailed = stderrors.New("failed to end session")
+
 // podCreatedCondition is True once the session's pod has been created. The pod
 // is never recreated, so a Session with it True and no pod has ended.
 const podCreatedCondition = "PodCreated"
@@ -313,6 +319,8 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	switch {
 	case stderrors.Is(podError, errSessionEnded):
 		return nil
+	case stderrors.Is(podError, errEndSessionFailed):
+		return podError
 	case podError != nil:
 		klog.Errorf("Failed to reconcile pod: %s", podError)
 		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
@@ -353,6 +361,8 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	switch {
 	case stderrors.Is(streamError, errSessionEnded):
 		return nil
+	case stderrors.Is(streamError, errEndSessionFailed):
+		return streamError
 	case streamError != nil:
 		klog.Errorf("Failed to reconcile active streams: %s", streamError)
 		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
@@ -786,9 +796,14 @@ func (c *SessionController) checkPod(ctx context.Context, session *v1alpha1types
 // pod's generated ResourceClaims) and frees its port block.
 func (c *SessionController) endSession(ctx context.Context, session *v1alpha1types.Session, reason string) error {
 	klog.Infof("Ending session %s/%s: %s", session.Namespace, session.Name, reason)
-	err := c.SessionClient.Delete(ctx, session.Name, metav1.DeleteOptions{
-		Preconditions: &metav1.Preconditions{UID: &session.UID},
-	})
+	// reason was decided from session as read. If it has changed since (an
+	// attach or /resume landing, possibly not yet in our cache), the delete
+	// conflicts and the requeue decides again on the newer object.
+	preconditions := metav1.Preconditions{UID: &session.UID}
+	if session.ResourceVersion != "" {
+		preconditions.ResourceVersion = &session.ResourceVersion
+	}
+	err := c.SessionClient.Delete(ctx, session.Name, metav1.DeleteOptions{Preconditions: &preconditions})
 	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("failed to delete session %s/%s: %w", session.Namespace, session.Name, err)
 	}
@@ -799,7 +814,7 @@ func (c *SessionController) endSession(ctx context.Context, session *v1alpha1typ
 // Session is deleted, so the caller stops reconciling it.
 func (c *SessionController) endSessionErr(ctx context.Context, session *v1alpha1types.Session, reason string) error {
 	if err := c.endSession(ctx, session, reason); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errEndSessionFailed, err)
 	}
 	return errSessionEnded
 }
