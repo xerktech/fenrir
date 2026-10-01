@@ -36,12 +36,9 @@ type UserSpec struct {
 	SidecarPolicies *SidecarPolicies `json:"sidecarPolicies,omitempty"`
 }
 
-// TODO
-// This will also need rework
-// Since I forgot that we might actually need to inject more than
-// Just the volume mounts and security context
-// for example the env vars.
 // SidecarPolicy defines the policy for a single sidecar container.
+// It may need more than volume mounts and a security context injected,
+// for example env vars.
 type SidecarPolicy struct {
 	// Environment variables appended to the sidecar
 	// +optional
