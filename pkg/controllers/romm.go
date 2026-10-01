@@ -48,29 +48,38 @@ type retroArchPlatform struct {
 	Label string
 }
 
-// retroArchPlatforms maps RomM platform slugs to their core. ROMs of other
-// platforms get no App. Cores that run without BIOS files are preferred:
-// sessions have none.
+// retroArchPlatforms maps RomM platform slugs to their core. RomM 5 reports
+// its universal slugs (backend/utils/platform_slugs.py: "psx", not the
+// folder name "ps"); the older IGDB slugs it migrated away from are kept for
+// RomM 4. ROMs of other platforms get no App. Cores that run without BIOS
+// files are preferred: sessions have none.
 var retroArchPlatforms = map[string]retroArchPlatform{
-	"nes":                              {"fceumm", "NES"},
-	"famicom":                          {"fceumm", "Famicom"},
-	"snes":                             {"snes9x", "SNES"},
-	"sfam":                             {"snes9x", "Super Famicom"},
-	"n64":                              {"mupen64plus_next", "N64"},
-	"gb":                               {"gambatte", "GB"},
-	"gbc":                              {"gambatte", "GBC"},
-	"gba":                              {"mgba", "GBA"},
-	"nds":                              {"melondsds", "DS"},
-	"sms":                              {"genesis_plus_gx", "Master System"}, //nolint:goconst // a table
-	"gamegear":                         {"genesis_plus_gx", "Game Gear"},
-	"genesis-slash-megadrive":          {"genesis_plus_gx", "Genesis"},
-	"segacd":                           {"genesis_plus_gx", "Sega CD"},
-	"sega32":                           {"picodrive", "32X"},
-	"saturn":                           {"yabasanshiro", "Saturn"},
+	"nes":           {"fceumm", "NES"},
+	"famicom":       {"fceumm", "Famicom"},
+	"fds":           {"fceumm", "FDS"},
+	"snes":          {"snes9x", "SNES"},
+	"sfam":          {"snes9x", "Super Famicom"},
+	"n64":           {"mupen64plus_next", "N64"},
+	"gb":            {"gambatte", "GB"},
+	"gbc":           {"gambatte", "GBC"},
+	"gba":           {"mgba", "GBA"},
+	"nds":           {"melondsds", "DS"},
+	"sms":           {"genesis_plus_gx", "Master System"}, //nolint:goconst // a table
+	"gamegear":      {"genesis_plus_gx", "Game Gear"},
+	"genesis":       {"genesis_plus_gx", "Genesis"},
+	"segacd":        {"genesis_plus_gx", "Sega CD"},
+	"sega32":        {"picodrive", "32X"},
+	"saturn":        {"yabasanshiro", "Saturn"},
+	"psx":           {"pcsx_rearmed", "PS1"},
+	"atari2600":     {"stella", "Atari 2600"},
+	"atari8bit":     {"atari800", "Atari 8-bit"},
+	"arcade":        {"fbneo", "Arcade"},
+	"tg16":          {"mednafen_pce_fast", "PC Engine"}, //nolint:goconst // a table
+	"turbografx-cd": {"mednafen_pce_fast", "PC Engine CD"},
+
+	// RomM 4's IGDB slugs.
 	"ps":                               {"pcsx_rearmed", "PS1"},
-	"atari2600":                        {"stella", "Atari 2600"},
-	"atari8bit":                        {"atari800", "Atari 8-bit"},
-	"arcade":                           {"fbneo", "Arcade"},
+	"genesis-slash-megadrive":          {"genesis_plus_gx", "Genesis"},
 	"turbografx16--1":                  {"mednafen_pce_fast", "PC Engine"},
 	"turbografx-16-slash-pc-engine-cd": {"mednafen_pce_fast", "PC Engine CD"},
 }
@@ -206,6 +215,14 @@ func (r *RomM) list(ctx context.Context) ([]rommROM, error) {
 			return nil, fmt.Errorf("RomM returned %d of the %d ROMs it counted", len(roms), total)
 		}
 	}
+	// RomM losing the share (an NFS outage during a rescan) would read as
+	// every ROM uninstalled.
+	if total == 0 {
+		return nil, errors.New("RomM reports no ROMs")
+	}
+	if !slices.ContainsFunc(roms, func(r rommROM) bool { return !r.MissingFromFS }) {
+		return nil, errors.New("RomM reports every ROM missing from its library")
+	}
 	seen := make(map[int]bool, len(roms))
 	for _, rom := range roms {
 		if seen[rom.ID] {
@@ -270,7 +287,11 @@ func rommGames(roms []rommROM) []catalogueGame {
 	for i := range roms {
 		rom := &roms[i]
 		platform, ok := retroArchPlatforms[rom.PlatformSlug]
-		if !ok || rom.MissingFromFS {
+		if !ok {
+			klog.V(2).Infof("RomM: not cataloguing ROM %d: no RetroArch core for platform %q", rom.ID, rom.PlatformSlug)
+			continue
+		}
+		if rom.MissingFromFS {
 			continue
 		}
 		file, err := rommLaunchFile(rom)

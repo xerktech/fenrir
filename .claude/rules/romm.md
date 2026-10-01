@@ -19,6 +19,10 @@ paths:
 - Fail closed: a page error, a missing `total`, a count that changes mid-read, a duplicate ID
   or a short read syncs nothing (offset paging shifts when RomM rescans).
   - More than `catalogueMaxGames` ROMs fails; `--romm-collection-id` narrows a big library.
+  - So do zero ROMs and every ROM `missing_from_fs`: RomM losing the NAS share would otherwise
+    delete every App and its per-game settings (an emptied collection keeps its Apps).
+- Platforms are keyed by RomM 5's universal slugs (`psx`, `genesis`, `tg16`, `turbografx-cd`;
+  RomM's `backend/utils/platform_slugs.py`), not folder names: RomM aliases folder `ps` to `psx`.
 - RomM's paths are relative to its library; sessions mount it read-only at `RomMLibraryPath`
   (`/romm/library`, as RomM's own container). `rommLibraryPath` refuses any path leaving it.
   - Filenames are anyone-with-NAS-write's: the ROM path is `shellQuote`d into the launch line.

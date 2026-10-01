@@ -135,7 +135,7 @@ func TestRomMSync(t *testing.T) {
 	roms := []map[string]any{
 		rommTestROM(1, "snes", "Kirby's Dream Land", "roms/snes/Kirby's Dream Land (USA).sfc"),
 		// A multi-disc PS1 game: the playlist is launched, not a track.
-		rommTestROM(2, "ps", "Final Fantasy VII",
+		rommTestROM(2, "psx", "Final Fantasy VII",
 			"roms/ps/FF7/FF7 (Disc 2).cue", "roms/ps/FF7/FF7 (Disc 1).bin", "roms/ps/FF7/FF7.m3u", "roms/ps/FF7/FF7 (Disc 1).cue"),
 		// A multi-track game without a playlist: the first cue sheet.
 		rommTestROM(3, "segacd", "Sonic CD", "roms/segacd/Sonic CD/Sonic CD (Track 02).bin", "roms/segacd/Sonic CD/Sonic CD.cue"),
@@ -145,8 +145,11 @@ func TestRomMSync(t *testing.T) {
 		rommTestROM(7, "nes", "Absolute", "/etc/passwd"),
 		rommTestROM(8, "gba", "", "/romm/library/roms/gba/Advance Wars.gba"),
 		// Several files, none of them launchable on its own.
-		rommTestROM(9, "ps", "Ambiguous", "roms/ps/x/a.bin", "roms/ps/x/b.bin"),
+		rommTestROM(9, "psx", "Ambiguous", "roms/ps/x/a.bin", "roms/ps/x/b.bin"),
 		rommTestROM(10, "n64", strings.Repeat("Long Title ", 10), "roms/n64/long.z64"),
+		// RomM 4's IGDB slug for what RomM 5 calls genesis.
+		rommTestROM(11, "genesis-slash-megadrive", "Sonic", "roms/genesis/sonic.md"),
+		rommTestROM(12, "genesis", "Sonic 2", "roms/genesis/sonic2.md"),
 	}
 	roms[0]["url_cover"] = "//images.igdb.com/igdb/image/upload/t_cover_big/kirby.jpg"
 	roms[1]["url_cover"] = "https://images.igdb.com/missing.jpg"
@@ -184,7 +187,7 @@ func TestRomMSync(t *testing.T) {
 	if _, ok := apps["steam-570"]; !ok {
 		t.Error("the Library catalogue's steam-570 was deleted by the RomM sync")
 	}
-	if got, want := len(apps), 2+5+rommPageSize; got != want { // base + steam + ROMs
+	if got, want := len(apps), 2+7+rommPageSize; got != want { // base + steam + ROMs
 		t.Errorf("%d Apps, want %d", got, want)
 	}
 
@@ -194,6 +197,8 @@ func TestRomMSync(t *testing.T) {
 		"romm-2":  {"Final Fantasy VII [PS1]", core("pcsx_rearmed") + `'/romm/library/roms/ps/FF7/FF7.m3u'`},
 		"romm-3":  {"Sonic CD [Sega CD]", core("genesis_plus_gx") + `'/romm/library/roms/segacd/Sonic CD/Sonic CD.cue'`},
 		"romm-8":  {"Advance Wars (USA) [GBA]", core("mgba") + `'/romm/library/roms/gba/Advance Wars.gba'`},
+		"romm-11": {"Sonic [Genesis]", core("genesis_plus_gx") + `'/romm/library/roms/genesis/sonic.md'`},
+		"romm-12": {"Sonic 2 [Genesis]", core("genesis_plus_gx") + `'/romm/library/roms/genesis/sonic2.md'`},
 		"romm-10": {strings.TrimSpace(strings.Repeat("Long Title ", 10)[:catalogueMaxTitle-len(" [N64]")]) + " [N64]", core("mupen64plus_next") + `'/romm/library/roms/n64/long.z64'`},
 	} {
 		app := apps[name]
@@ -241,6 +246,7 @@ func TestRomMScanFailsClosed(t *testing.T) {
 		roms  []map[string]any
 		token string
 		page  func(offset int, body map[string]any)
+		want  string // in the error, if set
 	}{
 		"bad token":     {roms: twoPages, token: "wrong"},
 		"too many ROMs": {roms: many},
@@ -259,6 +265,19 @@ func TestRomMScanFailsClosed(t *testing.T) {
 				body["items"] = many[:1]
 			}
 		}},
+		"no ROMs": {roms: []map[string]any{}},
+		"all missing": {roms: twoPages, page: func(_ int, body map[string]any) {
+			items := []map[string]any{}
+			for _, item := range body["items"].([]map[string]any) { //nolint:forcetypeassert // the fake's own type
+				item = maps.Clone(item) // shared with the other cases
+				item["missing_from_fs"] = true
+				items = append(items, item)
+			}
+			body["items"] = items
+		}},
+		"oversize page": {roms: twoPages, page: func(_ int, body map[string]any) {
+			body["padding"] = strings.Repeat(" ", rommMaxPageBytes)
+		}, want: "bytes"},
 		"no total": {roms: twoPages, page: func(_ int, body map[string]any) { body["total"] = nil }},
 		"more than counted": {roms: twoPages, page: func(offset int, body map[string]any) {
 			if offset > 0 {
@@ -276,8 +295,12 @@ func TestRomMScanFailsClosed(t *testing.T) {
 			if tc.token != "" {
 				f.romm.Token = tc.token
 			}
-			if err := f.romm.Scan(context.Background()); err == nil {
+			err := f.romm.Scan(context.Background())
+			if err == nil {
 				t.Fatal("Scan succeeded")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Scan: %v, want an error about %q", err, tc.want)
 			}
 			apps := f.apps(t)
 			if _, ok := apps["romm-999"]; !ok || len(apps) != 2 {
