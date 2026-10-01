@@ -369,30 +369,8 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	}
 
 	// Set the new status, if it is changed
-	if !reflect.DeepEqual(newObj.Status, oldStatus) {
-		// Only the operator writes status, so on a conflict (e.g. /resume
-		// updated spec meanwhile) it is re-applied to the latest object. Not
-		// retrying would lose a just-added Wolf session's ID, leaving that
-		// stream unknown and never stopped.
-		toWrite := newObj
-		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			_, updateErr := c.SessionClient.UpdateStatus(context.TODO(), toWrite, metav1.UpdateOptions{
-				FieldManager: "session-controller-status",
-			})
-			if updateErr == nil {
-				return nil
-			}
-			if errors.IsConflict(updateErr) {
-				latest, getErr := c.SessionClient.Get(context.TODO(), name, metav1.GetOptions{})
-				if getErr != nil {
-					return fmt.Errorf("failed to get session: %w", getErr)
-				}
-				latest.Status = newObj.Status
-				toWrite = latest
-			}
-			return fmt.Errorf("failed to update session status: %w", updateErr)
-		})
-
+	if !reflect.DeepEqual(&newObj.Status, oldStatus) {
+		err := c.writeStatus(context.TODO(), newObj, oldStatus)
 		// Failed to update status....nothing to do but try again with
 		// exponential backoff. Could be API server issue. Depends on response
 		// code?
@@ -638,6 +616,43 @@ func validateVolumeMounts(mounts []corev1.VolumeMount, validVolumes map[string]s
 		if _, ok := validVolumes[vm.Name]; !ok {
 			return fmt.Errorf("validation failed: volumeMount %q in %s sidecar policy refers to a volume that is not defined in the UserSpec.volumes", vm.Name, sidecarName)
 		}
+	}
+	return nil
+}
+
+// writeStatus writes session's status, computed from a read whose status was
+// oldStatus. On a conflict it re-applies the status to the latest object, but
+// only if that object's status is still oldStatus, i.e. only its spec moved
+// (e.g. /resume brought new keys). Dropping the write then would lose a
+// just-added Wolf session's ID, leaving that stream orphaned in Wolf.
+//
+// If the status moved too, this read was stale: another reconcile wrote a
+// newer status, and copying ours over it would erase what it recorded (the
+// current Wolf session ID), so the write is dropped and the error returned.
+func (c *SessionController) writeStatus(ctx context.Context, session *v1alpha1types.Session, oldStatus *v1alpha1types.SessionStatus) error {
+	toWrite := session
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, updateErr := c.SessionClient.UpdateStatus(ctx, toWrite, metav1.UpdateOptions{
+			FieldManager: "session-controller-status",
+		})
+		if updateErr == nil {
+			return nil
+		}
+		if errors.IsConflict(updateErr) {
+			latest, getErr := c.SessionClient.Get(ctx, session.Name, metav1.GetOptions{})
+			if getErr != nil {
+				return fmt.Errorf("failed to get session: %w", getErr)
+			}
+			if !reflect.DeepEqual(&latest.Status, oldStatus) {
+				return fmt.Errorf("session %s/%s status changed since it was read, not overwriting it", session.Namespace, session.Name)
+			}
+			latest.Status = session.Status
+			toWrite = latest
+		}
+		return fmt.Errorf("failed to update session status: %w", updateErr)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to write session status: %w", err)
 	}
 	return nil
 }

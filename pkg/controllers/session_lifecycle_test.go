@@ -3,13 +3,17 @@ package controllers
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
@@ -311,5 +315,79 @@ func TestUnrecordedWolfStreamRechecksLiveSession(t *testing.T) {
 	}
 	if !f.sessionExists(t, sess.Name) {
 		t.Error("session deleted from a stale cache read")
+	}
+}
+
+var sessionsResource = schema.GroupVersionResource{Group: v1alpha1types.GroupName, Version: "v1alpha1", Resource: "sessions"}
+
+// conflictOnce makes the first status update fail with a conflict, after
+// applying mutate to the stored Session (another writer racing us).
+func conflictOnce(t *testing.T, f *portsFixture, mutate func(*v1alpha1types.Session)) {
+	t.Helper()
+	var once sync.Once
+	f.dw.PrependReactor("update", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "status" {
+			return false, nil, nil
+		}
+		conflicted := false
+		once.Do(func() {
+			conflicted = true
+			s, err := f.dw.Tracker().Get(sessionsResource, portsTestNS, "alex-1")
+			if err != nil {
+				t.Errorf("tracker get: %v", err)
+				return
+			}
+			current, ok := s.(*v1alpha1types.Session)
+			if !ok {
+				t.Errorf("tracker returned %T", s)
+				return
+			}
+			stored := current.DeepCopy()
+			mutate(stored)
+			if err := f.dw.Tracker().Update(sessionsResource, stored, portsTestNS); err != nil {
+				t.Errorf("tracker update: %v", err)
+			}
+		})
+		if conflicted {
+			return true, nil, apierrors.NewConflict(v1alpha1types.Resource("sessions"), "alex-1", errors.New("modified"))
+		}
+		return false, nil, nil
+	})
+}
+
+// A conflict caused by a spec change (/resume) re-applies our status, so a
+// just-added Wolf session's ID is not lost.
+func TestWriteStatusReappliesOverSpecChange(t *testing.T) {
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session { return f.session("alex-1", f.user) }, nil)
+	old := sess.Status.DeepCopy()
+	conflictOnce(t, f, func(s *v1alpha1types.Session) { s.Spec.Config.AESKey = "newer" })
+
+	sess.Status.WolfSessionID = "1001"
+	if err := f.sc.writeStatus(context.Background(), sess, old); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Get(context.Background(), sess.Name, metav1.GetOptions{})
+	if got.Status.WolfSessionID != "1001" || got.Spec.Config.AESKey != "newer" {
+		t.Errorf("stored session = spec key %q, wolfSessionID %q; want the newer spec and our status", got.Spec.Config.AESKey, got.Status.WolfSessionID)
+	}
+}
+
+// A conflict because another reconcile wrote a newer status means our read
+// was stale: our status must not overwrite it.
+func TestWriteStatusKeepsNewerStatus(t *testing.T) {
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session { return f.session("alex-1", f.user) }, nil)
+	old := sess.Status.DeepCopy()
+	conflictOnce(t, f, func(s *v1alpha1types.Session) {
+		s.Status.WolfSessionID = "1002"
+		s.Status.AttachedGeneration = 3
+	})
+
+	sess.Status.DisconnectedAt = &metav1.Time{Time: time.Now()}
+	if err := f.sc.writeStatus(context.Background(), sess, old); err == nil {
+		t.Error("stale status write reported success")
+	}
+	got, _ := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Get(context.Background(), sess.Name, metav1.GetOptions{})
+	if got.Status.WolfSessionID != "1002" || got.Status.DisconnectedAt != nil {
+		t.Errorf("newer status overwritten: %+v", got.Status)
 	}
 }
