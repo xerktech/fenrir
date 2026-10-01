@@ -877,7 +877,7 @@ func TestCatalogueScanUnreadableDirFails(t *testing.T) {
 	} {
 		dir := t.TempDir()
 		writeFixture(t, dir, map[string]string{
-			"home/.local/share/Steam/steamapps/libraryfolders.vdf": libraryFolders(filepath.Join(dir, "home/.local/share/Steam"), filepath.Join(dir, "games/SteamLibrary")),
+			"home/.local/share/Steam/steamapps/libraryfolders.vdf": libraryFolders(filepath.Join(dir, "home", ".local", "share", "Steam"), filepath.Join(dir, "games", "SteamLibrary")),
 			"games/SteamLibrary/steamapps/appmanifest_570.acf":     `"AppState" { "appid" "570" "name" "Dota 2" "StateFlags" "4" }`,
 			"games/lost+found/.keep":                               "",
 			"games/other/.keep":                                    "",
