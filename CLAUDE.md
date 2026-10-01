@@ -16,6 +16,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Lint / format: `make lint`, `make fmt` (golangci-lint v2, config in `.golangci.yml`); `make vet`.
 - Build one binary: `go build ./cmd/<operator|moonlight-proxy|wolf-agent>`
 - Image: `docker build --build-arg APP_NAME=<cmd name> .` — one Dockerfile, `APP_NAME` picks the cmd.
+  - Exception: `nri-nvenc-fix` ships a C shim, so it has `cmd/nri-nvenc-fix/Dockerfile` (repo-root
+    context); the workflow matrix passes it as `file:`.
 - Non-Go images live in `images/<name>/` (own Dockerfile + context), e.g. `images/library`
   (linuxserver/steam + Heroic), `images/retroarch` (GoW RetroArch + pinned cores).
   CI builds them via matrix `include:` entries carrying `context:`.

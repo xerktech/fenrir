@@ -24,6 +24,9 @@ jobs:
             context: images/library
           - app: retroarch
             context: images/retroarch
+          # Go binary plus a C shim: repo-root context, own Dockerfile.
+          - app: nri-nvenc-fix
+            file: cmd/nri-nvenc-fix/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,6 +40,7 @@ jobs:
         uses: docker/build-push-action@v6.15.0
         with:
           context: ${{ matrix.context || '{{defaultContext}}' }}
+          file: ${{ matrix.file }}
           platforms: linux/amd64
           push: false
           cache-from: type=gha,scope=${{ matrix.app }}
