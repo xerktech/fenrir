@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"image/png"
 	"io"
+	"maps"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -928,13 +930,33 @@ func sendXMLWithHTTPStatus(w http.ResponseWriter, httpStatus int, resp Responsab
 	}
 }
 
+// secretQueryParams carry key material: the stream's AES key/IV (/launch,
+// /resume) and the pairing handshake's secrets. Anyone with the logs and a
+// capture of the stream could decrypt it, or replay a pairing step.
+var secretQueryParams = []string{
+	"rikey", "rikeyid",
+	"salt", "clientcert", "clientchallenge", "serverchallengeresp", "clientpairingsecret",
+	"pin",
+}
+
+// redactedQuery returns q with secretQueryParams' values replaced, for logging.
+func redactedQuery(q url.Values) url.Values {
+	out := maps.Clone(q)
+	for _, k := range secretQueryParams {
+		if _, ok := out[k]; ok {
+			out[k] = []string{"REDACTED"}
+		}
+	}
+	return out
+}
+
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
 		if r.URL.Path != "/serverinfo" {
 
-			klog.Infof("%s %s %s %v %s", r.Proto, r.Method, r.URL.Path, r.URL.Query(), r.RemoteAddr)
+			klog.Infof("%s %s %s %v %s", r.Proto, r.Method, r.URL.Path, redactedQuery(r.URL.Query()), r.RemoteAddr)
 			next.ServeHTTP(w, r)
 			klog.Infof("Completed in %s", time.Since(start))
 		} else {
