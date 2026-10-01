@@ -3,7 +3,6 @@ package controllers
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	stderrors "errors"
 	"fmt"
 	"maps"
@@ -1140,6 +1139,8 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 				"--socket=/etc/wolf/wolf.sock",
 				fmt.Sprintf("--port=%d", ports.WolfAgent),
 				"--token-file=" + wolfAgentTokenMountPath + "/" + wolfAgentTokenKey,
+				"--tls-cert=" + wolfAgentTokenMountPath + "/" + corev1.TLSCertKey,
+				"--tls-key=" + wolfAgentTokenMountPath + "/" + corev1.TLSPrivateKeyKey,
 			},
 			Ports: []corev1.ContainerPort{
 				{
@@ -1752,7 +1753,12 @@ func (c *SessionController) reconcileActiveStreams(
 	// streams from.
 	podIP := pod.Status.PodIP
 
-	token, err := c.agentToken(ctx, session)
+	token, tlsConfig, err := c.agentCredentials(ctx, session)
+	if stderrors.Is(err, errAgentCertMissing) {
+		// Created before the cert was pinned, so the pod serves a cert we
+		// cannot verify, and the token must not go to it.
+		return c.endSessionErr(ctx, session, err.Error())
+	}
 	if err != nil {
 		return err
 	}
@@ -1765,11 +1771,9 @@ func (c *SessionController) reconcileActiveStreams(
 		Timeout: wolfAgentTimeout,
 		Transport: &wolfapi.BearerTokenTransport{
 			Token: token,
-			Base: &http.Transport{
-				// wolf-agent serves a self-signed cert. XERK-1320 tracks
-				// pinning it; until then the token goes to an unverified peer.
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // see above
-			},
+			// Pinned to the session's own cert: a stranger bound to the
+			// agent port fails the handshake before seeing the token.
+			Base: &http.Transport{TLSClientConfig: tlsConfig},
 		},
 	})
 	sessions, err := wolfclient.ListSessions(ctx)
