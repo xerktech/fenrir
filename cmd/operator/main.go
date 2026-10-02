@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -98,13 +99,8 @@ func main() {
 	}
 	var libraryProxySecret []byte
 	if *libraryPort != 0 {
-		raw, readErr := os.ReadFile(*libraryProxySecretFile)
-		if readErr != nil {
-			klog.Fatalf("--library-proxy-secret-file: %s", readErr)
-		}
-		libraryProxySecret = bytes.TrimSpace(raw)
-		if len(libraryProxySecret) < controllers.MinLibraryProxySecretLen {
-			klog.Fatalf("--library-proxy-secret-file: secret is %d bytes, want at least %d", len(libraryProxySecret), controllers.MinLibraryProxySecretLen)
+		if libraryProxySecret, err = readProxySecret(*libraryProxySecretFile); err != nil {
+			klog.Fatalf("--library-proxy-secret-file: %v", err)
 		}
 	}
 	if *libraryPort < 0 || *libraryPort > 65535 {
@@ -302,4 +298,19 @@ func main() {
 		},
 	})
 	klog.Info("Shutting down")
+}
+
+// readProxySecret reads a proxy shared secret, trimmed of surrounding
+// whitespace, refusing one shorter than controllers.MinLibraryProxySecretLen
+// so a placeholder or truncated file fails at startup.
+func readProxySecret(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // the caller names the flag
+	}
+	secret := bytes.TrimSpace(raw)
+	if len(secret) < controllers.MinLibraryProxySecretLen {
+		return nil, fmt.Errorf("secret is %d bytes, want at least %d", len(secret), controllers.MinLibraryProxySecretLen)
+	}
+	return secret, nil
 }
