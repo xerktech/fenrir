@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/containerd/nri/pkg/api"
@@ -15,6 +16,16 @@ func annotatedPod(value string) *api.PodSandbox {
 		Namespace:   "streaming",
 		Annotations: map[string]string{injectAnnotation: value},
 	}
+}
+
+// newPlugin returns a plugin on a host with four GPUs.
+func newPlugin(t *testing.T) *plugin {
+	t.Helper()
+	gpus := t.TempDir()
+	for _, bus := range []string{"0000:01:00.0", "0000:21:00.0", "0000:c1:00.0", "0000:f1:00.0"} {
+		require.NoError(t, os.Mkdir(filepath.Join(gpus, bus), 0o755))
+	}
+	return &plugin{hostDir: "/var/lib/nvenc-fix", gpusDir: gpus}
 }
 
 // devices is a container holding the given device nodes.
@@ -35,13 +46,36 @@ func gpuContainer(mounts ...*api.Mount) *api.Container {
 }
 
 func TestAdjustmentGPUClaim(t *testing.T) {
-	p := &plugin{hostDir: "/var/lib/nvenc-fix"}
-	require.NotNil(t, p.adjustment(&api.PodSandbox{Name: "vllm", Namespace: "ai"}, gpuContainer()))
+	p := newPlugin(t)
+	pod := &api.PodSandbox{Name: "vllm", Namespace: "ai"}
+	require.NotNil(t, p.adjustment(pod, gpuContainer()))
 	require.NotNil(t, p.adjustment(annotatedPod("yes"), gpuContainer()), "only true/false override")
+	require.NotNil(t, p.adjustment(pod, devices("/dev/nvidia0", "/dev/nvidia3", "/dev/nvidia0")), "two of four, one repeated")
+	require.NotNil(t, p.adjustment(annotatedPod("TRUE"), &api.Container{Name: "side"}), "case-insensitive force")
+
+	// A two-digit minor is a GPU node too.
+	p.gpusDir = t.TempDir()
+	for i := range 12 {
+		require.NoError(t, os.Mkdir(filepath.Join(p.gpusDir, strconv.Itoa(i)), 0o755))
+	}
+	require.NotNil(t, p.adjustment(pod, devices("/dev/nvidia11")))
+}
+
+func TestAdjustmentEveryGPU(t *testing.T) {
+	p := newPlugin(t)
+	pod := &api.PodSandbox{Name: "kube-proxy", Namespace: "kube-system"}
+	// A privileged container: containerd hands it every host device.
+	all := devices("/dev/nvidiactl", "/dev/nvidia0", "/dev/nvidia1", "/dev/nvidia2", "/dev/nvidia3", "/dev/sda")
+	require.Nil(t, p.adjustment(pod, all))
+	require.NotNil(t, p.adjustment(annotatedPod("true"), all), "the annotation still forces it")
+
+	// Unknown GPU count: inject, the shim fails open.
+	p.gpusDir = filepath.Join(t.TempDir(), "missing")
+	require.NotNil(t, p.adjustment(pod, all))
 }
 
 func TestAdjustmentAnnotatedPod(t *testing.T) {
-	adjust := (&plugin{hostDir: "/var/lib/nvenc-fix"}).adjustment(annotatedPod("true"), &api.Container{Name: "wolf"})
+	adjust := (newPlugin(t)).adjustment(annotatedPod("true"), &api.Container{Name: "wolf"})
 	require.NotNil(t, adjust)
 
 	got := map[string]*api.Mount{}
@@ -75,6 +109,8 @@ func TestAdjustmentUntouched(t *testing.T) {
 		"no annotations, no GPU":             {pod: &api.PodSandbox{Name: "other", Namespace: "streaming"}, ctr: &api.Container{Name: "app"}},
 		"annotation not true, no GPU":        {pod: annotatedPod("yes"), ctr: &api.Container{Name: "app"}},
 		"opted out with a GPU":               {pod: annotatedPod("false"), ctr: gpuContainer()},
+		"opted out, other case":              {pod: annotatedPod("False"), ctr: gpuContainer()},
+		"not a GPU node":                     {pod: &api.PodSandbox{Name: "other"}, ctr: devices("/dev/nvidia-caps/nvidia-cap1", "/dev/nvidia0/x", "/host/dev/nvidia0")},
 		"control nodes only":                 {pod: &api.PodSandbox{Name: "other"}, ctr: devices("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-modeset")},
 		"a DRI node only (iGPU)":             {pod: &api.PodSandbox{Name: "other"}, ctr: devices("/dev/dri/renderD128")},
 		"GPU but own /etc/ld.so.preload":     {pod: &api.PodSandbox{Name: "other"}, ctr: gpuContainer(&api.Mount{Destination: "/etc/ld.so.preload"})},
@@ -86,7 +122,7 @@ func TestAdjustmentUntouched(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			require.Nil(t, (&plugin{hostDir: "/var/lib/nvenc-fix"}).adjustment(tc.pod, tc.ctr))
+			require.Nil(t, (newPlugin(t)).adjustment(tc.pod, tc.ctr))
 		})
 	}
 }
@@ -97,7 +133,7 @@ func TestAdjustmentUnrelatedMounts(t *testing.T) {
 		{Destination: "/usr/lib64"},  // shares a prefix, not a path component
 		{Destination: "/home/retro"}, // unrelated
 	}}
-	require.NotNil(t, (&plugin{hostDir: "/var/lib/nvenc-fix"}).adjustment(annotatedPod("true"), ctr))
+	require.NotNil(t, (newPlugin(t)).adjustment(annotatedPod("true"), ctr))
 }
 
 func writeShims(t *testing.T, content string) string {

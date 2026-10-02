@@ -1,8 +1,8 @@
 /*
  * Vendored for fenrir's nri-nvenc-fix plugin (XERK-1350) from
  * https://github.com/flexgrip/nvidia-gpu-enumeration at 1475091ae9e8, GPLv3 (COPYING
- * in this directory). It is built into its own shared object and loaded by the
- * containers that opt in; nothing in fenrir links against it. Local changes:
+ * in this directory). It is built into its own shared object and preloaded into
+ * the containers the plugin picks; nothing in fenrir links against it. Local changes:
  *   - match_gpuid_to_minor() matches the full PCI domain:bus:device RM encodes in
  *     a gpuId (gpuGenerate32BitId), not the bus alone, so two GPUs on the same bus
  *     number in different domains cannot be confused.
