@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -49,6 +51,8 @@ func main() {
 		"Port for the Library page, reached only through the authenticating Ingress. 0 disables the Library")
 	libraryTrustedProxies := flag.String("library-trusted-proxies", "",
 		"Comma-separated CIDRs of the Ingress controller, the only peers allowed to the Library page. Required with --library-port")
+	libraryProxySecretFile := flag.String("library-proxy-secret-file", "",
+		"File holding the secret the proxy sends in "+controllers.LibraryProxySecretHeader+". Required with --library-port")
 	libraryImage := flag.String("library-image", cmp.Or(os.Getenv("LIBRARY_IMAGE"), "ghcr.io/games-on-whales/fenrir/library:main"),
 		"Library (Steam + Heroic desktop) image")
 	libraryHomePVC := flag.String("library-home-pvc", "", "PVC holding the shared Steam home. Required with --library-port")
@@ -90,8 +94,14 @@ func main() {
 	if err != nil {
 		klog.Fatalf("--library-trusted-proxies: %v", err)
 	}
-	if *libraryPort != 0 && (len(libraryTrusted) == 0 || *libraryHomePVC == "" || *libraryGamesPVC == "") {
-		klog.Fatal("--library-port requires --library-trusted-proxies, --library-home-pvc and --library-games-pvc")
+	if *libraryPort != 0 && (len(libraryTrusted) == 0 || *libraryProxySecretFile == "" || *libraryHomePVC == "" || *libraryGamesPVC == "") {
+		klog.Fatal("--library-port requires --library-trusted-proxies, --library-proxy-secret-file, --library-home-pvc and --library-games-pvc")
+	}
+	var libraryProxySecret []byte
+	if *libraryPort != 0 {
+		if libraryProxySecret, err = readProxySecret(*libraryProxySecretFile); err != nil {
+			klog.Fatalf("--library-proxy-secret-file: %v", err)
+		}
 	}
 	if *libraryPort < 0 || *libraryPort > 65535 {
 		klog.Fatalf("--library-port must be 0-65535, got %d", *libraryPort)
@@ -230,6 +240,7 @@ func main() {
 			libraryController,
 			generic.NewLister[*corev1.Pod](libraryPodInformer.GetIndexer()).Namespaced(*namespace),
 			libraryTrusted,
+			libraryProxySecret,
 		)
 		go func() {
 			if err := libraryServer.Run(appContext, *libraryPort); err != nil {
@@ -287,4 +298,19 @@ func main() {
 		},
 	})
 	klog.Info("Shutting down")
+}
+
+// readProxySecret reads a proxy shared secret, trimmed of surrounding
+// whitespace, refusing one shorter than controllers.MinLibraryProxySecretLen
+// so a placeholder or truncated file fails at startup.
+func readProxySecret(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // the caller names the flag
+	}
+	secret := bytes.TrimSpace(raw)
+	if len(secret) < controllers.MinLibraryProxySecretLen {
+		return nil, fmt.Errorf("secret is %d bytes, want at least %d", len(secret), controllers.MinLibraryProxySecretLen)
+	}
+	return secret, nil
 }

@@ -367,8 +367,10 @@ func (f *libraryFixture) server(t *testing.T, pods ...*corev1.Pod) *LibraryServe
 		}
 	}
 	lister := generic.NewLister[*corev1.Pod](indexer).Namespaced(libraryTestNS)
-	return NewLibraryServer(f.library, lister, []netip.Prefix{netip.MustParsePrefix("10.1.0.0/16")})
+	return NewLibraryServer(f.library, lister, []netip.Prefix{netip.MustParsePrefix("10.1.0.0/16")}, []byte(testLibrarySecret))
 }
+
+const testLibrarySecret = "0123456789abcdef0123456789abcdef"
 
 // userVisit is what a browser sends on a page load the user asked for.
 var userVisit = http.Header{"Sec-Fetch-User": {"?1"}, "Sec-Fetch-Mode": {"navigate"}}
@@ -380,6 +382,8 @@ func serveLibrary(s *LibraryServer, peer string, header http.Header) *httptest.R
 func serveLibraryRequest(s *LibraryServer, method, target, peer string, header http.Header) *httptest.ResponseRecorder {
 	req := httptest.NewRequestWithContext(context.Background(), method, target, http.NoBody)
 	req.RemoteAddr = peer
+	// What the authenticating proxy sends; a test's header can override it.
+	req.Header.Set(LibraryProxySecretHeader, testLibrarySecret)
 	maps.Copy(req.Header, header)
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
@@ -390,6 +394,26 @@ func TestLibraryServer(t *testing.T) {
 	t.Run("untrusted peer", func(t *testing.T) {
 		f := newLibraryFixture(t, nil)
 		rec := serveLibrary(f.server(t), "10.2.0.5:5555", nil)
+		if rec.Code != http.StatusForbidden || f.podExists(t) {
+			t.Errorf("HTTP %d, pod created %v; want 403 and no pod", rec.Code, f.podExists(t))
+		}
+	})
+	// The source check admits every pod in the trusted range where the CNI
+	// does not enforce NetworkPolicy; only the proxy knows the secret.
+	for name, secret := range map[string]string{"missing": "", "wrong": "x" + testLibrarySecret[1:]} {
+		t.Run(name+" proxy secret", func(t *testing.T) {
+			f := newLibraryFixture(t, nil)
+			rec := serveLibrary(f.server(t), "10.1.0.5:5555", http.Header{"Sec-Fetch-User": {"?1"}, LibraryProxySecretHeader: {secret}})
+			if rec.Code != http.StatusForbidden || f.podExists(t) {
+				t.Errorf("HTTP %d, pod created %v; want 403 and no pod", rec.Code, f.podExists(t))
+			}
+		})
+	}
+	t.Run("no configured secret refuses everything", func(t *testing.T) {
+		f := newLibraryFixture(t, nil)
+		s := f.server(t)
+		s.secret = nil
+		rec := serveLibrary(s, "10.1.0.5:5555", http.Header{"Sec-Fetch-User": {"?1"}, LibraryProxySecretHeader: {""}})
 		if rec.Code != http.StatusForbidden || f.podExists(t) {
 			t.Errorf("HTTP %d, pod created %v; want 403 and no pod", rec.Code, f.podExists(t))
 		}
@@ -459,6 +483,11 @@ func TestLibraryServer(t *testing.T) {
 			if user, pass, ok := r.BasicAuth(); !ok || user != libraryAuthUser || pass != wantPassword {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Login"`)
 				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			// The desktop never sees the proxy secret.
+			if r.Header.Get(LibraryProxySecretHeader) != "" {
+				w.WriteHeader(http.StatusTeapot)
 				return
 			}
 			_, _ = w.Write([]byte("selkies"))

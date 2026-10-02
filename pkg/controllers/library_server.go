@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"html"
@@ -27,6 +28,15 @@ const libraryActivityFlushInterval = 30 * time.Second
 // libraryStartPath is where the stopped page's Start button posts.
 const libraryStartPath = "/.direwolf/library/start"
 
+// LibraryProxySecretHeader carries the secret shared with the authenticating
+// proxy (Authentik sets it through a property mapping on its provider). The
+// same header the pairing page uses, with its own secret.
+const LibraryProxySecretHeader = "X-Direwolf-Proxy-Secret"
+
+// MinLibraryProxySecretLen is the shortest proxy secret accepted, so a
+// placeholder or truncated secret file fails at startup.
+const MinLibraryProxySecretLen = 32
+
 // LibraryServer is the Library page's HTTP front end; the Ingress points
 // here, not at the pod. A visit with no pod starts one (unless a game holds
 // the Steam lock) and serves a "Starting…" page until the pod is ready, then
@@ -38,7 +48,12 @@ type LibraryServer struct {
 	// trusted are the only peers (the ingress controller behind Authentik)
 	// allowed in: the desktop has no login of its own.
 	trusted []netip.Prefix
-	proxy   *httputil.ReverseProxy
+	// secret must also arrive in LibraryProxySecretHeader: where the proxy
+	// is an in-cluster pod (Authentik's outpost) and the CNI does not
+	// enforce NetworkPolicy, the source check admits every pod in the
+	// trusted range. Empty refuses every request.
+	secret []byte
+	proxy  *httputil.ReverseProxy
 
 	// password caches the pod's basic-auth password; cleared on a 401.
 	password atomic.Pointer[string]
@@ -55,8 +70,8 @@ type libraryTarget struct {
 	password string
 }
 
-func NewLibraryServer(library *LibraryController, pods generic.NamespacedLister[*corev1.Pod], trusted []netip.Prefix) *LibraryServer {
-	s := &LibraryServer{library: library, pods: pods, trusted: trusted}
+func NewLibraryServer(library *LibraryController, pods generic.NamespacedLister[*corev1.Pod], trusted []netip.Prefix, secret []byte) *LibraryServer {
+	s := &LibraryServer{library: library, pods: pods, trusted: trusted, secret: secret}
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
 		// Every byte through a pod connection, including an upgraded
@@ -80,6 +95,8 @@ func NewLibraryServer(library *LibraryController, pods generic.NamespacedLister[
 				r.SetURL(target.url)
 				r.Out.SetBasicAuth(libraryAuthUser, target.password)
 			}
+			// The desktop runs arbitrary user code; it never needs the secret.
+			r.Out.Header.Del(LibraryProxySecretHeader)
 			r.SetXForwarded()
 		},
 		ModifyResponse: func(resp *http.Response) error {
@@ -150,6 +167,12 @@ func (s *LibraryServer) flushActivity(ctx context.Context) {
 func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	peer, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil || !s.isTrusted(peer.Addr().Unmap()) {
+		klog.Warningf("Library page: refusing request from untrusted peer %s", r.RemoteAddr)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if !s.hasProxySecret(r) {
+		klog.Warningf("Library page: refusing request from %s without the proxy secret", r.RemoteAddr)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -225,6 +248,13 @@ func (s *LibraryServer) authPassword(ctx context.Context) (string, error) {
 	}
 	s.password.Store(&password)
 	return password, nil
+}
+
+func (s *LibraryServer) hasProxySecret(r *http.Request) bool {
+	if len(s.secret) == 0 {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(r.Header.Get(LibraryProxySecretHeader)), s.secret) == 1
 }
 
 func (s *LibraryServer) isTrusted(addr netip.Addr) bool {
