@@ -51,6 +51,8 @@ func TestAdjustmentGPUClaim(t *testing.T) {
 	require.NotNil(t, p.adjustment(pod, gpuContainer()))
 	require.NotNil(t, p.adjustment(annotatedPod("yes"), gpuContainer()), "only true/false override")
 	require.NotNil(t, p.adjustment(pod, devices("/dev/nvidia0", "/dev/nvidia3", "/dev/nvidia0")), "two of four, one repeated")
+	require.NotNil(t, p.adjustment(pod, devices("/dev/nvidia0", "/dev/nvidia0", "/dev/nvidia0", "/dev/nvidia0")),
+		"one GPU listed four times is not every GPU")
 	require.NotNil(t, p.adjustment(annotatedPod("TRUE"), &api.Container{Name: "side"}), "case-insensitive force")
 
 	// A two-digit minor is a GPU node too.
