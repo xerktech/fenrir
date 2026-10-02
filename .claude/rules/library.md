@@ -28,6 +28,10 @@ paths:
   operator's proxy adds it. k8x's flannel does not enforce the chart's NetworkPolicy, so this
   password is the pod's real protection. Selkies itself binds localhost, behind nginx.
 - The page is trusted only from `--library-trusted-proxies` (the Ingress behind Authentik).
+- Every page request must also carry `X-Direwolf-Proxy-Secret` (`--library-proxy-secret-file`,
+  >= 32 bytes, required with `--library-port`). On k8x the proxy is Authentik's outpost, a pod, so
+  the trusted range is pod CIDRs, and flannel lets every pod there in. Never drop the secret check.
+  - The proxy strips the header before the pod: the desktop runs arbitrary user code.
 - Tests: `TestLibraryIdleRule`, `TestLibraryEnsurePod*`, `TestLibraryServer` in
   `pkg/controllers/library_test.go`; `TestLaunchBacksOutWhenBusyAfterCreate` in
   `pkg/moonlight/library_test.go`.

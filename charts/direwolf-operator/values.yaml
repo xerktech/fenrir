@@ -48,7 +48,8 @@ controllers:
           # The Library (on-demand Steam + Heroic desktop) is off unless
           # --library-port is set; enabling it needs, with service.library:
           #   --library-port=8080
-          #   --library-trusted-proxies=<ingress controller pod CIDR>
+          #   --library-trusted-proxies=<authenticating proxy's pod CIDR>
+          #   --library-proxy-secret-file=<file; the proxy sends it in X-Direwolf-Proxy-Secret>
           #   --library-home-pvc=<shared Steam home PVC>
           #   --library-games-pvc=<shared game library PVC>
           # The catalogue (one App per installed game, read from the Library)
