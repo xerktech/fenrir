@@ -9,9 +9,19 @@
 //
 // The fix is shim/nvenc_fix.c, an ioctl interposer that drops GPUs whose
 // device node the container lacks from that answer. This plugin installs the
-// shim into --host-dir and, for every container of a pod annotated
-// nvenc-fix.xerktech.com/inject=true, bind-mounts it read-only together with
-// an /etc/ld.so.preload naming it. Every other container is left untouched.
+// shim into --host-dir and bind-mounts it read-only, together with an
+// /etc/ld.so.preload naming it, into every container that holds some, but not
+// all, of the node's GPU device nodes (/dev/nvidiaN): what a DRA GPU claim's CDI
+// device adds. A container holding every node (any privileged one) never hits
+// the bug and is left alone. The pod annotation nvenc-fix.xerktech.com/inject
+// overrides that: "false" opts the whole pod out, "true" injects into every
+// container of the pod. Every other container is left untouched.
+//
+// Automatic rather than opt-in because no workload is pinned to a card: one that
+// encodes works on the "primary" GPU without the shim and fails on every other,
+// so an opt-in is a bug that only shows once the scheduler moves it. CUDA-only
+// workloads were measured with and without the shim on a 3090 and the PRO 6000
+// before this was made the default; the results are on XERK-1388.
 //
 // The preload entry is /usr/lib/nvenc-fix/$PLATFORM/libnvenc_fix.so, which
 // glibc expands per process: 64-bit processes load the shim, 32-bit ones (the
@@ -21,8 +31,8 @@
 //
 // /etc/ld.so.preload rather than LD_PRELOAD: images and their scripts set
 // LD_PRELOAD themselves (Selkies' joystick interposer) and would replace ours,
-// while glibc always reads the file. musl ignores it, so Alpine sidecars in an
-// annotated pod are unaffected.
+// while glibc always reads the file. musl ignores it, so an Alpine container that
+// gets the shim is unaffected.
 //
 // The adjustment grants nothing: two read-only files the pod could have
 // shipped itself. That is why, unlike nri-input, it needs no namespace scope.
@@ -36,6 +46,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/containerd/nri/pkg/api"
@@ -44,8 +55,13 @@ import (
 )
 
 const (
-	// injectAnnotation opts a pod in when set to "true".
+	// injectAnnotation overrides the default for a whole pod: "false" never
+	// injects, "true" injects into every container (either case).
 	injectAnnotation = "nvenc-fix.xerktech.com/inject"
+
+	// hostGPUsDir lists one entry per GPU the driver has bound. procfs shows it
+	// to every container, so the plugin needs no host mount to read it.
+	hostGPUsDir = "/proc/driver/nvidia/gpus"
 
 	shimFile    = "libnvenc_fix.so"
 	shimDir     = "lib" // per-$PLATFORM subdirectories, under --shim-dir and --host-dir
@@ -80,6 +96,8 @@ type plugin struct {
 	// resolved on the host, so it must be the same path inside the plugin's
 	// container and on the node.
 	hostDir string
+	// gpusDir is hostGPUsDir; a field so tests can stand one up.
+	gpusDir string
 }
 
 // CreateContainer implements stub.CreateContainerInterface.
@@ -97,10 +115,10 @@ func (p *plugin) CreateContainer(
 	return adjust, nil, nil
 }
 
-// adjustment returns the mounts that preload the shim into ctr, or nil if
-// pod has not opted in.
+// adjustment returns the mounts that preload the shim into ctr, or nil if it
+// should not have them.
 func (p *plugin) adjustment(pod *api.PodSandbox, ctr *api.Container) *api.ContainerAdjustment {
-	if pod.GetAnnotations()[injectAnnotation] != "true" {
+	if !p.wantsShim(pod, ctr) {
 		return nil
 	}
 	for _, m := range ctr.GetMounts() {
@@ -127,6 +145,46 @@ func (p *plugin) adjustment(pod *api.PodSandbox, ctr *api.Container) *api.Contai
 	}
 	return adjust
 }
+
+// wantsShim reports whether ctr gets the shim: the pod annotation if it says
+// "true" or "false", otherwise whether ctr holds some but not all GPU nodes.
+//
+// The device node, not the CDI name: containerd 2.2 (NRI v0.11) resolves the DRA
+// driver's CDI device into the spec and passes the plugin an empty CDIDevices.
+// Containers of the same pod without the claim (init containers, sidecars) have
+// no node and are left alone; they cannot reach the encoder anyway.
+//
+// A container holding every node is skipped: containerd gives a privileged one
+// all host devices, the bug needs a missing node, and the shim would filter
+// nothing. That keeps node infrastructure (kube-proxy, Longhorn, the DRA kubelet
+// plugin, dcgm) from running every ioctl through it. If the GPU count can't be
+// read, the container gets the shim, which then fails open for it.
+func (p *plugin) wantsShim(pod *api.PodSandbox, ctr *api.Container) bool {
+	switch strings.ToLower(pod.GetAnnotations()[injectAnnotation]) {
+	case "false":
+		return false
+	case "true":
+		return true
+	}
+	held := map[string]bool{}
+	for _, d := range ctr.GetLinux().GetDevices() {
+		if gpuDevice.MatchString(d.GetPath()) {
+			held[d.GetPath()] = true
+		}
+	}
+	if len(held) == 0 {
+		return false
+	}
+	host, err := os.ReadDir(p.gpusDir)
+	if err != nil {
+		klog.ErrorS(err, "Counting host GPUs; injecting anyway")
+		return true
+	}
+	return len(held) < len(host)
+}
+
+// gpuDevice matches a GPU's own node, not nvidiactl, nvidia-uvm or nvidia-modeset.
+var gpuDevice = regexp.MustCompile(`^/dev/nvidia\d+$`)
 
 // covers reports whether a mount at dst is target or one of its parents.
 func covers(dst, target string) bool {
@@ -226,7 +284,7 @@ func main() {
 	}
 	klog.InfoS("Installed NVENC fix", "dir", *hostDir, "annotation", injectAnnotation)
 
-	s, err := stub.New(&plugin{hostDir: *hostDir},
+	s, err := stub.New(&plugin{hostDir: *hostDir, gpusDir: hostGPUsDir},
 		stub.WithPluginName(*pluginName),
 		stub.WithPluginIdx(*pluginIdx),
 		stub.WithSocketPath(*socketPath),

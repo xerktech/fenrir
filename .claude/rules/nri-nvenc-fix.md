@@ -12,9 +12,24 @@ paths:
     "primary" GPU (smallest UUID) and need its `/dev/nvidiaN`. On talos04 that is gpu-3 (the Dell
     3090), which is why the HP 3090s looked broken (XERK-1350).
   - Delete this plugin once a driver Talos ships fixes it (reportedly 610.x). Re-test first: probe
-    NVENC from a pod holding only gpu-0 with the annotation removed.
-- **Opt-in by pod annotation `nvenc-fix.xerktech.com/inject: "true"`.** Every container of the pod
-  gets the shim; nothing else is touched. It grants no access, so there is no namespace scope.
+    NVENC from a pod holding only gpu-0, annotated `inject: "false"`.
+- **Automatic for every container holding some, but not all, GPU nodes (`/dev/nvidiaN`)**: what a
+  DRA GPU claim gives. Opt-in left video workloads working on the primary GPU only, and no workload
+  is pinned to a card.
+  - Detected by device node, not CDI name: containerd 2.2 (NRI v0.11) hands the plugin an empty
+    `CDIDevices`; the claimed `/dev/nvidia0` is in `Linux.Devices`. Seen on talos04 with a probe.
+  - **A container holding every node is skipped.** containerd gives a privileged container all host
+    devices (`oci.WithHostDevices`), and talos04 runs ~17 privileged infra pods (kube-proxy, Longhorn,
+    the DRA kubelet plugin, dcgm). They never hit the bug; without the skip every ioctl of theirs,
+    NVML's included, would run through the shim. The count is `/proc/driver/nvidia/gpus`, which
+    procfs shows to any container; unreadable means inject.
+  - Pod annotation `nvenc-fix.xerktech.com/inject`: `"false"` opts the pod out, `"true"` injects
+    every container (GPU or not), either case. Anything else means the default.
+  - Containers in the pod without the claim (init, sidecars) are untouched.
+  - An image's own `/etc/ld.so.preload` (jemalloc and the like) is hidden in every container that
+    gets the shim. That, or a proven CUDA problem, is what the opt-out is for.
+  - Made the default only after a CUDA no-regression gate on a 3090 and the PRO 6000 (XERK-1388).
+    It grants no access, so there is no namespace scope.
 - **Injected as `/etc/ld.so.preload`, never `LD_PRELOAD`.** Images set `LD_PRELOAD` themselves and
   would replace ours; glibc always reads the file. musl ignores it, so Alpine sidecars are safe.
   - Verified on talos04: a container with its own `LD_PRELOAD` still gets the fix, and an Alpine
@@ -33,7 +48,8 @@ paths:
   `dlsym@GLIBC_2.34` and `__isoc23_sscanf@GLIBC_2.38`; the preload then fails in older images.
   The built object needs only `GLIBC_2.17`.
 - `shim/nvenc_fix.c` is vendored (GPLv3, `shim/COPYING`) with local changes listed in its header. It is built into a separate `.so`; nothing in fenrir links it.
-  - It fails open: if it cannot map a GPU ID to a device node it leaves the list unfiltered.
+  - It fails open only if it can map NO GPU ID to a device node. An ID it can't map while others map
+    is dropped, so a `/proc/driver/nvidia/gpus` mismatch hides that GPU from the container.
   - IDs map to minors via `/proc/driver/nvidia/gpus` by full PCI domain:bus:device; its
     `GET_ID_INFO` path returns status 0x1f on driver 595 and is only a first attempt.
 - `--host-dir` must be the same path in the plugin's container and on the node: NRI mount sources
