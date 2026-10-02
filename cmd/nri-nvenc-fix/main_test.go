@@ -17,6 +17,29 @@ func annotatedPod(value string) *api.PodSandbox {
 	}
 }
 
+// devices is a container holding the given device nodes.
+func devices(paths ...string) *api.Container {
+	ctr := &api.Container{Name: "app", Linux: &api.LinuxContainer{}}
+	for _, p := range paths {
+		ctr.Linux.Devices = append(ctr.Linux.Devices, &api.LinuxDevice{Path: p, Type: "c"})
+	}
+	return ctr
+}
+
+// gpuContainer holds gpu-0 as a DRA claim hands it out on talos04 (seen over NRI).
+func gpuContainer(mounts ...*api.Mount) *api.Container {
+	ctr := devices("/dev/nvidia-modeset", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidiactl",
+		"/dev/nvidia0", "/dev/dri/card0", "/dev/dri/renderD128")
+	ctr.Mounts = mounts
+	return ctr
+}
+
+func TestAdjustmentGPUClaim(t *testing.T) {
+	p := &plugin{hostDir: "/var/lib/nvenc-fix"}
+	require.NotNil(t, p.adjustment(&api.PodSandbox{Name: "vllm", Namespace: "ai"}, gpuContainer()))
+	require.NotNil(t, p.adjustment(annotatedPod("yes"), gpuContainer()), "only true/false override")
+}
+
 func TestAdjustmentAnnotatedPod(t *testing.T) {
 	adjust := (&plugin{hostDir: "/var/lib/nvenc-fix"}).adjustment(annotatedPod("true"), &api.Container{Name: "wolf"})
 	require.NotNil(t, adjust)
@@ -49,8 +72,12 @@ func TestAdjustmentUntouched(t *testing.T) {
 		pod *api.PodSandbox
 		ctr *api.Container
 	}{
-		"no annotations":                     {pod: &api.PodSandbox{Name: "other", Namespace: "streaming"}, ctr: &api.Container{Name: "app"}},
-		"annotation not true":                {pod: annotatedPod("false"), ctr: &api.Container{Name: "app"}},
+		"no annotations, no GPU":             {pod: &api.PodSandbox{Name: "other", Namespace: "streaming"}, ctr: &api.Container{Name: "app"}},
+		"annotation not true, no GPU":        {pod: annotatedPod("yes"), ctr: &api.Container{Name: "app"}},
+		"opted out with a GPU":               {pod: annotatedPod("false"), ctr: gpuContainer()},
+		"control nodes only":                 {pod: &api.PodSandbox{Name: "other"}, ctr: devices("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-modeset")},
+		"a DRI node only (iGPU)":             {pod: &api.PodSandbox{Name: "other"}, ctr: devices("/dev/dri/renderD128")},
+		"GPU but own /etc/ld.so.preload":     {pod: &api.PodSandbox{Name: "other"}, ctr: gpuContainer(&api.Mount{Destination: "/etc/ld.so.preload"})},
 		"own /etc/ld.so.preload":             {pod: annotatedPod("true"), ctr: mountAt("/etc/ld.so.preload")},
 		"volume at /etc":                     {pod: annotatedPod("true"), ctr: mountAt("/etc/")},
 		"volume at the shim dir":             {pod: annotatedPod("true"), ctr: mountAt("/usr/lib/nvenc-fix")},

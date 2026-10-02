@@ -12,9 +12,17 @@ paths:
     "primary" GPU (smallest UUID) and need its `/dev/nvidiaN`. On talos04 that is gpu-3 (the Dell
     3090), which is why the HP 3090s looked broken (XERK-1350).
   - Delete this plugin once a driver Talos ships fixes it (reportedly 610.x). Re-test first: probe
-    NVENC from a pod holding only gpu-0 with the annotation removed.
-- **Opt-in by pod annotation `nvenc-fix.xerktech.com/inject: "true"`.** Every container of the pod
-  gets the shim; nothing else is touched. It grants no access, so there is no namespace scope.
+    NVENC from a pod holding only gpu-0, annotated `inject: "false"`.
+- **Automatic for every container holding a GPU node (`/dev/nvidiaN`)**, i.e. every DRA GPU claim.
+  Opt-in left video workloads working on the primary GPU only, and no workload is pinned to a card.
+  - Detected by device node, not CDI name: containerd 2.2 (NRI v0.11) hands the plugin an empty
+    `CDIDevices`; the claimed `/dev/nvidia0` is in `Linux.Devices`. Seen on talos04 with a probe.
+  - Pod annotation `nvenc-fix.xerktech.com/inject`: `"false"` opts the pod out, `"true"` injects
+    every container (GPU or not). Anything else means the default.
+  - Containers in the pod without the claim (init, sidecars) are untouched. A privileged container
+    sees every node, so it may match; the shim then filters nothing (fails open).
+  - Made the default only after a CUDA no-regression gate on a 3090 and the PRO 6000 (XERK-1388).
+    It grants no access, so there is no namespace scope.
 - **Injected as `/etc/ld.so.preload`, never `LD_PRELOAD`.** Images set `LD_PRELOAD` themselves and
   would replace ours; glibc always reads the file. musl ignores it, so Alpine sidecars are safe.
   - Verified on talos04: a container with its own `LD_PRELOAD` still gets the fix, and an Alpine
