@@ -66,6 +66,8 @@ func TestAppCRDValidatesEmbeddedMetadata(t *testing.T) {
 		{name: "empty prefix", labels: map[string]any{"/x": "x"}, wantErr: "metadata.labels keys"},
 		{name: "label value", labels: map[string]any{"app": "bad value"}, wantErr: "metadata.labels.app"},
 		{name: "label value too long", labels: map[string]any{"app": long + "a"}, wantErr: "metadata.labels.app"},
+		{name: "annotation prefix 253 long", annotations: map[string]any{strings.Repeat("a.", 126) + "a/x": "x"}},
+		{name: "annotation prefix 254 long", annotations: map[string]any{strings.Repeat("a.", 126) + "ab/x": "x"}, wantErr: "metadata.annotations keys"},
 		{name: "annotation key", annotations: map[string]any{"bad key!": "x"}, wantErr: "metadata.annotations keys"},
 	} {
 		for _, field := range []string{"template", "volumeClaimTemplate"} {
