@@ -25,6 +25,7 @@ import (
 	"games-on-whales.github.io/direwolf/pkg/wolfapi"
 	// "github.com/pelletier/go-toml/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -310,13 +311,22 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	// 	})
 	// }
 
-	if pvcError := c.reconcilePVC(ctx, newObj); pvcError != nil {
+	if pvcDrift, pvcError := c.reconcilePVC(ctx, newObj); pvcError != nil {
 		klog.Errorf("Failed to reconcile pvc: %s", pvcError)
 		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
 			Type:    "VolumeCreated",
 			Status:  metav1.ConditionFalse,
 			Reason:  "PVCAllocationFailed",
 			Message: pvcError.Error(),
+		})
+	} else if len(pvcDrift) > 0 {
+		// The PVC is usable; the App's template just no longer describes it.
+		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
+			Type:   "VolumeCreated",
+			Status: metav1.ConditionTrue,
+			Reason: "TemplateDrift",
+			Message: "the existing PVC keeps its live values for volumeClaimTemplate fields it cannot change: " +
+				strings.Join(pvcDrift, ", ") + "; delete the PVC (losing its data) to apply them",
 		})
 	} else {
 		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
@@ -1516,20 +1526,26 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 // 	return nil
 // }
 
-func (c *SessionController) reconcilePVC(ctx context.Context, session *v1alpha1types.Session) error {
+// reconcilePVC creates the session's PVC from the App's volumeClaimTemplate
+// and keeps its metadata in step. The PVC outlives Sessions, and the apiserver
+// rejects almost any spec change on an existing claim, so after creation it
+// re-declares the live spec instead of the template's (XERK-1519). The only
+// spec change it makes is growing the storage request. It returns the template
+// fields the live PVC no longer matches, for the caller to surface.
+func (c *SessionController) reconcilePVC(ctx context.Context, session *v1alpha1types.Session) ([]string, error) {
 	user, err := c.UserInformer.Namespaced(session.Namespace).Get(session.Spec.UserReference.Name)
 	if err != nil {
-		return fmt.Errorf("failed to get user: %s", err)
+		return nil, fmt.Errorf("failed to get user: %w", err)
 	}
 	app, err := c.AppInformer.Namespaced(session.Namespace).Get(session.Spec.GameReference.Name)
 	if err != nil {
-		return fmt.Errorf("failed to get user: %s", err)
+		return nil, fmt.Errorf("failed to get app: %w", err)
 	}
 
 	// Check if the user defined a volume claim template. If not, return nil.
 	if app.Spec.VolumeClaimTemplate == nil {
 		klog.Infof("App %s does not define a VolumeClaimTemplate, skipping PVC creation.", app.Name)
-		return nil
+		return nil, nil
 	}
 
 	pvcName := c.pvcName(session)
@@ -1549,21 +1565,131 @@ func (c *SessionController) reconcilePVC(ctx context.Context, session *v1alpha1t
 	}
 	// Note: Default storage class is handled by Kubernetes if StorageClassName is nil.
 
-	// Build the PVC spec apply configuration from the defaulted spec
-	pvcSpec := v1ac.PersistentVolumeClaimSpec().
-		WithAccessModes(templateSpec.AccessModes...).
-		WithResources(v1ac.VolumeResourceRequirements().
-			WithLimits(templateSpec.Resources.Limits).
-			WithRequests(templateSpec.Resources.Requests))
+	pvcs := c.K8sClient.CoreV1().PersistentVolumeClaims(session.Namespace)
+	live, err := pvcs.Get(ctx, pvcName, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		live = nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to get PVC %s: %w", pvcName, err)
+	}
 
-	if templateSpec.Selector != nil {
-		selectorConfig := metav1ac.LabelSelector()
-		if len(templateSpec.Selector.MatchLabels) > 0 {
-			selectorConfig.WithMatchLabels(templateSpec.Selector.MatchLabels)
+	apply := func(spec *corev1.PersistentVolumeClaimSpec) error {
+		_, applyErr := pvcs.Apply(
+			ctx,
+			v1ac.PersistentVolumeClaim(pvcName, session.Namespace).
+				// The template's metadata first, so the operator's labels win.
+				// With* copy into the apply configuration's own maps, leaving the
+				// informer cache's App untouched.
+				WithLabels(app.Spec.VolumeClaimTemplate.Labels).
+				WithAnnotations(app.Spec.VolumeClaimTemplate.Annotations).
+				WithLabels(map[string]string{
+					"app":           "direwolf-worker",
+					"direwolf/app":  session.Spec.GameReference.Name,
+					"direwolf/user": session.Spec.UserReference.Name,
+				}).
+				WithOwnerReferences(metav1ac.OwnerReference().
+					WithName(user.Name).
+					WithAPIVersion(v1alpha1.GroupVersion.String()).
+					WithKind("User").
+					WithUID(user.UID).
+					WithController(true)).
+				WithSpec(pvcSpecApply(spec)),
+			metav1.ApplyOptions{
+				FieldManager: "direwolf-session-controller-pvc",
+				// The operator owns every field it declares here; without Force a
+				// key another manager also set (e.g. `kubectl label`) conflicts and
+				// fails every reconcile (XERK-1376).
+				Force: true,
+			},
+		)
+		if applyErr != nil {
+			return fmt.Errorf("failed to apply PVC %s: %w", pvcName, applyErr)
 		}
-		if len(templateSpec.Selector.MatchExpressions) > 0 {
+		return nil
+	}
+
+	if live == nil {
+		return nil, apply(templateSpec)
+	}
+
+	spec, drift := keepLivePVCSpec(templateSpec, &live.Spec)
+	err = apply(spec)
+	if err != nil && (errors.IsInvalid(err) || errors.IsForbidden(err)) &&
+		!spec.Resources.Requests.Storage().Equal(*live.Spec.Resources.Requests.Storage()) {
+		// Not every StorageClass can expand a claim. Keep the live size rather
+		// than fail every Session of this user and App.
+		klog.Warningf("PVC %s: growing to the template's storage request failed, keeping %s: %v",
+			pvcName, live.Spec.Resources.Requests.Storage(), err)
+		drift = append(drift, "resources.requests.storage (resize rejected)")
+		spec.Resources.Requests[corev1.ResourceStorage] = live.Spec.Resources.Requests.Storage().DeepCopy()
+		err = apply(spec)
+	}
+	return drift, err
+}
+
+// keepLivePVCSpec returns the spec to re-apply to an existing PVC: every field
+// the operator declares, at its live value, so server-side apply neither
+// changes an immutable field nor removes one a later template dropped. The
+// storage request alone follows the template, and only upwards. drift names
+// the template fields the live PVC differs from.
+func keepLivePVCSpec(template, live *corev1.PersistentVolumeClaimSpec) (spec *corev1.PersistentVolumeClaimSpec, drift []string) {
+	spec = &corev1.PersistentVolumeClaimSpec{
+		AccessModes:      live.AccessModes,
+		Selector:         live.Selector,
+		StorageClassName: live.StorageClassName,
+		VolumeMode:       live.VolumeMode,
+		DataSource:       live.DataSource,
+		DataSourceRef:    live.DataSourceRef,
+		Resources: corev1.VolumeResourceRequirements{
+			Limits:   live.Resources.Limits,
+			Requests: maps.Clone(live.Resources.Requests),
+		},
+	}
+	if spec.Resources.Requests == nil {
+		spec.Resources.Requests = corev1.ResourceList{}
+	}
+
+	differs := func(field string, declared bool, want, got any) {
+		if declared && !equality.Semantic.DeepEqual(want, got) {
+			drift = append(drift, field)
+		}
+	}
+	// Fields the template leaves unset are the apiserver's to default.
+	differs("accessModes", true, template.AccessModes, live.AccessModes)
+	differs("selector", template.Selector != nil, template.Selector, live.Selector)
+	differs("storageClassName", template.StorageClassName != nil, template.StorageClassName, live.StorageClassName)
+	differs("volumeMode", template.VolumeMode != nil, template.VolumeMode, live.VolumeMode)
+	differs("dataSource", template.DataSource != nil, template.DataSource, live.DataSource)
+	differs("dataSourceRef", template.DataSourceRef != nil, template.DataSourceRef, live.DataSourceRef)
+	differs("resources.limits", len(template.Resources.Limits) > 0, template.Resources.Limits, live.Resources.Limits)
+
+	want, got := template.Resources.Requests.Storage(), live.Resources.Requests.Storage()
+	switch want.Cmp(*got) {
+	case 1:
+		spec.Resources.Requests[corev1.ResourceStorage] = want.DeepCopy()
+	case -1:
+		// Never shrink: the apiserver rejects it, and someone grew it on purpose.
+		drift = append(drift, "resources.requests.storage")
+	}
+	return spec, drift
+}
+
+// pvcSpecApply converts a PVC spec into its apply configuration.
+func pvcSpecApply(spec *corev1.PersistentVolumeClaimSpec) *v1ac.PersistentVolumeClaimSpecApplyConfiguration {
+	pvcSpec := v1ac.PersistentVolumeClaimSpec().
+		WithAccessModes(spec.AccessModes...).
+		WithResources(v1ac.VolumeResourceRequirements().
+			WithLimits(spec.Resources.Limits).
+			WithRequests(spec.Resources.Requests))
+
+	if spec.Selector != nil {
+		selectorConfig := metav1ac.LabelSelector()
+		if len(spec.Selector.MatchLabels) > 0 {
+			selectorConfig.WithMatchLabels(spec.Selector.MatchLabels)
+		}
+		if len(spec.Selector.MatchExpressions) > 0 {
 			var expressions []*metav1ac.LabelSelectorRequirementApplyConfiguration
-			for _, req := range templateSpec.Selector.MatchExpressions {
+			for _, req := range spec.Selector.MatchExpressions {
 				expressions = append(expressions, metav1ac.LabelSelectorRequirement().
 					WithKey(req.Key).
 					WithOperator(req.Operator).
@@ -1573,68 +1699,34 @@ func (c *SessionController) reconcilePVC(ctx context.Context, session *v1alpha1t
 		}
 		pvcSpec.WithSelector(selectorConfig)
 	}
-	if templateSpec.StorageClassName != nil {
-		pvcSpec.WithStorageClassName(*templateSpec.StorageClassName)
+	if spec.StorageClassName != nil {
+		pvcSpec.WithStorageClassName(*spec.StorageClassName)
 	}
-	if templateSpec.VolumeMode != nil {
-		pvcSpec.WithVolumeMode(*templateSpec.VolumeMode)
+	if spec.VolumeMode != nil {
+		pvcSpec.WithVolumeMode(*spec.VolumeMode)
 	}
-	if templateSpec.DataSource != nil {
+	if spec.DataSource != nil {
 		dsConfig := v1ac.TypedLocalObjectReference().
-			WithKind(templateSpec.DataSource.Kind).
-			WithName(templateSpec.DataSource.Name)
-		if templateSpec.DataSource.APIGroup != nil {
-			dsConfig.WithAPIGroup(*templateSpec.DataSource.APIGroup)
+			WithKind(spec.DataSource.Kind).
+			WithName(spec.DataSource.Name)
+		if spec.DataSource.APIGroup != nil {
+			dsConfig.WithAPIGroup(*spec.DataSource.APIGroup)
 		}
 		pvcSpec.WithDataSource(dsConfig)
 	}
-	if templateSpec.DataSourceRef != nil {
+	if spec.DataSourceRef != nil {
 		dsrConfig := v1ac.TypedObjectReference().
-			WithKind(templateSpec.DataSourceRef.Kind).
-			WithName(templateSpec.DataSourceRef.Name)
-		if templateSpec.DataSourceRef.APIGroup != nil {
-			dsrConfig.WithAPIGroup(*templateSpec.DataSourceRef.APIGroup)
+			WithKind(spec.DataSourceRef.Kind).
+			WithName(spec.DataSourceRef.Name)
+		if spec.DataSourceRef.APIGroup != nil {
+			dsrConfig.WithAPIGroup(*spec.DataSourceRef.APIGroup)
 		}
-		if templateSpec.DataSourceRef.Namespace != nil {
-			dsrConfig.WithNamespace(*templateSpec.DataSourceRef.Namespace)
+		if spec.DataSourceRef.Namespace != nil {
+			dsrConfig.WithNamespace(*spec.DataSourceRef.Namespace)
 		}
 		pvcSpec.WithDataSourceRef(dsrConfig)
 	}
-
-	_, err = c.K8sClient.CoreV1().PersistentVolumeClaims(session.Namespace).Apply(
-		ctx,
-		v1ac.PersistentVolumeClaim(pvcName, session.Namespace).
-			// The template's metadata first, so the operator's labels win.
-			// With* copy into the apply configuration's own maps, leaving the
-			// informer cache's App untouched.
-			WithLabels(app.Spec.VolumeClaimTemplate.Labels).
-			WithAnnotations(app.Spec.VolumeClaimTemplate.Annotations).
-			WithLabels(map[string]string{
-				"app":           "direwolf-worker",
-				"direwolf/app":  session.Spec.GameReference.Name,
-				"direwolf/user": session.Spec.UserReference.Name,
-			}).
-			WithOwnerReferences(metav1ac.OwnerReference().
-				WithName(user.Name).
-				WithAPIVersion(v1alpha1.GroupVersion.String()).
-				WithKind("User").
-				WithUID(user.UID).
-				WithController(true)).
-			WithSpec(pvcSpec),
-		metav1.ApplyOptions{
-			FieldManager: "direwolf-session-controller-pvc",
-			// The operator owns every field it declares here; without Force a
-			// key another manager also set (e.g. `kubectl label`) conflicts and
-			// fails every reconcile (XERK-1376).
-			Force: true,
-		},
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to apply PVC %s: %w", pvcName, err)
-	}
-
-	return nil
+	return pvcSpec
 }
 
 // pvcName is per user and App, not per Session: the game's state outlives

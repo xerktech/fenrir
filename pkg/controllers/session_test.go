@@ -265,7 +265,7 @@ func reconcileFixtures(t *testing.T, userPath, appPath string) (*SessionControll
 	sess.Status.Conditions = append(sess.Status.Conditions, metav1.Condition{Type: "PortsAllocated", Status: metav1.ConditionTrue, Reason: "Test", Message: "allocated"})
 
 	// 3) reconcilePVC
-	if err := sc.reconcilePVC(ctx, sess); err != nil {
+	if _, err = sc.reconcilePVC(ctx, sess); err != nil {
 		t.Fatalf("reconcilePVC failed: %v", err)
 	}
 
@@ -682,7 +682,7 @@ func TestSessionPVCApplyForcesConflicts(t *testing.T) {
 		t.Fatalf("relabel PVC: %v", err)
 	}
 
-	if err = sc.reconcilePVC(ctx, sess); err != nil {
+	if _, err = sc.reconcilePVC(ctx, sess); err != nil {
 		t.Fatalf("reconcilePVC after an out-of-band relabel: %v", err)
 	}
 	pvc, err = pvcs.Get(ctx, sc.pvcName(sess), metav1.GetOptions{})

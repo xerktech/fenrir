@@ -97,6 +97,10 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     Library pod for Steam/Heroic installs and keeps one App per game; see `.claude/rules/catalogue.md`.
   - RomM sync (`pkg/controllers/romm.go`, off unless `--romm-url`) keeps one RetroArch App per
     playable RomM ROM, via the catalogue's App sync; see `.claude/rules/romm.md`.
+  - The PVC is per user and App and outlives Sessions. Once it exists, `reconcilePVC` re-applies
+    its live spec (only the storage request grows), never the template's: the apiserver rejects
+    nearly every spec change, and a field left out of the apply is removed (XERK-1519).
+    Template drift shows as `VolumeCreated` reason `TemplateDrift`. Tests: `session_pvc_test.go`.
   - `App.spec.gpu` becomes a per-Session DRA ResourceClaim (`pkg/controllers/gpu_claim.go`).
   - Watches session pods (label `direwolf/session=true` only) to re-reconcile their Session.
 - **wolf-agent** (`pkg/controllers/agent.go`, `pkg/wolfapi`, `pkg/fakeudev`): sidecar talking to
