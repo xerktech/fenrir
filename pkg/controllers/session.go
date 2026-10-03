@@ -128,6 +128,11 @@ type SessionController struct {
 
 	ports *portAllocator
 
+	// runCtx is Run's context, set before any Reconcile: the generic
+	// controller's reconcile callback takes none, and shutdown or leader loss
+	// must cancel in-flight calls, wolf-agent polls above all.
+	runCtx context.Context
+
 	controller    generic.Controller[*v1alpha1types.Session]
 	podController generic.Controller[*corev1.Pod]
 	SessionControllerOptions
@@ -189,6 +194,7 @@ func NewSessionController(
 func (c *SessionController) Run(ctx context.Context) error {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	c.runCtx = sessionCtx
 
 	if !cache.WaitForCacheSync(sessionCtx.Done(), c.SessionInformer.HasSynced) {
 		return fmt.Errorf("failed to sync session informer")
@@ -255,16 +261,21 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	klog.Infof("Reconciling session %s/%s", namespace, name)
 	defer klog.Infof("Finished Reconciling session %s/%s", namespace, name)
 
+	ctx := c.runCtx
+	if ctx == nil { // Reconcile called without Run (tests)
+		ctx = context.Background()
+	}
+
 	if newObj == nil {
 		// Session was deleted. Its pod, and through the pod its generated
 		// ResourceClaims, are garbage collected via owner references; the
 		// port block is ours to free.
 		return c.releaseUnusedPorts()
 	} else if reason := c.expiredReason(newObj, time.Now()); reason != "" {
-		return c.endSession(context.TODO(), newObj, reason)
+		return c.endSession(ctx, newObj, reason)
 	}
 	oldStatus := newObj.Status.DeepCopy()
-	portsError := c.allocatePorts(context.TODO(), newObj)
+	portsError := c.allocatePorts(ctx, newObj)
 
 	if portsError != nil {
 		klog.Errorf("Failed to allocate ports: %s", portsError)
@@ -299,7 +310,7 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	// 	})
 	// }
 
-	if pvcError := c.reconcilePVC(context.TODO(), newObj); pvcError != nil {
+	if pvcError := c.reconcilePVC(ctx, newObj); pvcError != nil {
 		klog.Errorf("Failed to reconcile pvc: %s", pvcError)
 		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
 			Type:    "VolumeCreated",
@@ -315,7 +326,7 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 		})
 	}
 
-	pod, podError := c.reconcilePod(context.TODO(), newObj)
+	pod, podError := c.reconcilePod(ctx, newObj)
 	switch {
 	case stderrors.Is(podError, errSessionEnded):
 		return nil
@@ -356,7 +367,7 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 
 	streamError := podError
 	if streamError == nil {
-		streamError = c.reconcileActiveStreams(context.TODO(), newObj, pod)
+		streamError = c.reconcileActiveStreams(ctx, newObj, pod)
 	}
 	switch {
 	case stderrors.Is(streamError, errSessionEnded):
@@ -381,7 +392,7 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 
 	// Set the new status, if it is changed
 	if !reflect.DeepEqual(&newObj.Status, oldStatus) {
-		err := c.writeStatus(context.TODO(), newObj, oldStatus)
+		err := c.writeStatus(ctx, newObj, oldStatus)
 		// Failed to update status....nothing to do but try again with
 		// exponential backoff. Could be API server issue. Depends on response
 		// code?
@@ -1844,7 +1855,7 @@ func (c *SessionController) reconcileActiveStreams(
 	})
 	sessions, err := wolfclient.ListSessions(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to list sessions: %s", err)
+		return fmt.Errorf("polling wolf-agent: %w", err)
 	}
 
 	keyIVHash := util.Hash([]byte(session.Spec.Config.AESKey), []byte(session.Spec.Config.AESIV))

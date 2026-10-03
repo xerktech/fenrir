@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 )
@@ -89,9 +90,14 @@ func (c *client) JoinLobby(ctx context.Context, lobbyID, sessionID string) error
 	return nil
 }
 
+// maxResponseBytes bounds how much of a reply call reads.
+const maxResponseBytes = 8 << 20
+
 // call sends body (if any) as JSON and decodes Wolf's reply into out, whose
 // embedded Response reports failure. Wolf answers errors with HTTP 500 and a
-// JSON body, so the body is decoded whatever the status.
+// JSON Response, so a non-2xx reply reports Wolf's message when it has one,
+// else its status and the start of its body (wolf-agent's proxy and auth
+// errors are plain text).
 func (c *client) call(ctx context.Context, method, path string, body any, out interface{ failure() error }) error {
 	u, err := url.JoinPath(c.apiURL, path)
 	if err != nil {
@@ -115,10 +121,30 @@ func (c *client) call(ctx context.Context, method, path string, body any, out in
 		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("HTTP %d: %w", resp.StatusCode, err)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return fmt.Errorf("%s %s: %s: reading body: %w", method, path, resp.Status, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		var wolfErr Response
+		if json.Unmarshal(raw, &wolfErr) == nil && wolfErr.Error != "" {
+			return fmt.Errorf("%s %s: %s: wolf: %s", method, path, resp.Status, wolfErr.Error)
+		}
+		return fmt.Errorf("%s %s: %s: %q", method, path, resp.Status, bodyStart(raw))
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("%s %s: decoding %q: %w", method, path, bodyStart(raw), err)
 	}
 	return out.failure()
+}
+
+// bodyStart is the start of a reply body, for error messages.
+func bodyStart(b []byte) string {
+	const maxLen = 200
+	if len(b) > maxLen {
+		return string(b[:maxLen]) + "..."
+	}
+	return string(b)
 }
 
 func (r *Response) failure() error {

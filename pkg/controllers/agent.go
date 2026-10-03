@@ -119,7 +119,7 @@ func (a *Agent) handleEvents(ctx context.Context, ch <-chan *sse.Event) {
 
 				a.lobby.ended(pauseEvent.SessionID)
 				if err := a.WolfClient.StopSession(ctx, pauseEvent.SessionID); err != nil {
-					utilruntime.HandleError(fmt.Errorf("failed to stop session: %w", err))
+					utilruntime.HandleError(err)
 					continue
 				}
 				a.clearDevices()
