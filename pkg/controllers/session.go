@@ -901,6 +901,14 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	if err := addAppGPUClaim(&podToCreate.Spec, app, session); err != nil {
 		return nil, err
 	}
+	// Before the operator's own containers are added: only the App's are
+	// stripped.
+	for i := range podToCreate.Spec.InitContainers {
+		dropMknod(&podToCreate.Spec.InitContainers[i])
+	}
+	for i := range podToCreate.Spec.Containers {
+		dropMknod(&podToCreate.Spec.Containers[i])
+	}
 
 	if podToCreate.Labels == nil {
 		podToCreate.Labels = map[string]string{}
@@ -1655,6 +1663,35 @@ func validateNoHotplugOverride(mounts []corev1.VolumeMount) error {
 // relative mountPath, which the runtime resolves against the container root.
 func mountTarget(m *corev1.VolumeMount) string {
 	return path.Join("/", m.MountPath)
+}
+
+// dropMknod removes CAP_MKNOD from an App container, even one whose App adds
+// it. cmd/nri-input grants every container of a session pod the whole input
+// major (13:* rwm) and the runtime's default device cgroup allows mknod of any
+// node, so a root App holding MKNOD could create and open the host's keyboards
+// or another session's virtual devices. The App needs none: wolf-agent mknods
+// its controllers into the shared /dev/input.
+//
+// It does not cover an App that is privileged (the runtime then ignores the
+// drop and hands it the host's /dev) or adds SYS_ADMIN (it can mount a
+// devtmpfs instead).
+func dropMknod(ctr *corev1.Container) {
+	if ctr.SecurityContext == nil {
+		ctr.SecurityContext = &corev1.SecurityContext{}
+	}
+	if ctr.SecurityContext.Capabilities == nil {
+		ctr.SecurityContext.Capabilities = &corev1.Capabilities{}
+	}
+	caps := ctr.SecurityContext.Capabilities
+	// The runtime applies drops after adds (an added ALL included), and
+	// accepts either spelling.
+	isMknod := func(c corev1.Capability) bool {
+		return strings.TrimPrefix(strings.ToUpper(string(c)), "CAP_") == "MKNOD"
+	}
+	caps.Add = slices.DeleteFunc(caps.Add, isMknod)
+	if !slices.ContainsFunc(caps.Drop, isMknod) {
+		caps.Drop = append(caps.Drop, "MKNOD")
+	}
 }
 
 // withHotplugMounts adds the hotplug volume mounts to mounts, except where
