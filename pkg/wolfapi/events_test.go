@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +34,42 @@ func TestSubscribeToEventsClosesOnStreamEnd(t *testing.T) {
 					t.Errorf("events %q, want [PauseStreamEvent]", got)
 				}
 				return
+			}
+			got = append(got, string(ev.Event))
+		case <-timeout:
+			t.Fatalf("channel not closed after the stream ended; events %q", got)
+		}
+	}
+}
+
+// An event far over the SSE library's 64KiB default (a PlugDeviceEvent with
+// many udev hwdb entries is ~200KiB) is delivered whole, not dropped with
+// the stream.
+func TestSubscribeToEventsDeliversLargeEvent(t *testing.T) {
+	data := `{"hwdb":"` + strings.Repeat("x", 1<<20) + `"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: PlugDeviceEvent\ndata: %s\n\nevent: PauseStreamEvent\ndata: {}\n\n", data)
+	}))
+	t.Cleanup(srv.Close)
+
+	ch, err := wolfapi.NewClient(srv.URL, srv.Client()).SubscribeToEvents(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	timeout := time.After(10 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				if len(got) != 2 || got[0] != "PlugDeviceEvent" || got[1] != "PauseStreamEvent" {
+					t.Errorf("events %q, want [PlugDeviceEvent PauseStreamEvent]", got)
+				}
+				return
+			}
+			if string(ev.Event) == "PlugDeviceEvent" && string(ev.Data) != data {
+				t.Errorf("PlugDeviceEvent data is %d bytes, want %d", len(ev.Data), len(data))
 			}
 			got = append(got, string(ev.Event))
 		case <-timeout:

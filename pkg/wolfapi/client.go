@@ -262,6 +262,14 @@ func (c *client) StopSession(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// maxEventSize bounds one Wolf SSE event. The library's 64KiB default ends
+// the stream on a bigger one and that event is lost; a PlugDeviceEvent
+// carrying many udev hwdb entries reaches ~200KiB, and losing it means the
+// controller never appears. The buffer only grows to what an event needs.
+// Not higher: the reader rescans its buffer on every read, so a 16MiB event
+// takes seconds of CPU and stalls the agent's event loop; 4MiB is ~0.3s.
+const maxEventSize = 4 << 20
+
 // SubscribeToEvents opens one connection to Wolf's event stream. It returns
 // once Wolf has answered; the channel is closed when that connection ends,
 // for whatever reason, so the caller sees every disconnect and resubscribes.
@@ -275,6 +283,7 @@ func (c *client) SubscribeToEvents(ctx context.Context) (<-chan *sse.Event, erro
 	sseClient := sse.NewClient(c.apiURL+"/api/v1/events", func(cl *sse.Client) {
 		cl.Connection = c.httpClient
 		cl.ReconnectStrategy = &backoff.StopBackOff{}
+		sse.ClientMaxBufferSize(maxEventSize)(cl)
 		cl.ResponseValidator = func(_ *sse.Client, resp *http.Response) error {
 			var err error
 			if resp.StatusCode != http.StatusOK {
