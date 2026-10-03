@@ -80,8 +80,13 @@ spec:
                 description: Whether the app supports HDR
                 type: boolean
               template:
-                description: PodTemplateSpec describes the data a pod should have
-                  when created from a template
+                description: |-
+                  The operator copies this metadata onto the session pod, so a key the API
+                  server rejects there would fail every Session of the App: reject it here.
+                  Label values get a schema pattern from hack/update-codegen.sh instead:
+                  CEL over unbounded map values exceeds the CRD cost budget.
+                  Plain regexes, not CEL's format library, which needs a newer API server
+                  than the chart's kubeVersion floor.
                 properties:
                   metadata:
                     description: |-
@@ -98,6 +103,8 @@ spec:
                         type: array
                       labels:
                         additionalProperties:
+                          maxLength: 63
+                          pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
                           type: string
                         type: object
                       name:
@@ -7420,6 +7427,8 @@ spec:
                                           type: array
                                         labels:
                                           additionalProperties:
+                                            maxLength: 63
+                                            pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
                                             type: string
                                           type: object
                                         name:
@@ -8919,6 +8928,17 @@ spec:
                     - containers
                     type: object
                 type: object
+                x-kubernetes-validations:
+                - message: 'metadata.labels keys must be qualified names: an optional
+                    DNS subdomain prefix and ''/'', then at most 63 alphanumerics,
+                    ''-'', ''_'' or ''.'', starting and ending alphanumeric'
+                  rule: '!has(self.metadata) || !has(self.metadata.labels) || self.metadata.labels.all(k,
+                    k.indexOf(''/'') <= 253 && k.matches(r''^([a-z\d]+((-+|[.])[a-z\d]+)*/)?[^\W_]([-\w.]{0,61}[^\W_])?$''))'
+                - message: 'metadata.annotations keys must be qualified names: an
+                    optional DNS subdomain prefix and ''/'', then at most 63 alphanumerics,
+                    ''-'', ''_'' or ''.'', starting and ending alphanumeric'
+                  rule: '!has(self.metadata) || !has(self.metadata.annotations) ||
+                    self.metadata.annotations.all(k, k.indexOf(''/'') <= 253 && k.lowerAscii().matches(r''^([a-z\d]+((-+|[.])[a-z\d]+)*/)?[^\W_]([-\w.]{0,61}[^\W_])?$''))'
               title:
                 description: Name of the app to be presented to the user
                 maxLength: 63
@@ -8931,6 +8951,7 @@ spec:
                   this template and mount it at /home/retro.
                   If not provided, an emptyDir volume will be used.
                   all other volumes must be defined in the pod template's spec.volumes field.
+                  Its metadata is validated as template's is; it is copied onto the PVC.
                 properties:
                   metadata:
                     description: |-
@@ -8948,6 +8969,8 @@ spec:
                         type: array
                       labels:
                         additionalProperties:
+                          maxLength: 63
+                          pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$
                           type: string
                         type: object
                       name:
@@ -9156,6 +9179,17 @@ spec:
                 required:
                 - spec
                 type: object
+                x-kubernetes-validations:
+                - message: 'metadata.labels keys must be qualified names: an optional
+                    DNS subdomain prefix and ''/'', then at most 63 alphanumerics,
+                    ''-'', ''_'' or ''.'', starting and ending alphanumeric'
+                  rule: '!has(self.metadata) || !has(self.metadata.labels) || self.metadata.labels.all(k,
+                    k.indexOf(''/'') <= 253 && k.matches(r''^([a-z\d]+((-+|[.])[a-z\d]+)*/)?[^\W_]([-\w.]{0,61}[^\W_])?$''))'
+                - message: 'metadata.annotations keys must be qualified names: an
+                    optional DNS subdomain prefix and ''/'', then at most 63 alphanumerics,
+                    ''-'', ''_'' or ''.'', starting and ending alphanumeric'
+                  rule: '!has(self.metadata) || !has(self.metadata.annotations) ||
+                    self.metadata.annotations.all(k, k.indexOf(''/'') <= 253 && k.lowerAscii().matches(r''^([a-z\d]+((-+|[.])[a-z\d]+)*/)?[^\W_]([-\w.]{0,61}[^\W_])?$''))'
               wolfConfig:
                 description: |-
                   Unstructured wolf configuration for app to be merged with the default

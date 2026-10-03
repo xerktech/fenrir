@@ -28,6 +28,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - Keep `crd:generateEmbeddedObjectMeta=true`: without it an embedded template's `metadata` is a
     bare `{type: object}` and the API server prunes its labels/annotations on admission (XERK-1347).
     Unit tests seed fake clients that never prune; `TestCRDsKeepEmbeddedMetadata` guards it.
+  - App template metadata keys are checked by CEL markers in `app.go`; label values by a pattern
+    `update-codegen.sh` patches into every CRD `labels` map (XERK-1375). CEL over a map's values
+    exceeds the CRD cost budget. `TestAppCRDValidatesEmbeddedMetadata` runs the API server's checks.
 - Chart: `charts/direwolf-operator` has no `crds/` dir in git; CI copies `crds/*.yaml` in before
   `helm lint --strict` / `helm template --kube-version 1.36.0` (kubeVersion floor is >=1.28).
 
