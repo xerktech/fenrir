@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/streaming/pkg/httpstream"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	dwfake "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
@@ -563,5 +565,56 @@ func TestValidateLibraryGamesPath(t *testing.T) {
 		if err := ValidateLibraryGamesPath(path); (err == nil) != ok {
 			t.Errorf("ValidateLibraryGamesPath(%q) = %v, want ok=%v", path, err, ok)
 		}
+	}
+}
+
+// The first exec into a just-started Library pod fails its stream upgrade
+// (XERK-1546); the command never ran, so it is retried once. Any other
+// failure is not retried: the command may have run.
+func TestRetryUpgradeFailure(t *testing.T) {
+	defer func(d time.Duration) { execUpgradeRetryDelay = d }(execUpgradeRetryDelay)
+	execUpgradeRetryDelay = time.Millisecond
+	upgradeErr := fmt.Errorf("%w: ", &httpstream.UpgradeFailureError{Cause: errors.New("use of closed network connection")})
+	exitErr := errors.New("command terminated with exit code 1")
+
+	for _, tc := range []struct {
+		name      string
+		errs      []error
+		wantCalls int
+		wantErr   error
+	}{
+		{"ok", []error{nil}, 1, nil},
+		{"upgrade failure then ok", []error{upgradeErr, nil}, 2, nil},
+		{"upgrade failure twice", []error{upgradeErr, upgradeErr}, 2, upgradeErr},
+		{"command failed", []error{exitErr}, 1, exitErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			exec := retryUpgradeFailure(func(context.Context, string, string, string, []string) (string, error) {
+				err := tc.errs[calls]
+				calls++
+				if err != nil {
+					return "", err
+				}
+				return "out", nil
+			})
+			out, err := exec(context.Background(), libraryTestNS, LibraryPodName, libraryContainer, []string{"true"})
+			if calls != tc.wantCalls || !errors.Is(err, tc.wantErr) || (err == nil && out != "out") {
+				t.Errorf("calls %d, out %q, err %v; want calls %d, err %v", calls, out, err, tc.wantCalls, tc.wantErr)
+			}
+		})
+	}
+
+	// A cancelled context ends the wait without a retry.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := 0
+	exec := retryUpgradeFailure(func(context.Context, string, string, string, []string) (string, error) {
+		calls++
+		return "", upgradeErr
+	})
+	execUpgradeRetryDelay = time.Hour
+	if _, err := exec(ctx, libraryTestNS, LibraryPodName, libraryContainer, nil); calls != 1 || !errors.Is(err, upgradeErr) {
+		t.Errorf("cancelled: calls %d, err %v; want 1 call, the upgrade error", calls, err)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/klog/v2"
+	"k8s.io/streaming/pkg/httpstream"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
@@ -127,9 +128,13 @@ func execResult(stdout, stderr *cappedBuffer, err error) (string, error) {
 	return stdout.String(), nil
 }
 
+// execUpgradeRetryDelay is the pause before retrying an exec whose stream
+// upgrade failed.
+var execUpgradeRetryDelay = 2 * time.Second
+
 // NewPodExecutor execs through the API server (pods/exec).
 func NewPodExecutor(config *rest.Config, client kubernetes.Interface) PodExecutor {
-	return func(ctx context.Context, namespace, pod, container string, command []string) (string, error) {
+	return retryUpgradeFailure(func(ctx context.Context, namespace, pod, container string, command []string) (string, error) {
 		req := client.CoreV1().RESTClient().Post().
 			Resource("pods").Namespace(namespace).Name(pod).SubResource("exec").
 			VersionedParams(&corev1.PodExecOptions{
@@ -145,6 +150,28 @@ func NewPodExecutor(config *rest.Config, client kubernetes.Interface) PodExecuto
 		return streamCapped(func(opts remotecommand.StreamOptions) error {
 			return executor.StreamWithContext(ctx, opts)
 		})
+	})
+}
+
+// retryUpgradeFailure retries an exec once when its stream upgrade failed.
+// The first exec into a just-started Library pod fails that way
+// (XERK-1546: the API server's dial to the kubelet hits "use of closed
+// network connection"), and a retry seconds later works. An upgrade failure
+// means the command never ran, so retrying any command is safe; any other
+// error (a non-zero exit, output over its cap, a timeout) is returned as is.
+func retryUpgradeFailure(exec PodExecutor) PodExecutor {
+	return func(ctx context.Context, namespace, pod, container string, command []string) (string, error) {
+		out, err := exec(ctx, namespace, pod, container, command)
+		if !httpstream.IsUpgradeFailure(err) {
+			return out, err
+		}
+		klog.V(2).Infof("Retrying exec into %s/%s: %v", namespace, pod, err)
+		select {
+		case <-ctx.Done():
+			return out, err
+		case <-time.After(execUpgradeRetryDelay):
+		}
+		return exec(ctx, namespace, pod, container, command)
 	}
 }
 

@@ -32,6 +32,9 @@ paths:
   >= 32 bytes, required with `--library-port`). On k8x the proxy is Authentik's outpost, a pod, so
   the trusted range is pod CIDRs, and flannel lets every pod there in. Never drop the secret check.
   - The proxy strips the header before the pod: the desktop runs arbitrary user code.
-- Tests: `TestLibraryIdleRule`, `TestLibraryEnsurePod*`, `TestLibraryServer` in
+- The first exec into a just-started Library pod fails its stream upgrade (API server→kubelet
+  dial: "use of closed network connection"). `retryUpgradeFailure` retries once on an upgrade
+  failure only: the command never ran. Never retry other exec errors; the command may have run.
+- Tests: `TestRetryUpgradeFailure`, `TestLibraryIdleRule`, `TestLibraryEnsurePod*`, `TestLibraryServer` in
   `pkg/controllers/library_test.go`; `TestLaunchBacksOutWhenBusyAfterCreate` in
   `pkg/moonlight/library_test.go`.
