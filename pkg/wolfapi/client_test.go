@@ -91,7 +91,8 @@ func TestCallReportsHTTPStatus(t *testing.T) {
 		status      int
 		want        []string
 	}{
-		{"wolf error", `{"success":false,"error":"No session found"}`, http.StatusInternalServerError, []string{"500 Internal Server Error", "No session found"}},
+		// Longer than the body excerpt, so only Wolf's decoded message has its end.
+		{"wolf error", `{"success":false,"error":"No session found` + strings.Repeat(".", 300) + `END"}`, http.StatusInternalServerError, []string{"500 Internal Server Error", "wolf: No session found", "END"}},
 		{"plain text", "oops, bad gateway", http.StatusBadGateway, []string{"502 Bad Gateway", "oops, bad gateway"}},
 		{"success body", `{"success":true,"sessions":[]}`, http.StatusUnauthorized, []string{"401 Unauthorized"}},
 	} {

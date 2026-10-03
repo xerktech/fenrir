@@ -1855,7 +1855,7 @@ func (c *SessionController) reconcileActiveStreams(
 	})
 	sessions, err := wolfclient.ListSessions(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to list sessions: %s", err)
+		return fmt.Errorf("polling wolf-agent: %w", err)
 	}
 
 	keyIVHash := util.Hash([]byte(session.Spec.Config.AESKey), []byte(session.Spec.Config.AESIV))
