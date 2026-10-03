@@ -64,7 +64,7 @@
           "type": "boolean"
         },
         "template": {
-          "description": "PodTemplateSpec describes the data a pod should have when created from a template",
+          "description": "The operator copies this metadata onto the session pod, so a key the API\nserver rejects there would fail every Session of the App: reject it here.\nLabel values get a schema pattern from hack/update-codegen.sh instead:\nCEL over unbounded map values exceeds the CRD cost budget.\nPlain regexes, not CEL's format library, which needs a newer API server\nthan the chart's kubeVersion floor.",
           "properties": {
             "metadata": {
               "description": "Standard object's metadata.\nMore info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata",
@@ -83,6 +83,8 @@
                 },
                 "labels": {
                   "additionalProperties": {
+                    "maxLength": 63,
+                    "pattern": "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$",
                     "type": "string"
                   },
                   "type": "object"
@@ -6324,6 +6326,8 @@
                                   },
                                   "labels": {
                                     "additionalProperties": {
+                                      "maxLength": 63,
+                                      "pattern": "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$",
                                       "type": "string"
                                     },
                                     "type": "object"
@@ -7543,6 +7547,16 @@
             }
           },
           "type": "object",
+          "x-kubernetes-validations": [
+            {
+              "message": "metadata.labels keys must be qualified names: an optional DNS subdomain prefix and '/', then at most 63 alphanumerics, '-', '_' or '.', starting and ending alphanumeric",
+              "rule": "!has(self.metadata) || !has(self.metadata.labels) || self.metadata.labels.all(k, k.indexOf('/') <= 253 && k.matches(r'^([a-z\\d]+((-+|[.])[a-z\\d]+)*/)?[^\\W_]([-\\w.]{0,61}[^\\W_])?$'))"
+            },
+            {
+              "message": "metadata.annotations keys must be qualified names: an optional DNS subdomain prefix and '/', then at most 63 alphanumerics, '-', '_' or '.', starting and ending alphanumeric",
+              "rule": "!has(self.metadata) || !has(self.metadata.annotations) || self.metadata.annotations.all(k, k.indexOf('/') <= 253 && k.lowerAscii().matches(r'^([a-z\\d]+((-+|[.])[a-z\\d]+)*/)?[^\\W_]([-\\w.]{0,61}[^\\W_])?$'))"
+            }
+          ],
           "additionalProperties": false
         },
         "title": {
@@ -7552,7 +7566,7 @@
           "type": "string"
         },
         "volumeClaimTemplate": {
-          "description": "A template for a PersistentVolumeClaim to be created for the app's\nhome directory. If provided, the operator will create a PVC from\nthis template and mount it at /home/retro.\nIf not provided, an emptyDir volume will be used.\nall other volumes must be defined in the pod template's spec.volumes field.",
+          "description": "A template for a PersistentVolumeClaim to be created for the app's\nhome directory. If provided, the operator will create a PVC from\nthis template and mount it at /home/retro.\nIf not provided, an emptyDir volume will be used.\nall other volumes must be defined in the pod template's spec.volumes field.\nIts metadata is validated as template's is; it is copied onto the PVC.",
           "properties": {
             "metadata": {
               "description": "May contain labels and annotations that will be copied into the PVC\nwhen creating it. No other fields are allowed and will be rejected during\nvalidation.",
@@ -7571,6 +7585,8 @@
                 },
                 "labels": {
                   "additionalProperties": {
+                    "maxLength": 63,
+                    "pattern": "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$",
                     "type": "string"
                   },
                   "type": "object"
@@ -7758,6 +7774,16 @@
             "spec"
           ],
           "type": "object",
+          "x-kubernetes-validations": [
+            {
+              "message": "metadata.labels keys must be qualified names: an optional DNS subdomain prefix and '/', then at most 63 alphanumerics, '-', '_' or '.', starting and ending alphanumeric",
+              "rule": "!has(self.metadata) || !has(self.metadata.labels) || self.metadata.labels.all(k, k.indexOf('/') <= 253 && k.matches(r'^([a-z\\d]+((-+|[.])[a-z\\d]+)*/)?[^\\W_]([-\\w.]{0,61}[^\\W_])?$'))"
+            },
+            {
+              "message": "metadata.annotations keys must be qualified names: an optional DNS subdomain prefix and '/', then at most 63 alphanumerics, '-', '_' or '.', starting and ending alphanumeric",
+              "rule": "!has(self.metadata) || !has(self.metadata.annotations) || self.metadata.annotations.all(k, k.indexOf('/') <= 253 && k.lowerAscii().matches(r'^([a-z\\d]+((-+|[.])[a-z\\d]+)*/)?[^\\W_]([-\\w.]{0,61}[^\\W_])?$'))"
+            }
+          ],
           "additionalProperties": false
         },
         "wolfConfig": {

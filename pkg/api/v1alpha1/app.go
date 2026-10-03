@@ -39,6 +39,14 @@ type AppSpec struct {
 	AppAssetWebP []byte `json:"appAssetWebP" xml:"-"`
 
 	// +kubebuilder:validation:Optional
+	// The operator copies this metadata onto the session pod, so a key the API
+	// server rejects there would fail every Session of the App: reject it here.
+	// Label values get a schema pattern from hack/update-codegen.sh instead:
+	// CEL over unbounded map values exceeds the CRD cost budget.
+	// Plain regexes, not CEL's format library, which needs a newer API server
+	// than the chart's kubeVersion floor.
+	// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || self.metadata.labels.all(k, k.indexOf('/') <= 253 && k.matches(r'^([a-z\\d]+((-+|[.])[a-z\\d]+)*/)?[^\\W_]([-\\w.]{0,61}[^\\W_])?$'))",message="metadata.labels keys must be qualified names: an optional DNS subdomain prefix and '/', then at most 63 alphanumerics, '-', '_' or '.', starting and ending alphanumeric"
+	// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.annotations) || self.metadata.annotations.all(k, k.indexOf('/') <= 253 && k.lowerAscii().matches(r'^([a-z\\d]+((-+|[.])[a-z\\d]+)*/)?[^\\W_]([-\\w.]{0,61}[^\\W_])?$'))",message="metadata.annotations keys must be qualified names: an optional DNS subdomain prefix and '/', then at most 63 alphanumerics, '-', '_' or '.', starting and ending alphanumeric"
 	Template *v1.PodTemplateSpec `json:"template" xml:"-"`
 
 	// Unstructured wolf configuration for app to be merged with the default
@@ -53,6 +61,9 @@ type AppSpec struct {
 	// If not provided, an emptyDir volume will be used.
 	// all other volumes must be defined in the pod template's spec.volumes field.
 	// +kubebuilder:validation:Optional
+	// Its metadata is validated as template's is; it is copied onto the PVC.
+	// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.labels) || self.metadata.labels.all(k, k.indexOf('/') <= 253 && k.matches(r'^([a-z\\d]+((-+|[.])[a-z\\d]+)*/)?[^\\W_]([-\\w.]{0,61}[^\\W_])?$'))",message="metadata.labels keys must be qualified names: an optional DNS subdomain prefix and '/', then at most 63 alphanumerics, '-', '_' or '.', starting and ending alphanumeric"
+	// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.annotations) || self.metadata.annotations.all(k, k.indexOf('/') <= 253 && k.lowerAscii().matches(r'^([a-z\\d]+((-+|[.])[a-z\\d]+)*/)?[^\\W_]([-\\w.]{0,61}[^\\W_])?$'))",message="metadata.annotations keys must be qualified names: an optional DNS subdomain prefix and '/', then at most 63 alphanumerics, '-', '_' or '.', starting and ending alphanumeric"
 	VolumeClaimTemplate *v1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplate,omitempty" xml:"-"`
 
 	// Hidden Apps are left out of the Moonlight app list (e.g. the base Apps

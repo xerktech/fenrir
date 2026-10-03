@@ -33,8 +33,14 @@ type AppSpecApplyConfiguration struct {
 	// Whether the app supports HDR
 	IsHDRSupported *bool `json:"isHDRSupported,omitempty"`
 	// PNG image of the app
-	AppAssetWebP []byte              `json:"appAssetWebP,omitempty"`
-	Template     *v1.PodTemplateSpec `json:"template,omitempty"`
+	AppAssetWebP []byte `json:"appAssetWebP,omitempty"`
+	// The operator copies this metadata onto the session pod, so a key the API
+	// server rejects there would fail every Session of the App: reject it here.
+	// Label values get a schema pattern from hack/update-codegen.sh instead:
+	// CEL over unbounded map values exceeds the CRD cost budget.
+	// Plain regexes, not CEL's format library, which needs a newer API server
+	// than the chart's kubeVersion floor.
+	Template *v1.PodTemplateSpec `json:"template,omitempty"`
 	// Unstructured wolf configuration for app to be merged with the default
 	// configuration
 	WolfConfig *WolfConfigApplyConfiguration `json:"wolfConfig,omitempty"`
@@ -43,6 +49,7 @@ type AppSpecApplyConfiguration struct {
 	// this template and mount it at /home/retro.
 	// If not provided, an emptyDir volume will be used.
 	// all other volumes must be defined in the pod template's spec.volumes field.
+	// Its metadata is validated as template's is; it is copied onto the PVC.
 	VolumeClaimTemplate *v1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplate,omitempty"`
 	// Hidden Apps are left out of the Moonlight app list (e.g. the base Apps
 	// the catalogue scanner copies). A per-game setting the scanner keeps.

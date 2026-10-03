@@ -87,6 +87,26 @@ echo "Patching crd manifests..." >&2
 # go run github.com/mikefarah/yq/v4 eval ".spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.matchResources.properties.namespaceSelector.default = {}" "./crds/admissionregistration.x-k8s.io_validatingadmissionpolicybindings.yaml" -i
 # go run github.com/mikefarah/yq/v4 eval ".spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.matchResources.properties.objectSelector.default = {}" "./crds/admissionregistration.x-k8s.io_validatingadmissionpolicybindings.yaml" -i
 
+# Every `labels` map in the CRDs is an embedded ObjectMeta's (session pod, PVC). Give its values
+# the API server's label-value rule, so a bad value fails on apply rather than on every Session
+# (XERK-1375). controller-gen has no marker for ObjectMeta's fields, and a CEL rule over the map's
+# unbounded values exceeds the CRD cost budget. Keys are checked by CEL markers in pkg/api.
+python3 - crds/*.yaml <<'PY'
+import re, sys
+for path in sys.argv[1:]:
+    with open(path) as f:
+        src = f.read()
+    out = re.sub(
+        r"^( *)labels:\n\1  additionalProperties:\n\1    type: string\n",
+        lambda m: (f"{m[1]}labels:\n{m[1]}  additionalProperties:\n"
+                   f"{m[1]}    maxLength: 63\n"
+                   f"{m[1]}    pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$\n"
+                   f"{m[1]}    type: string\n"),
+        src, flags=re.M)
+    with open(path, "w") as f:
+        f.write(out)
+PY
+
 echo "Done" >&2
 popd >/dev/null
 
