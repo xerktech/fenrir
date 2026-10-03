@@ -665,6 +665,38 @@ func TestSessionPVCCarriesAppTemplateMetadata(t *testing.T) {
 	}
 }
 
+// TestSessionPVCApplyForcesConflicts relabels the session PVC under another
+// field manager, as `kubectl label --overwrite` does. Without Force the next
+// apply conflicts on that key and every reconcile fails (XERK-1376).
+func TestSessionPVCApplyForcesConflicts(t *testing.T) {
+	sc, k8s, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "testdata/app-pod-labels.yaml")
+	ctx := context.Background()
+	pvcs := k8s.CoreV1().PersistentVolumeClaims(sess.Namespace)
+	pvc, err := pvcs.Get(ctx, sc.pvcName(sess), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get PVC: %v", err)
+	}
+	pvc.Labels["example.com/backup"] = "weekly"
+	pvc.Labels["direwolf/user"] = "someone-else"
+	if _, err = pvcs.Update(ctx, pvc, metav1.UpdateOptions{FieldManager: "kubectl-label"}); err != nil {
+		t.Fatalf("relabel PVC: %v", err)
+	}
+
+	if err = sc.reconcilePVC(ctx, sess); err != nil {
+		t.Fatalf("reconcilePVC after an out-of-band relabel: %v", err)
+	}
+	pvc, err = pvcs.Get(ctx, sc.pvcName(sess), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get PVC: %v", err)
+	}
+	if got := pvc.Labels["example.com/backup"]; got != "daily" {
+		t.Errorf("PVC label example.com/backup = %q, want the App template's daily back", got)
+	}
+	if got := pvc.Labels["direwolf/user"]; got != sess.Spec.UserReference.Name {
+		t.Errorf("PVC label direwolf/user = %q, want the operator's %q back", got, sess.Spec.UserReference.Name)
+	}
+}
+
 // TestBuildPodLeavesCachedObjects builds pods for two sessions of one App at
 // once, as the controller's two workers can. The App and User are the informer
 // cache's own, so building a pod must copy their maps and slices, not write
