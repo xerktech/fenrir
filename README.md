@@ -22,8 +22,9 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
 - Moonlight: add host `10.10.10.34`, start pairing, then open `pair.xerktech.com` (Authentik),
   pick the waiting client and enter the PIN Moonlight shows.
   - The Authentik username must have a `User` CR of the same name, or the PIN is refused.
-- One stream at a time (`--max-concurrent-sessions=1`). A second launch, or a launch while the
-  Library is open, is refused with a busy message rather than queued.
+- One stream at a time (`--max-concurrent-sessions=1`, counted across Users). Another User's
+  launch, or any launch while the Library is open, is refused with a busy message. A launch by
+  the same User from a second client replaces that User's running session instead.
 - Steam games: install from `library.xerktech.com`; each install becomes its own App (with
   cover art) after that Library visit. Other apps are `App` CRs in `streaming/direwolf/`.
 - Quit in Moonlight ends the session at once. Closing the client without quitting keeps the
@@ -35,14 +36,16 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
   streaming <name>`; its pod, GPU claim and wolf-agent Secret go with it. Never delete the pod
   alone expecting a restart: a gone pod ends the Session.
 - Revoke a client: `kubectl delete pairing -n streaming <fingerprint>` (`spec.userReference`
-  names its owner).
+  names its owner). It is refused from then on; a session it already has keeps running until
+  quit or deleted.
 - Steam home and library are backed up hourly/daily to NFS; the restore procedure is in the
   ArgoCD streaming rules (Steam backup).
 - RomM sync is off in this deployment (no `--romm-url`).
 
 ### Exit tests (re-run after a deploy)
 
-From a LAN host that is not talos01-03, with kubectl, and with nobody playing:
+From a LAN host that is not talos01-03 (the pairing page trusts those), with kubectl, and with
+nobody playing:
 
 - `scripts/nri-input-exit-test.sh` (ArgoCD): input devices only for session pods; a claimed
   pod sees only its GPU.
@@ -53,9 +56,11 @@ From a LAN host that is not talos01-03, with kubectl, and with nobody playing:
 These need a real Moonlight client and a gamepad, and are checked by hand:
 
 - Pair through `pair.xerktech.com`; launch Steam at the client's native resolution; the
-  gamepad works in game; stream uses NVENC (wolf log names `nvh264`/`nvh265`, not `x264`).
+  gamepad works in game; the stream uses NVENC (wolf log `Using h264 encoder: nvcodec`, not
+  `x264`).
 - Disconnect without quitting, reconnect within 10 minutes: same game, same state.
-- Second launch from another client while streaming: busy message.
+- While streaming, a launch from another User's client gets the busy message; one from your
+  own second client takes the stream over.
 - Library: install a game, close the page, it goes idle and stops; a launch while it is open
   is refused; the game appears in Moonlight with its cover.
 - Quit: `kubectl get pods,resourceclaims -n streaming` shows no session pod or claim.
