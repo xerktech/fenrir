@@ -36,6 +36,7 @@ paths:
   dial: "use of closed network connection"). `retryUpgradeFailure` retries once on an upgrade
   failure only: the command almost never ran. Never retry other exec errors; the command may
   have run. A new Library exec must stay safe to run twice.
-- Tests: `TestRetryUpgradeFailure`, `TestPodExecutorRetriesUpgradeFailure`, `TestLibraryIdleRule`, `TestLibraryEnsurePod*`, `TestLibraryServer` in
+- Tests: `TestRetryUpgradeFailure`, `TestPodExecutorRetriesUpgradeFailure`, `TestLibraryIdleRule`,
+  `TestLibraryEnsurePod*`, `TestLibraryServer` in
   `pkg/controllers/library_test.go`; `TestLaunchBacksOutWhenBusyAfterCreate` in
   `pkg/moonlight/library_test.go`.
