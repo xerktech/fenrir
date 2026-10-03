@@ -282,10 +282,16 @@ func TestLibraryEnsurePodStartsLibrary(t *testing.T) {
 		}
 	}
 	var passwordFrom *corev1.SecretKeySelector
+	env := map[string]string{}
 	for _, e := range pod.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
 		if e.Name == "PASSWORD" && e.ValueFrom != nil {
 			passwordFrom = e.ValueFrom.SecretKeyRef
 		}
+	}
+	// The Steam home is the game sessions' too: same uid/gid as GoW's retro.
+	if env["PUID"] != "1000" || env["PGID"] != "1000" {
+		t.Errorf("Library runs as PUID %q PGID %q, want the sessions' 1000:1000", env["PUID"], env["PGID"])
 	}
 	if passwordFrom == nil || passwordFrom.Name != libraryAuthSecret {
 		t.Error("Library pod's Selkies login is not set from the auth secret")
