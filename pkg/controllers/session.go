@@ -1623,6 +1623,10 @@ func (c *SessionController) reconcilePVC(ctx context.Context, session *v1alpha1t
 			WithSpec(pvcSpec),
 		metav1.ApplyOptions{
 			FieldManager: "direwolf-session-controller-pvc",
+			// The operator owns every field it declares here; without Force a
+			// key another manager also set (e.g. `kubectl label`) conflicts and
+			// fails every reconcile (XERK-1376).
+			Force: true,
 		},
 	)
 
