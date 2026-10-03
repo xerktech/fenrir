@@ -6,11 +6,13 @@ import (
 	stderrors "errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -120,13 +122,14 @@ func TestSessionPVCSurvivesImmutableTemplateEdit(t *testing.T) {
 		tmpl.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
 		// Smaller than the PVC was grown to out of band.
 		tmpl.Spec.Resources.Requests = corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")}
+		tmpl.Spec.DataSource = &corev1.TypedLocalObjectReference{Kind: "PersistentVolumeClaim", Name: "seed"}
 	})
 
 	drift, err := sc.reconcilePVC(context.Background(), sess)
 	if err != nil {
 		t.Fatalf("reconcilePVC after an immutable template edit: %v", err)
 	}
-	if want := []string{"accessModes", "resources.requests.storage"}; !slices.Equal(drift, want) {
+	if want := []string{"accessModes", "dataSource", "resources.requests.storage"}; !slices.Equal(drift, want) {
 		t.Errorf("drift = %v, want %v", drift, want)
 	}
 	pvc := getPVC(t, k8s, sc, sess)
@@ -138,6 +141,9 @@ func TestSessionPVCSurvivesImmutableTemplateEdit(t *testing.T) {
 	}
 	if got := pvc.Spec.StorageClassName; got == nil || *got != "local-path" {
 		t.Errorf("storageClassName = %v, want the live local-path kept", got)
+	}
+	if got := pvc.Spec.DataSource; got != nil {
+		t.Errorf("dataSource = %v, want the live none kept", got)
 	}
 	if got := pvc.Labels["example.com/tier"]; got != "gold" {
 		t.Errorf("PVC label example.com/tier = %q, want the edited template's gold", got)
@@ -220,5 +226,60 @@ func TestSessionPVCResizeRejected(t *testing.T) {
 	}
 	if got := pvc.Labels["example.com/tier"]; got != "gold" {
 		t.Errorf("PVC label example.com/tier = %q, want metadata still applied", got)
+	}
+}
+
+// TestSessionTemplateDriftCondition reconciles a Session whose PVC no longer
+// matches the App's template: the Session proceeds, and VolumeCreated says
+// which template fields the PVC keeps its live values for.
+func TestSessionTemplateDriftCondition(t *testing.T) {
+	f := newPortsFixture(t)
+	ctx := context.Background()
+	cached, err := f.sc.AppInformer.Namespaced(portsTestNS).Get(f.app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := cached.DeepCopy()
+	fast, slow := "fast", "slow"
+	app.Spec.VolumeClaimTemplate = &corev1.PersistentVolumeClaimTemplate{Spec: corev1.PersistentVolumeClaimSpec{
+		AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+		StorageClassName: &fast,
+		Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("5Gi")}},
+	}}
+	if err = f.sc.AppInformer.GetIndexer().Update(app); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.sc.K8sClient.CoreV1().PersistentVolumeClaims(portsTestNS).Create(ctx, &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: f.user + "-" + f.app, Namespace: portsTestNS},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			StorageClassName: &slow,
+			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("20Gi")}},
+		},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	sessions := f.dw.DirewolfV1alpha1().Sessions(portsTestNS)
+	sess := f.session("alex-1", f.user)
+	// A zero creation time reads as long unstarted, and the reaper ends it.
+	sess.CreationTimestamp = metav1.Now()
+	sess, err = sessions.Create(ctx, sess, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The fake pod never goes ready, so Reconcile requeues; the status is
+	// written first.
+	_ = f.sc.Reconcile(portsTestNS, sess.Name, sess)
+	got, err := sessions.Get(ctx, sess.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cond := meta.FindStatusCondition(got.Status.Conditions, "VolumeCreated")
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != "TemplateDrift" {
+		t.Fatalf("VolumeCreated = %+v, want True/TemplateDrift", cond)
+	}
+	if want := "accessModes, storageClassName, resources.requests.storage"; !strings.Contains(cond.Message, want) {
+		t.Errorf("VolumeCreated message = %q, want it to list %q", cond.Message, want)
 	}
 }
