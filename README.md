@@ -1,7 +1,69 @@
 # fenrir
 The leader of the pack - control multiple distributed instances of Wolf in K8S
 
-NOTE: NOT IN A USEABLE STATE!
+NOTE: upstream is not in a usable state. This fork runs on talos04 for xerktech; see
+[Operator runbook](#operator-runbook-xerktech-talos04). The upstream
+[Getting started](#getting-started) below predates the fork and is out of date.
+
+## Operator runbook (xerktech, talos04)
+
+Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps/direwolf.yaml`
+(chart, flags) and `streaming/direwolf/` (User, Apps, Steam storage, backups). Its
+`.claude/rules/streaming.md` holds the cluster-specific pitfalls and launch-failure guide.
+
+### Deploy
+
+- Each merge to `main` publishes chart `0.0.1-<run id>-SNAPSHOT` (images pinned by digest).
+  Nothing follows `main`: bump `targetRevision` in `apps/direwolf.yaml` to deploy it.
+- A change that adds operator/proxy flags or a new kind lands in ArgoCD in the same bump.
+
+### Use
+
+- Moonlight: add host `10.10.10.34`, start pairing, then open `pair.xerktech.com` (Authentik),
+  pick the waiting client and enter the PIN Moonlight shows.
+  - The Authentik username must have a `User` CR of the same name, or the PIN is refused.
+- One stream at a time (`--max-concurrent-sessions=1`, counted across Users). Another User's
+  launch, or any launch while the Library is open, is refused with a busy message. A launch by
+  the same User from a second client replaces that User's running session instead.
+- Steam games: install from `library.xerktech.com`; each install becomes its own App (with
+  cover art) after that Library visit. Other apps are `App` CRs in `streaming/direwolf/`.
+- Quit in Moonlight ends the session at once. Closing the client without quitting keeps the
+  pod for 10 minutes (`--disconnect-grace-period`); reconnecting in that window resumes the game.
+
+### Administer
+
+- Running sessions: `kubectl get sessions -n streaming`. End one: `kubectl delete session -n
+  streaming <name>`; its pod, GPU claim and wolf-agent Secret go with it. Never delete the pod
+  alone expecting a restart: a gone pod ends the Session.
+- Revoke a client: `kubectl delete pairing -n streaming <fingerprint>` (`spec.userReference`
+  names its owner). It is refused from then on; a session it already has keeps running until
+  quit or deleted.
+- Steam home and library are backed up hourly/daily to NFS; the restore procedure is in the
+  ArgoCD streaming rules (Steam backup).
+- RomM sync is off in this deployment (no `--romm-url`).
+
+### Exit tests (re-run after a deploy)
+
+From a LAN host that is not talos01-03 (the pairing page trusts those), with kubectl, and with
+nobody playing:
+
+- `scripts/nri-input-exit-test.sh` (ArgoCD): input devices only for session pods; a claimed
+  pod sees only its GPU.
+- `scripts/direwolf-session-exit-test.sh` (ArgoCD): a real session pod is unprivileged, on
+  talos04, GPU via DRA; wolf-agent, Wolf's API and the pairing page refuse the LAN; quitting
+  frees the pod, claim and Secret.
+
+These need a real Moonlight client and a gamepad, and are checked by hand:
+
+- Pair through `pair.xerktech.com`; launch Steam at the client's native resolution; the
+  gamepad works in game; the stream uses NVENC (wolf log `Using h264 encoder: nvcodec`, not
+  `x264`).
+- Disconnect without quitting, reconnect within 10 minutes: same game, same state.
+- While streaming, a launch from another User's client gets the busy message; one from your
+  own second client takes the stream over.
+- Library: install a game, close the page, it goes idle and stops; a launch while it is open
+  is refused; the game appears in Moonlight with its cover.
+- Quit: `kubectl get pods,resourceclaims -n streaming` shows no session pod or claim.
 
 ## High Level Idea
 
