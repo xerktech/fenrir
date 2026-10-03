@@ -857,11 +857,6 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		"PULSE_SERVER":           "unix:/tmp/.X11-unix/pulse-socket",
 		"HOST_APPS_STATE_FOLDER": "/mnt/data/wolf",
 		"WOLF_SOCKET_PATH":       "/etc/wolf/wolf.sock",
-		// A stream's pipeline starts on its own producer, then switches to
-		// the lobby's (lobbyBufferCaps). With zero copy their caps differ
-		// (DMABuf/CUDAMemory vs system memory) and on VA every second
-		// switch fails to renegotiate, killing the stream's video.
-		"WOLF_USE_ZERO_COPY": "FALSE",
 		// "WOLF_CFG_FILE":          "/etc/wolf/cfg/config.toml", // no longer needed
 		// "WOLF_PRIVATE_CERT_FILE": "/mnt/data/wolf/cfg/cert.pem",
 		// "WOLF_PRIVATE_KEY_FILE": "/mnt/data/wolf/cfg/key.pem",
@@ -1725,10 +1720,23 @@ func withHotplugMounts(mounts []corev1.VolumeMount) []corev1.VolumeMount {
 // "not a device here", not "unset". A WOLF_RENDER_NODE from the App
 // (wolfConfig.runtimeVariables.renderNode) or a User's wolf policy that does
 // exist in the container is kept.
+//
+// It then turns Wolf's zero copy off unless that node is an NVIDIA card. A
+// stream's pipeline starts on its own producer, then switches to the lobby's,
+// so the lobby must render with the caps Wolf picked for its own sessions
+// (lobbyBufferCaps). On NVIDIA those are CUDAMemory, which the operator can
+// tell from Wolf's pipelines; on VA they are a DMABuf drm-format list it
+// can't rebuild, and with mismatched caps every second switch fails to
+// renegotiate, killing the stream's video (XERK-1363). A WOLF_USE_ZERO_COPY
+// from a User's wolf policy is overridden: the lobby caps assume this choice.
 var wolfCommand = []string{"/bin/sh", "-c", `if [ ! -c "${WOLF_RENDER_NODE:-}" ]; then
   for n in /dev/dri/renderD*; do
     if [ -c "$n" ]; then export WOLF_RENDER_NODE="$n"; break; fi
   done
+fi
+unset WOLF_USE_ZERO_COPY
+if [ "$(cat "/sys/class/drm/${WOLF_RENDER_NODE##*/}/device/vendor" 2>/dev/null)" != 0x10de ]; then
+  export WOLF_USE_ZERO_COPY=FALSE
 fi
 exec /entrypoint.sh`}
 
@@ -2029,11 +2037,20 @@ func (c *SessionController) reconcileActiveStreams(
 	return nil
 }
 
-// lobbyBufferCaps is the frame format of the lobby's compositor. Wolf's API
-// doesn't expose the caps it picks for its own sessions, so the pod runs Wolf
-// without zero copy (WOLF_USE_ZERO_COPY), whose caps are these: a stream's
-// switch from its own producer to the lobby's then keeps the same caps.
-const lobbyBufferCaps = "video/x-raw"
+// lobbyBufferCaps is the frame format of the lobby's compositor: the caps
+// Wolf picked for its own sessions' producers, so that a stream's switch from
+// its own producer to the lobby's keeps the same caps. Wolf's API doesn't
+// expose them, but they follow from its h264 pipeline (configTOML.cpp):
+//   - zero copy with an nvcodec encoder renders to CUDAMemory, and only
+//     nvcodec pipelines carry CUDAMemory; wolfCommand leaves zero copy on
+//     only on NVIDIA, where VA encoders are never picked.
+//   - everything else (no zero copy, or a software encoder) is system memory.
+func lobbyBufferCaps(h264Pipeline string) string {
+	if strings.Contains(h264Pipeline, "memory:CUDAMemory") {
+		return "video/x-raw(memory:CUDAMemory)"
+	}
+	return "video/x-raw"
+}
 
 // lobbyRunner keeps the lobby alive: Wolf stops a lobby whose runner exits.
 // The game runs in its own container, not under Wolf.
@@ -2073,6 +2090,7 @@ func (c *SessionController) ensureLobby(ctx context.Context, wolfclient wolfapi.
 		return stderrors.New("wolf lists no app to take the render node from")
 	}
 	renderNode := apps[0].RenderNode
+	caps := lobbyBufferCaps(apps[0].H264GSTPipeline)
 	cfg := session.Spec.Config
 	id, err := wolfclient.CreateLobby(ctx, &wolfapi.CreateLobbyRequest{
 		ProfileID:              wolfapi.MoonlightProfileID,
@@ -2084,7 +2102,7 @@ func (c *SessionController) ensureLobby(ctx context.Context, wolfclient wolfapi.
 			RefreshRate: cfg.VideoRefreshRate,
 			WaylandNode: renderNode,
 			RunnerNode:  renderNode,
-			BufferCaps:  lobbyBufferCaps,
+			BufferCaps:  caps,
 		},
 		AudioSettings:     wolfapi.LobbyAudioSettings{ChannelCount: 2},
 		RunnerStateFolder: "direwolf-lobby",
@@ -2093,7 +2111,7 @@ func (c *SessionController) ensureLobby(ctx context.Context, wolfclient wolfapi.
 	if err != nil {
 		return fmt.Errorf("failed to create wolf lobby: %w", err)
 	}
-	klog.Infof("Session %s/%s: created Wolf lobby %s", session.Namespace, session.Name, id)
+	klog.Infof("Session %s/%s: created Wolf lobby %s (%s)", session.Namespace, session.Name, id, caps)
 	return nil
 }
 

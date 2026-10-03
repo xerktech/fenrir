@@ -589,11 +589,38 @@ func TestFirstAttachCreatesLobbyBeforeStream(t *testing.T) {
 	if v := l.VideoSettings; v.Width != 2560 || v.Height != 1440 || v.RefreshRate != 120 || v.WaylandNode != "/dev/dri/renderD129" || v.RunnerNode != "/dev/dri/renderD129" {
 		t.Errorf("video settings %+v: want the session's mode on Wolf's render node", v)
 	}
+	if l.VideoSettings.BufferCaps != "video/x-raw" {
+		t.Errorf("lobby caps %q: want system memory, like Wolf's own producers", l.VideoSettings.BufferCaps)
+	}
 	if l.Runner.Type != "process" || l.Runner.RunCmd == "" || l.ProfileID != wolfapi.MoonlightProfileID {
 		t.Errorf("lobby %+v", l)
 	}
 	if st := sess.Status; st.WolfSessionID != "4242" || st.StreamURL == "" {
 		t.Errorf("not attached: %+v", st)
+	}
+}
+
+// With Wolf's NVIDIA zero copy, its own producers render to CUDAMemory, and
+// a stream's switch to the lobby keeps working only if the lobby does too.
+func TestLobbyRendersToCUDAMemoryUnderNVIDIAZeroCopy(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.lobbies = "[]"
+	agent.h264 = "cudaupload ! cudaconvertscale add-borders=true ! video/x-raw(memory:CUDAMemory),format=NV12 ! nvh264enc"
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Generation = 1
+		s.Status.Ports = blockPorts(agent.base(t))
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatal(err)
+	}
+	if agent.lobby == nil {
+		t.Fatal("no lobby created")
+	}
+	if got, want := agent.lobby.VideoSettings.BufferCaps, "video/x-raw(memory:CUDAMemory)"; got != want {
+		t.Errorf("lobby caps %q, want %q", got, want)
 	}
 }
 

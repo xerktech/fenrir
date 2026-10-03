@@ -719,24 +719,61 @@ func TestBuildPodLeavesCachedObjects(t *testing.T) {
 	}
 }
 
-// A stream's pipeline starts on its own producer and switches to the lobby's
-// (lobbyBufferCaps); with zero copy their caps differ and on VA every second
-// switch kills the stream's video (XERK-1363).
-func TestSessionPodRunsWolfWithoutZeroCopy(t *testing.T) {
-	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
-	for _, c := range pod.Spec.Containers {
-		if c.Name != "wolf" {
-			continue
-		}
-		for _, e := range c.Env {
-			if e.Name == "WOLF_USE_ZERO_COPY" {
-				if e.Value != "FALSE" { // Wolf matches exactly "FALSE"
-					t.Errorf("WOLF_USE_ZERO_COPY = %q, want FALSE", e.Value)
-				}
-				return
-			}
-		}
-		t.Fatal("wolf container runs with zero copy")
+// The lobby can only match the caps of Wolf's own producers on NVIDIA
+// (lobbyBufferCaps); on any other card, or none, a stream's switch to the
+// lobby breaks with zero copy (XERK-1363), so Wolf runs without it.
+func TestWolfCommandKeepsZeroCopyOnlyOnNVIDIA(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
 	}
-	t.Fatal("no wolf container")
+	sys := t.TempDir()
+	script := strings.ReplaceAll(wolfCommand[2], "/sys/class/drm/", sys+"/")
+	script = strings.ReplaceAll(script, "exec /entrypoint.sh", `echo "${WOLF_USE_ZERO_COPY-unset}"`)
+	// [ -c ] fails on the nodes below, so the script would pick one from the
+	// real /dev/dri: keep the node as given instead.
+	script = strings.Replace(script, `export WOLF_RENDER_NODE="$n"`, ":", 1)
+	vendor := func(node, id string) {
+		if err := os.MkdirAll(sys+"/"+node+"/device", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sys+"/"+node+"/device/vendor", []byte(id+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vendor("renderD129", "0x10de") // NVIDIA
+	vendor("renderD130", "0x1002") // AMD
+	for env, want := range map[string]string{
+		"WOLF_RENDER_NODE=/dev/dri/renderD129": "unset",
+		// A User's wolf policy can't turn it off under CUDAMemory lobby caps.
+		"WOLF_RENDER_NODE=/dev/dri/renderD129 WOLF_USE_ZERO_COPY=FALSE": "unset",
+		"WOLF_RENDER_NODE=/dev/dri/renderD130 WOLF_USE_ZERO_COPY=TRUE":  "FALSE",
+		"WOLF_RENDER_NODE=/dev/dri/renderD130":                          "FALSE", // Wolf matches exactly "FALSE"
+		"WOLF_RENDER_NODE=/dev/dri/renderD131":                          "FALSE", // vendor unreadable
+		"WOLF_RENDER_NODE=":                                             "FALSE",
+	} {
+		cmd := exec.CommandContext(t.Context(), "sh", "-c", script)
+		cmd.Env = strings.Fields(env)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(string(out)); got != want {
+			t.Errorf("%s: WOLF_USE_ZERO_COPY = %q, want %q", env, got, want)
+		}
+	}
+}
+
+// The lobby renders with the caps of Wolf's own producers, which follow from
+// the pipelines Wolf picked (configTOML.cpp; pipelines from its defaults).
+func TestLobbyBufferCapsMatchWolfProducers(t *testing.T) {
+	for name, tc := range map[string]struct{ pipeline, want string }{
+		"nvcodec zero copy": {"cudaupload !\ncudaconvertscale add-borders=true !\nvideo/x-raw(memory:CUDAMemory),format=NV12, width={width}, height={height}, pixel-aspect-ratio=1/1 !\nnvh264enc preset=low-latency-hq", "video/x-raw(memory:CUDAMemory)"},
+		"va legacy":         {"vapostproc !\nvideo/x-raw(memory:VAMemory), format=NV12 !\nvah264enc", "video/x-raw"},
+		"software":          {"videoconvertscale !\nvideorate !\nvideo/x-raw, format=I420 !\nx264enc", "video/x-raw"},
+		"none":              {"", "video/x-raw"},
+	} {
+		if got := lobbyBufferCaps(tc.pipeline); got != tc.want {
+			t.Errorf("%s: caps %q, want %q", name, got, tc.want)
+		}
+	}
 }

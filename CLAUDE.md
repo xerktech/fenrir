@@ -68,8 +68,11 @@ Three binaries in `cmd/`, all sharing `pkg/`:
         `WAYLAND_DISPLAY` the game waits for. `stop_when_everyone_leaves` must stay false.
       - wolf-agent joins each stream (`lobbyJoiner`) only after both pipelines start (setup events,
         then RTP pings): Wolf switches only running pipelines to the lobby's producers.
-      - Wolf runs with `WOLF_USE_ZERO_COPY=FALSE` so a stream's own producer has the lobby's caps
-        (`video/x-raw`); mismatched caps break every second producer switch on VA.
+      - The lobby's caps must equal Wolf's own producers' caps; mismatched caps break every second
+        producer switch on VA. Wolf's API doesn't expose them (`lobbyBufferCaps` infers them).
+        - `wolfCommand` owns `WOLF_USE_ZERO_COPY`: zero copy only on an NVIDIA node (CUDAMemory,
+          seen in Wolf's nvcodec pipeline); elsewhere FALSE, since VA's DMABuf list can't be rebuilt.
+        - Tests: `TestWolfCommandKeepsZeroCopyOnlyOnNVIDIA`, `TestLobbyBufferCapsMatchWolfProducers`.
       - Every stream Wolf's API adds on a pod has the same session ID (hash of an empty client
         cert): tell streams apart by events (setup, pause, stop), never by ID.
       - Tests: `TestFirstAttachCreatesLobbyBeforeStream`, `agent_lobby_test.go`.

@@ -165,6 +165,7 @@ type fakeAgent struct {
 	*httptest.Server
 	sessions string // JSON array for /api/v1/sessions
 	lobbies  string // JSON array for /api/v1/lobbies
+	h264     string // h264_gst_pipeline of the app /api/v1/apps lists
 
 	open atomic.Int32 // client connections not yet closed
 
@@ -196,7 +197,8 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 			a.mu.Unlock()
 			fmt.Fprint(w, `{"success":true,"lobby_id":"lobby-new"}`)
 		case "/api/v1/apps":
-			fmt.Fprint(w, `{"success":true,"apps":[{"id":"1","title":"Wolf UI","render_node":"/dev/dri/renderD129"}]}`)
+			h264, _ := json.Marshal(a.h264)
+			fmt.Fprintf(w, `{"success":true,"apps":[{"id":"1","title":"Wolf UI","render_node":"/dev/dri/renderD129","h264_gst_pipeline":%s}]}`, h264)
 		case "/api/v1/sessions":
 			fmt.Fprintf(w, `{"success":true,"sessions":%s}`, a.sessions)
 		case "/api/v1/sessions/add":
