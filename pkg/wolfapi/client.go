@@ -1,13 +1,11 @@
 package wolfapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 
 	"github.com/r3labs/sse/v2"
 	"gopkg.in/cenkalti/backoff.v1"
@@ -87,178 +85,48 @@ func (c *client) AddSession(
 	ctx context.Context,
 	session Session,
 ) (string, error) {
-	u, err := url.JoinPath(c.apiURL, "/api/v1/sessions/add")
-	if err != nil {
-		return "", err
+	var resp AddSessionResponse
+	if err := c.call(ctx, http.MethodPost, "/api/v1/sessions/add", session, &resp); err != nil {
+		return "", fmt.Errorf("failed to add session: %w", err)
 	}
-
-	encodedSession, err := json.Marshal(session)
-	if err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewBuffer(encodedSession))
-	if err != nil {
-		return "", err
-	}
-
-	// FORCE HTTP/1.0 (this disables chunked encoding automatically)
-	req.Proto = "HTTP/1.0"
-	req.ProtoMajor = 1
-	req.ProtoMinor = 0
-	req.TransferEncoding = []string{"identity"}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	var addSessionResp AddSessionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&addSessionResp); err != nil {
-		return "", err
-	}
-
-	if !addSessionResp.Success {
-		return "", fmt.Errorf("failed to add session: %s", addSessionResp.Error)
-	}
-
-	return addSessionResp.SessionID, nil
+	return resp.SessionID, nil
 }
 
 // GET /api/v1/sessions
 func (c *client) ListSessions(ctx context.Context) ([]Session, error) {
-	u, err := url.JoinPath(c.apiURL, "/api/v1/sessions")
-	if err != nil {
-		return nil, err
+	var resp SessionsResponse
+	if err := c.call(ctx, http.MethodGet, "/api/v1/sessions", nil, &resp); err != nil {
+		return nil, fmt.Errorf("failed to list sessions: %w", err)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var sessionsResp SessionsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&sessionsResp); err != nil {
-		return nil, err
-	}
-
-	if !sessionsResp.Success {
-		return nil, fmt.Errorf("failed to list sessions: %s", sessionsResp.Error)
-	}
-
-	return sessionsResp.Sessions, nil
+	return resp.Sessions, nil
 }
 
 // GET /api/v1/apps
 func (c *client) ListApps(ctx context.Context) ([]App, error) {
-	u, err := url.JoinPath(c.apiURL, "/api/v1/apps")
-	if err != nil {
-		return nil, err
+	var resp AppsResponse
+	if err := c.call(ctx, http.MethodGet, "/api/v1/apps", nil, &resp); err != nil {
+		return nil, fmt.Errorf("failed to list apps: %w", err)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var appsResp AppsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&appsResp); err != nil {
-		return nil, err
-	}
-
-	if !appsResp.Success {
-		return nil, fmt.Errorf("failed to list apps: %s", appsResp.Error)
-	}
-	return appsResp.Apps, nil
+	return resp.Apps, nil
 }
 
 // This is no longer used, I will probably remove it in the future
 // POST /api/v1/apps/add
 func (c *client) AddApp(ctx context.Context, app App) error {
-	u, err := url.JoinPath(c.apiURL, "/api/v1/apps/add")
-	if err != nil {
-		return err
+	if err := c.call(ctx, http.MethodPost, "/api/v1/apps/add", app, &Response{}); err != nil {
+		return fmt.Errorf("failed to add app: %w", err)
 	}
-
-	encodedApp, err := json.Marshal(app)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewBuffer(encodedApp))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	var response Response
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return err
-	}
-
-	if !response.Success {
-		return fmt.Errorf("failed to add app: %s", response.Error)
-	}
-
 	return nil
 }
 
+// POST /api/v1/sessions/stop
 func (c *client) StopSession(ctx context.Context, sessionID string) error {
-	type StopSessionRequest struct {
+	req := struct {
 		SessionID string `json:"session_id"`
+	}{sessionID}
+	if err := c.call(ctx, http.MethodPost, "/api/v1/sessions/stop", req, &Response{}); err != nil {
+		return fmt.Errorf("failed to stop session: %w", err)
 	}
-	u, err := url.JoinPath(c.apiURL, "/api/v1/sessions/stop")
-	if err != nil {
-		return err
-	}
-
-	stopSessionReq := StopSessionRequest{
-		SessionID: sessionID,
-	}
-	encodedStopSessionReq, err := json.Marshal(stopSessionReq)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewBuffer(encodedStopSessionReq))
-	if err != nil {
-		return err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-
-	defer resp.Body.Close()
-	var stopSessionResp Response
-	if err := json.NewDecoder(resp.Body).Decode(&stopSessionResp); err != nil {
-		return err
-	} else if !stopSessionResp.Success {
-		return fmt.Errorf("failed to stop session: %s", stopSessionResp.Error)
-	}
-
 	return nil
 }
 
