@@ -452,6 +452,36 @@ func TestSessionPodDropsAppMknod(t *testing.T) {
 	}
 }
 
+func TestSessionPodMountsNoServiceAccountToken(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	if got := pod.Spec.AutomountServiceAccountToken; got == nil || *got {
+		t.Errorf("automountServiceAccountToken = %v, want false", got)
+	}
+}
+
+func TestSessionPodKeepsAppsServiceAccountTokenChoice(t *testing.T) {
+	data, err := os.ReadFile("../../examples/steam.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var app v1alpha1api.App
+	if err = sigsyaml.Unmarshal(data, &app); err != nil {
+		t.Fatal(err)
+	}
+	app.Spec.Template.Spec.AutomountServiceAccountToken = new(true)
+	if data, err = sigsyaml.Marshal(&app); err != nil {
+		t.Fatal(err)
+	}
+	appPath := filepath.Join(t.TempDir(), "app.yaml")
+	if err = os.WriteFile(appPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", appPath) //nolint:dogsled // only the Pod matters here
+	if got := pod.Spec.AutomountServiceAccountToken; got == nil || !*got {
+		t.Errorf("automountServiceAccountToken = %v, want the App's true", got)
+	}
+}
+
 func TestSessionPodDropsAppInitMknod(t *testing.T) {
 	data, err := os.ReadFile("../../examples/nvidia_devices/firefox.yaml")
 	if err != nil {
@@ -466,7 +496,7 @@ func TestSessionPodDropsAppInitMknod(t *testing.T) {
 		t.Fatal(err)
 	}
 	appPath := filepath.Join(t.TempDir(), "app.yaml")
-	if err := os.WriteFile(appPath, data, 0o600); err != nil {
+	if err = os.WriteFile(appPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 

@@ -1157,6 +1157,14 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	// Apply HostIPC setting to the pod spec if requested by any sidecar policy
 	podToCreate.Spec.HostIPC = podHostIPC
 
+	// The game container runs arbitrary code and nothing in the pod talks to
+	// the Kubernetes API (wolf-agent is driven by the operator), so it gets no
+	// ServiceAccount token unless the App's template sets this field itself.
+	// This overrides the ServiceAccount's own automount setting.
+	if podToCreate.Spec.AutomountServiceAccountToken == nil {
+		podToCreate.Spec.AutomountServiceAccountToken = new(false)
+	}
+
 	// Session pods share the node IP with moonlight-proxy, since Moonlight can
 	// only be redirected to another port. Every listener is on the session's
 	// port block and declared as a container port: on the host network those
