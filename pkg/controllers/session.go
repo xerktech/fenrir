@@ -1159,7 +1159,8 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 
 	// The game container runs arbitrary code and nothing in the pod talks to
 	// the Kubernetes API (wolf-agent is driven by the operator), so it gets no
-	// ServiceAccount token unless the App asks for one.
+	// ServiceAccount token unless the App's template sets this field itself.
+	// This overrides the ServiceAccount's own automount setting.
 	if podToCreate.Spec.AutomountServiceAccountToken == nil {
 		podToCreate.Spec.AutomountServiceAccountToken = new(false)
 	}
