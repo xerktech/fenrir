@@ -157,8 +157,10 @@ func NewPodExecutor(config *rest.Config, client kubernetes.Interface) PodExecuto
 // The first exec into a just-started Library pod fails that way
 // (XERK-1546: the API server's dial to the kubelet hits "use of closed
 // network connection"), and a retry seconds later works. An upgrade failure
-// means the command never ran, so retrying any command is safe; any other
-// error (a non-zero exit, output over its cap, a timeout) is returned as is.
+// is almost always a non-101 reply, so the command never ran (client-go also
+// reports a 101 with an unexpected subprotocol as one); every Library command
+// is safe to run twice anyway. Any other error (a non-zero exit, output over
+// its cap, a timeout) is returned as is: the command may have run.
 func retryUpgradeFailure(exec PodExecutor) PodExecutor {
 	return func(ctx context.Context, namespace, pod, container string, command []string) (string, error) {
 		out, err := exec(ctx, namespace, pod, container, command)

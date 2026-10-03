@@ -34,7 +34,8 @@ paths:
   - The proxy strips the header before the pod: the desktop runs arbitrary user code.
 - The first exec into a just-started Library pod fails its stream upgrade (API server→kubelet
   dial: "use of closed network connection"). `retryUpgradeFailure` retries once on an upgrade
-  failure only: the command never ran. Never retry other exec errors; the command may have run.
-- Tests: `TestRetryUpgradeFailure`, `TestLibraryIdleRule`, `TestLibraryEnsurePod*`, `TestLibraryServer` in
+  failure only: the command almost never ran. Never retry other exec errors; the command may
+  have run. A new Library exec must stay safe to run twice.
+- Tests: `TestRetryUpgradeFailure`, `TestPodExecutorRetriesUpgradeFailure`, `TestLibraryIdleRule`, `TestLibraryEnsurePod*`, `TestLibraryServer` in
   `pkg/controllers/library_test.go`; `TestLaunchBacksOutWhenBusyAfterCreate` in
   `pkg/moonlight/library_test.go`.

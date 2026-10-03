@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,7 +20,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/streaming/pkg/httpstream"
@@ -616,5 +619,32 @@ func TestRetryUpgradeFailure(t *testing.T) {
 	execUpgradeRetryDelay = time.Hour
 	if _, err := exec(ctx, libraryTestNS, LibraryPodName, libraryContainer, nil); calls != 1 || !errors.Is(err, upgradeErr) {
 		t.Errorf("cancelled: calls %d, err %v; want 1 call, the upgrade error", calls, err)
+	}
+}
+
+// The real executor: the API server's 500 for a failed kubelet dial must
+// reach retryUpgradeFailure as an upgrade failure (client-go's type, not
+// apimachinery's same-named one), and NewPodExecutor must be wrapped in it.
+func TestPodExecutorRetriesUpgradeFailure(t *testing.T) {
+	defer func(d time.Duration) { execUpgradeRetryDelay = d }(execUpgradeRetryDelay)
+	execUpgradeRetryDelay = time.Millisecond
+	var requests atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"kind":"Status","apiVersion":"v1","status":"Failure","code":500,` +
+			`"message":"error dialing backend: write tcp 10.10.10.33:47188->10.10.10.34:10250: use of closed network connection"}`))
+	}))
+	defer srv.Close()
+	config := &rest.Config{Host: srv.URL, TLSClientConfig: rest.TLSClientConfig{Insecure: true}}
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = NewPodExecutor(config, client)(context.Background(), libraryTestNS, LibraryPodName, libraryContainer, []string{"true"})
+	if !httpstream.IsUpgradeFailure(err) || requests.Load() != 2 {
+		t.Errorf("err %v (upgrade failure: %v), %d requests; want an upgrade failure after 2", err, httpstream.IsUpgradeFailure(err), requests.Load())
 	}
 }
