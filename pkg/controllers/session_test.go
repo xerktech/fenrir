@@ -452,6 +452,13 @@ func TestSessionPodDropsAppMknod(t *testing.T) {
 	}
 }
 
+func TestSessionPodMountsNoServiceAccountToken(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	if got := pod.Spec.AutomountServiceAccountToken; got == nil || *got {
+		t.Errorf("automountServiceAccountToken = %v, want false", got)
+	}
+}
+
 func TestSessionPodDropsAppInitMknod(t *testing.T) {
 	data, err := os.ReadFile("../../examples/nvidia_devices/firefox.yaml")
 	if err != nil {
