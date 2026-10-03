@@ -96,13 +96,16 @@ import re, sys
 for path in sys.argv[1:]:
     with open(path) as f:
         src = f.read()
-    out = re.sub(
+    out, n = re.subn(
         r"^( *)labels:\n\1  additionalProperties:\n\1    type: string\n",
         lambda m: (f"{m[1]}labels:\n{m[1]}  additionalProperties:\n"
                    f"{m[1]}    maxLength: 63\n"
                    f"{m[1]}    pattern: ^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$\n"
                    f"{m[1]}    type: string\n"),
         src, flags=re.M)
+    # Fail rather than silently skip a labels map whose layout controller-gen changed.
+    if n != len(re.findall(r"^ *labels:$", src, flags=re.M)):
+        sys.exit(f"{path}: patched {n} labels maps; check the pattern against controller-gen's output")
     with open(path, "w") as f:
         f.write(out)
 PY
