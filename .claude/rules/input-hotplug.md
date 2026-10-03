@@ -22,6 +22,8 @@ paths:
 - The App's containers (init too) always lose CAP_MKNOD (`dropMknod`, even if the App adds it):
   `13:*` plus containerd's default `c *:* m` would let a root App mknod and open host keyboards or
   another session's pads (XERK-1338). Tests: `TestSessionPodDropsAppMknod`.
+  - containerd prefixes `CAP_` itself: a listed `CAP_MKNOD` drop is a no-op (`CAP_CAP_MKNOD`), so
+    only a bare `MKNOD` counts as dropped. Tests: `TestDropMknod`.
   - NRI can't narrow the grant per minor: device rules are set only at container create.
   - Not covered: a privileged App, or one adding SYS_ADMIN (mounts a devtmpfs), or mounting hostPath
     `/dev/input` (`examples/steam.yaml` does all but privileged).

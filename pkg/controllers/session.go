@@ -1683,13 +1683,13 @@ func dropMknod(ctr *corev1.Container) {
 		ctr.SecurityContext.Capabilities = &corev1.Capabilities{}
 	}
 	caps := ctr.SecurityContext.Capabilities
-	// The runtime applies drops after adds (an added ALL included), and
-	// accepts either spelling.
-	isMknod := func(c corev1.Capability) bool {
+	// The runtime applies drops after adds (an added ALL included). It
+	// prefixes "CAP_" itself, so a listed "CAP_MKNOD" becomes the no-op
+	// CAP_CAP_MKNOD: only the bare name counts as already dropped.
+	caps.Add = slices.DeleteFunc(caps.Add, func(c corev1.Capability) bool {
 		return strings.TrimPrefix(strings.ToUpper(string(c)), "CAP_") == "MKNOD"
-	}
-	caps.Add = slices.DeleteFunc(caps.Add, isMknod)
-	if !slices.ContainsFunc(caps.Drop, isMknod) {
+	})
+	if !slices.ContainsFunc(caps.Drop, func(c corev1.Capability) bool { return strings.EqualFold(string(c), "MKNOD") }) {
 		caps.Drop = append(caps.Drop, "MKNOD")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -451,17 +452,47 @@ func TestSessionPodDropsAppMknod(t *testing.T) {
 	}
 }
 
+func TestSessionPodDropsAppInitMknod(t *testing.T) {
+	data, err := os.ReadFile("../../examples/nvidia_devices/firefox.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var app v1alpha1api.App
+	if err = sigsyaml.Unmarshal(data, &app); err != nil {
+		t.Fatal(err)
+	}
+	app.Spec.Template.Spec.InitContainers = []corev1.Container{{Name: "app-init", Image: "busybox"}}
+	if data, err = sigsyaml.Marshal(&app); err != nil {
+		t.Fatal(err)
+	}
+	appPath := filepath.Join(t.TempDir(), "app.yaml")
+	if err := os.WriteFile(appPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, pod := reconcileFixtures(t, "../../examples/nvidia_devices/user.yaml", appPath) //nolint:dogsled // only the Pod matters here
+	for _, ctr := range pod.Spec.InitContainers {
+		dropped := ctr.SecurityContext != nil && ctr.SecurityContext.Capabilities != nil &&
+			slices.Contains(ctr.SecurityContext.Capabilities.Drop, "MKNOD")
+		// The operator's own init container runs its fixed command.
+		if want := ctr.Name == "app-init"; dropped != want {
+			t.Errorf("init container %s: MKNOD dropped = %v, want %v", ctr.Name, dropped, want)
+		}
+	}
+}
+
 func TestDropMknod(t *testing.T) {
 	ctr := corev1.Container{SecurityContext: &corev1.SecurityContext{Capabilities: &corev1.Capabilities{
-		Add:  []corev1.Capability{"cap_mknod", "SYS_NICE", "ALL"},
-		Drop: []corev1.Capability{"NET_RAW"},
+		Add: []corev1.Capability{"cap_mknod", "SYS_NICE", "ALL"},
+		// containerd reads this as CAP_CAP_MKNOD, dropping nothing.
+		Drop: []corev1.Capability{"NET_RAW", "CAP_MKNOD"},
 	}}}
 	dropMknod(&ctr)
 	caps := ctr.SecurityContext.Capabilities
 	if want := []corev1.Capability{"SYS_NICE", "ALL"}; !slices.Equal(caps.Add, want) {
 		t.Errorf("Add = %v, want %v", caps.Add, want)
 	}
-	if want := []corev1.Capability{"NET_RAW", "MKNOD"}; !slices.Equal(caps.Drop, want) {
+	if want := []corev1.Capability{"NET_RAW", "CAP_MKNOD", "MKNOD"}; !slices.Equal(caps.Drop, want) {
 		t.Errorf("Drop = %v, want %v", caps.Drop, want)
 	}
 
