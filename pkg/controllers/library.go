@@ -45,6 +45,13 @@ const (
 	// libraryUnixUser is the image's desktop (and Steam) user, not to be
 	// confused with the basic-auth name above.
 	libraryUnixUser = "abc"
+	// libraryUID is abc's uid and gid (linuxserver's PUID/PGID). The Steam
+	// home is shared with game sessions, whose GoW images run as retro, uid
+	// and gid 1000. Left at linuxserver's default 911, the desktop can't read
+	// what a session wrote there (PulseAudio fails on ~/.config/pulse, so
+	// Selkies never starts and the page's websocket 404s), and its init
+	// re-owns the home's top level to 911 under the sessions.
+	libraryUID = "1000"
 	// libraryHTTPPort is Selkies' plain-HTTP port in linuxserver images.
 	libraryHTTPPort = 3000
 	// libraryHome is HOME for the image's abc user, so the Steam home PVC
@@ -549,6 +556,8 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 				Image: c.Image,
 				Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: libraryHTTPPort, Protocol: corev1.ProtocolTCP}},
 				Env: []corev1.EnvVar{
+					{Name: "PUID", Value: libraryUID},
+					{Name: "PGID", Value: libraryUID},
 					{Name: "CUSTOM_USER", Value: libraryAuthUser},
 					{Name: "PASSWORD", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: libraryAuthSecret},
