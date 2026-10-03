@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -423,6 +424,83 @@ func TestSessionPodKeepsAppsOwnInputMount(t *testing.T) {
 	}
 	if got["/run/udev"] != hotplugUdevVolume {
 		t.Errorf("app /run/udev = %q, want %s", got["/run/udev"], hotplugUdevVolume)
+	}
+}
+
+// cmd/nri-input grants the whole input major (13:*): an App able to mknod
+// could open the host's keyboards (XERK-1338).
+func TestSessionPodDropsAppMknod(t *testing.T) {
+	// steam.yaml adds MKNOD to its app container.
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	for _, ctr := range pod.Spec.Containers {
+		var caps *corev1.Capabilities
+		if ctr.SecurityContext != nil {
+			caps = ctr.SecurityContext.Capabilities
+		}
+		dropped := caps != nil && slices.Contains(caps.Drop, "MKNOD")
+		switch ctr.Name {
+		case "app":
+			if !dropped || slices.Contains(caps.Add, "MKNOD") {
+				t.Errorf("app capabilities = %+v, want MKNOD dropped and not added", caps)
+			}
+		case "wolf-agent":
+			// It mknods the hotplugged controllers.
+			if dropped {
+				t.Errorf("wolf-agent must keep MKNOD")
+			}
+		}
+	}
+}
+
+func TestSessionPodDropsAppInitMknod(t *testing.T) {
+	data, err := os.ReadFile("../../examples/nvidia_devices/firefox.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var app v1alpha1api.App
+	if err = sigsyaml.Unmarshal(data, &app); err != nil {
+		t.Fatal(err)
+	}
+	app.Spec.Template.Spec.InitContainers = []corev1.Container{{Name: "app-init", Image: "busybox"}}
+	if data, err = sigsyaml.Marshal(&app); err != nil {
+		t.Fatal(err)
+	}
+	appPath := filepath.Join(t.TempDir(), "app.yaml")
+	if err := os.WriteFile(appPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, pod := reconcileFixtures(t, "../../examples/nvidia_devices/user.yaml", appPath) //nolint:dogsled // only the Pod matters here
+	for _, ctr := range pod.Spec.InitContainers {
+		dropped := ctr.SecurityContext != nil && ctr.SecurityContext.Capabilities != nil &&
+			slices.Contains(ctr.SecurityContext.Capabilities.Drop, "MKNOD")
+		// The operator's own init container runs its fixed command.
+		if want := ctr.Name == "app-init"; dropped != want {
+			t.Errorf("init container %s: MKNOD dropped = %v, want %v", ctr.Name, dropped, want)
+		}
+	}
+}
+
+func TestDropMknod(t *testing.T) {
+	ctr := corev1.Container{SecurityContext: &corev1.SecurityContext{Capabilities: &corev1.Capabilities{
+		Add: []corev1.Capability{"cap_mknod", "SYS_NICE", "ALL"},
+		// containerd reads this as CAP_CAP_MKNOD, dropping nothing.
+		Drop: []corev1.Capability{"NET_RAW", "CAP_MKNOD"},
+	}}}
+	dropMknod(&ctr)
+	caps := ctr.SecurityContext.Capabilities
+	if want := []corev1.Capability{"SYS_NICE", "ALL"}; !slices.Equal(caps.Add, want) {
+		t.Errorf("Add = %v, want %v", caps.Add, want)
+	}
+	if want := []corev1.Capability{"NET_RAW", "CAP_MKNOD", "MKNOD"}; !slices.Equal(caps.Drop, want) {
+		t.Errorf("Drop = %v, want %v", caps.Drop, want)
+	}
+
+	var bare corev1.Container
+	dropMknod(&bare)
+	dropMknod(&bare)
+	if got := bare.SecurityContext.Capabilities.Drop; !slices.Equal(got, []corev1.Capability{"MKNOD"}) {
+		t.Errorf("bare container Drop = %v, want [MKNOD]", got)
 	}
 }
 

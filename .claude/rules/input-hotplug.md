@@ -19,6 +19,14 @@ paths:
   - Opening is gated only by the device cgroup, by number and not path: 13:64 gave EPERM without
     the `cmd/nri-input` grant (13:* rwm). Re-check `nodev` if Talos or kubelet changes.
 - wolf-agent needs CAP_MKNOD (runtime default; dropping ALL in its sidecar policy breaks hotplug).
+- The App's containers (init too) always lose CAP_MKNOD (`dropMknod`, even if the App adds it):
+  `13:*` plus containerd's default `c *:* m` would let a root App mknod and open host keyboards or
+  another session's pads (XERK-1338). Tests: `TestSessionPodDropsAppMknod`.
+  - containerd prefixes `CAP_` itself: a listed `CAP_MKNOD` drop is a no-op (`CAP_CAP_MKNOD`), so
+    only a bare `MKNOD` counts as dropped. Tests: `TestDropMknod`.
+  - NRI can't narrow the grant per minor: device rules are set only at container create.
+  - Not covered: a privileged App, or one adding SYS_ADMIN (mounts a devtmpfs), or mounting hostPath
+    `/dev/input` (`examples/steam.yaml` does all but privileged).
 - Only char major 13 under `/dev/input/` is created (`CreateDeviceNode`); a Wolf event can't make
   a disk node. `/dev/hidraw*` is not handled: pads are uinput Xbox pads (no uhid on Talos).
 - An App that mounts its own `/dev/input` keeps it (`withHotplugMounts` skips taken paths).
