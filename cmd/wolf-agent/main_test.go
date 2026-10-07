@@ -333,6 +333,11 @@ func TestCertFileFollowsRotation(t *testing.T) {
 	}
 }
 
+// testReadTimeout stands in for serverReadTimeout. net/http also applies it to
+// the TLS handshake, so it must leave room for a handshake and request under
+// -race on a loaded CI runner; at 50-100ms those tests flaked (XERK-1374).
+const testReadTimeout = time.Second
+
 // startServer serves handler via newServer on loopback, with timeouts
 // shortened by tune, and returns its address.
 func startServer(t *testing.T, handler http.Handler, tune func(*http.Server)) string {
@@ -403,7 +408,7 @@ func TestServerDropsSilentConnections(t *testing.T) {
 // (net/http drains an unread body after the handler, e.g. after a 401).
 func TestServerDropsWithheldBody(t *testing.T) {
 	unauthorized := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) })
-	addr := startServer(t, unauthorized, func(s *http.Server) { s.ReadTimeout = 100 * time.Millisecond })
+	addr := startServer(t, unauthorized, func(s *http.Server) { s.ReadTimeout = testReadTimeout })
 
 	for name, req := range map[string]string{
 		"content-length": "POST /api/v1/sessions/add HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n",
@@ -420,7 +425,8 @@ func TestServerDropsWithheldBody(t *testing.T) {
 }
 
 // ReadTimeout bounds reading the request only: a response may stream for much
-// longer (as /api/v1/events does).
+// longer (as /api/v1/events does). Six events a quarter-timeout apart stream
+// for 1.5x the timeout after the body is read.
 func TestServerStreamsPastReadTimeout(t *testing.T) {
 	stream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := io.ReadAll(r.Body); err != nil {
@@ -434,11 +440,11 @@ func TestServerStreamsPastReadTimeout(t *testing.T) {
 			case <-r.Context().Done():
 				t.Errorf("request canceled mid-stream after event %d", i)
 				return
-			case <-time.After(50 * time.Millisecond):
+			case <-time.After(testReadTimeout / 4):
 			}
 		}
 	})
-	addr := startServer(t, stream, func(s *http.Server) { s.ReadTimeout = 50 * time.Millisecond })
+	addr := startServer(t, stream, func(s *http.Server) { s.ReadTimeout = testReadTimeout })
 
 	// HTTP/2, where a read deadline firing resets the stream.
 	client := &http.Client{Transport: &http.Transport{
