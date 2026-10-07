@@ -269,9 +269,10 @@ func TestLibraryDownloadStall(t *testing.T) {
 	f := newLibraryFixture(t, []runtime.Object{pod})
 	now := libraryTestNow
 	f.library.now = func() time.Time { return now }
+	tx := 0
 	check := func(files string, rx int) string {
 		t.Helper()
-		f.exec.steam = fmt.Sprintf("entry /games/steamapps/downloading/570\nfiles /games/steamapps/downloading %s\nrx %d\n", files, rx)
+		f.exec.steam = fmt.Sprintf("entry /games/steamapps/downloading/570\nfiles /games/steamapps/downloading %s\nrx %d\ntx %d\n", files, rx, tx)
 		got, err := f.library.downloadsInProgress(context.Background(), pod)
 		if err != nil {
 			t.Fatal(err)
@@ -291,31 +292,36 @@ func TestLibraryDownloadStall(t *testing.T) {
 	if got := check("a", libraryDownloadMinBytes-1); got != "" {
 		t.Errorf("stalled download still counts: %q", got)
 	}
-	// Bytes received count as progress (a Heroic download is invisible on disk).
-	if check("a", libraryDownloadMinBytes) == "" {
+	// An open tab's ACKs grow with its stream, at any bitrate.
+	tx = 40 * libraryDownloadMinBytes
+	if got := check("a", 4*libraryDownloadMinBytes); got != "" {
+		t.Errorf("stream ACKs count as download progress: %q", got)
+	}
+	// Bytes received beyond that count (a Heroic download is invisible on disk).
+	if check("a", 5*libraryDownloadMinBytes) == "" {
 		t.Error("download receiving data does not count")
 	}
 	step(libraryDownloadStallTimeout)
 	// Changing files count too (Steam patching from disk).
-	if check("b", libraryDownloadMinBytes) == "" {
+	if check("b", 5*libraryDownloadMinBytes) == "" {
 		t.Error("download whose files changed does not count")
 	}
 	// A new Library pod starts the clock afresh.
 	step(libraryDownloadStallTimeout)
 	pod.UID = "new-library-uid"
-	if check("b", libraryDownloadMinBytes) == "" {
+	if check("b", 5*libraryDownloadMinBytes) == "" {
 		t.Error("download in a new Library pod does not count")
 	}
 	// So does a new download once the last one finished.
 	step(libraryDownloadStallTimeout)
-	if check("b", libraryDownloadMinBytes) != "" {
+	if check("b", 5*libraryDownloadMinBytes) != "" {
 		t.Fatal("stalled download still counts")
 	}
 	f.exec.steam = "rx 0\n"
 	if got, err := f.library.downloadsInProgress(context.Background(), pod); err != nil || got != "" {
 		t.Fatalf("nothing listed: %q, %v", got, err)
 	}
-	if check("b", libraryDownloadMinBytes) == "" {
+	if check("b", 5*libraryDownloadMinBytes) == "" {
 		t.Error("download listed again after none was does not count")
 	}
 }
@@ -344,7 +350,9 @@ func TestSteamDownloadsCommand(t *testing.T) {
 		}
 	}
 	write(filepath.Join(netDir, "lo", "statistics", "rx_bytes"), "999999999\n")
+	write(filepath.Join(netDir, "lo", "statistics", "tx_bytes"), "999999999\n")
 	write(filepath.Join(netDir, "eth0", "statistics", "rx_bytes"), "1234\n")
+	write(filepath.Join(netDir, "eth0", "statistics", "tx_bytes"), "5678\n")
 	chunk := filepath.Join(downloading, "570", "chunk")
 	write(chunk, "a")
 
@@ -366,8 +374,8 @@ func TestSteamDownloadsCommand(t *testing.T) {
 	if want := []string{downloading + "/570"}; !slices.Equal(before.entries, want) {
 		t.Errorf("entries = %q, want %q", before.entries, want)
 	}
-	if before.rxBytes != 1234 {
-		t.Errorf("rx = %d, want 1234 (lo excluded)", before.rxBytes)
+	if before.rxBytes != 1234 || before.txBytes != 5678 {
+		t.Errorf("rx, tx = %d, %d; want 1234, 5678 (lo excluded)", before.rxBytes, before.txBytes)
 	}
 	if again := run(); again.files != before.files {
 		t.Errorf("files changed with nothing written: %q -> %q", before.files, again.files)

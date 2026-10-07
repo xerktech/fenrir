@@ -25,8 +25,10 @@ paths:
     - Received bytes are the only progress signal for Heroic: its store is not known to change
       while downloading. Unverified against real paused downloads (no launcher data on talos04).
     - Progress state is in memory on the leader; a new leader starts the stall clock afresh.
-    - Exclude lo from the received bytes: it carries the whole nginx↔Selkies stream, so every
-      open tab would count as progress. eth0 adds ~50 MiB per 15 min at 45 Mbit/s of stream.
+    - Exclude lo from the byte counts: it carries the whole nginx↔Selkies stream, so every
+      open tab would count as progress.
+    - Received bytes count only beyond a tenth of sent bytes (`libraryStreamAckRatio`): an open
+      tab's ACKs grow with its bitrate, so no fixed threshold separates them from a download.
   - A replica flushes the visit annotation only when it saw a new visit, so an older visit never
     overwrites another replica's later one.
   - Activity lives on the pod (`direwolf/library-last-activity`), not in memory: every

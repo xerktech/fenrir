@@ -83,10 +83,14 @@ const (
 	// an entry Steam left behind, would otherwise hold it up forever.
 	libraryDownloadStallTimeout = 15 * time.Minute
 	// libraryDownloadMinBytes is how many bytes the pod must receive since a
-	// download last made progress for that to count as progress. An open
-	// tab's ACKs and input add ~50 MiB per stall window at 45 Mbit/s of
-	// stream (measured); this leaves room for a 4K one.
-	libraryDownloadMinBytes = 256 << 20
+	// download last made progress, beyond libraryStreamAckRatio of what it
+	// sent, for that to count as progress.
+	libraryDownloadMinBytes = 64 << 20
+	// libraryStreamAckRatio: an open tab's stream makes the pod receive ACKs
+	// and input in proportion to what it sends (a few percent); received
+	// bytes up to this share of sent bytes are that, not a download, at
+	// any stream bitrate.
+	libraryStreamAckRatio = 10
 
 	libraryCheckInterval = time.Minute
 	libraryExecTimeout   = 30 * time.Second
@@ -457,7 +461,7 @@ func (c *LibraryController) downloadsInProgress(ctx context.Context, pod *corev1
 		return "", nil
 	}
 	downloading := strings.Join(what, "; ")
-	if !c.downloadProgressing(pod.UID, state.files+"\n"+heroic, state.rxBytes) {
+	if !c.downloadProgressing(pod.UID, state.files+"\n"+heroic, state.rxBytes, state.txBytes) {
 		klog.Infof("Library download made no progress for %s, not counting it (%s)", libraryDownloadStallTimeout, downloading)
 		return "", nil
 	}
@@ -469,19 +473,22 @@ type downloadProgress struct {
 	uid   types.UID
 	files string // download dirs' file listing and the Heroic store
 	rx    uint64 // bytes the pod had received
+	tx    uint64 // and sent
 	at    time.Time
 }
 
 // downloadProgressing reports whether a listed download has progressed
 // within libraryDownloadStallTimeout: its files (or Heroic's store) changed,
-// or the pod received libraryDownloadMinBytes. Files catch Steam patching
+// or the pod received libraryDownloadMinBytes more than its stream's ACKs
+// (see libraryStreamAckRatio) would explain. Files catch Steam patching
 // from disk; received bytes catch launchers whose files we can't see (a
 // Heroic download lands in the game's own folder). First sight counts as
 // progress, so a restarted operator waits a full stall timeout.
-func (c *LibraryController) downloadProgressing(uid types.UID, files string, rx uint64) bool {
+func (c *LibraryController) downloadProgressing(uid types.UID, files string, rx, tx uint64) bool {
 	now, last := c.now(), c.download
-	if last.uid != uid || last.files != files || rx < last.rx || rx-last.rx >= libraryDownloadMinBytes {
-		c.download = downloadProgress{uid: uid, files: files, rx: rx, at: now}
+	if last.uid != uid || last.files != files || rx < last.rx || tx < last.tx ||
+		rx-last.rx >= libraryDownloadMinBytes+(tx-last.tx)/libraryStreamAckRatio {
+		c.download = downloadProgress{uid: uid, files: files, rx: rx, tx: tx, at: now}
 		return true
 	}
 	return now.Sub(last.at) < libraryDownloadStallTimeout
@@ -491,8 +498,8 @@ func (c *LibraryController) downloadProgressing(uid types.UID, files string, rx 
 // "entry <path>" for every entry of steamapps/downloading in the default
 // Steam library and in library folders on the games volume (at its root or
 // one directory down, e.g. <games>/SteamLibrary); "files <dir> <checksum>"
-// over each such dir's file names, sizes and mtimes; and "rx <bytes>" per
-// network interface but lo. The pod has its own network namespace, so those
+// over each such dir's file names, sizes and mtimes; and "rx <bytes>" and
+// "tx <bytes>" per network interface but lo. The pod has its own network namespace, so those
 // are its bytes alone; lo carries the whole nginx↔Selkies stream, so it
 // must stay excluded or every open tab would count as download progress.
 func steamDownloadsCommand(gamesPath string) []string {
@@ -502,8 +509,10 @@ for d in "$1/.local/share/Steam/steamapps/downloading" "$2/steamapps/downloading
   ls -A "$d" | sed "s|^|entry $d/|"
   echo "files $d $(find "$d" -printf '%P %s %T@\n' | cksum)"
 done
-for f in "$3"/*/statistics/rx_bytes; do
-  case "$f" in */lo/*) ;; *) echo "rx $(cat "$f")" ;; esac
+for f in "$3"/*/statistics; do
+  case "$f" in */lo/*) continue ;; esac
+  echo "rx $(cat "$f/rx_bytes")"
+  echo "tx $(cat "$f/tx_bytes")"
 done
 exit 0
 `, "sh", libraryHome, gamesPath, "/sys/class/net"}
@@ -513,6 +522,7 @@ type downloadState struct {
 	entries []string
 	files   string
 	rxBytes uint64
+	txBytes uint64
 }
 
 func parseDownloadState(out string) (downloadState, error) {
@@ -525,12 +535,16 @@ func parseDownloadState(out string) (downloadState, error) {
 			state.entries = append(state.entries, value)
 		case "files":
 			files = append(files, value)
-		case "rx":
+		case "rx", "tx":
 			n, err := strconv.ParseUint(value, 10, 64)
 			if err != nil {
-				return state, fmt.Errorf("parsing received bytes %q: %w", value, err)
+				return state, fmt.Errorf("parsing %s bytes %q: %w", kind, value, err)
 			}
-			state.rxBytes += n
+			if kind == "rx" {
+				state.rxBytes += n
+			} else {
+				state.txBytes += n
+			}
 		default:
 			return state, fmt.Errorf("unexpected download state line %q", line)
 		}
