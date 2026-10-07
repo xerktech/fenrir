@@ -36,8 +36,8 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
   streaming <name>`; its pod, GPU claim and wolf-agent Secret go with it. Never delete the pod
   alone expecting a restart: a gone pod ends the Session.
 - Revoke a client: `kubectl delete pairing -n streaming <fingerprint>` (`spec.userReference`
-  names its owner). It is refused from then on; a session it already has keeps running until
-  quit or deleted.
+  names its owner). It is refused from then on, and the operator ends any session it has
+  running (pod and stream included).
 - Steam home and library are backed up hourly/daily to NFS; the restore procedure is in the
   ArgoCD streaming rules (Steam backup).
 - RomM sync is off in this deployment (no `--romm-url`).

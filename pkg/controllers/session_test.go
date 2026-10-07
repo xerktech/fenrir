@@ -209,6 +209,8 @@ func reconcileFixtures(t *testing.T, userPath, appPath string) (*SessionControll
 		appInformer,
 		userInformer,
 		podInformer,
+		fakeDirewolf.DirewolfV1alpha1().Pairings(user.Namespace),
+		generic.NewInformer[*v1alpha1types.Pairing](dwFactory.Direwolf().V1alpha1().Pairings().Informer()),
 		SessionControllerOptions{
 			SessionPortRange:    PortRange{Min: 20000, Max: 20999},
 			SessionNodeSelector: map[string]string{"kubernetes.io/hostname": "talos04"},

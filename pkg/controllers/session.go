@@ -122,6 +122,10 @@ type SessionController struct {
 	AppInformer  generic.Informer[*v1alpha1types.App]
 	UserInformer generic.Informer[*v1alpha1types.User]
 
+	// A Session whose Pairing is gone is ended (see revokedReason).
+	PairingClient   v1alpha1client.PairingInterface
+	PairingInformer generic.Informer[*v1alpha1types.Pairing]
+
 	TCPRouteClient gatewayv1alpha2.TCPRouteInterface
 	UDPRouteClient gatewayv1alpha2.UDPRouteInterface
 
@@ -134,8 +138,9 @@ type SessionController struct {
 	// must cancel in-flight calls, wolf-agent polls above all.
 	runCtx context.Context
 
-	controller    generic.Controller[*v1alpha1types.Session]
-	podController generic.Controller[*corev1.Pod]
+	controller        generic.Controller[*v1alpha1types.Session]
+	podController     generic.Controller[*corev1.Pod]
+	pairingController generic.Controller[*v1alpha1types.Pairing]
 	SessionControllerOptions
 }
 
@@ -149,6 +154,8 @@ func NewSessionController(
 	appInformer generic.Informer[*v1alpha1types.App],
 	userInformer generic.Informer[*v1alpha1types.User],
 	podInformer generic.Informer[*corev1.Pod],
+	pairingClient v1alpha1client.PairingInterface,
+	pairingInformer generic.Informer[*v1alpha1types.Pairing],
 	options SessionControllerOptions,
 ) *SessionController {
 	res := &SessionController{
@@ -159,6 +166,8 @@ func NewSessionController(
 		SessionInformer:          sessionInformer,
 		AppInformer:              appInformer,
 		UserInformer:             userInformer,
+		PairingClient:            pairingClient,
+		PairingInformer:          pairingInformer,
 		ports:                    newPortAllocator(options.SessionPortRange),
 		SessionControllerOptions: options,
 	}
@@ -185,6 +194,16 @@ func NewSessionController(
 		},
 		generic.ControllerOptions{
 			Name:    "session-controller-pod",
+			Workers: 1,
+		},
+	)
+
+	// A Pairing deletion (client revoked) re-reconciles its Sessions.
+	res.pairingController = generic.NewController(
+		pairingInformer,
+		res.reconcilePairing,
+		generic.ControllerOptions{
+			Name:    "session-controller-pairing",
 			Workers: 1,
 		},
 	)
@@ -216,6 +235,14 @@ func (c *SessionController) Run(ctx context.Context) error {
 		err := c.podController.Run(sessionCtx)
 		if err != nil {
 			klog.Errorf("Failed to run pod controller: %v", err)
+		}
+	}()
+
+	go func() {
+		defer cancel()
+		err := c.pairingController.Run(sessionCtx)
+		if err != nil {
+			klog.Errorf("Failed to run pairing controller: %v", err)
 		}
 	}()
 
@@ -273,6 +300,11 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 		// port block is ours to free.
 		return c.releaseUnusedPorts()
 	} else if reason := c.expiredReason(newObj, time.Now()); reason != "" {
+		return c.endSession(ctx, newObj, reason)
+	}
+	if reason, err := c.revokedReason(ctx, newObj); err != nil {
+		return err
+	} else if reason != "" {
 		return c.endSession(ctx, newObj, reason)
 	}
 	oldStatus := newObj.Status.DeepCopy()
