@@ -1620,7 +1620,7 @@ func (c *SessionController) reconcilePVC(ctx context.Context, session *v1alpha1t
 		return nil, apply(templateSpec)
 	}
 
-	spec, drift := keepLivePVCSpec(templateSpec, &live.Spec)
+	spec, drift := keepLivePVCSpec(templateSpec, &live.Spec, live.Status.Phase == corev1.ClaimBound)
 	err = apply(spec)
 	if err != nil && (errors.IsInvalid(err) || errors.IsForbidden(err)) &&
 		!spec.Resources.Requests.Storage().Equal(*live.Spec.Resources.Requests.Storage()) {
@@ -1637,10 +1637,11 @@ func (c *SessionController) reconcilePVC(ctx context.Context, session *v1alpha1t
 
 // keepLivePVCSpec returns the spec to re-apply to an existing PVC: every field
 // the operator declares, at its live value, so server-side apply neither
-// changes an immutable field nor removes one a later template dropped. The
-// storage request alone follows the template, and only upwards. drift names
-// the template fields the live PVC differs from.
-func keepLivePVCSpec(template, live *corev1.PersistentVolumeClaimSpec) (spec *corev1.PersistentVolumeClaimSpec, drift []string) {
+// changes an immutable field nor removes one a later template dropped. Only
+// the storage request (upwards) and, once bound, volumeAttributesClassName,
+// which the apiserver lets a bound claim change, follow the template. drift names the
+// template fields the live PVC keeps a differing value for.
+func keepLivePVCSpec(template, live *corev1.PersistentVolumeClaimSpec, bound bool) (spec *corev1.PersistentVolumeClaimSpec, drift []string) {
 	spec = &corev1.PersistentVolumeClaimSpec{
 		AccessModes:      live.AccessModes,
 		Selector:         live.Selector,
@@ -1648,6 +1649,8 @@ func keepLivePVCSpec(template, live *corev1.PersistentVolumeClaimSpec) (spec *co
 		VolumeMode:       live.VolumeMode,
 		DataSource:       live.DataSource,
 		DataSourceRef:    live.DataSourceRef,
+		// The template's, if any, is set below.
+		VolumeAttributesClassName: live.VolumeAttributesClassName,
 		Resources: corev1.VolumeResourceRequirements{
 			Limits:   live.Resources.Limits,
 			Requests: maps.Clone(live.Resources.Requests),
@@ -1670,6 +1673,15 @@ func keepLivePVCSpec(template, live *corev1.PersistentVolumeClaimSpec) (spec *co
 	differs("dataSource", template.DataSource != nil, template.DataSource, live.DataSource)
 	differs("dataSourceRef", template.DataSourceRef != nil, template.DataSourceRef, live.DataSourceRef)
 	differs("resources.limits", len(template.Resources.Limits) > 0, template.Resources.Limits, live.Resources.Limits)
+
+	// Only a bound claim may move to another VolumeAttributesClass, and the
+	// apiserver forbids unsetting one, or setting it to "", once it is set.
+	vac := template.VolumeAttributesClassName
+	if vac != nil && bound && (*vac != "" || live.VolumeAttributesClassName == nil) {
+		spec.VolumeAttributesClassName = vac
+	} else {
+		differs("volumeAttributesClassName", vac != nil, vac, live.VolumeAttributesClassName)
+	}
 
 	want, got := template.Resources.Requests.Storage(), live.Resources.Requests.Storage()
 	switch want.Cmp(*got) {
@@ -1712,6 +1724,9 @@ func pvcSpecApply(spec *corev1.PersistentVolumeClaimSpec) *v1ac.PersistentVolume
 	}
 	if spec.VolumeMode != nil {
 		pvcSpec.WithVolumeMode(*spec.VolumeMode)
+	}
+	if spec.VolumeAttributesClassName != nil {
+		pvcSpec.WithVolumeAttributesClassName(*spec.VolumeAttributesClassName)
 	}
 	if spec.DataSource != nil {
 		dsConfig := v1ac.TypedLocalObjectReference().
