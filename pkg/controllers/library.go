@@ -83,9 +83,10 @@ const (
 	// an entry Steam left behind, would otherwise hold it up forever.
 	libraryDownloadStallTimeout = 15 * time.Minute
 	// libraryDownloadMinBytes is how many bytes the pod must receive since a
-	// download last made progress for that to count as progress. It sits
-	// well above what an open tab's ACKs and input add over the stall window.
-	libraryDownloadMinBytes = 64 << 20
+	// download last made progress for that to count as progress. An open
+	// tab's ACKs and input add ~50 MiB per stall window at 45 Mbit/s of
+	// stream (measured); this leaves room for a 4K one.
+	libraryDownloadMinBytes = 256 << 20
 
 	libraryCheckInterval = time.Minute
 	libraryExecTimeout   = 30 * time.Second
@@ -492,7 +493,8 @@ func (c *LibraryController) downloadProgressing(uid types.UID, files string, rx 
 // one directory down, e.g. <games>/SteamLibrary); "files <dir> <checksum>"
 // over each such dir's file names, sizes and mtimes; and "rx <bytes>" per
 // network interface but lo. The pod has its own network namespace, so those
-// are its bytes alone.
+// are its bytes alone; lo carries the whole nginx↔Selkies stream, so it
+// must stay excluded or every open tab would count as download progress.
 func steamDownloadsCommand(gamesPath string) []string {
 	return []string{"sh", "-c", `
 for d in "$1/.local/share/Steam/steamapps/downloading" "$2/steamapps/downloading" "$2"/*/steamapps/downloading; do
@@ -500,11 +502,11 @@ for d in "$1/.local/share/Steam/steamapps/downloading" "$2/steamapps/downloading
   ls -A "$d" | sed "s|^|entry $d/|"
   echo "files $d $(find "$d" -printf '%P %s %T@\n' | cksum)"
 done
-for f in /sys/class/net/*/statistics/rx_bytes; do
+for f in "$3"/*/statistics/rx_bytes; do
   case "$f" in */lo/*) ;; *) echo "rx $(cat "$f")" ;; esac
 done
 exit 0
-`, "sh", libraryHome, gamesPath}
+`, "sh", libraryHome, gamesPath, "/sys/class/net"}
 }
 
 type downloadState struct {

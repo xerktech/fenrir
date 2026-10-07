@@ -160,8 +160,10 @@ func (s *LibraryServer) flushActivity(ctx context.Context) {
 	if seen == 0 || (seen == s.lastFlushed && visit == s.lastFlushedVisit) {
 		return
 	}
+	// Send the visit only when this replica saw a new one: another replica
+	// may have recorded a later one, and an old one must never overwrite it.
 	var visitAt time.Time
-	if visit != 0 {
+	if visit != 0 && visit != s.lastFlushedVisit {
 		visitAt = time.Unix(0, visit)
 	}
 	if err := s.library.RecordActivity(ctx, time.Unix(0, seen), visitAt); err != nil {

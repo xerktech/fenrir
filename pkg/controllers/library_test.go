@@ -9,6 +9,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"os/exec"
+	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -301,6 +305,76 @@ func TestLibraryDownloadStall(t *testing.T) {
 	pod.UID = "new-library-uid"
 	if check("b", libraryDownloadMinBytes) == "" {
 		t.Error("download in a new Library pod does not count")
+	}
+	// So does a new download once the last one finished.
+	step(libraryDownloadStallTimeout)
+	if check("b", libraryDownloadMinBytes) != "" {
+		t.Fatal("stalled download still counts")
+	}
+	f.exec.steam = "rx 0\n"
+	if got, err := f.library.downloadsInProgress(context.Background(), pod); err != nil || got != "" {
+		t.Fatalf("nothing listed: %q, %v", got, err)
+	}
+	if check("b", libraryDownloadMinBytes) == "" {
+		t.Error("download listed again after none was does not count")
+	}
+}
+
+// steamDownloadsCommand's script, run for real: entries and file changes are
+// reported, and lo (which carries the whole Selkies stream) is not counted.
+func TestSteamDownloadsCommand(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("needs GNU find")
+	}
+	home, games, netDir := t.TempDir(), t.TempDir(), t.TempDir()
+	downloading := filepath.Join(games, "SteamLibrary", "steamapps", "downloading")
+	for _, dir := range []string{
+		filepath.Join(downloading, "570"),
+		filepath.Join(netDir, "lo", "statistics"),
+		filepath.Join(netDir, "eth0", "statistics"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(path, data string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(netDir, "lo", "statistics", "rx_bytes"), "999999999\n")
+	write(filepath.Join(netDir, "eth0", "statistics", "rx_bytes"), "1234\n")
+	chunk := filepath.Join(downloading, "570", "chunk")
+	write(chunk, "a")
+
+	run := func() downloadState {
+		t.Helper()
+		command := steamDownloadsCommand(games)
+		command = append(command[:len(command)-3], home, games, netDir)
+		out, err := exec.CommandContext(context.Background(), command[0], command[1:]...).Output() //nolint:gosec // the code's own script
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, err := parseDownloadState(string(out))
+		if err != nil {
+			t.Fatalf("%v in %q", err, out)
+		}
+		return state
+	}
+	before := run()
+	if want := []string{downloading + "/570"}; !slices.Equal(before.entries, want) {
+		t.Errorf("entries = %q, want %q", before.entries, want)
+	}
+	if before.rxBytes != 1234 {
+		t.Errorf("rx = %d, want 1234 (lo excluded)", before.rxBytes)
+	}
+	if again := run(); again.files != before.files {
+		t.Errorf("files changed with nothing written: %q -> %q", before.files, again.files)
+	}
+	write(chunk, "ab")
+	if after := run(); after.files == before.files {
+		t.Error("a grown download file left the files checksum unchanged")
 	}
 }
 
@@ -615,6 +689,33 @@ func TestLibraryServer(t *testing.T) {
 		}
 		if stored.Annotations[libraryVisitAnnotation] == "" || stored.Annotations[libraryActivityAnnotation] == "" {
 			t.Errorf("flushed annotations = %v, want activity and visit", stored.Annotations)
+		}
+
+		visitAnnotation := func() string {
+			t.Helper()
+			stored, getErr := f.k8s.CoreV1().Pods(libraryTestNS).Get(context.Background(), LibraryPodName, metav1.GetOptions{})
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			return stored.Annotations[libraryVisitAnnotation]
+		}
+		// Another replica records a later visit; this one's traffic must not
+		// write its older visit back over it.
+		later := time.Now().Add(time.Hour)
+		if err = f.library.RecordActivity(context.Background(), later, later); err != nil {
+			t.Fatal(err)
+		}
+		s.lastSeen.Add(1)
+		s.flushActivity(context.Background())
+		if got, want := visitAnnotation(), later.UTC().Format(time.RFC3339); got != want {
+			t.Errorf("visit after a stale replica's flush = %s, want %s", got, want)
+		}
+		// A new visit with no new traffic is still flushed.
+		newer := later.Add(time.Hour)
+		s.lastVisit.Store(newer.UnixNano())
+		s.flushActivity(context.Background())
+		if got, want := visitAnnotation(), newer.UTC().Format(time.RFC3339); got != want {
+			t.Errorf("visit-only flush = %s, want %s", got, want)
 		}
 
 		// A pod started with another password: the stale cache is dropped on

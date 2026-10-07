@@ -25,6 +25,10 @@ paths:
     - Received bytes are the only progress signal for Heroic: its store is not known to change
       while downloading. Unverified against real paused downloads (no launcher data on talos04).
     - Progress state is in memory on the leader; a new leader starts the stall clock afresh.
+    - Exclude lo from the received bytes: it carries the whole nginx↔Selkies stream, so every
+      open tab would count as progress. eth0 adds ~50 MiB per 15 min at 45 Mbit/s of stream.
+  - A replica flushes the visit annotation only when it saw a new visit, so an older visit never
+    overwrites another replica's later one.
   - Activity lives on the pod (`direwolf/library-last-activity`), not in memory: every
     operator replica serves the page, only the leader runs the idle check.
   - Any doubt (exec failure, unparseable Heroic store) keeps the Library up.
@@ -46,7 +50,7 @@ paths:
   failure only: the command almost never ran. Never retry other exec errors; the command may
   have run. A new Library exec must stay safe to run twice.
 - Tests: `TestRetryUpgradeFailure`, `TestPodExecutorRetriesUpgradeFailure`, `TestLibraryIdleRule`,
-  `TestLibraryDownloadStall`,
+  `TestLibraryDownloadStall`, `TestSteamDownloadsCommand`,
   `TestLibraryEnsurePod*`, `TestLibraryServer` in
   `pkg/controllers/library_test.go`; `TestLaunchBacksOutWhenBusyAfterCreate` in
   `pkg/moonlight/library_test.go`.
