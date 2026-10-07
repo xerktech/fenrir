@@ -9,6 +9,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"os/exec"
+	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -39,7 +43,7 @@ var libraryTestNow = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 // fakeLibraryExec answers the idle check's execs and records the rest.
 type fakeLibraryExec struct {
 	mu        sync.Mutex
-	steam     string // steamapps/downloading listing
+	steam     string // steamDownloadsCommand's output
 	heroic    string // download-manager.json contents
 	err       error
 	shutdowns int
@@ -94,6 +98,7 @@ func newLibraryFixture(t *testing.T, k8sObjs []runtime.Object, dwObjs ...runtime
 			NodeSelector: map[string]string{"kubernetes.io/hostname": "talos04.xerktech.com"},
 			Tolerations:  []corev1.Toleration{{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}},
 			IdleTimeout:  DefaultLibraryIdleTimeout,
+			MaxRuntime:   DefaultLibraryMaxRuntime,
 		},
 	}
 	return f
@@ -133,7 +138,7 @@ func libraryPod(lastActivity time.Duration, ready bool) *corev1.Pod {
 	}
 }
 
-func TestLibraryLastActivity(t *testing.T) {
+func TestLibraryAnnotatedTime(t *testing.T) {
 	created := libraryTestNow.Add(-time.Hour)
 	for _, tc := range []struct {
 		name       string
@@ -150,8 +155,8 @@ func TestLibraryLastActivity(t *testing.T) {
 			if tc.annotation != "" {
 				pod.Annotations = map[string]string{libraryActivityAnnotation: tc.annotation}
 			}
-			if got := libraryLastActivity(pod); !got.Equal(tc.want) {
-				t.Errorf("libraryLastActivity = %v, want %v", got, tc.want)
+			if got := libraryAnnotatedTime(pod, libraryActivityAnnotation); !got.Equal(tc.want) {
+				t.Errorf("libraryAnnotatedTime = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -180,12 +185,18 @@ func TestHeroicQueueLen(t *testing.T) {
 	}
 }
 
-// The idle rule: stop only after IdleTimeout without browser traffic AND
-// with nothing downloading; when in doubt, keep it up.
+// steamDownloading is steamDownloadsCommand's output for one Steam download.
+const steamDownloading = "entry /games/SteamLibrary/steamapps/downloading/570\n" +
+	"files /games/SteamLibrary/steamapps/downloading 1234 56\nrx 1000\n"
+
+// The idle rule: stop only after IdleTimeout without browser traffic (or
+// MaxRuntime since the user last opened the page) AND with nothing
+// downloading; when in doubt, keep it up.
 func TestLibraryIdleRule(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		lastActivity time.Duration
+		lastVisit    time.Duration // 0: only the pod's start, an hour ago
 		ready        bool
 		steam        string
 		heroic       string
@@ -196,11 +207,22 @@ func TestLibraryIdleRule(t *testing.T) {
 		wantShutdown bool
 	}{
 		{name: "browser active", lastActivity: 14 * time.Minute, ready: true, wantRequeue: time.Minute},
+		// An open tab's WebSocket never goes quiet, with or without a user.
+		{name: "tab open, opened 4h ago", lastActivity: 5 * time.Second, lastVisit: 4 * time.Hour, ready: true,
+			wantStopped: true, wantShutdown: true},
+		{name: "tab open, opened 4h ago, Steam downloading", lastActivity: 5 * time.Second, lastVisit: 4 * time.Hour, ready: true,
+			steam: steamDownloading, wantRequeue: libraryCheckInterval},
+		{name: "tab open, reopened recently", lastActivity: 5 * time.Second, lastVisit: 3*time.Hour + 50*time.Minute, ready: true,
+			wantRequeue: 10 * time.Minute},
 		{name: "idle, nothing downloading", lastActivity: 15 * time.Minute, ready: true, wantStopped: true, wantShutdown: true},
 		{name: "idle, finished Heroic downloads only", lastActivity: time.Hour, ready: true,
 			heroic: `{"queue":[],"finished":[{}]}`, wantStopped: true, wantShutdown: true},
 		{name: "idle, Steam downloading", lastActivity: time.Hour, ready: true,
-			steam: "/games/SteamLibrary/steamapps/downloading/570\n", wantRequeue: libraryCheckInterval},
+			steam: steamDownloading, wantRequeue: libraryCheckInterval},
+		{name: "idle, empty Steam download dir", lastActivity: time.Hour, ready: true,
+			steam: "files /games/steamapps/downloading 1 0\nrx 1000\n", wantStopped: true, wantShutdown: true},
+		{name: "idle, unparseable download state", lastActivity: time.Hour, ready: true,
+			steam: "rx lots\n", wantRequeue: libraryCheckInterval},
 		{name: "idle, Heroic downloading", lastActivity: time.Hour, ready: true,
 			heroic: `{"queue":[{}],"finished":[]}`, wantRequeue: libraryCheckInterval},
 		{name: "idle, Heroic store unreadable", lastActivity: time.Hour, ready: true,
@@ -214,6 +236,10 @@ func TestLibraryIdleRule(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := libraryPod(tc.lastActivity, tc.ready)
 			pod.Status.Phase = tc.phase
+			if tc.lastVisit > 0 {
+				pod.CreationTimestamp = metav1.NewTime(libraryTestNow.Add(-tc.lastVisit - time.Minute))
+				pod.Annotations[libraryVisitAnnotation] = libraryTestNow.Add(-tc.lastVisit).Format(time.RFC3339)
+			}
 			f := newLibraryFixture(t, []runtime.Object{pod})
 			f.exec.steam, f.exec.heroic, f.exec.err = tc.steam, tc.heroic, tc.execErr
 
@@ -232,6 +258,142 @@ func TestLibraryIdleRule(t *testing.T) {
 				t.Errorf("steam -shutdown ran %d times, want ran=%v", f.exec.shutdowns, tc.wantShutdown)
 			}
 		})
+	}
+}
+
+// A listed download keeps the Library up only while it makes progress: a
+// paused download, or an entry Steam left behind, must not hold it (and the
+// Steam lock) forever.
+func TestLibraryDownloadStall(t *testing.T) {
+	pod := libraryPod(time.Hour, true)
+	f := newLibraryFixture(t, []runtime.Object{pod})
+	now := libraryTestNow
+	f.library.now = func() time.Time { return now }
+	tx := 0
+	check := func(files string, rx int) string {
+		t.Helper()
+		f.exec.steam = fmt.Sprintf("entry /games/steamapps/downloading/570\nfiles /games/steamapps/downloading %s\nrx %d\ntx %d\n", files, rx, tx)
+		got, err := f.library.downloadsInProgress(context.Background(), pod)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	step := func(d time.Duration) { now = now.Add(d) }
+
+	if check("a", 0) == "" {
+		t.Fatal("a download seen for the first time does not count")
+	}
+	step(libraryDownloadStallTimeout - time.Second)
+	if check("a", libraryDownloadMinBytes-1) == "" {
+		t.Error("download stopped counting before the stall timeout")
+	}
+	step(time.Second)
+	if got := check("a", libraryDownloadMinBytes-1); got != "" {
+		t.Errorf("stalled download still counts: %q", got)
+	}
+	// An open tab's ACKs grow with its stream, at any bitrate.
+	tx = 40 * libraryDownloadMinBytes
+	if got := check("a", 4*libraryDownloadMinBytes); got != "" {
+		t.Errorf("stream ACKs count as download progress: %q", got)
+	}
+	// Bytes received beyond that count (a Heroic download is invisible on disk).
+	if check("a", 5*libraryDownloadMinBytes) == "" {
+		t.Error("download receiving data does not count")
+	}
+	step(libraryDownloadStallTimeout)
+	// Changing files count too (Steam patching from disk).
+	if check("b", 5*libraryDownloadMinBytes) == "" {
+		t.Error("download whose files changed does not count")
+	}
+	// A new Library pod starts the clock afresh.
+	step(libraryDownloadStallTimeout)
+	pod.UID = "new-library-uid"
+	if check("b", 5*libraryDownloadMinBytes) == "" {
+		t.Error("download in a new Library pod does not count")
+	}
+	// So does a new download once the last one finished.
+	step(libraryDownloadStallTimeout)
+	if check("b", 5*libraryDownloadMinBytes) != "" {
+		t.Fatal("stalled download still counts")
+	}
+	f.exec.steam = "rx 0\n"
+	if got, err := f.library.downloadsInProgress(context.Background(), pod); err != nil || got != "" {
+		t.Fatalf("nothing listed: %q, %v", got, err)
+	}
+	if check("b", 5*libraryDownloadMinBytes) == "" {
+		t.Error("download listed again after none was does not count")
+	}
+	// The ACK allowance is on bytes sent since the last progress, not ever:
+	// after hours of streaming, a download must still count.
+	tx = 1000 * libraryDownloadMinBytes
+	step(time.Minute)
+	if check("c", 5*libraryDownloadMinBytes) == "" {
+		t.Fatal("new files do not count")
+	}
+	step(libraryDownloadStallTimeout)
+	if check("c", 7*libraryDownloadMinBytes) == "" {
+		t.Error("download after a long stream does not count")
+	}
+}
+
+// steamDownloadsCommand's script, run for real: entries and file changes are
+// reported, and lo (which carries the whole Selkies stream) is not counted.
+func TestSteamDownloadsCommand(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("needs GNU find")
+	}
+	home, games, netDir := t.TempDir(), t.TempDir(), t.TempDir()
+	downloading := filepath.Join(games, "SteamLibrary", "steamapps", "downloading")
+	for _, dir := range []string{
+		filepath.Join(downloading, "570"),
+		filepath.Join(netDir, "lo", "statistics"),
+		filepath.Join(netDir, "eth0", "statistics"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(path, data string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(netDir, "lo", "statistics", "rx_bytes"), "999999999\n")
+	write(filepath.Join(netDir, "lo", "statistics", "tx_bytes"), "999999999\n")
+	write(filepath.Join(netDir, "eth0", "statistics", "rx_bytes"), "1234\n")
+	write(filepath.Join(netDir, "eth0", "statistics", "tx_bytes"), "5678\n")
+	chunk := filepath.Join(downloading, "570", "chunk")
+	write(chunk, "a")
+
+	run := func() downloadState {
+		t.Helper()
+		command := steamDownloadsCommand(games)
+		command = append(command[:len(command)-3], home, games, netDir)
+		out, err := exec.CommandContext(context.Background(), command[0], command[1:]...).Output() //nolint:gosec // the code's own script
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, err := parseDownloadState(string(out))
+		if err != nil {
+			t.Fatalf("%v in %q", err, out)
+		}
+		return state
+	}
+	before := run()
+	if want := []string{downloading + "/570"}; !slices.Equal(before.entries, want) {
+		t.Errorf("entries = %q, want %q", before.entries, want)
+	}
+	if before.rxBytes != 1234 || before.txBytes != 5678 {
+		t.Errorf("rx, tx = %d, %d; want 1234, 5678 (lo excluded)", before.rxBytes, before.txBytes)
+	}
+	if again := run(); again.files != before.files {
+		t.Errorf("files changed with nothing written: %q -> %q", before.files, again.files)
+	}
+	write(chunk, "ab")
+	if after := run(); after.files == before.files {
+		t.Error("a grown download file left the files checksum unchanged")
 	}
 }
 
@@ -525,6 +687,54 @@ func TestLibraryServer(t *testing.T) {
 		}
 		if s.lastSeen.Load() == 0 {
 			t.Error("proxied traffic not counted as activity")
+		}
+		if s.lastVisit.Load() != 0 {
+			t.Error("a request the user did not open counted as a visit")
+		}
+		// A page load the user asked for restarts the MaxRuntime clock.
+		if rec = serveLibrary(s, "10.1.0.5:5555", userVisit); rec.Body.String() != "selkies" {
+			t.Errorf("user visit: HTTP %d %q, want the pod's page", rec.Code, rec.Body.String())
+		}
+		if s.lastVisit.Load() == 0 {
+			t.Error("user-opened page load not counted as a visit")
+		}
+		if _, err = f.k8s.CoreV1().Pods(libraryTestNS).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		s.flushActivity(context.Background())
+		stored, err := f.k8s.CoreV1().Pods(libraryTestNS).Get(context.Background(), LibraryPodName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Annotations[libraryVisitAnnotation] == "" || stored.Annotations[libraryActivityAnnotation] == "" {
+			t.Errorf("flushed annotations = %v, want activity and visit", stored.Annotations)
+		}
+
+		visitAnnotation := func() string {
+			t.Helper()
+			stored, getErr := f.k8s.CoreV1().Pods(libraryTestNS).Get(context.Background(), LibraryPodName, metav1.GetOptions{})
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			return stored.Annotations[libraryVisitAnnotation]
+		}
+		// Another replica records a later visit; this one's traffic must not
+		// write its older visit back over it.
+		later := time.Now().Add(time.Hour)
+		if err = f.library.RecordActivity(context.Background(), later, later); err != nil {
+			t.Fatal(err)
+		}
+		s.lastSeen.Add(1)
+		s.flushActivity(context.Background())
+		if got, want := visitAnnotation(), later.UTC().Format(time.RFC3339); got != want {
+			t.Errorf("visit after a stale replica's flush = %s, want %s", got, want)
+		}
+		// A new visit with no new traffic is still flushed.
+		newer := later.Add(time.Hour)
+		s.lastVisit.Store(newer.UnixNano())
+		s.flushActivity(context.Background())
+		if got, want := visitAnnotation(), newer.UTC().Format(time.RFC3339); got != want {
+			t.Errorf("visit-only flush = %s, want %s", got, want)
 		}
 
 		// A pod started with another password: the stale cache is dropped on

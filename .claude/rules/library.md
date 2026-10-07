@@ -15,7 +15,22 @@ paths:
     be seconds old.
   - The operator side also counts session pods, not just Sessions: a terminating pod still
     runs Steam.
-- Idle rule: no browser traffic for `--library-idle-timeout` AND nothing downloading.
+- Idle rule: (no browser traffic for `--library-idle-timeout` OR no user-opened page load for
+  `--library-max-runtime`) AND nothing downloading.
+  - An open Selkies tab sends WebSocket traffic every few seconds with nobody there, so traffic
+    alone never idles; the max-runtime clock counts only `userNavigation` loads and Start.
+  - A listed download counts only while it progresses (files in steamapps/downloading or the
+    Heroic store change, or the pod receives `libraryDownloadMinBytes`) within
+    `libraryDownloadStallTimeout`. Paused downloads and stale Steam entries stay listed forever.
+    - Received bytes are the only progress signal for Heroic: its store is not known to change
+      while downloading. Unverified against real paused downloads (no launcher data on talos04).
+    - Progress state is in memory on the leader; a new leader starts the stall clock afresh.
+    - Exclude lo from the byte counts: it carries the whole nginx↔Selkies stream, so every
+      open tab would count as progress.
+    - Received bytes count only beyond a tenth of sent bytes (`libraryStreamAckRatio`): an open
+      tab's ACKs grow with its bitrate, so no fixed threshold separates them from a download.
+  - A replica flushes the visit annotation only when it saw a new visit, so an older visit never
+    overwrites another replica's later one.
   - Activity lives on the pod (`direwolf/library-last-activity`), not in memory: every
     operator replica serves the page, only the leader runs the idle check.
   - Any doubt (exec failure, unparseable Heroic store) keeps the Library up.
@@ -37,6 +52,7 @@ paths:
   failure only: the command almost never ran. Never retry other exec errors; the command may
   have run. A new Library exec must stay safe to run twice.
 - Tests: `TestRetryUpgradeFailure`, `TestPodExecutorRetriesUpgradeFailure`, `TestLibraryIdleRule`,
+  `TestLibraryDownloadStall`, `TestSteamDownloadsCommand`,
   `TestLibraryEnsurePod*`, `TestLibraryServer` in
   `pkg/controllers/library_test.go`; `TestLaunchBacksOutWhenBusyAfterCreate` in
   `pkg/moonlight/library_test.go`.

@@ -60,6 +60,8 @@ func main() {
 	libraryGamesPath := flag.String("library-games-path", "/games", "Where the Library mounts the game library")
 	libraryIdleTimeout := flag.Duration("library-idle-timeout", controllers.DefaultLibraryIdleTimeout,
 		"How long the Library may go without browser traffic (and with nothing downloading) before it is stopped")
+	libraryMaxRuntime := flag.Duration("library-max-runtime", controllers.DefaultLibraryMaxRuntime,
+		"How long the Library stays up after the last user-opened page load, even with a tab still open (unless downloading)")
 	catalogueSteamApp := flag.String("catalogue-steam-app", "",
 		"App copied for each installed Steam game (its pod template runs $"+controllers.LaunchCommandEnv+"). Empty: Steam games are not catalogued. Needs --library-port")
 	catalogueHeroicApp := flag.String("catalogue-heroic-app", "",
@@ -119,6 +121,9 @@ func main() {
 	}
 	if *libraryIdleTimeout <= 0 {
 		klog.Fatalf("--library-idle-timeout must be positive, got %s", *libraryIdleTimeout)
+	}
+	if *libraryMaxRuntime <= 0 {
+		klog.Fatalf("--library-max-runtime must be positive, got %s", *libraryMaxRuntime)
 	}
 
 	if (*rommURL == "") != (*rommApp == "") {
@@ -227,6 +232,7 @@ func main() {
 				NodeSelector: nodeSelector,
 				Tolerations:  tolerations,
 				IdleTimeout:  *libraryIdleTimeout,
+				MaxRuntime:   *libraryMaxRuntime,
 			},
 		)
 		if *catalogueSteamApp != "" || *catalogueHeroicApp != "" {
