@@ -188,3 +188,68 @@ func waitPairingWatch(t *testing.T, sc *SessionController) {
 	}
 	t.Fatal("pairing watch never started")
 }
+
+// reconcilePairing for a Pairing that is gone, with s referencing it.
+func (f *portsFixture) revokeOne(t *testing.T, pairing string) (*v1alpha1types.Session, error) {
+	t.Helper()
+	s := f.session("mine", f.user)
+	s.Spec.PairingReference.Name = pairing
+	if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Create(context.Background(), s, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	f.waitInformer(t, s.Name, true)
+	return s, f.sc.reconcilePairing(portsTestNS, pairing, nil)
+}
+
+// A failed delete (the Session changed meanwhile) is returned, so the
+// Pairing's key is retried rather than the revocation dropped.
+func TestPairingDeletionRetriesFailedEnd(t *testing.T) {
+	f := newPortsFixture(t)
+	conflicts := 1
+	f.dw.PrependReactor("delete", "sessions", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if conflicts > 0 {
+			conflicts--
+			return true, nil, apierrors.NewConflict(v1alpha1types.Resource("sessions"), "mine", nil)
+		}
+		return false, nil, nil
+	})
+	s, err := f.revokeOne(t, "client")
+	if err == nil {
+		t.Fatal("a conflicting delete was not returned for retry")
+	}
+	if err := f.sc.reconcilePairing(portsTestNS, "client", nil); err != nil {
+		t.Fatal(err)
+	}
+	if f.sessionExists(t, s.Name) {
+		t.Error("session survived the retry")
+	}
+}
+
+// An API server error confirming the Pairing is gone keeps the Session.
+func TestPairingDeletionKeepsSessionOnAPIError(t *testing.T) {
+	f := newPortsFixture(t)
+	f.dw.PrependReactor("get", "pairings", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("apiserver restarting")
+	})
+	s, err := f.revokeOne(t, "client")
+	if err == nil {
+		t.Error("API error not returned for retry")
+	}
+	if !f.sessionExists(t, s.Name) {
+		t.Error("an API error ended the session")
+	}
+}
+
+// A Pairing recreated (re-paired) before its delete event is handled keeps
+// the Session.
+func TestPairingDeletionKeepsSessionOfRecreatedPairing(t *testing.T) {
+	f := newPortsFixture(t)
+	f.createPairing(t, "client")
+	s, err := f.revokeOne(t, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.sessionExists(t, s.Name) {
+		t.Error("ended the session of a pairing that exists again")
+	}
+}
