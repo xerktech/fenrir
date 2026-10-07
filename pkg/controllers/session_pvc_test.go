@@ -19,14 +19,17 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/utils/ptr"
 
 	v1alpha1api "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
 
 // rejectImmutablePVCChanges makes the fake clientset refuse a PVC apply the
-// way the apiserver does: any change to the spec but resources.requests, and,
-// with resizable false, a storage request change too. A declared field left
-// out counts as a change, since server-side apply then removes it.
+// way the apiserver does: any change to the spec but resources.requests and,
+// on a bound claim, volumeAttributesClassName; with resizable false, a storage
+// request change too. A declared field left out counts as a change, since
+// server-side apply then removes it; so does unsetting a set
+// volumeAttributesClassName.
 func rejectImmutablePVCChanges(t *testing.T, k8s *k8sfake.Clientset, resizable bool) {
 	t.Helper()
 	pvcGVR := corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims")
@@ -57,7 +60,15 @@ func rejectImmutablePVCChanges(t *testing.T, k8s *k8sfake.Clientset, resizable b
 					stderrors.New("only dynamically provisioned pvc can be resized"))
 			}
 		}
+		if live.VolumeAttributesClassName != nil &&
+			(want.VolumeAttributesClassName == nil || *want.VolumeAttributesClassName == "") {
+			return true, nil, errors.NewInvalid(corev1.SchemeGroupVersion.WithKind("PersistentVolumeClaim").GroupKind(),
+				patch.GetName(), nil)
+		}
 		want.Resources.Requests, live.Resources.Requests = nil, nil
+		if pvc.Status.Phase == corev1.ClaimBound {
+			want.VolumeAttributesClassName, live.VolumeAttributesClassName = nil, nil
+		}
 		live.VolumeName = ""
 		if !equality.Semantic.DeepEqual(want, live) {
 			return true, nil, errors.NewInvalid(corev1.SchemeGroupVersion.WithKind("PersistentVolumeClaim").GroupKind(),
@@ -83,7 +94,8 @@ func editPVCTemplate(t *testing.T, sc *SessionController, sess *v1alpha1api.Sess
 }
 
 // bindPVC gives the session PVC what binding and an out-of-band resize leave
-// on it: a defaulted StorageClass, a volume, and the given storage request.
+// on it: a defaulted StorageClass, a volume, the Bound phase, and the given
+// storage request.
 func bindPVC(t *testing.T, k8s *k8sfake.Clientset, sc *SessionController, sess *v1alpha1api.Session, storage string) {
 	t.Helper()
 	ctx := context.Background()
@@ -95,6 +107,7 @@ func bindPVC(t *testing.T, k8s *k8sfake.Clientset, sc *SessionController, sess *
 	class := "local-path"
 	pvc.Spec.StorageClassName = &class
 	pvc.Spec.VolumeName = "pv-1"
+	pvc.Status.Phase = corev1.ClaimBound
 	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse(storage)
 	if _, err := pvcs.Update(ctx, pvc, metav1.UpdateOptions{FieldManager: "kubectl"}); err != nil {
 		t.Fatalf("bind PVC: %v", err)
@@ -176,6 +189,67 @@ func TestSessionPVCKeepsDroppedStorageClass(t *testing.T) {
 	}
 	if got := getPVC(t, k8s, sc, sess).Spec.StorageClassName; got == nil || *got != class {
 		t.Errorf("storageClassName = %v, want %q kept", got, class)
+	}
+}
+
+// TestSessionPVCVolumeAttributesClass sets volumeAttributesClassName in the
+// template: the PVC is created with it, keeps it while Pending, since only a
+// bound claim may change it, then follows a change to it, and keeps it when
+// the template drops it, since the apiserver forbids unsetting it (XERK-1554).
+func TestSessionPVCVolumeAttributesClass(t *testing.T) {
+	sc, k8s, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "testdata/app-pod-labels.yaml")
+	ctx := context.Background()
+	if err := k8s.CoreV1().PersistentVolumeClaims(sess.Namespace).Delete(ctx, sc.pvcName(sess), metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	setClass := func(class *string) {
+		editPVCTemplate(t, sc, sess, func(tmpl *corev1.PersistentVolumeClaimTemplate) {
+			tmpl.Spec.VolumeAttributesClassName = class
+		})
+	}
+	silver, gold, empty := "silver", "gold", ""
+	setClass(&silver)
+	if _, err := sc.reconcilePVC(ctx, sess); err != nil {
+		t.Fatalf("create PVC: %v", err)
+	}
+	if got := getPVC(t, k8s, sc, sess).Spec.VolumeAttributesClassName; got == nil || *got != silver {
+		t.Fatalf("created volumeAttributesClassName = %v, want %q", got, silver)
+	}
+	rejectImmutablePVCChanges(t, k8s, true)
+
+	setClass(&gold)
+	drift, err := sc.reconcilePVC(ctx, sess)
+	if err != nil {
+		t.Fatalf("reconcilePVC on a Pending PVC: %v", err)
+	}
+	if want := []string{"volumeAttributesClassName"}; !slices.Equal(drift, want) {
+		t.Errorf("Pending PVC: drift = %v, want %v", drift, want)
+	}
+	if got := getPVC(t, k8s, sc, sess).Spec.VolumeAttributesClassName; got == nil || *got != silver {
+		t.Errorf("Pending PVC: volumeAttributesClassName = %v, want the live %q kept", got, silver)
+	}
+
+	bindPVC(t, k8s, sc, sess, "1Gi")
+	for _, step := range []struct {
+		template  *string
+		want      string
+		wantDrift []string
+	}{
+		{&gold, gold, nil},
+		{nil, gold, nil},
+		{&empty, gold, []string{"volumeAttributesClassName"}},
+	} {
+		setClass(step.template)
+		drift, err := sc.reconcilePVC(ctx, sess)
+		if err != nil {
+			t.Fatalf("reconcilePVC with template class %s: %v", ptr.Deref(step.template, "<nil>"), err)
+		}
+		if !slices.Equal(drift, step.wantDrift) {
+			t.Errorf("template class %s: drift = %v, want %v", ptr.Deref(step.template, "<nil>"), drift, step.wantDrift)
+		}
+		if got := getPVC(t, k8s, sc, sess).Spec.VolumeAttributesClassName; got == nil || *got != step.want {
+			t.Errorf("template class %s: volumeAttributesClassName = %v, want %q", ptr.Deref(step.template, "<nil>"), got, step.want)
+		}
 	}
 }
 

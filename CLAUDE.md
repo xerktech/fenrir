@@ -107,6 +107,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     its live spec (only the storage request grows), never the template's: the apiserver rejects
     nearly every spec change, and a field left out of the apply is removed (XERK-1519).
     Template drift shows as `VolumeCreated` reason `TemplateDrift`. Tests: `session_pvc_test.go`.
+    - Exception: `volumeAttributesClassName` follows the template once the claim is Bound (only
+      then may it change); once set it can't be unset, so a dropped one stays (XERK-1554).
   - `App.spec.gpu` becomes a per-Session DRA ResourceClaim (`pkg/controllers/gpu_claim.go`).
   - Watches session pods (label `direwolf/session=true` only) to re-reconcile their Session.
 - **wolf-agent** (`pkg/controllers/agent.go`, `pkg/wolfapi`, `pkg/fakeudev`): sidecar talking to
