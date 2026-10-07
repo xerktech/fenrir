@@ -45,7 +45,7 @@ const (
 // the join waits for both setup events, a ping of each kind after them, then
 // settle; the client sees the empty display for that long.
 //
-// Every stream of a pod has the same Wolf session ID (see
+// Wolf session IDs repeat across a pod's streams (see
 // wolfapi.PauseStreamEvent), so a stream is told from the next by its
 // events: a stream ends with a pause or stop, and a second setup event of a
 // kind already seen starts a new one. The pod streams to one client at a

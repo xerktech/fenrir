@@ -165,6 +165,7 @@ type fakeAgent struct {
 	*httptest.Server
 	sessions string // JSON array for /api/v1/sessions
 	lobbies  string // JSON array for /api/v1/lobbies
+	clients  string // JSON array for /api/v1/clients
 
 	open atomic.Int32 // client connections not yet closed
 
@@ -178,7 +179,11 @@ type fakeAgent struct {
 
 func newFakeAgent(t *testing.T) *fakeAgent {
 	t.Helper()
-	a := &fakeAgent{sessions: "[]", lobbies: `[{"id":"lobby-1","name":"alex-1","connected_sessions":[]}]`}
+	a := &fakeAgent{sessions: "[]", lobbies: `[{"id":"lobby-1","name":"alex-1","connected_sessions":[]}]`,
+		// The seeded stream clients, out of order, and one paired otherwise.
+		clients: `[{"client_id":"13","app_state_folder":"direwolf-stream-3"},{"client_id":"99","app_state_folder":"someone"},` +
+			`{"client_id":"10","app_state_folder":"direwolf-stream-0"},{"client_id":"11","app_state_folder":"direwolf-stream-1"},` +
+			`{"client_id":"12","app_state_folder":"direwolf-stream-2"}]`}
 	a.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		a.calls = append(a.calls, r.URL.Path)
@@ -195,6 +200,8 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 			a.lobby = &req
 			a.mu.Unlock()
 			fmt.Fprint(w, `{"success":true,"lobby_id":"lobby-new"}`)
+		case "/api/v1/clients":
+			fmt.Fprintf(w, `{"success":true,"clients":%s}`, a.clients)
 		case "/api/v1/apps":
 			fmt.Fprint(w, `{"success":true,"apps":[{"id":"1","title":"Wolf UI","render_node":"/dev/dri/renderD129"}]}`)
 		case "/api/v1/sessions":
