@@ -46,7 +46,7 @@
           "x-kubernetes-validations": [
             {
               "message": "memory must be positive",
-              "rule": "!has(self.memory) || quantity(string(self.memory)).isGreaterThan(quantity('0'))"
+              "rule": "!has(self.memory) || string(self.memory).matches('^[+]?[0-9.]*[1-9]')"
             }
           ],
           "additionalProperties": false
