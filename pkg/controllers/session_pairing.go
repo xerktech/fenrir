@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -40,20 +41,32 @@ func (c *SessionController) revokedReason(ctx context.Context, session *v1alpha1
 	}
 }
 
-// reconcilePairing re-reconciles the Sessions of a deleted Pairing, so
-// revoking a client ends its stream at once.
+// reconcilePairing ends the Sessions of a deleted Pairing, so revoking a
+// client ends its stream at once. It ends them itself rather than enqueueing
+// them: the session controller's queue only exists once its Run has started.
+// A conflicting delete (the Session changed) retries the Pairing's key.
 func (c *SessionController) reconcilePairing(namespace, name string, pairing *v1alpha1types.Pairing) error {
 	if pairing != nil {
 		return nil
+	}
+	ctx := c.runCtx
+	if ctx == nil { // called without Run (tests)
+		ctx = context.Background()
 	}
 	sessions, err := c.SessionInformer.Namespaced(namespace).List(labels.Everything())
 	if err != nil {
 		return fmt.Errorf("failed to list sessions: %w", err)
 	}
+	var errs []error
 	for _, s := range sessions {
-		if s.Spec.PairingReference.Name == name {
-			c.controller.Enqueue(namespace, s.Name)
+		if s.Spec.PairingReference.Name != name {
+			continue
 		}
+		reason, err := c.revokedReason(ctx, s)
+		if err == nil && reason != "" {
+			err = c.endSession(ctx, s, reason)
+		}
+		errs = append(errs, err)
 	}
-	return nil
+	return stderrors.Join(errs...)
 }

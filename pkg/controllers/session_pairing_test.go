@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"context"
-	"slices"
 	"testing"
 	"time"
 
@@ -97,6 +96,7 @@ func TestPairingDeletionEndsSession(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- f.sc.Run(ctx) }()
+	waitPairingWatch(t, f.sc) // Run starts it
 
 	// Kept while its client is paired.
 	time.Sleep(500 * time.Millisecond)
@@ -131,42 +131,33 @@ func emptyPairingInformer(t *testing.T) generic.Informer[*v1alpha1types.Pairing]
 	return generic.NewInformer[*v1alpha1types.Pairing](inf)
 }
 
-type enqueueRecorder struct {
-	generic.Controller[*v1alpha1types.Session]
-	keys []string
-}
-
-func (r *enqueueRecorder) Enqueue(namespace, name string) {
-	r.keys = append(r.keys, namespace+"/"+name)
-}
-
-// A Pairing deletion re-reconciles that client's Sessions only, rather than
-// leaving them to the next unrelated reconcile.
-func TestPairingDeletionEnqueuesItsSessions(t *testing.T) {
-	ctx := context.Background()
+// The Pairing watch alone ends a deleted Pairing's Sessions, and only
+// those: a Session whose own reconcile never runs again still ends.
+func TestPairingWatchEndsItsSessions(t *testing.T) {
+	ctx := t.Context()
 	f := newPortsFixture(t)
+	f.createPairing(t, "client")
+	f.createPairing(t, "another")
+	sessions := f.dw.DirewolfV1alpha1().Sessions(portsTestNS)
 	for name, pairing := range map[string]string{"mine": "client", "other": "another", "manual": ""} {
 		s := f.session(name, f.user)
 		s.Spec.PairingReference.Name = pairing
-		if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Create(ctx, s, metav1.CreateOptions{}); err != nil {
+		if _, err := sessions.Create(ctx, s, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		f.waitInformer(t, name, true)
 	}
-	rec := &enqueueRecorder{}
-	f.sc.controller = rec
+	go func() { _ = f.sc.pairingController.Run(ctx) }()
+	waitPairingWatch(t, f.sc)
 
-	if err := f.sc.reconcilePairing(portsTestNS, "client", &v1alpha1types.Pairing{}); err != nil {
+	if err := f.dw.DirewolfV1alpha1().Pairings(portsTestNS).Delete(ctx, "client", metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(rec.keys) != 0 {
-		t.Fatalf("an existing pairing enqueued %v", rec.keys)
-	}
-	if err := f.sc.reconcilePairing(portsTestNS, "client", nil); err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{portsTestNS + "/mine"}; !slices.Equal(rec.keys, want) {
-		t.Errorf("enqueued %v, want %v", rec.keys, want)
+	f.waitInformer(t, "mine", false)
+	for _, name := range []string{"other", "manual"} {
+		if _, err := sessions.Get(ctx, name, metav1.GetOptions{}); err != nil {
+			t.Errorf("session %s of another client ended: %v", name, err)
+		}
 	}
 }
 
@@ -184,4 +175,16 @@ func TestRevokedReasonKeepsSessionOnAPIError(t *testing.T) {
 	if err == nil || reason != "" {
 		t.Errorf("revokedReason = (%q, %v), want an error and no reason", reason, err)
 	}
+}
+
+// waitPairingWatch waits until the Pairing watch has synced.
+func waitPairingWatch(t *testing.T, sc *SessionController) {
+	t.Helper()
+	for range 500 {
+		if sc.pairingController.HasSynced() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("pairing watch never started")
 }

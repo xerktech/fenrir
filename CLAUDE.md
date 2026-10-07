@@ -70,7 +70,7 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     - A pod create rejected as Invalid ends the Session: CRD CEL cannot check every pod field
       (keys nested in arrays exceed the cost budget, annotation size). `TestInvalidPodEndsSession`.
     - A Session whose `spec.pairingReference` Pairing is gone (client revoked) is ended; Pairing
-      deletes re-enqueue their Sessions. The cache miss is confirmed with a live GET first, as the
+      deletes end their Sessions directly. The cache miss is confirmed with a live GET first, as the
       Pairing watch can lag the Session's. Tests: `session_pairing_test.go`.
     - The game runs on the pod's Wolf lobby display, not a stream's: stopping a stream destroys
       its display, and every disconnect stops it (XERK-1363).
