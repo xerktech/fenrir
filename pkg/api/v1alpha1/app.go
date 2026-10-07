@@ -78,8 +78,13 @@ type AppSpec struct {
 	GPU *AppGPU `json:"gpu,omitempty" xml:"-"`
 }
 
+// Positive means a nonzero digit before any suffix or exponent (the schema
+// already checks quantity syntax). Not quantity(): CEL's quantity library
+// needs Kubernetes 1.29, and the chart supports 1.28 (XERK-1521).
+
+// +kubebuilder:validation:XValidation:rule="!has(self.memory) || string(self.memory).matches('^[+]?[0-9.]*[1-9]')",message="memory must be positive"
+
 // AppGPU is the GPU share a session of the App gets.
-// +kubebuilder:validation:XValidation:rule="!has(self.memory) || quantity(string(self.memory)).isGreaterThan(quantity('0'))",message="memory must be positive"
 type AppGPU struct {
 	// VRAM to reserve on one card (the claim's capacity.requests.memory).
 	// Omitted: the whole card.

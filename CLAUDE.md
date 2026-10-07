@@ -31,6 +31,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - App template metadata keys are checked by CEL markers in `app.go`; label values by a pattern
     `update-codegen.sh` patches into every CRD `labels` map (XERK-1375). CEL over a map's values
     exceeds the CRD cost budget. `TestAppCRDValidatesEmbeddedMetadata` runs the API server's checks.
+  - CEL rules must compile on 1.28, the chart floor: no `quantity()` (1.29+, XERK-1521). The
+    vendored libraries back-date it to 1.28, so only an envtest 1.28 kube-apiserver catches it.
 - Chart: `charts/direwolf-operator` has no `crds/` dir in git; CI copies `crds/*.yaml` in before
   `helm lint --strict` / `helm template --kube-version 1.36.0` (kubeVersion floor is >=1.28).
 
