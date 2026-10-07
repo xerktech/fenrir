@@ -139,7 +139,7 @@ func TestPairingWatchEndsItsSessions(t *testing.T) {
 	f.createPairing(t, "client")
 	f.createPairing(t, "another")
 	sessions := f.dw.DirewolfV1alpha1().Sessions(portsTestNS)
-	for name, pairing := range map[string]string{"mine": "client", "other": "another", "manual": ""} {
+	for name, pairing := range map[string]string{"mine": "client", "mine-too": "client", "other": "another", "manual": ""} {
 		s := f.session(name, f.user)
 		s.Spec.PairingReference.Name = pairing
 		if _, err := sessions.Create(ctx, s, metav1.CreateOptions{}); err != nil {
@@ -154,6 +154,7 @@ func TestPairingWatchEndsItsSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.waitInformer(t, "mine", false)
+	f.waitInformer(t, "mine-too", false)
 	for _, name := range []string{"other", "manual"} {
 		if _, err := sessions.Get(ctx, name, metav1.GetOptions{}); err != nil {
 			t.Errorf("session %s of another client ended: %v", name, err)
