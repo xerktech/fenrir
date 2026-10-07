@@ -240,6 +240,12 @@ func (c *SessionController) Run(ctx context.Context) error {
 
 	go func() {
 		defer cancel()
+		// Its deletes enqueue Sessions, so not before the session controller
+		// has its queue; Sessions whose Pairing went while we were down are
+		// ended by that initial sync.
+		if !cache.WaitForCacheSync(sessionCtx.Done(), c.controller.HasSynced) {
+			return
+		}
 		err := c.pairingController.Run(sessionCtx)
 		if err != nil {
 			klog.Errorf("Failed to run pairing controller: %v", err)

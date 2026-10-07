@@ -8,6 +8,8 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	generatedclient "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
@@ -165,5 +167,21 @@ func TestPairingDeletionEnqueuesItsSessions(t *testing.T) {
 	}
 	if want := []string{portsTestNS + "/mine"}; !slices.Equal(rec.keys, want) {
 		t.Errorf("enqueued %v, want %v", rec.keys, want)
+	}
+}
+
+// Only NotFound means revoked: an API server error on the confirming GET
+// must not end every stream whose Pairing the cache briefly lacks.
+func TestRevokedReasonKeepsSessionOnAPIError(t *testing.T) {
+	f := newPortsFixture(t)
+	f.sc.PairingInformer = emptyPairingInformer(t)
+	f.dw.PrependReactor("get", "pairings", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("apiserver restarting")
+	})
+	s := f.session("s", f.user)
+	s.Spec.PairingReference.Name = "client"
+	reason, err := f.sc.revokedReason(context.Background(), s)
+	if err == nil || reason != "" {
+		t.Errorf("revokedReason = (%q, %v), want an error and no reason", reason, err)
 	}
 }
