@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -277,6 +278,48 @@ func TestPodCreatedButNotCachedIsUsed(t *testing.T) {
 	}
 	if !f.sessionExists(t, sess.Name) {
 		t.Error("session deleted although its pod exists")
+	}
+}
+
+// A pod the API server rejects as invalid (metadata the CRDs cannot check,
+// such as keys nested in ephemeral volume templates) ends the Session at
+// once: retrying cannot succeed. Other create errors are retried.
+func TestInvalidPodEndsSession(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		createErr error
+		wantEnded bool
+	}{
+		{"invalid", apierrors.NewInvalid(corev1.SchemeGroupVersion.WithKind("Pod").GroupKind(), "alex-1", field.ErrorList{
+			field.Invalid(field.NewPath("spec", "volumes").Index(0).Child("ephemeral", "volumeClaimTemplate", "metadata", "labels"), "bad key!", "name part must consist of alphanumeric characters"),
+		}), true},
+		{"transient", apierrors.NewServerTimeout(corev1.Resource("pods"), "create", 1), false},
+		{"quota", apierrors.NewForbidden(corev1.Resource("pods"), "alex-1", errors.New("exceeded quota")), false},
+		{"conflict", apierrors.NewConflict(corev1.Resource("pods"), "alex-1", errors.New("try again")), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := podReadySession(f)
+				s.Status.Conditions = s.Status.Conditions[:1] // PortsAllocated only: no pod yet
+				return s
+			}, nil)
+			client := k8sfake.NewClientset()
+			client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, tc.createErr
+			})
+			f.sc.K8sClient = client
+			_, err := f.sc.reconcilePod(context.Background(), sess)
+			if tc.wantEnded {
+				if !errors.Is(err, errSessionEnded) {
+					t.Fatalf("reconcilePod = %v, want errSessionEnded", err)
+				}
+			} else if err == nil || errors.Is(err, errSessionEnded) {
+				t.Fatalf("reconcilePod = %v, want a retryable error", err)
+			}
+			if got := f.sessionExists(t, sess.Name); got == tc.wantEnded {
+				t.Errorf("session exists = %v, want %v", got, !tc.wantEnded)
+			}
+		})
 	}
 }
 

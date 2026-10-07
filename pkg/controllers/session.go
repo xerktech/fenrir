@@ -780,6 +780,12 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 			return nil, fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, getErr)
 		}
 		return c.checkPod(ctx, session, live)
+	} else if errors.IsInvalid(err) {
+		// Pod validation depends on the App, User and namespace policy (e.g. a
+		// LimitRange), not on time, so every retry fails the same way. The CRDs cannot check all of it (keys nested in
+		// arrays exceed the CEL cost budget, annotation size), so end the
+		// Session now rather than at the unstarted TTL (XERK-1522).
+		return nil, c.endSessionErr(ctx, session, fmt.Sprintf("its pod is invalid (check its App, User and namespace LimitRanges): %v", err))
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to create pod: %w", err)
 	}
