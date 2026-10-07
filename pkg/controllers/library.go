@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,10 +65,27 @@ const (
 	// in memory, so any operator replica can serve the page while only the
 	// leader runs the idle check, and a restart does not reset the clock.
 	libraryActivityAnnotation = "direwolf/library-last-activity"
+	// libraryVisitAnnotation holds the last time (RFC3339) a user opened the
+	// page themselves (see userNavigation). An open tab keeps the WebSocket
+	// busy with no one there, so MaxRuntime counts from this instead.
+	libraryVisitAnnotation = "direwolf/library-last-visit"
 
 	// DefaultLibraryIdleTimeout is how long the Library may go without
 	// browser traffic before it is stopped (if nothing is downloading).
 	DefaultLibraryIdleTimeout = 15 * time.Minute
+	// DefaultLibraryMaxRuntime is how long the Library stays up after the
+	// last user-opened page load, even with a tab still open (if nothing is
+	// downloading). Reloading the page restarts it.
+	DefaultLibraryMaxRuntime = 4 * time.Hour
+
+	// libraryDownloadStallTimeout is how long a listed download may make no
+	// progress before it stops keeping the Library up: a paused download, or
+	// an entry Steam left behind, would otherwise hold it up forever.
+	libraryDownloadStallTimeout = 15 * time.Minute
+	// libraryDownloadMinBytes is how many bytes the pod must receive since a
+	// download last made progress for that to count as progress. It sits
+	// well above what an open tab's ACKs and input add over the stall window.
+	libraryDownloadMinBytes = 64 << 20
 
 	libraryCheckInterval = time.Minute
 	libraryExecTimeout   = 30 * time.Second
@@ -200,11 +218,13 @@ type LibraryControllerOptions struct {
 	Tolerations  []corev1.Toleration
 
 	IdleTimeout time.Duration
+	MaxRuntime  time.Duration
 }
 
 // LibraryController owns the on-demand Library pod: it is created by a visit
 // to the Library page (LibraryServer), and stopped once the browser has been
-// gone for IdleTimeout and nothing is downloading.
+// gone for IdleTimeout (or nobody opened the page for MaxRuntime) and
+// nothing is downloading.
 //
 // The Library and game sessions are mutually exclusive (Steam's single-writer
 // lock on the shared home): the Library is not started while a Session or a
@@ -222,6 +242,9 @@ type LibraryController struct {
 
 	controller generic.Controller[*corev1.Pod]
 	now        func() time.Time
+	// download is the progress last seen on a listed download. Only the
+	// idle check (one worker) touches it; a new leader starts it afresh.
+	download downloadProgress
 	LibraryControllerOptions
 }
 
@@ -235,6 +258,9 @@ func NewLibraryController(
 ) *LibraryController {
 	if options.IdleTimeout <= 0 {
 		options.IdleTimeout = DefaultLibraryIdleTimeout
+	}
+	if options.MaxRuntime <= 0 {
+		options.MaxRuntime = DefaultLibraryMaxRuntime
 	}
 	c := &LibraryController{
 		Namespace:                namespace,
@@ -287,9 +313,8 @@ func (c *LibraryController) reconcileIdle(ctx context.Context, pod *corev1.Pod) 
 		return 0, c.stop(ctx, pod)
 	}
 
-	idleFor := c.now().Sub(libraryLastActivity(pod))
-	if idleFor < c.IdleTimeout {
-		return c.IdleTimeout - idleFor, nil
+	if wait, _ := c.untilIdle(pod); wait > 0 {
+		return wait, nil
 	}
 
 	// A Library that never came up (or is crash-looping) serves nobody and
@@ -302,7 +327,7 @@ func (c *LibraryController) reconcileIdle(ctx context.Context, pod *corev1.Pod) 
 			return libraryCheckInterval, nil
 		}
 		if downloading != "" {
-			klog.V(2).Infof("Library idle for %s but still downloading (%s)", idleFor.Round(time.Second), downloading)
+			klog.V(2).Infof("Library idle but still downloading (%s)", downloading)
 			return libraryCheckInterval, nil
 		}
 	}
@@ -319,12 +344,29 @@ func (c *LibraryController) reconcileIdle(ctx context.Context, pod *corev1.Pod) 
 	if fresh.UID != pod.UID {
 		return 0, nil
 	}
-	if idleFor = c.now().Sub(libraryLastActivity(fresh)); idleFor < c.IdleTimeout {
-		return c.IdleTimeout - idleFor, nil
+	wait, why := c.untilIdle(fresh)
+	if wait > 0 {
+		return wait, nil
 	}
 
-	klog.Infof("Library idle for %s with no downloads, stopping it", idleFor.Round(time.Second))
+	klog.Infof("Library %s with no downloads, stopping it", why)
 	return 0, c.stop(ctx, fresh)
+}
+
+// untilIdle returns how long until the Library counts as idle: no browser
+// traffic for IdleTimeout, or no user-opened page load for MaxRuntime (an
+// open tab never goes quiet). Once idle, it returns 0 and why.
+func (c *LibraryController) untilIdle(pod *corev1.Pod) (wait time.Duration, why string) {
+	now := c.now()
+	idleFor := now.Sub(libraryAnnotatedTime(pod, libraryActivityAnnotation))
+	if idleFor >= c.IdleTimeout {
+		return 0, fmt.Sprintf("idle for %s", idleFor.Round(time.Second))
+	}
+	visitedFor := now.Sub(libraryAnnotatedTime(pod, libraryVisitAnnotation))
+	if visitedFor >= c.MaxRuntime {
+		return 0, fmt.Sprintf("last opened %s ago", visitedFor.Round(time.Second))
+	}
+	return min(c.IdleTimeout-idleFor, c.MaxRuntime-visitedFor), ""
 }
 
 // stop asks Steam to shut down cleanly (it writes to the shared home), waits
@@ -377,7 +419,8 @@ done
 
 // downloadsInProgress returns what is still downloading, or "" when nothing
 // is: any entry in a Steam library's steamapps/downloading, or anything in
-// Heroic's download queue.
+// Heroic's download queue, that made progress within
+// libraryDownloadStallTimeout.
 func (c *LibraryController) downloadsInProgress(ctx context.Context, pod *corev1.Pod) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, libraryExecTimeout)
 	defer cancel()
@@ -386,35 +429,112 @@ func (c *LibraryController) downloadsInProgress(ctx context.Context, pod *corev1
 	if err != nil {
 		return "", fmt.Errorf("listing Steam downloads: %w", err)
 	}
-	if entries := nonEmptyLines(out); len(entries) > 0 {
-		return "Steam: " + strings.Join(entries, ", "), nil
+	state, err := parseDownloadState(out)
+	if err != nil {
+		return "", err
 	}
 
-	out, err = c.Exec(ctx, pod.Namespace, pod.Name, libraryContainer,
+	heroic, err := c.Exec(ctx, pod.Namespace, pod.Name, libraryContainer,
 		[]string{"sh", "-c", `[ ! -f "$1" ] || cat "$1"`, "sh", heroicDownloadQueue})
 	if err != nil {
 		return "", fmt.Errorf("reading Heroic download queue: %w", err)
 	}
-	queued, err := heroicQueueLen([]byte(out))
+	queued, err := heroicQueueLen([]byte(heroic))
 	if err != nil {
 		return "", fmt.Errorf("parsing %s: %w", heroicDownloadQueue, err)
 	}
-	if queued > 0 {
-		return fmt.Sprintf("Heroic: %d queued", queued), nil
+
+	var what []string
+	if len(state.entries) > 0 {
+		what = append(what, "Steam: "+strings.Join(state.entries, ", "))
 	}
-	return "", nil
+	if queued > 0 {
+		what = append(what, fmt.Sprintf("Heroic: %d queued", queued))
+	}
+	if len(what) == 0 {
+		c.download = downloadProgress{}
+		return "", nil
+	}
+	downloading := strings.Join(what, "; ")
+	if !c.downloadProgressing(pod.UID, state.files+"\n"+heroic, state.rxBytes) {
+		klog.Infof("Library download made no progress for %s, not counting it (%s)", libraryDownloadStallTimeout, downloading)
+		return "", nil
+	}
+	return downloading, nil
 }
 
-// steamDownloadsCommand lists every entry of steamapps/downloading in the
-// default Steam library and in library folders on the games volume (at its
-// root or one directory down, e.g. <games>/SteamLibrary).
+// downloadProgress is a listed download's state as last seen changing.
+type downloadProgress struct {
+	uid   types.UID
+	files string // download dirs' file listing and the Heroic store
+	rx    uint64 // bytes the pod had received
+	at    time.Time
+}
+
+// downloadProgressing reports whether a listed download has progressed
+// within libraryDownloadStallTimeout: its files (or Heroic's store) changed,
+// or the pod received libraryDownloadMinBytes. Files catch Steam patching
+// from disk; received bytes catch launchers whose files we can't see (a
+// Heroic download lands in the game's own folder). First sight counts as
+// progress, so a restarted operator waits a full stall timeout.
+func (c *LibraryController) downloadProgressing(uid types.UID, files string, rx uint64) bool {
+	now, last := c.now(), c.download
+	if last.uid != uid || last.files != files || rx < last.rx || rx-last.rx >= libraryDownloadMinBytes {
+		c.download = downloadProgress{uid: uid, files: files, rx: rx, at: now}
+		return true
+	}
+	return now.Sub(last.at) < libraryDownloadStallTimeout
+}
+
+// steamDownloadsCommand reports the Library's download state, a line each:
+// "entry <path>" for every entry of steamapps/downloading in the default
+// Steam library and in library folders on the games volume (at its root or
+// one directory down, e.g. <games>/SteamLibrary); "files <dir> <checksum>"
+// over each such dir's file names, sizes and mtimes; and "rx <bytes>" per
+// network interface but lo. The pod has its own network namespace, so those
+// are its bytes alone.
 func steamDownloadsCommand(gamesPath string) []string {
 	return []string{"sh", "-c", `
 for d in "$1/.local/share/Steam/steamapps/downloading" "$2/steamapps/downloading" "$2"/*/steamapps/downloading; do
-  [ -d "$d" ] && ls -A "$d" | sed "s|^|$d/|"
+  [ -d "$d" ] || continue
+  ls -A "$d" | sed "s|^|entry $d/|"
+  echo "files $d $(find "$d" -printf '%P %s %T@\n' | cksum)"
+done
+for f in /sys/class/net/*/statistics/rx_bytes; do
+  case "$f" in */lo/*) ;; *) echo "rx $(cat "$f")" ;; esac
 done
 exit 0
 `, "sh", libraryHome, gamesPath}
+}
+
+type downloadState struct {
+	entries []string
+	files   string
+	rxBytes uint64
+}
+
+func parseDownloadState(out string) (downloadState, error) {
+	var state downloadState
+	var files []string
+	for _, line := range nonEmptyLines(out) {
+		kind, value, _ := strings.Cut(line, " ")
+		switch kind {
+		case "entry":
+			state.entries = append(state.entries, value)
+		case "files":
+			files = append(files, value)
+		case "rx":
+			n, err := strconv.ParseUint(value, 10, 64)
+			if err != nil {
+				return state, fmt.Errorf("parsing received bytes %q: %w", value, err)
+			}
+			state.rxBytes += n
+		default:
+			return state, fmt.Errorf("unexpected download state line %q", line)
+		}
+	}
+	state.files = strings.Join(files, "\n")
+	return state, nil
 }
 
 func nonEmptyLines(s string) []string {
@@ -443,11 +563,12 @@ func heroicQueueLen(data []byte) (int, error) {
 	return len(store.Queue), nil
 }
 
-// libraryLastActivity is the latest of the pod's creation and the last
-// browser traffic recorded on it.
-func libraryLastActivity(pod *corev1.Pod) time.Time {
+// libraryAnnotatedTime is the latest of the pod's creation (a user started
+// it) and the time in annotation: the last browser traffic or user-opened
+// page load recorded on it.
+func libraryAnnotatedTime(pod *corev1.Pod, annotation string) time.Time {
 	last := pod.CreationTimestamp.Time
-	if v, ok := pod.Annotations[libraryActivityAnnotation]; ok {
+	if v, ok := pod.Annotations[annotation]; ok {
 		if t, err := time.Parse(time.RFC3339, v); err == nil && t.After(last) {
 			last = t
 		}
@@ -456,12 +577,15 @@ func libraryLastActivity(pod *corev1.Pod) time.Time {
 }
 
 // RecordActivity stamps the Library pod with the time of the last browser
-// traffic (see libraryActivityAnnotation).
-func (c *LibraryController) RecordActivity(ctx context.Context, at time.Time) error {
+// traffic (see libraryActivityAnnotation) and, unless visit is zero, of the
+// last user-opened page load (libraryVisitAnnotation).
+func (c *LibraryController) RecordActivity(ctx context.Context, at, visit time.Time) error {
+	annotations := map[string]string{libraryActivityAnnotation: at.UTC().Format(time.RFC3339)}
+	if !visit.IsZero() {
+		annotations[libraryVisitAnnotation] = visit.UTC().Format(time.RFC3339)
+	}
 	patch, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{
-			"annotations": map[string]string{libraryActivityAnnotation: at.UTC().Format(time.RFC3339)},
-		},
+		"metadata": map[string]any{"annotations": annotations},
 	})
 	if err != nil {
 		return fmt.Errorf("encoding activity patch: %w", err)

@@ -61,6 +61,9 @@ type LibraryServer struct {
 	// lastSeen is the unix-nano time of the last byte to or from the pod.
 	lastSeen    atomic.Int64
 	lastFlushed int64
+	// lastVisit is the unix-nano time of the last user-opened page load.
+	lastVisit        atomic.Int64
+	lastFlushedVisit int64
 }
 
 type libraryTargetKey struct{}
@@ -153,15 +156,19 @@ func (s *LibraryServer) Run(ctx context.Context, port int) error {
 }
 
 func (s *LibraryServer) flushActivity(ctx context.Context) {
-	seen := s.lastSeen.Load()
-	if seen == 0 || seen == s.lastFlushed {
+	seen, visit := s.lastSeen.Load(), s.lastVisit.Load()
+	if seen == 0 || (seen == s.lastFlushed && visit == s.lastFlushedVisit) {
 		return
 	}
-	if err := s.library.RecordActivity(ctx, time.Unix(0, seen)); err != nil {
+	var visitAt time.Time
+	if visit != 0 {
+		visitAt = time.Unix(0, visit)
+	}
+	if err := s.library.RecordActivity(ctx, time.Unix(0, seen), visitAt); err != nil {
 		klog.Errorf("Failed to record Library activity: %v", err)
 		return
 	}
-	s.lastFlushed = seen
+	s.lastFlushed, s.lastFlushedVisit = seen, visit
 }
 
 func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -204,6 +211,10 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeLibraryPage(w, http.StatusConflict, busy, false, false)
 			return
 		}
+	}
+	if start || userNavigation(r) {
+		// Someone is there: restart the MaxRuntime clock.
+		s.lastVisit.Store(time.Now().UnixNano())
 	}
 	if start {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
