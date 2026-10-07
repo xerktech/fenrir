@@ -324,6 +324,17 @@ func TestLibraryDownloadStall(t *testing.T) {
 	if check("b", 5*libraryDownloadMinBytes) == "" {
 		t.Error("download listed again after none was does not count")
 	}
+	// The ACK allowance is on bytes sent since the last progress, not ever:
+	// after hours of streaming, a download must still count.
+	tx = 1000 * libraryDownloadMinBytes
+	step(time.Minute)
+	if check("c", 5*libraryDownloadMinBytes) == "" {
+		t.Fatal("new files do not count")
+	}
+	step(libraryDownloadStallTimeout)
+	if check("c", 7*libraryDownloadMinBytes) == "" {
+		t.Error("download after a long stream does not count")
+	}
 }
 
 // steamDownloadsCommand's script, run for real: entries and file changes are
