@@ -10,6 +10,10 @@ spec:
   id: 2
   isHDRSupported: false
   title: Steam
+  # The only GPU a session gets (DRA, via a per-Session claim): the game renders and Wolf
+  # encodes on it. Steam games need more VRAM than RetroArch's 2Gi.
+  gpu:
+    memory: 8Gi
   template:
     spec:
       hostIPC: true

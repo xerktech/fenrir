@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -527,7 +528,10 @@ func TestSessionPodGPUFromAppSpec(t *testing.T) {
 			t.Fatal(err)
 		}
 		appPath := filepath.Join(t.TempDir(), "app.yaml")
-		withGPU := strings.Replace(string(raw), "\nspec:\n", "\nspec:\n  "+tc.gpu+"\n", 1)
+		withGPU := regexp.MustCompile(`\n {2}gpu:\n(?: {4}.*\n)+`).ReplaceAllLiteralString(string(raw), "\n  "+tc.gpu+"\n")
+		if withGPU == string(raw) {
+			t.Fatal("examples/steam.yaml has no gpu block for this test to replace")
+		}
 		if err = os.WriteFile(appPath, []byte(withGPU), 0o600); err != nil { //nolint:gosec // t.TempDir()
 			t.Fatal(err)
 		}
@@ -567,6 +571,19 @@ func TestSessionPodGPUFromAppSpec(t *testing.T) {
 	}
 }
 
+// The streaming examples get their GPU only from spec.gpu (the example User
+// requests none), so a session of each must claim it for the game and Wolf.
+func TestExampleAppsClaimGPU(t *testing.T) {
+	for _, app := range []string{"steam", "firefox", "retroarch"} {
+		_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/"+app+".yaml")
+		for _, ctr := range pod.Spec.Containers {
+			if (ctr.Name == "app" || ctr.Name == "wolf") && !slices.Contains(ctr.Resources.Claims, corev1.ResourceClaim{Name: appGPUClaim}) {
+				t.Errorf("examples/%s.yaml: container %s has no GPU claim", app, ctr.Name)
+			}
+		}
+	}
+}
+
 // A claim left by an earlier Session of the same name is waited out, never
 // adopted.
 func TestGPUClaimFromEarlierSessionIsNotReused(t *testing.T) {
@@ -575,9 +592,9 @@ func TestGPUClaimFromEarlierSessionIsNotReused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app = app.DeepCopy()
-	app.Spec.GPU = &v1alpha1types.AppGPU{}
-	if err := sc.AppInformer.GetIndexer().Update(app); err != nil {
+	// steam.yaml has spec.gpu, so the fixture reconcile already made this
+	// Session's claim; swap it for one an earlier Session left behind.
+	if err := k8s.ResourceV1().ResourceClaims(sess.Namespace).Delete(context.Background(), gpuClaimName(sess.Name), metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	old := sess.DeepCopy()

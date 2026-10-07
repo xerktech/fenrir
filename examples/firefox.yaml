@@ -10,6 +10,9 @@ spec:
   id: 1
   isHDRSupported: false
   title: Firefox
+  # Wolf encodes on this GPU share; without it the session has no GPU.
+  gpu:
+    memory: 2Gi
   #This will automatically provision storage with the default parameters
   volumeClaimTemplate: 
     spec: {}
