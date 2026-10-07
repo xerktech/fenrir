@@ -14,7 +14,7 @@ import (
 type Session struct {
 	AppID             string         `json:"app_id,omitempty"`
 	AudioChannelCount int            `json:"audio_channel_count"`
-	ClientID          string         `json:"client_id,omitempty"` // omit, otherwise it throws 'Unhandled exception: stoull'
+	ClientID          string         `json:"client_id,omitempty"` // a paired client's ID; omitted, Wolf uses a certless dummy ("" throws 'Unhandled exception: stoull')
 	ClientIP          string         `json:"client_ip"`
 	ClientSettings    ClientSettings `json:"client_settings,omitempty"`
 	VideoHeight       int            `json:"video_height"`
@@ -57,6 +57,7 @@ type Client interface {
 	StopSession(ctx context.Context, sessionID string) error
 	ListSessions(ctx context.Context) ([]Session, error)
 	ListApps(ctx context.Context) ([]App, error)
+	ListClients(ctx context.Context) ([]PairedClient, error)
 	ListLobbies(ctx context.Context) ([]Lobby, error)
 	CreateLobby(ctx context.Context, lobby *CreateLobbyRequest) (string, error)
 	JoinLobby(ctx context.Context, lobbyID, sessionID string) error
@@ -108,6 +109,25 @@ func (c *client) ListApps(ctx context.Context) ([]App, error) {
 		return nil, fmt.Errorf("failed to list apps: %w", err)
 	}
 	return resp.Apps, nil
+}
+
+// PairedClient is a client in Wolf's config. Only the fields direwolf reads
+// are decoded.
+type PairedClient struct {
+	ClientID       string `json:"client_id"`
+	AppStateFolder string `json:"app_state_folder"`
+}
+
+// GET /api/v1/clients
+func (c *client) ListClients(ctx context.Context) ([]PairedClient, error) {
+	var resp struct {
+		Response `json:",inline"`
+		Clients  []PairedClient `json:"clients"`
+	}
+	if err := c.call(ctx, http.MethodGet, "/api/v1/clients", nil, &resp); err != nil {
+		return nil, fmt.Errorf("failed to list clients: %w", err)
+	}
+	return resp.Clients, nil
 }
 
 // This is no longer used, I will probably remove it in the future
@@ -243,9 +263,9 @@ const (
 
 // PauseStreamEvent also decodes StopStreamEvent.
 //
-// Every stream Wolf's API adds has the same session ID (a hash of the
-// paired client's cert, empty for API sessions), so a pod's launch and its
-// resumes share one ID.
+// A stream's session ID is a hash of its paired client's cert. The operator
+// rotates a pod's attaches over a few clients (wolfStreamClientID), so IDs
+// repeat across a pod's streams: tell streams apart by events, not ID.
 type PauseStreamEvent struct {
 	SessionID string `json:"session_id"`
 }

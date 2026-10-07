@@ -852,6 +852,10 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	if err != nil {
 		return nil, fmt.Errorf("failed to get app: %w", err)
 	}
+	wolfConfigSeed, err := wolfConfigSeed()
+	if err != nil {
+		return nil, err
+	}
 	// Prepare environment variables for the wolf container.
 	// The GPU is not selected here: it comes only from the App's DRA
 	// ResourceClaims (see appResourceClaims), which the DRA driver injects via CDI.
@@ -1027,7 +1031,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 				"sh", "-c", `
 				mkdir -p /mnt/data/wolf/cfg
 				cp /certs/* /mnt/data/wolf/cfg/
-				chown 1000:1000 /mnt/data/wolf
+` + wolfConfigSeedScript + `				chown 1000:1000 /mnt/data/wolf
 				chmod 777 /mnt/data/wolf
 				chown -R 1000:1000 /mnt/data/wolf/cfg
 				chmod 777 /mnt/data/wolf/cfg
@@ -1039,6 +1043,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 				chmod 777 -R /etc/wolf
 			`,
 			},
+			Env: []corev1.EnvVar{{Name: wolfConfigSeedEnv, Value: wolfConfigSeed}},
 			VolumeMounts: []corev1.VolumeMount{
 				// {
 				// 	Name:      "wolf-tls-secret",
@@ -2118,6 +2123,10 @@ func (c *SessionController) reconcileActiveStreams(
 		}
 		if lobbyErr := c.ensureLobby(ctx, wolfclient, session); lobbyErr != nil {
 			return lobbyErr
+		}
+		wolfSession.ClientID, err = wolfStreamClientID(ctx, wolfclient, session.Generation)
+		if err != nil {
+			return err
 		}
 		sessionID, err := wolfclient.AddSession(ctx, wolfSession)
 
