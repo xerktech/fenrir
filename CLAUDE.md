@@ -67,6 +67,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     - A disconnect sets `status.disconnectedAt`; the pod is kept for `--disconnect-grace-period`
       (default 10m) for `/resume`, then the Session is deleted. Tests: `session_lifecycle_test.go`.
     - The unstarted-session reaper must skip disconnected sessions (`expiredReason`).
+    - A pod create rejected as Invalid ends the Session: CRD CEL cannot check every pod field
+      (keys nested in arrays exceed the cost budget, annotation size). `TestInvalidPodEndsSession`.
     - The game runs on the pod's Wolf lobby display, not a stream's: stopping a stream destroys
       its display, and every disconnect stops it (XERK-1363).
       - `ensureLobby` creates it before the first AddSession, so its socket is `wayland-1`, the
