@@ -1926,8 +1926,8 @@ const (
 // after it.
 // ld.so skips a preload it can't load with only a warning, so the check
 // loads it, not just looks for it.
-var wolfCommand = []string{"/bin/sh", "-c", `if [ ! -f ` + wolfLoopbackShimPath + ` ] || [ -n "$(LD_PRELOAD=` + wolfLoopbackShimPath + ` /bin/true 2>&1)" ]; then
-  echo "cannot preload ` + wolfLoopbackShimPath + `" >&2
+var wolfCommand = []string{"/bin/sh", "-c", `if [ ! -f ` + wolfLoopbackShimPath + ` ] || ! out=$(LD_PRELOAD=` + wolfLoopbackShimPath + ` /bin/true 2>&1) || [ -n "$out" ]; then
+  echo "cannot preload ` + wolfLoopbackShimPath + `: $out" >&2
   exit 1
 fi
 export LD_PRELOAD="` + wolfLoopbackShimPath + `${LD_PRELOAD:+ $LD_PRELOAD}"
