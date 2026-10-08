@@ -2041,15 +2041,8 @@ func (c *SessionController) reconcileActiveStreams(
 			return nil
 		}
 		// The stream we attached is gone: the client disconnected, or
-		// resumed before Wolf noticed, in which case its old stream must go.
-		if resumed {
-			if freshErr := c.confirmFresh(ctx, session); freshErr != nil {
-				return freshErr
-			}
-			if stopErr := wolfclient.StopSession(ctx, status.WolfSessionID); stopErr != nil {
-				klog.Warningf("Session %s/%s: stopping superseded Wolf session %s: %v", session.Namespace, session.Name, status.WolfSessionID, stopErr)
-			}
-		}
+		// resumed before Wolf noticed, in which case the attach below stops
+		// its old stream.
 		klog.Infof("Session %s/%s: stream %s ended, keeping the pod for %s", session.Namespace, session.Name, status.WolfSessionID, c.DisconnectGracePeriod)
 		status.WolfSessionID = ""
 		status.StreamURL = ""
@@ -2174,6 +2167,9 @@ func (c *SessionController) reconcileActiveStreams(
 		if err != nil {
 			return err
 		}
+		if stopErr := c.stopStaleStreams(ctx, wolfclient, session, sessions); stopErr != nil {
+			return stopErr
+		}
 		if lobbyErr := c.ensureLobby(ctx, wolfclient, session); lobbyErr != nil {
 			return lobbyErr
 		}
@@ -2192,6 +2188,46 @@ func (c *SessionController) reconcileActiveStreams(
 	}
 
 	status.StreamURL = "rtsp://" + net.JoinHostPort(podIP, strconv.Itoa(int(status.Ports.RTSP)))
+	return nil
+}
+
+// stopStaleStreams stops the streams Wolf still has before the pod attaches a
+// new one. None carries the Session's current keys, so each is superseded: a
+// resumed client's old stream, or one whose status write was lost.
+//
+// A stream Wolf still lists after its stop means Wolf is wedged: a stream
+// pipeline hung on a freed CUDA context (XERK-1688) never finishes stopping,
+// and every stream attached after it fails. Only a new pod streams again, so
+// the Session ends and the client's next launch gets one.
+func (c *SessionController) stopStaleStreams(
+	ctx context.Context,
+	wolfclient wolfapi.Client,
+	session *v1alpha1types.Session,
+	sessions []wolfapi.Session,
+) error {
+	if len(sessions) == 0 {
+		return nil
+	}
+	stale := make(map[string]bool, len(sessions))
+	for _, s := range sessions {
+		// Wolf lists a stream's session ID as its client_id.
+		if stale[s.ClientID] {
+			continue
+		}
+		stale[s.ClientID] = true
+		if err := wolfclient.StopSession(ctx, s.ClientID); err != nil {
+			klog.Warningf("Session %s/%s: stopping superseded Wolf session %s: %v", session.Namespace, session.Name, s.ClientID, err)
+		}
+	}
+	left, err := wolfclient.ListSessions(ctx)
+	if err != nil {
+		return fmt.Errorf("polling wolf-agent: %w", err)
+	}
+	for _, s := range left {
+		if stale[s.ClientID] {
+			return c.endSessionErr(ctx, session, fmt.Sprintf("Wolf cannot stop its superseded stream %s, so the pod can no longer stream", s.ClientID))
+		}
+	}
 	return nil
 }
 
