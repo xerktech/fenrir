@@ -14,17 +14,17 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1api "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
-	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
-	generatedclient "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
-	generatedinformers "games-on-whales.github.io/direwolf/pkg/generated/informers/externalversions"
-	"games-on-whales.github.io/direwolf/pkg/generic"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	sigsyaml "sigs.k8s.io/yaml"
+
+	v1alpha1api "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	generatedclient "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
+	generatedinformers "games-on-whales.github.io/direwolf/pkg/generated/informers/externalversions"
+	"games-on-whales.github.io/direwolf/pkg/generic"
 )
 
 // TestSessionControllerReconcilePath builds a session CR, runs the controller's
@@ -542,6 +542,11 @@ func TestWolfCommandPicksClaimedRenderNode(t *testing.T) {
 	}
 	dri := t.TempDir()
 	script := strings.ReplaceAll(wolfCommand[2], "/dev/dri/", dri+"/")
+	shim := filepath.Join(t.TempDir(), "shim.so")
+	if err := os.WriteFile(shim, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script = strings.ReplaceAll(script, wolfLoopbackShimPath, shim)
 	script = strings.ReplaceAll(script, "exec /entrypoint.sh", `echo "$WOLF_RENDER_NODE"`)
 	run := func(env ...string) string {
 		cmd := exec.CommandContext(t.Context(), "sh", "-c", script)
@@ -583,6 +588,58 @@ func TestSessionPodStartsWolfThroughRenderNodeWrapper(t *testing.T) {
 		}
 	}
 	t.Fatal("no wolf container")
+}
+
+// Wolf's HTTP/HTTPS must not listen on the node IP (XERK-1682): Wolf starts
+// only with the loopback shim, copied in from the wolf-agent image.
+func TestSessionPodPreloadsLoopbackShim(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	var agentImage string
+	for _, c := range pod.Spec.Containers {
+		if c.Name == "wolf-agent" {
+			agentImage = c.Image
+		}
+	}
+	var copied bool
+	for _, c := range pod.Spec.InitContainers {
+		if c.Name == wolfLoopbackShimVolume {
+			copied = c.Image == agentImage && slices.Contains(c.Command, wolfLoopbackShimImagePath) &&
+				slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool {
+					return m.Name == wolfLoopbackShimVolume && m.MountPath == wolfLoopbackShimDir
+				})
+		}
+	}
+	if !copied {
+		t.Errorf("no init container copying the shim from the wolf-agent image: %+v", pod.Spec.InitContainers)
+	}
+	if got := mountsAt(t, &pod.Spec, "wolf")[wolfLoopbackShimDir]; got != wolfLoopbackShimVolume {
+		t.Errorf("wolf %s = %q, want %s", wolfLoopbackShimDir, got, wolfLoopbackShimVolume)
+	}
+
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	shim := filepath.Join(t.TempDir(), "shim.so")
+	script := strings.ReplaceAll(wolfCommand[2], wolfLoopbackShimPath, shim)
+	script = strings.ReplaceAll(script, "exec /entrypoint.sh", `echo "$LD_PRELOAD"`)
+	run := func(env ...string) (string, error) {
+		cmd := exec.CommandContext(t.Context(), "sh", "-c", script)
+		cmd.Env = env
+		out, err := cmd.Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	if out, err := run(); err == nil {
+		t.Errorf("Wolf started without the shim (LD_PRELOAD=%q)", out)
+	}
+	if err := os.WriteFile(shim, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := run(); err != nil || got != shim {
+		t.Errorf("LD_PRELOAD = %q (%v), want %q", got, err, shim)
+	}
+	if got, err := run("LD_PRELOAD=/user.so"); err != nil || got != shim+" /user.so" {
+		t.Errorf("with a User's LD_PRELOAD: LD_PRELOAD = %q (%v), want the shim first", got, err)
+	}
 }
 
 func TestSessionPodKeepsAppsOwnHome(t *testing.T) {

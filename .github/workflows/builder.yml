@@ -22,7 +22,6 @@ jobs:
       fail-fast: false
       matrix:
         app:
-          - wolf-agent
           - moonlight-proxy
           - operator
           - nri-input
@@ -35,6 +34,8 @@ jobs:
           # Go binary plus a C shim: repo-root context, own Dockerfile.
           - app: nri-nvenc-fix
             file: cmd/nri-nvenc-fix/Dockerfile
+          - app: wolf-agent
+            file: cmd/wolf-agent/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

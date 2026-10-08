@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Lint / format: `make lint`, `make fmt` (golangci-lint v2, config in `.golangci.yml`); `make vet`.
 - Build one binary: `go build ./cmd/<operator|moonlight-proxy|wolf-agent>`
 - Image: `docker build --build-arg APP_NAME=<cmd name> .` — one Dockerfile, `APP_NAME` picks the cmd.
-  - Exception: `nri-nvenc-fix` ships a C shim, so it has `cmd/nri-nvenc-fix/Dockerfile` (repo-root
+  - Exception: `nri-nvenc-fix` and `wolf-agent` ship C shims, so each has `cmd/<name>/Dockerfile` (repo-root
     context); the workflow matrix passes it as `file:`.
 - Non-Go images live in `images/<name>/` (own Dockerfile + context), e.g. `images/library`
   (linuxserver/steam + Heroic), `images/retroarch` (GoW RetroArch + pinned cores).
@@ -94,6 +94,11 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     - A pod records its block in the `port-block` annotation; one whose block differs from
       `status.ports` ends the Session, since the advertised ports would go unserved.
     - Exception: Wolf's mDNS (UDP 5353, SO_REUSEPORT) is hardcoded and outside the block.
+  - Wolf's HTTP/HTTPS bind to 127.0.0.1 via a `bind()` preload shim (`cmd/wolf-agent/shim`,
+    `wolfCommand`): Wolf hardcodes 0.0.0.0 and its HTTPS accepts any cert naming an unknown issuer
+    as paired (XERK-1682). Flannel enforces no NetworkPolicy, and none applies to hostNetwork.
+    - The shim ships in the wolf-agent image (own Dockerfile); an init container copies it in.
+      Wolf refuses to start without it. Tests: `TestLoopbackShim`, `TestSessionPodPreloadsLoopbackShim`.
   - Chart: moonlight-proxy is host-networked with a nodeSelector and tolerations that must match
     the operator's `--session-node-selector` / `--session-tolerations`.
     - Talos labels `kubernetes.io/hostname` with the FQDN (`talos04.xerktech.com`), and talos04
