@@ -168,6 +168,11 @@ type fakeAgent struct {
 	sessions string // JSON array for /api/v1/sessions
 	lobbies  string // JSON array for /api/v1/lobbies
 	clients  string // JSON array for /api/v1/clients
+	// wedged keeps stopped streams listed, as a Wolf with a stuck stream
+	// pipeline does (XERK-1688).
+	wedged bool
+	// relistFails fails /api/v1/sessions once a stream has been stopped.
+	relistFails bool
 
 	open atomic.Int32 // client connections not yet closed
 
@@ -207,7 +212,14 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 		case "/api/v1/apps":
 			fmt.Fprint(w, `{"success":true,"apps":[{"id":"1","title":"Wolf UI","render_node":"/dev/dri/renderD129"}]}`)
 		case "/api/v1/sessions":
+			a.mu.Lock()
+			if a.relistFails && len(a.stopped) > 0 {
+				a.mu.Unlock()
+				http.Error(w, "agent unreachable", http.StatusBadGateway)
+				return
+			}
 			fmt.Fprintf(w, `{"success":true,"sessions":%s}`, a.sessions)
+			a.mu.Unlock()
 		case "/api/v1/sessions/add":
 			a.mu.Lock()
 			a.added++
@@ -223,6 +235,9 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			a.mu.Lock()
 			a.stopped = append(a.stopped, req.SessionID)
+			if !a.wedged {
+				a.sessions = "[]"
+			}
 			a.mu.Unlock()
 			fmt.Fprint(w, `{"success":true}`)
 		default:

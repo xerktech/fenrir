@@ -67,6 +67,10 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     - A disconnect sets `status.disconnectedAt`; the pod is kept for `--disconnect-grace-period`
       (default 10m) for `/resume`, then the Session is deleted. Tests: `session_lifecycle_test.go`.
     - The unstarted-session reaper must skip disconnected sessions (`expiredReason`).
+    - An attach first stops every stream Wolf lists (none carry the current keys, so all are
+      superseded); one still listed after its stop means Wolf is wedged, and the Session ends
+      rather than stacking streams (`stopStaleStreams`, XERK-1688). Wolf lists a stream's session
+      ID as `client_id`. Tests: `TestUnstoppableStreamEndsSession`.
     - A pod create rejected as Invalid ends the Session: CRD CEL cannot check every pod field
       (keys nested in arrays exceed the cost budget, annotation size). `TestInvalidPodEndsSession`.
     - A Session whose `spec.pairingReference` Pairing is gone (client revoked) is ended; Pairing

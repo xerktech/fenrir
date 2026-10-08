@@ -195,6 +195,11 @@ func TestResumeReattaches(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			agent := newFakeAgent(t)
+			if !tc.disconnected {
+				// Wolf still streams the old keys: the client resumed before
+				// its old stream's pause.
+				agent.sessions = `[{"aes_key":"k","aes_iv":"i","client_id":"old"}]`
+			}
 			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
 				s := attachedSession(f, agent.base(t))
 				if tc.disconnected {
@@ -218,6 +223,79 @@ func TestResumeReattaches(t *testing.T) {
 				t.Errorf("stopped %v, want old stopped = %v", agent.stopped, wantStop)
 			}
 		})
+	}
+}
+
+// A superseded stream Wolf cannot stop wedges the pod (XERK-1688): its
+// pipelines hang, and streams added beside it never play. The Session ends
+// instead of attaching another stream to it.
+func TestUnstoppableStreamEndsSession(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.wedged = true
+	agent.sessions = `[{"aes_key":"k","aes_iv":"i","client_id":"old"},{"aes_key":"k0","aes_iv":"i0","client_id":"older"}]`
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := attachedSession(f, agent.base(t))
+		s.Generation = 2
+		s.Spec.Config.AESKey = "new-key"
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); !errors.Is(err, errSessionEnded) {
+		t.Fatalf("reconcileActiveStreams = %v, want errSessionEnded", err)
+	}
+	if f.sessionExists(t, sess.Name) {
+		t.Error("session kept on a wedged Wolf")
+	}
+	if agent.added != 0 {
+		t.Errorf("added %d streams beside the stuck one", agent.added)
+	}
+	if !slices.Equal(agent.stopped, []string{"old", "older"}) {
+		t.Errorf("stopped %v, want every stale stream stopped once", agent.stopped)
+	}
+}
+
+// A stream ID Wolf lists twice is stopped once, and the attach goes on once
+// Wolf has dropped it.
+func TestResumeStopsRepeatedStreamIDOnce(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.sessions = `[{"aes_key":"k","aes_iv":"i","client_id":"old"},{"aes_key":"k0","aes_iv":"i0","client_id":"old"}]`
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := attachedSession(f, agent.base(t))
+		s.Generation = 2
+		s.Spec.Config.AESKey = "new-key"
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(agent.stopped, []string{"old"}) || agent.added != 1 {
+		t.Errorf("stopped %v, added %d; want old stopped once and one attach", agent.stopped, agent.added)
+	}
+}
+
+// Not knowing whether the stale stream went is no reason to attach beside it,
+// nor to end the Session: the next reconcile retries.
+func TestStaleStreamRelistFailureRetries(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.relistFails = true
+	agent.sessions = `[{"aes_key":"k","aes_iv":"i","client_id":"old"}]`
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := attachedSession(f, agent.base(t))
+		s.Generation = 2
+		s.Spec.Config.AESKey = "new-key"
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess))
+	if err == nil || errors.Is(err, errSessionEnded) {
+		t.Fatalf("reconcileActiveStreams = %v, want a retryable error", err)
+	}
+	if agent.added != 0 {
+		t.Errorf("attached %d streams without knowing the stale one is gone", agent.added)
+	}
+	if !f.sessionExists(t, sess.Name) {
+		t.Error("session ended on a failed poll")
 	}
 }
 
