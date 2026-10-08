@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -59,6 +60,14 @@ for family, any_addr in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
 		if got := bound(port, env...); !slices.Equal(got, loopback) {
 			t.Errorf("Wolf port %s bound to %v, want %v", port, got, loopback)
 		}
+	}
+	// Wolf keeps the port as an unsigned short: 65536 more is the same port.
+	wrapped, err := strconv.Atoi(https)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bound(https, "WOLF_HTTPS_PORT="+strconv.Itoa(wrapped+65536)); !slices.Equal(got, loopback) {
+		t.Errorf("Wolf port %s given as %d bound to %v, want %v", https, wrapped+65536, got, loopback)
 	}
 	if got, want := bound(other, env...), []string{"0.0.0.0", "::"}; !slices.Equal(got, want) {
 		t.Errorf("other port %s bound to %v, want %v", other, got, want)

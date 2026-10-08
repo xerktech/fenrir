@@ -30,8 +30,9 @@ static long env_port(const char *name, long def) {
   const char *v = getenv(name);
   if (v == NULL || *v == '\0')
     return def;
-  /* Wolf parses it with std::stoi, which stops at the first non-digit. */
-  return strtol(v, NULL, 10);
+  /* Wolf parses it with std::stoi (stops at the first non-digit) and keeps
+   * it as an unsigned short, so 85537 means 20001. */
+  return (unsigned short)strtol(v, NULL, 10);
 }
 
 static int is_wolf_rest_port(in_port_t net_port) {

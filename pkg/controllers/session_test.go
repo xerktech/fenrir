@@ -14,17 +14,17 @@ import (
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/informers"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
-	sigsyaml "sigs.k8s.io/yaml"
-
 	v1alpha1api "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	generatedclient "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
 	generatedinformers "games-on-whales.github.io/direwolf/pkg/generated/informers/externalversions"
 	"games-on-whales.github.io/direwolf/pkg/generic"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/informers"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+	sigsyaml "sigs.k8s.io/yaml"
 )
 
 // TestSessionControllerReconcilePath builds a session CR, runs the controller's
@@ -542,11 +542,7 @@ func TestWolfCommandPicksClaimedRenderNode(t *testing.T) {
 	}
 	dri := t.TempDir()
 	script := strings.ReplaceAll(wolfCommand[2], "/dev/dri/", dri+"/")
-	shim := filepath.Join(t.TempDir(), "shim.so")
-	if err := os.WriteFile(shim, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	script = strings.ReplaceAll(script, wolfLoopbackShimPath, shim)
+	script = strings.ReplaceAll(script, wolfLoopbackShimPath, loadableLib(t))
 	script = strings.ReplaceAll(script, "exec /entrypoint.sh", `echo "$WOLF_RENDER_NODE"`)
 	run := func(env ...string) string {
 		cmd := exec.CommandContext(t.Context(), "sh", "-c", script)
@@ -603,7 +599,8 @@ func TestSessionPodPreloadsLoopbackShim(t *testing.T) {
 	var copied bool
 	for _, c := range pod.Spec.InitContainers {
 		if c.Name == wolfLoopbackShimVolume {
-			copied = c.Image == agentImage && slices.Contains(c.Command, wolfLoopbackShimImagePath) &&
+			copied = c.Image == agentImage &&
+				slices.Equal(c.Command, []string{"cp", wolfLoopbackShimImagePath, wolfLoopbackShimPath}) &&
 				slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool {
 					return m.Name == wolfLoopbackShimVolume && m.MountPath == wolfLoopbackShimDir
 				})
@@ -614,6 +611,14 @@ func TestSessionPodPreloadsLoopbackShim(t *testing.T) {
 	}
 	if got := mountsAt(t, &pod.Spec, "wolf")[wolfLoopbackShimDir]; got != wolfLoopbackShimVolume {
 		t.Errorf("wolf %s = %q, want %s", wolfLoopbackShimDir, got, wolfLoopbackShimVolume)
+	}
+	// Read-only, or Wolf could swap the shim for a fresh exec of itself.
+	for _, c := range pod.Spec.Containers {
+		for _, m := range c.VolumeMounts {
+			if m.Name == wolfLoopbackShimVolume && !m.ReadOnly {
+				t.Errorf("%s mounts the shim read-write", c.Name)
+			}
+		}
 	}
 
 	if _, err := exec.LookPath("sh"); err != nil {
@@ -631,15 +636,35 @@ func TestSessionPodPreloadsLoopbackShim(t *testing.T) {
 	if out, err := run(); err == nil {
 		t.Errorf("Wolf started without the shim (LD_PRELOAD=%q)", out)
 	}
-	if err := os.WriteFile(shim, nil, 0o644); err != nil {
+	// An unloadable shim (here empty) is ignored by ld.so, so it must refuse too.
+	if err := os.WriteFile(shim, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if out, err := run(); err == nil {
+		t.Errorf("Wolf started with an unloadable shim (LD_PRELOAD=%q)", out)
+	}
+	lib := loadableLib(t)
+	script = strings.ReplaceAll(script, shim, lib)
+	shim = lib
 	if got, err := run(); err != nil || got != shim {
 		t.Errorf("LD_PRELOAD = %q (%v), want %q", got, err, shim)
 	}
 	if got, err := run("LD_PRELOAD=/user.so"); err != nil || got != shim+" /user.so" {
 		t.Errorf("with a User's LD_PRELOAD: LD_PRELOAD = %q (%v), want the shim first", got, err)
 	}
+}
+
+// loadableLib returns a shared object ld.so can preload, standing in for the
+// loopback shim in wolfCommand.
+func loadableLib(t *testing.T) string {
+	t.Helper()
+	for _, pattern := range []string{"/lib/*-linux-gnu/libc.so.6", "/usr/lib/*-linux-gnu/libc.so.6", "/lib64/libc.so.6", "/usr/lib64/libc.so.6"} {
+		if m, _ := filepath.Glob(pattern); len(m) > 0 {
+			return m[0]
+		}
+	}
+	t.Skip("no glibc to preload")
+	return ""
 }
 
 func TestSessionPodKeepsAppsOwnHome(t *testing.T) {

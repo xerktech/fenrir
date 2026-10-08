@@ -17,6 +17,12 @@ import (
 	"strings"
 	"time"
 
+	"games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
+	"games-on-whales.github.io/direwolf/pkg/generic"
+	"games-on-whales.github.io/direwolf/pkg/util"
+	"games-on-whales.github.io/direwolf/pkg/wolfapi"
 	// "github.com/pelletier/go-toml/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -34,14 +40,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/typed/apis/v1alpha2"
 
-	"games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
-	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
-	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
-	"games-on-whales.github.io/direwolf/pkg/generic"
-	"games-on-whales.github.io/direwolf/pkg/util"
-	"games-on-whales.github.io/direwolf/pkg/wolfapi"
+	gatewayv1alpha2 "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/typed/apis/v1alpha2"
 )
 
 // unstartedSessionTTL is how long a Session may go without a Wolf session
@@ -1924,7 +1924,12 @@ const (
 // operator drives Wolf through wolf-agent and its socket. Wolf refuses to
 // start without the shim rather than run exposed; a User's LD_PRELOAD is kept
 // after it.
-var wolfCommand = []string{"/bin/sh", "-c", `[ -f ` + wolfLoopbackShimPath + ` ] || { echo "missing ` + wolfLoopbackShimPath + `" >&2; exit 1; }
+// ld.so skips a preload it can't load with only a warning, so the check
+// loads it, not just looks for it.
+var wolfCommand = []string{"/bin/sh", "-c", `if [ ! -f ` + wolfLoopbackShimPath + ` ] || [ -n "$(LD_PRELOAD=` + wolfLoopbackShimPath + ` /bin/true 2>&1)" ]; then
+  echo "cannot preload ` + wolfLoopbackShimPath + `" >&2
+  exit 1
+fi
 export LD_PRELOAD="` + wolfLoopbackShimPath + `${LD_PRELOAD:+ $LD_PRELOAD}"
 if [ ! -c "${WOLF_RENDER_NODE:-}" ]; then
   for n in /dev/dri/renderD*; do
