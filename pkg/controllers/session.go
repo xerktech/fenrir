@@ -2180,7 +2180,7 @@ func (c *SessionController) reconcileActiveStreams(
 		sessionID, err := wolfclient.AddSession(ctx, wolfSession)
 
 		if err != nil {
-			return fmt.Errorf("failed to create session: %s", err)
+			return fmt.Errorf("failed to create session: %w", err)
 		}
 		status.WolfSessionID = sessionID
 		status.AttachedGeneration = session.Generation
