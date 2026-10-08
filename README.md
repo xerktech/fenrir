@@ -289,6 +289,9 @@ To create a user:
 add the app the to cluster using:  
 `kubectl apply -f examples/testball.yaml`
 
+testball takes its GPU from the user's wolf sidecar (the generic devices above). On a cluster
+with only a DRA GPU driver, add `gpu: {}` to its `spec` instead.
+
 Next get the ip of the loadbalancer service to connect with moonlight:  
 `kubectl get svc direwolf -n direwolf -o jsonpath='{.status.loadBalancer.ingress[0].ip}'`
 

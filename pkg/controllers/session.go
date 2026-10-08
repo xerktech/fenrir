@@ -1196,6 +1196,11 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 
 	// Captured before the sidecars are appended: these are the App's containers only.
 	wolfResources.Claims = appendResourceClaims(wolfResources.Claims, appResourceClaims(podToCreate.Spec.Containers)...)
+	// Directly too: an App with no containers (Wolf renders a test source)
+	// would otherwise leave spec.gpu's claim unused.
+	if app.Spec.GPU != nil {
+		wolfResources.Claims = appendResourceClaims(wolfResources.Claims, corev1.ResourceClaim{Name: appGPUClaim})
+	}
 
 	// Apply HostIPC setting to the pod spec if requested by any sidecar policy
 	podToCreate.Spec.HostIPC = podHostIPC

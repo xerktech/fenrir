@@ -577,11 +577,58 @@ func TestExampleAppsClaimGPU(t *testing.T) {
 	for _, app := range []string{"steam", "firefox", "retroarch"} {
 		_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/"+app+".yaml")
 		for _, ctr := range pod.Spec.Containers {
-			if (ctr.Name == "app" || ctr.Name == "wolf") && !slices.Contains(ctr.Resources.Claims, corev1.ResourceClaim{Name: appGPUClaim}) {
-				t.Errorf("examples/%s.yaml: container %s has no GPU claim", app, ctr.Name)
+			want := 0
+			if ctr.Name == "app" || ctr.Name == "wolf" {
+				want = 1
+			}
+			if got := gpuClaimRefs(ctr.Resources.Claims); got != want {
+				t.Errorf("examples/%s.yaml: container %s claims GPU %d times, want %d", app, ctr.Name, got, want)
 			}
 		}
 	}
+}
+
+// An App with no containers (testball: Wolf renders a test source) still gets
+// spec.gpu's claim on Wolf, else the claim is made but nothing uses it
+// (XERK-1676). Without spec.gpu Wolf must claim nothing: the API server rejects
+// a container claim the pod doesn't declare.
+func TestContainerlessAppGPUReachesWolf(t *testing.T) {
+	raw, err := os.ReadFile("../../examples/testball.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gpu := range []bool{true, false} {
+		appPath := filepath.Join(t.TempDir(), "app.yaml")
+		app := string(raw)
+		if gpu {
+			app = strings.Replace(app, "\nspec:\n", "\nspec:\n  gpu: {}\n", 1)
+		}
+		if err = os.WriteFile(appPath, []byte(app), 0o600); err != nil { //nolint:gosec // t.TempDir()
+			t.Fatal(err)
+		}
+		_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", appPath)
+		for _, ctr := range pod.Spec.Containers {
+			want := 0
+			if gpu && ctr.Name == "wolf" {
+				want = 1
+			}
+			if got := gpuClaimRefs(ctr.Resources.Claims); got != want {
+				t.Errorf("gpu=%v: container %s claims GPU %d times, want %d", gpu, ctr.Name, got, want)
+			}
+		}
+	}
+}
+
+// gpuClaimRefs counts the references to appGPUClaim; the API server rejects
+// a duplicate.
+func gpuClaimRefs(claims []corev1.ResourceClaim) int {
+	n := 0
+	for _, c := range claims {
+		if c.Name == appGPUClaim {
+			n++
+		}
+	}
+	return n
 }
 
 // A claim left by an earlier Session of the same name is waited out, never
