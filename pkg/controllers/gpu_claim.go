@@ -16,8 +16,8 @@ import (
 )
 
 // appGPUClaim is the pod-level claim name for App.spec.gpu. It is attached to
-// every App container and, through appResourceClaims, to the wolf sidecar, so
-// Wolf encodes on the card the game renders on.
+// every App container and to the wolf sidecar, so Wolf encodes on the card the
+// game renders on (and still gets one when the App has no containers).
 const (
 	appGPUClaim             = "direwolf-gpu"
 	defaultGPUDeviceClass   = "gpu.nvidia.com"

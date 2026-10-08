@@ -64,6 +64,8 @@ paths:
   - Pods reference it by name, so a template's generated claims' GC doesn't cover it.
   - A claim still owned by an earlier same-named Session is waited out, never adopted.
   - Don't combine it with a template GPU claim: the pod would get two cards.
+  - Wolf gets it directly, not only via the App's containers: testball has none (XERK-1676).
+    Tests: `TestContainerlessAppGPUReachesWolf`.
 - Tests: `pkg/controllers/catalogue_test.go` (fixtures in `testdata/catalogue`, run through
   the real scan script); `TestHiddenAppsAreNotListed`, `TestAppAssetServesJPEGAsPNG` in
   `pkg/moonlight/apps_test.go`.
