@@ -1108,6 +1108,18 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		},
 	)
 
+	// Hands Wolf the loopback shim (see wolfCommand) from the wolf-agent
+	// image: Wolf's image is upstream's.
+	podToCreate.Spec.InitContainers = append(podToCreate.Spec.InitContainers,
+		corev1.Container{
+			Name:            wolfLoopbackShimVolume,
+			Image:           c.WolfAgentImage,
+			ImagePullPolicy: corev1.PullAlways,
+			Command:         []string{"cp", wolfLoopbackShimImagePath, wolfLoopbackShimPath},
+			VolumeMounts:    []corev1.VolumeMount{{Name: wolfLoopbackShimVolume, MountPath: wolfLoopbackShimDir}},
+		},
+	)
+
 	// Define default resources for sidecars
 	wolfAgentDefaultResources := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
@@ -1383,6 +1395,11 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 					Name:      "wolf-data",
 					MountPath: "/mnt/data/wolf",
 				},
+				{
+					Name:      wolfLoopbackShimVolume,
+					MountPath: wolfLoopbackShimDir,
+					ReadOnly:  true,
+				},
 				// {
 				// 	Name:      "dev-input",
 				// 	MountPath: "/dev/input",
@@ -1447,6 +1464,10 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		corev1.Volume{
 			Name:         "wolf-data",
 			VolumeSource: wolfDataVolumeSource,
+		},
+		corev1.Volume{
+			Name:         wolfLoopbackShimVolume,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
 		corev1.Volume{
 			Name:         hotplugDevVolume,
@@ -1882,6 +1903,14 @@ func withHotplugMounts(mounts []corev1.VolumeMount) []corev1.VolumeMount {
 	)
 }
 
+const (
+	wolfLoopbackShimVolume = "wolf-loopback-shim"
+	// Where cmd/wolf-agent/Dockerfile puts the shim in the wolf-agent image.
+	wolfLoopbackShimImagePath = "/app/lib/libwolf_loopback.so"
+	wolfLoopbackShimDir       = "/opt/direwolf"
+	wolfLoopbackShimPath      = wolfLoopbackShimDir + "/libwolf_loopback.so"
+)
+
 // wolfCommand starts Wolf through the GOW image's own /entrypoint.sh, first
 // pointing WOLF_RENDER_NODE at the render node the session's GPU claim put in
 // the container. Wolf otherwise defaults to /dev/dri/renderD128, but a DRA
@@ -1892,7 +1921,22 @@ func withHotplugMounts(mounts []corev1.VolumeMount) []corev1.VolumeMount {
 // "not a device here", not "unset". A WOLF_RENDER_NODE from the App
 // (wolfConfig.runtimeVariables.renderNode) or a User's wolf policy that does
 // exist in the container is kept.
-var wolfCommand = []string{"/bin/sh", "-c", `if [ ! -c "${WOLF_RENDER_NODE:-}" ]; then
+//
+// It also preloads the loopback shim (cmd/wolf-agent/shim), which binds Wolf's
+// Moonlight HTTP/HTTPS servers to 127.0.0.1 instead of 0.0.0.0 (XERK-1682):
+// the pod is host-networked, and Wolf's HTTPS takes any client cert naming an
+// issuer it doesn't have as a paired client. Nothing uses either server: the
+// operator drives Wolf through wolf-agent and its socket. Wolf refuses to
+// start without the shim rather than run exposed; a User's LD_PRELOAD is kept
+// after it.
+// ld.so skips a preload it can't load with only a warning, so the check
+// loads it, not just looks for it.
+var wolfCommand = []string{"/bin/sh", "-c", `if [ ! -f ` + wolfLoopbackShimPath + ` ] || ! out=$(LD_PRELOAD=` + wolfLoopbackShimPath + ` /bin/true 2>&1) || [ -n "$out" ]; then
+  echo "cannot preload ` + wolfLoopbackShimPath + `: $out" >&2
+  exit 1
+fi
+export LD_PRELOAD="` + wolfLoopbackShimPath + `${LD_PRELOAD:+ $LD_PRELOAD}"
+if [ ! -c "${WOLF_RENDER_NODE:-}" ]; then
   for n in /dev/dri/renderD*; do
     if [ -c "$n" ]; then export WOLF_RENDER_NODE="$n"; break; fi
   done
