@@ -274,6 +274,10 @@ type PauseStreamEvent struct {
 // the rest (AudioSession carries the AES key) is left undecoded.
 type StreamSetupEvent struct {
 	SessionID string `json:"session_id"`
+	// The stream's AES key, which Wolf's session list also carries; only
+	// the AudioSession event has it. Unlike the session ID, it is never
+	// reused by a later stream.
+	AESKey string `json:"aes_key,omitempty"`
 }
 
 // PlugDeviceEvent is fired by wolf when it hotplugs a virtual input device

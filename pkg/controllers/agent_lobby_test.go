@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -14,14 +15,19 @@ import (
 	"games-on-whales.github.io/direwolf/pkg/wolfapi"
 )
 
-// lobbyClient serves events and one lobby, and records joins.
+// lobbyClient serves events and one lobby, and records joins. As in Wolf, a
+// joined stream is among the lobby's connected sessions.
 type lobbyClient struct {
 	fakeEventsClient
 	joined  chan [2]string // lobby ID, session ID
 	joinErr error
 
-	mu    sync.Mutex
-	joins int
+	mu        sync.Mutex
+	joins     int
+	connected []string
+	listed    []wolfapi.Session // ListSessions
+	stops     []string          // StopSession calls
+	stopErr   error
 }
 
 func newLobbyClient() *lobbyClient {
@@ -29,18 +35,59 @@ func newLobbyClient() *lobbyClient {
 }
 
 func (c *lobbyClient) ListLobbies(context.Context) ([]wolfapi.Lobby, error) {
-	return []wolfapi.Lobby{{ID: "lobby-1"}}, nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return []wolfapi.Lobby{{ID: "lobby-1", ConnectedSessions: slices.Clone(c.connected)}}, nil
 }
 
 func (c *lobbyClient) JoinLobby(_ context.Context, lobbyID, sessionID string) error {
 	c.mu.Lock()
 	c.joins++
+	if c.joinErr == nil {
+		c.connected = append(c.connected, sessionID)
+	}
 	c.mu.Unlock()
 	c.joined <- [2]string{lobbyID, sessionID}
 	return c.joinErr
 }
 
-func (c *lobbyClient) StopSession(context.Context, string) error { return nil }
+func (c *lobbyClient) ListSessions(context.Context) ([]wolfapi.Session, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.listed), nil
+}
+
+func (c *lobbyClient) StopSession(_ context.Context, sessionID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stops = append(c.stops, sessionID)
+	if c.stopErr != nil {
+		return c.stopErr
+	}
+	c.listed = nil
+	return nil
+}
+
+// streamKey is the AES key of the stream joinedOnFreshSubscription starts.
+const streamKey = "secret"
+
+// leave is Wolf pausing (listed) or stopping a joined stream: it leaves the
+// lobby, and a stopped one is no longer listed.
+func (c *lobbyClient) leave(listed bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.connected = nil
+	c.listed = nil
+	if listed {
+		c.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey}}
+	}
+}
+
+func (c *lobbyClient) stopCalls() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.stops)
+}
 
 func (c *lobbyClient) send(typ wolfapi.WolfEventType, data string) {
 	c.events <- &sse.Event{Event: []byte(typ), Data: []byte(data)}
@@ -630,5 +677,133 @@ func TestAgentRetryFailureDoesNotReplayAgain(t *testing.T) {
 	joinReturned()
 	if _, err := os.Stat(entry); err != nil {
 		t.Fatalf("retry failure replayed the first attempt's unplug again: %v", err)
+	}
+}
+
+// joinedOnFreshSubscription joins a stream to the lobby with a published
+// device, then closes the event stream, leaving the agent waiting to
+// resubscribe; it returns the next subscription's channel and the device.
+func joinedOnFreshSubscription(t *testing.T, client *resubClient, beforeResubscribe func()) (a *Agent, ch chan *sse.Event, entry string) {
+	t.Helper()
+	a = hotplugAgent(t, client)
+	a.lobby.settle = 0
+	a.minResubscribeDelay = 50 * time.Millisecond
+	go a.Run(t.Context())
+	ch = <-client.subs
+	sendOn(ch, wolfapi.VideoSessionEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	sendOn(ch, wolfapi.AudioSessionEventType, `{"session_id":"`+wolfStreamID+`","aes_key":"`+streamKey+`"}`)
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+	entry = deviceEntry(t, a)
+	close(ch)
+	// Wolf's events while the agent waits to resubscribe are lost.
+	beforeResubscribe()
+	ch = <-client.subs
+	// Unbuffered: once taken, the catch-up before it is done.
+	sendOn(ch, "Done", "")
+	return a, ch, entry
+}
+
+// A pause Wolf sends while the event stream is down is lost for good (Wolf
+// replays nothing), but it takes the stream out of the lobby. After
+// resubscribing, the agent must stop it as the pause would have, so the
+// operator sees the disconnect, and drop its devices (XERK-1378).
+func TestAgentCatchesUpPauseMissedWhileResubscribing(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a, _, entry := joinedOnFreshSubscription(t, client, func() { client.leave(true) })
+	if got := client.stopCalls(); !slices.Equal(got, []string{wolfStreamID}) {
+		t.Errorf("StopSession calls %v, want [%s]", got, wolfStreamID)
+	}
+	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("device of the missed-paused stream kept: %v", err)
+	}
+	wantForgotten(t, a)
+}
+
+// The ended stream is forgotten: otherwise its ID's next stream would have
+// its unplugs held as a joined stream's, and be caught up again.
+func wantForgotten(t *testing.T, a *Agent) {
+	t.Helper()
+	if s, _ := a.lobby.joinedStream(); s != "" {
+		t.Errorf("joined stream %q after catching up its end, want none", s)
+	}
+}
+
+// Wolf's session IDs repeat: a resume started during the outage can reuse the
+// joined stream's ID. Told apart by its AES key, it must not be stopped.
+func TestAgentCatchUpSparesResumeReusingID(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a, _, entry := joinedOnFreshSubscription(t, client, func() {
+		client.leave(false)
+		client.mu.Lock()
+		client.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: "resumed"}}
+		client.mu.Unlock()
+	})
+	if got := client.stopCalls(); len(got) != 0 {
+		t.Errorf("StopSession calls %v: stopped the resumed stream", got)
+	}
+	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("device of the ended stream kept: %v", err)
+	}
+	wantForgotten(t, a)
+}
+
+// A failed stop keeps the stream joined, so the next subscribe retries it.
+func TestAgentCatchUpRetriesFailedStop(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	client.stopErr = errors.New("wolf refused")
+	a, ch, entry := joinedOnFreshSubscription(t, client, func() { client.leave(true) })
+	if _, err := os.Stat(entry); err != nil {
+		t.Errorf("devices dropped though Wolf did not stop the stream: %v", err)
+	}
+	client.mu.Lock()
+	client.stopErr = nil
+	client.mu.Unlock()
+	close(ch)
+	ch = <-client.subs
+	sendOn(ch, "Done", "")
+	if got := client.stopCalls(); !slices.Equal(got, []string{wolfStreamID, wolfStreamID}) {
+		t.Errorf("StopSession calls %v, want a retry after the next subscribe", got)
+	}
+	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("device kept after the retried stop: %v", err)
+	}
+	wantForgotten(t, a)
+}
+
+// A stream Wolf stopped while the event stream was down is no longer listed:
+// nothing to stop, but its devices are gone.
+func TestAgentCatchesUpStopMissedWhileResubscribing(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a, _, entry := joinedOnFreshSubscription(t, client, func() { client.leave(false) })
+	if got := client.stopCalls(); len(got) != 0 {
+		t.Errorf("StopSession calls %v for a stream Wolf no longer lists", got)
+	}
+	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("device of the missed-stopped stream kept: %v", err)
+	}
+	wantForgotten(t, a)
+}
+
+// A joined stream still in the lobby after a resubscribe is left alone, and
+// keeps its joined state.
+func TestAgentResubscribeKeepsStreamStillInLobby(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a, ch, entry := joinedOnFreshSubscription(t, client, func() {})
+	if got := client.stopCalls(); len(got) != 0 {
+		t.Errorf("StopSession calls %v for a stream still in the lobby", got)
+	}
+	if _, err := os.Stat(entry); err != nil {
+		t.Errorf("device of a live stream dropped: %v", err)
+	}
+	if s, _ := a.lobby.joinedStream(); s != wolfStreamID {
+		t.Errorf("joined stream %q after resubscribe, want %s", s, wolfStreamID)
+	}
+	// Its own unplug is still held as a joined stream's.
+	sendOn(ch, wolfapi.UnplugDeviceEventType, unplugEvent(wolfStreamID))
+	sendOn(ch, "Done", "")
+	if _, err := os.Stat(entry); err != nil {
+		t.Errorf("joined state lost across resubscribe: %v", err)
 	}
 }
