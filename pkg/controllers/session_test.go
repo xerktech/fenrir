@@ -732,26 +732,49 @@ func TestBuildPodRejectsWolfAgentHotplugOverride(t *testing.T) {
 // socket and config, and Wolf's preload shim: an App container mounting one
 // by name could drive Wolf or impersonate wolf-agent (XERK-1366).
 func TestBuildPodRejectsAppMountOfOperatorVolume(t *testing.T) {
+	mounts := map[string]corev1.VolumeMount{
+		"plain":       {MountPath: "/x"},
+		"subPath":     {MountPath: "/x", SubPath: "tls.key"},
+		"subPathExpr": {MountPath: "/x", SubPathExpr: "$(POD_NAME)"},
+	}
 	for _, name := range []string{"wolf-agent-token", "wolf-cfg", "wolf-data", wolfLoopbackShimVolume} {
-		for _, initCtr := range []bool{false, true} {
-			sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml")
-			app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// The informer's copy: buildPod reads it back below.
-			mount := corev1.VolumeMount{Name: name, MountPath: "/x"}
-			if initCtr {
-				app.Spec.Template.Spec.InitContainers = append(app.Spec.Template.Spec.InitContainers,
-					corev1.Container{Name: "steal", Image: "busybox", VolumeMounts: []corev1.VolumeMount{mount}})
-			} else {
-				ctr := &app.Spec.Template.Spec.Containers[0]
-				ctr.VolumeMounts = append(ctr.VolumeMounts, mount)
-			}
-			if _, err := sc.buildPod(sess); err == nil || !strings.Contains(err.Error(), "reserved for the operator") {
-				t.Errorf("mount of %s (init container: %v): buildPod err = %v, want it rejected", name, initCtr, err)
+		for kind, mount := range mounts {
+			for _, initCtr := range []bool{false, true} {
+				sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml")
+				app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// The informer's copy: buildPod reads it back below.
+				mount.Name = name
+				if initCtr {
+					app.Spec.Template.Spec.InitContainers = append(app.Spec.Template.Spec.InitContainers,
+						corev1.Container{Name: "steal", Image: "busybox", VolumeMounts: []corev1.VolumeMount{mount}})
+				} else {
+					ctr := &app.Spec.Template.Spec.Containers[0]
+					ctr.VolumeMounts = append(ctr.VolumeMounts, mount)
+				}
+				if _, err := sc.buildPod(sess); err == nil || !strings.Contains(err.Error(), "reserved for the operator") {
+					t.Errorf("%s mount of %s (init container: %v): buildPod err = %v, want it rejected", kind, name, initCtr, err)
+				}
 			}
 		}
+	}
+}
+
+func TestBuildPodRejectsAppDeviceOfOperatorVolume(t *testing.T) {
+	sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+	app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The informer's copy: buildPod reads it back below.
+	app.Spec.Template.Spec.InitContainers = append(app.Spec.Template.Spec.InitContainers, corev1.Container{
+		Name: "steal", Image: "busybox",
+		VolumeDevices: []corev1.VolumeDevice{{Name: "wolf-data", DevicePath: "/dev/xvda"}},
+	})
+	if _, err := sc.buildPod(sess); err == nil || !strings.Contains(err.Error(), "reserved for the operator") {
+		t.Errorf("buildPod err = %v, want the wolf-data volumeDevice rejected", err)
 	}
 }
 

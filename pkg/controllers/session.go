@@ -1864,9 +1864,17 @@ var operatorVolumes = []string{
 func validateNoOperatorVolumeMounts(spec *corev1.PodSpec) error {
 	for _, ctrs := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
 		for _, ctr := range ctrs {
+			names := make([]string, 0, len(ctr.VolumeMounts)+len(ctr.VolumeDevices))
 			for _, m := range ctr.VolumeMounts {
-				if slices.Contains(operatorVolumes, m.Name) {
-					return fmt.Errorf("validation failed: container %q in the App template mounts volume %q, which is reserved for the operator", ctr.Name, m.Name)
+				names = append(names, m.Name)
+			}
+			// A block-mode claim is attached as a device, not mounted.
+			for _, d := range ctr.VolumeDevices {
+				names = append(names, d.Name)
+			}
+			for _, name := range names {
+				if slices.Contains(operatorVolumes, name) {
+					return fmt.Errorf("validation failed: container %q in the App template mounts volume %q, which is reserved for the operator", ctr.Name, name)
 				}
 			}
 		}
