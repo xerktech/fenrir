@@ -151,11 +151,40 @@ func (p *videoProgress) stalledFor(session *v1alpha1types.Session, flows map[str
 	return now.Sub(prev.risenAt)
 }
 
+// attached records flows, sampled just before the stream was added to Wolf,
+// as the baseline of session's new attach: a stream whose only packets come
+// before the first poll still rose, so its stall is seen.
+func (p *videoProgress) attached(session *v1alpha1types.Session, flows map[string]uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.m == nil {
+		p.m = map[string]streamProgress{}
+	}
+	p.m[session.Namespace+"/"+session.Name] = streamProgress{
+		uid: session.UID, wolfSessionID: session.Status.WolfSessionID,
+		generation: session.Status.AttachedGeneration, flows: flows,
+	}
+}
+
 // forget drops a deleted Session's progress.
 func (p *videoProgress) forget(namespace, name string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.m, namespace+"/"+name)
+}
+
+// videoBaseline samples the video flows before an attach, or nil when they
+// are unknown; the first poll then takes the baseline instead.
+func videoBaseline(ctx context.Context, session *v1alpha1types.Session, client *http.Client, baseURL string) map[string]uint64 {
+	v, err := fetchVideoPackets(ctx, client, baseURL)
+	if err != nil || !v.Counted {
+		klog.V(2).Infof("Session %s/%s: no video baseline before attaching (%v)", session.Namespace, session.Name, err)
+		return nil
+	}
+	if v.Flows == nil {
+		return map[string]uint64{}
+	}
+	return v.Flows
 }
 
 // streamStalledReason asks wolf-agent for the attached stream's video packet

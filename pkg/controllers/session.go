@@ -2239,6 +2239,7 @@ func (c *SessionController) reconcileActiveStreams(
 		if err != nil {
 			return err
 		}
+		baseline := videoBaseline(ctx, session, agentClient, agentURL)
 		sessionID, err := wolfclient.AddSession(ctx, wolfSession)
 
 		if err != nil {
@@ -2247,6 +2248,9 @@ func (c *SessionController) reconcileActiveStreams(
 		status.WolfSessionID = sessionID
 		status.AttachedGeneration = session.Generation
 		status.DisconnectedAt = nil
+		if baseline != nil {
+			c.videoProgress.attached(session, baseline)
+		}
 	}
 
 	status.StreamURL = "rtsp://" + net.JoinHostPort(podIP, strconv.Itoa(int(status.Ports.RTSP)))

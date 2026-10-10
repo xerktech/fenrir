@@ -126,28 +126,80 @@ func TestUnknownVideoCountKeepsSession(t *testing.T) {
 // starts its own clock and baseline: the old stream's stall must not end the
 // new one, and its leftover flow is not the new stream's start.
 func TestReattachRestartsStallClock(t *testing.T) {
+	flows := func(n uint64) map[string]uint64 { return map[string]uint64{"dst=c dport=1": n} }
+	for _, tc := range []struct {
+		name   string
+		attach func(*v1alpha1types.Session)
+	}{
+		{"new generation", func(s *v1alpha1types.Session) { s.Status.AttachedGeneration++ }},
+		{"new Wolf stream", func(s *v1alpha1types.Session) { s.Status.WolfSessionID += "1" }},
+		{"new Session", func(s *v1alpha1types.Session) { s.UID += "1" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var c SessionController
+			sess := &v1alpha1types.Session{}
+			sess.Namespace, sess.Name, sess.UID = "ns", "alex-1", "u1"
+			sess.Status.WolfSessionID, sess.Status.AttachedGeneration = "10", 1
+			now := time.Now()
+			c.videoProgress.stalledFor(sess, flows(400), now)
+			c.videoProgress.stalledFor(sess, flows(500), now)
+			if d := c.videoProgress.stalledFor(sess, flows(500), now.Add(time.Minute)); d != time.Minute {
+				t.Fatalf("stalledFor = %s, want 1m", d)
+			}
+			tc.attach(sess)
+			for i := range 2 {
+				if d := c.videoProgress.stalledFor(sess, flows(500), now.Add(time.Duration(i+2)*time.Minute)); d != 0 {
+					t.Errorf("stalledFor = %s, want 0", d)
+				}
+			}
+		})
+	}
+}
+
+// A flow's count falling (it expired and came back) is not video.
+func TestFallingCountIsNoProgress(t *testing.T) {
 	var c SessionController
 	sess := &v1alpha1types.Session{}
-	sess.Namespace, sess.Name, sess.UID = "ns", "alex-1", "u1"
-	sess.Status.WolfSessionID, sess.Status.AttachedGeneration = "10", 1
+	sess.Namespace, sess.Name = "ns", "alex-1"
 	now := time.Now()
-	flows := func(n uint64) map[string]uint64 { return map[string]uint64{"dst=c dport=1": n} }
-	c.videoProgress.stalledFor(sess, flows(400), now)
-	c.videoProgress.stalledFor(sess, flows(500), now)
-	if d := c.videoProgress.stalledFor(sess, flows(500), now.Add(time.Minute)); d != time.Minute {
-		t.Fatalf("stalledFor = %s, want 1m", d)
+	c.videoProgress.stalledFor(sess, map[string]uint64{"dst=c dport=1": 400}, now)
+	c.videoProgress.stalledFor(sess, map[string]uint64{"dst=c dport=1": 500}, now)
+	if d := c.videoProgress.stalledFor(sess, map[string]uint64{"dst=c dport=1": 3}, now.Add(time.Minute)); d != time.Minute {
+		t.Errorf("stalledFor after a fall = %s, want 1m", d)
 	}
-	for name, attach := range map[string]func(){
-		"new generation":  func() { sess.Status.AttachedGeneration++ },
-		"new Wolf stream": func() { sess.Status.WolfSessionID += "1" },
-		"new Session":     func() { sess.UID += "1" },
-	} {
-		attach()
-		for i := range 2 {
-			if d := c.videoProgress.stalledFor(sess, flows(500), now.Add(time.Duration(i+2)*time.Minute)); d != 0 {
-				t.Errorf("%s: stalledFor = %s, want 0", name, d)
-			}
-		}
+}
+
+// A stream whose only packets were sent before the operator's first poll
+// still rose from the baseline taken before the attach, so it is caught when
+// it freezes.
+func TestAttachTakesVideoBaseline(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.sessions = `[{"aes_key":"k","aes_iv":"i","client_id":"old"}]`
+	agent.videoPackets = `{"counted":true,"flows":{"dst=c dport=1":18638}}`
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := attachedSession(f, agent.base(t))
+		s.Generation = 2
+		s.Spec.Config.AESKey, s.Spec.Config.AESIV = "new-key", "i"
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+	ctx := context.Background()
+	if err := f.sc.reconcileActiveStreams(ctx, sess, readyPod(sess)); err != nil {
+		t.Fatal(err)
+	}
+	if agent.added != 1 {
+		t.Fatalf("added %d streams, want the resume's", agent.added)
+	}
+	// Wolf lists the new stream; it sent 3 packets, then froze.
+	agent.mu.Lock()
+	agent.sessions = `[{"aes_key":"new-key","aes_iv":"i","client_id":"4242"}]`
+	agent.mu.Unlock()
+	agent.setVideoPackets(`{"counted":true,"flows":{"dst=c dport=1":18638,"dst=c dport=2":3}}`)
+	if err := f.sc.reconcileActiveStreams(ctx, sess, readyPod(sess)); err != nil {
+		t.Fatal(err)
+	}
+	f.sc.age(sess, streamStallTimeout)
+	if err := f.sc.reconcileActiveStreams(ctx, sess, readyPod(sess)); !errors.Is(err, errSessionEnded) {
+		t.Fatalf("reconcileActiveStreams = %v, want errSessionEnded", err)
 	}
 }
 
