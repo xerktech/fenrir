@@ -17,6 +17,11 @@ concurrency:
 permissions:
   packages: write
 
+env:
+  # build-push-action uploads a .dockerbuild build-record artifact per build, and it
+  # counts against the org's shared Actions storage quota (XERK-1796).
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
 jobs:
   build_and_push_containers:
     runs-on: ubuntu-latest
@@ -95,6 +100,7 @@ jobs:
         with:
           name: image-digest-${{ matrix.app }}
           path: image-digest-${{ matrix.app }}.txt
+          retention-days: 3
 
   build_and_push_chart:
     runs-on: ubuntu-latest

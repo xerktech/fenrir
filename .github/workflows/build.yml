@@ -7,6 +7,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # build-push-action uploads a .dockerbuild build-record artifact per build, and it
+  # counts against the org's shared Actions storage quota (XERK-1796).
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
 jobs:
   verify_build:
     runs-on: ubuntu-latest
