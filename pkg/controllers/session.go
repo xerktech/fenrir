@@ -133,6 +133,9 @@ type SessionController struct {
 
 	ports *portAllocator
 
+	// videoProgress spots attached streams that stopped sending video.
+	videoProgress videoProgress
+
 	// runCtx is Run's context, set before any Reconcile: the generic
 	// controller's reconcile callback takes none, and shutdown or leader loss
 	// must cancel in-flight calls, wolf-agent polls above all.
@@ -298,6 +301,7 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 		// Session was deleted. Its pod, and through the pod its generated
 		// ResourceClaims, are garbage collected via owner references; the
 		// port block is ours to free.
+		c.videoProgress.forget(namespace, name)
 		return c.releaseUnusedPorts()
 	} else if reason := c.expiredReason(newObj, time.Now()); reason != "" {
 		return c.endSession(ctx, newObj, reason)
@@ -1257,6 +1261,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 			Args: []string{
 				"--socket=/etc/wolf/wolf.sock",
 				fmt.Sprintf("--port=%d", ports.WolfAgent),
+				fmt.Sprintf("--video-port=%d", ports.VideoRTP),
 				"--token-file=" + wolfAgentTokenMountPath + "/" + wolfAgentTokenKey,
 				"--tls-cert=" + wolfAgentTokenMountPath + "/" + corev1.TLSCertKey,
 				"--tls-key=" + wolfAgentTokenMountPath + "/" + corev1.TLSPrivateKeyKey,
@@ -2027,7 +2032,9 @@ func (c *SessionController) releaseUnusedPorts() error {
 //     first (ensureLobby); wolf-agent joins the stream to it;
 //   - detect the client going away (wolf-agent stops Wolf's session when
 //     Moonlight disconnects), and record it in status.disconnectedAt, starting
-//     the grace period Reconcile ends the session after.
+//     the grace period Reconcile ends the session after;
+//   - end the session when its attached stream stops sending video
+//     (streamStalledReason).
 func (c *SessionController) reconcileActiveStreams(
 	ctx context.Context,
 	session *v1alpha1types.Session,
@@ -2060,10 +2067,12 @@ func (c *SessionController) reconcileActiveStreams(
 	// A fresh transport per poll: close its keep-alive connection, which
 	// wolf-agent never times out, or every poll leaks one.
 	defer transport.CloseIdleConnections()
-	wolfclient := wolfapi.NewClient("https://"+net.JoinHostPort(podIP, strconv.Itoa(int(session.Status.Ports.WolfAgent))), &http.Client{
+	agentURL := "https://" + net.JoinHostPort(podIP, strconv.Itoa(int(session.Status.Ports.WolfAgent)))
+	agentClient := &http.Client{
 		Timeout:   wolfAgentTimeout,
 		Transport: &wolfapi.BearerTokenTransport{Token: wolfapi.StaticToken(token), Base: transport},
-	})
+	}
+	wolfclient := wolfapi.NewClient(agentURL, agentClient)
 	sessions, err := wolfclient.ListSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("polling wolf-agent: %w", err)
@@ -2085,7 +2094,11 @@ func (c *SessionController) reconcileActiveStreams(
 
 	if status.WolfSessionID != "" {
 		if found && !resumed {
-			// Streaming.
+			// Streaming, unless its pipeline froze: Wolf still lists the
+			// stream and the client still pings it, but it sends no video.
+			if reason := c.streamStalledReason(ctx, session, agentClient, agentURL); reason != "" {
+				return c.endSessionErr(ctx, session, reason)
+			}
 			status.StreamURL = "rtsp://" + net.JoinHostPort(podIP, strconv.Itoa(int(status.Ports.RTSP)))
 			return nil
 		}
@@ -2226,6 +2239,7 @@ func (c *SessionController) reconcileActiveStreams(
 		if err != nil {
 			return err
 		}
+		baseline := videoBaseline(ctx, session, agentClient, agentURL)
 		sessionID, err := wolfclient.AddSession(ctx, wolfSession)
 
 		if err != nil {
@@ -2234,6 +2248,9 @@ func (c *SessionController) reconcileActiveStreams(
 		status.WolfSessionID = sessionID
 		status.AttachedGeneration = session.Generation
 		status.DisconnectedAt = nil
+		if baseline != nil {
+			c.videoProgress.attached(session, baseline)
+		}
 	}
 
 	status.StreamURL = "rtsp://" + net.JoinHostPort(podIP, strconv.Itoa(int(status.Ports.RTSP)))

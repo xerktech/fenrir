@@ -168,6 +168,9 @@ type fakeAgent struct {
 	sessions string // JSON array for /api/v1/sessions
 	lobbies  string // JSON array for /api/v1/lobbies
 	clients  string // JSON array for /api/v1/clients
+	// videoPackets is the body of VideoPacketsPath; "" answers 404, as a
+	// pod from before the endpoint does.
+	videoPackets string
 	// wedged keeps stopped streams listed, as a Wolf with a stuck stream
 	// pipeline does (XERK-1688).
 	wedged bool
@@ -228,6 +231,15 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 			}
 			a.mu.Unlock()
 			fmt.Fprint(w, `{"success":true,"session_id":"4242"}`)
+		case VideoPacketsPath:
+			a.mu.Lock()
+			body := a.videoPackets
+			a.mu.Unlock()
+			if body == "" {
+				http.NotFound(w, r)
+				return
+			}
+			fmt.Fprint(w, body)
 		case "/api/v1/sessions/stop":
 			var req struct {
 				SessionID string `json:"session_id"`
@@ -257,6 +269,12 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 	a.StartTLS()
 	t.Cleanup(a.Close)
 	return a
+}
+
+func (a *fakeAgent) setVideoPackets(body string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.videoPackets = body
 }
 
 // testAgentCert is the serving cert every fakeAgent presents and tokenSecret

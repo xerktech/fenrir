@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"games-on-whales.github.io/direwolf/pkg/conntrack"
 	"games-on-whales.github.io/direwolf/pkg/controllers"
 	"games-on-whales.github.io/direwolf/pkg/util"
 	"games-on-whales.github.io/direwolf/pkg/wolfapi"
@@ -30,6 +31,7 @@ func main() {
 	serverPort := flag.Int("port", 443, "Port to listen on")
 	wolfSocketPath := flag.String("socket", "/var/run/wolf.sock", "Path to wolf.sock")
 	tokenFile := flag.String("token-file", "", "Path to a file holding the bearer token required on /api/v1/ (required)")
+	videoPort := flag.Int("video-port", 0, "Wolf's video RTP port, whose outbound packets "+controllers.VideoPacketsPath+" counts (0: not counted)")
 	klog.InitFlags(nil)
 	flag.Parse()
 
@@ -107,6 +109,9 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.Handle("/api/v1/", apiHandler(token, &client, &ready))
+	mux.Handle(controllers.VideoPacketsPath, videoPacketsHandler(token, func() (controllers.VideoPackets, error) {
+		return controllers.ReadVideoPackets(*videoPort, conntrack.AcctPath, conntrack.TablePath)
+	}))
 
 	// Start HTTPS server
 	server := newServer(*serverPort, mux, serverTLSConfig(certs))
@@ -123,6 +128,12 @@ func main() {
 // *tokenFile rather than a token so the file can't be snapshotted at startup.
 func apiHandler(token *tokenFile, client *http.Client, ready *atomic.Bool) http.Handler {
 	return wolfapi.RequireBearerToken(token.Token, proxyHandler(client, ready))
+}
+
+// videoPacketsHandler serves the video flow counts behind the bearer token,
+// like /api/v1/: under hostNetwork the agent port is on the node IP.
+func videoPacketsHandler(token *tokenFile, read func() (controllers.VideoPackets, error)) http.Handler {
+	return wolfapi.RequireBearerToken(token.Token, controllers.VideoPacketsHandler(read))
 }
 
 // Under hostNetwork the agent port is on the node IP, so anyone who can reach
