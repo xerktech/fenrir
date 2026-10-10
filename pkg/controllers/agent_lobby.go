@@ -154,6 +154,16 @@ func (j *lobbyJoiner) joinLobby(ctx context.Context, stream string) (string, err
 	return lobbies[0].ID, nil
 }
 
+// joinedStream returns the stream joined to the lobby, if any.
+func (j *lobbyJoiner) joinedStream() string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.state != lobbyJoinDone {
+		return ""
+	}
+	return j.stream
+}
+
 // ended forgets a paused or stopped stream.
 func (j *lobbyJoiner) ended(sessionID string) {
 	j.mu.Lock()
