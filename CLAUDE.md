@@ -71,6 +71,10 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       superseded); one still listed after its stop means Wolf is wedged, and the Session ends
       rather than stacking streams (`stopStaleStreams`, XERK-1688). Wolf lists a stream's session
       ID as `client_id`. Tests: `TestUnstoppableStreamEndsSession`.
+    - A stream Wolf still lists whose video packet count (wolf-agent reads the node's conntrack
+      for its `--video-port`) has not risen for `streamStallTimeout` froze; the Session ends
+      (XERK-1741). Needs `net.netfilter.nf_conntrack_acct=1` on the session node (Talos
+      `nvidia-gpu` role); without it, or on an old pod, the check is off. `stream_liveness_test.go`.
     - A pod create rejected as Invalid ends the Session: CRD CEL cannot check every pod field
       (keys nested in arrays exceed the cost budget, annotation size). `TestInvalidPodEndsSession`.
     - A Session whose `spec.pairingReference` Pairing is gone (client revoked) is ended; Pairing

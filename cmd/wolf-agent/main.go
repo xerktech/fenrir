@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"games-on-whales.github.io/direwolf/pkg/conntrack"
 	"games-on-whales.github.io/direwolf/pkg/controllers"
 	"games-on-whales.github.io/direwolf/pkg/util"
 	"games-on-whales.github.io/direwolf/pkg/wolfapi"
@@ -30,6 +31,7 @@ func main() {
 	serverPort := flag.Int("port", 443, "Port to listen on")
 	wolfSocketPath := flag.String("socket", "/var/run/wolf.sock", "Path to wolf.sock")
 	tokenFile := flag.String("token-file", "", "Path to a file holding the bearer token required on /api/v1/ (required)")
+	videoPort := flag.Int("video-port", 0, "Wolf's video RTP port, whose outbound packets "+controllers.VideoPacketsPath+" counts (0: not counted)")
 	klog.InitFlags(nil)
 	flag.Parse()
 
@@ -107,6 +109,9 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.Handle("/api/v1/", apiHandler(token, &client, &ready))
+	mux.Handle(controllers.VideoPacketsPath, wolfapi.RequireBearerToken(token.Token, controllers.VideoPacketsHandler(func() (controllers.VideoPackets, error) {
+		return controllers.ReadVideoPackets(*videoPort, conntrack.AcctPath, conntrack.TablePath)
+	})))
 
 	// Start HTTPS server
 	server := newServer(*serverPort, mux, serverTLSConfig(certs))
