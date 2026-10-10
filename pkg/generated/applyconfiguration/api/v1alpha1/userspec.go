@@ -27,7 +27,9 @@ import (
 type UserSpecApplyConfiguration struct {
 	// Resources defines the maximum resource requests and limits that the app
 	// container can have. If an app requests exceeds these values,
-	// the app will fail to start.
+	// the app will fail to start. It does not cap DRA ResourceClaims
+	// (App.spec.gpu or the App template's resourceClaims): Apps are
+	// admin-authored and trusted to size their own GPU claims.
 	Resources *v1.ResourceRequirements `json:"resources,omitempty"`
 	// Volumes defines the volumes that can be mounted by the session's pods.
 	Volumes []v1.Volume `json:"volumes,omitempty"`

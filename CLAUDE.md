@@ -122,6 +122,9 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     - Exception: `volumeAttributesClassName` follows the template once the claim is Bound (only
       then may it change); once set it can't be unset, so a dropped one stays (XERK-1554).
   - `App.spec.gpu` becomes a per-Session DRA ResourceClaim (`pkg/controllers/gpu_claim.go`).
+    - `User.spec.resources` caps only requests/limits, never DRA claims: Apps are admin-authored
+      and their author can already run any pod spec, so a per-User GPU policy adds no boundary
+      (XERK-1329). An App template's own resourceClaims may still ask for more than one device.
   - Watches session pods (label `direwolf/session=true` only) to re-reconcile their Session.
 - **wolf-agent** (`pkg/controllers/agent.go`, `pkg/wolfapi`, `pkg/fakeudev`): sidecar talking to
   Wolf's HTTP API over a mounted unix socket.

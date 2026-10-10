@@ -15,7 +15,7 @@
     "spec": {
       "properties": {
         "resources": {
-          "description": "Resources defines the maximum resource requests and limits that the app\ncontainer can have. If an app requests exceeds these values,\nthe app will fail to start.",
+          "description": "Resources defines the maximum resource requests and limits that the app\ncontainer can have. If an app requests exceeds these values,\nthe app will fail to start. It does not cap DRA ResourceClaims\n(App.spec.gpu or the App template's resourceClaims): Apps are\nadmin-authored and trusted to size their own GPU claims.",
           "properties": {
             "claims": {
               "description": "Claims lists the names of resources, defined in spec.resourceClaims,\nthat are used by this container.\n\nThis field depends on the\nDynamicResourceAllocation feature gate.\n\nThis field is immutable. It can only be set for containers.",
