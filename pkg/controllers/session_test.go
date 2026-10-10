@@ -728,6 +728,96 @@ func TestBuildPodRejectsWolfAgentHotplugOverride(t *testing.T) {
 	}
 }
 
+// The operator's volumes hold wolf-agent's token and TLS key, Wolf's API
+// socket and config, and Wolf's preload shim: an App container mounting one
+// by name could drive Wolf or impersonate wolf-agent (XERK-1366).
+func TestBuildPodRejectsAppMountOfOperatorVolume(t *testing.T) {
+	mounts := map[string]corev1.VolumeMount{
+		"plain":       {MountPath: "/x"},
+		"subPath":     {MountPath: "/x", SubPath: "tls.key"},
+		"subPathExpr": {MountPath: "/x", SubPathExpr: "$(POD_NAME)"},
+	}
+	for _, name := range []string{"wolf-agent-token", "wolf-cfg", "wolf-data", wolfLoopbackShimVolume} {
+		for kind, mount := range mounts {
+			for _, initCtr := range []bool{false, true} {
+				sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml")
+				app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// The informer's copy: buildPod reads it back below.
+				mount.Name = name
+				if initCtr {
+					app.Spec.Template.Spec.InitContainers = append(app.Spec.Template.Spec.InitContainers,
+						corev1.Container{Name: "steal", Image: "busybox", VolumeMounts: []corev1.VolumeMount{mount}})
+				} else {
+					ctr := &app.Spec.Template.Spec.Containers[0]
+					ctr.VolumeMounts = append(ctr.VolumeMounts, mount)
+				}
+				if _, err := sc.buildPod(sess); err == nil || !strings.Contains(err.Error(), "reserved for the operator") {
+					t.Errorf("%s mount of %s (init container: %v): buildPod err = %v, want it rejected", kind, name, initCtr, err)
+				}
+			}
+		}
+	}
+}
+
+func TestBuildPodRejectsAppDeviceOfOperatorVolume(t *testing.T) {
+	for _, initCtr := range []bool{false, true} {
+		sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+		app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The informer's copy: buildPod reads it back below.
+		dev := corev1.VolumeDevice{Name: "wolf-data", DevicePath: "/dev/xvda"}
+		if initCtr {
+			app.Spec.Template.Spec.InitContainers = append(app.Spec.Template.Spec.InitContainers,
+				corev1.Container{Name: "steal", Image: "busybox", VolumeDevices: []corev1.VolumeDevice{dev}})
+		} else {
+			ctr := &app.Spec.Template.Spec.Containers[0]
+			ctr.VolumeDevices = append(ctr.VolumeDevices, dev)
+		}
+		if _, err := sc.buildPod(sess); err == nil || !strings.Contains(err.Error(), "reserved for the operator") {
+			t.Errorf("init container %v: buildPod err = %v, want the wolf-data volumeDevice rejected", initCtr, err)
+		}
+	}
+}
+
+// Keeps operatorVolumes in step with buildPod: a volume added there and not
+// listed would be mountable by the App.
+func TestOperatorVolumesListsEveryOperatorVolume(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	data, err := os.ReadFile("../../examples/steam.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var app v1alpha1api.App
+	if err = sigsyaml.Unmarshal(data, &app); err != nil {
+		t.Fatal(err)
+	}
+	userData, err := os.ReadFile("../../examples/user.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var user v1alpha1api.User
+	if err = sigsyaml.Unmarshal(userData, &user); err != nil {
+		t.Fatal(err)
+	}
+	notOperator := map[string]bool{}
+	for _, v := range app.Spec.Template.Spec.Volumes {
+		notOperator[v.Name] = true
+	}
+	for _, v := range user.Spec.Volumes {
+		notOperator[v.Name] = true
+	}
+	for _, v := range pod.Spec.Volumes {
+		if !notOperator[v.Name] && !slices.Contains(operatorVolumes, v.Name) {
+			t.Errorf("pod volume %q is the operator's but not in operatorVolumes", v.Name)
+		}
+	}
+}
+
 func TestSessionPodCarriesAppTemplateMetadata(t *testing.T) {
 	sc, _, sess, pod := reconcileFixtures(t, "../../examples/user.yaml", "testdata/app-pod-labels.yaml")
 	if got := pod.Labels["xerktech.com/gpu-claim"]; got != "direwolf-gpu" {

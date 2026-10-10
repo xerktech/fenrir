@@ -976,6 +976,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	for i := range podToCreate.Spec.Containers {
 		dropMknod(&podToCreate.Spec.Containers[i])
 	}
+	if err := validateNoOperatorVolumeMounts(&podToCreate.Spec); err != nil {
+		return nil, err
+	}
 
 	if podToCreate.Labels == nil {
 		podToCreate.Labels = map[string]string{}
@@ -1842,6 +1845,47 @@ const (
 	hotplugDevVolume  = "direwolf-dev-input"
 	hotplugUdevVolume = "direwolf-udev"
 )
+
+// operatorVolumes are the pod volumes buildPod adds. Their contents are the
+// operator's sidecars' alone: wolf-agent's bearer token and TLS key, Wolf's API
+// socket and config, Wolf's preload shim. An App container mounting one by
+// name could drive Wolf or impersonate wolf-agent to the operator, so
+// validateNoOperatorVolumeMounts rejects it. The operator mounts the ones the
+// App needs (wolf-runtime, its wolf-data subPath, hotplug) itself.
+var operatorVolumes = []string{
+	"wolf-cfg",
+	"wolf-runtime",
+	"wolf-data",
+	wolfLoopbackShimVolume,
+	hotplugDevVolume,
+	hotplugUdevVolume,
+	"wolf-agent-token",
+}
+
+// validateNoOperatorVolumeMounts rejects App template containers (init too)
+// that mount an operator volume. Run it before the operator adds its own
+// mounts and containers. The App's game code is untrusted and the catalogue
+// generates Apps, so this is a security boundary, not a misconfiguration check.
+func validateNoOperatorVolumeMounts(spec *corev1.PodSpec) error {
+	for _, ctrs := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
+		for _, ctr := range ctrs {
+			names := make([]string, 0, len(ctr.VolumeMounts)+len(ctr.VolumeDevices))
+			for _, m := range ctr.VolumeMounts {
+				names = append(names, m.Name)
+			}
+			// A block-mode claim is attached as a device, not mounted.
+			for _, d := range ctr.VolumeDevices {
+				names = append(names, d.Name)
+			}
+			for _, name := range names {
+				if slices.Contains(operatorVolumes, name) {
+					return fmt.Errorf("validation failed: container %q in the App template mounts volume %q, which is reserved for the operator", ctr.Name, name)
+				}
+			}
+		}
+	}
+	return nil
+}
 
 // validateNoHotplugOverride rejects wolf-agent mounts at or under the hotplug
 // paths: wolf-agent would then mknod into (and clear) something other than
