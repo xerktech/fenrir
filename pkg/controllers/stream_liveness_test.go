@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,16 +40,20 @@ func (c *SessionController) age(sess *v1alpha1types.Session, d time.Duration) {
 	defer c.videoProgress.mu.Unlock()
 	key := sess.Namespace + "/" + sess.Name
 	p := c.videoProgress.m[key]
-	p.changedAt = p.changedAt.Add(-d)
+	p.risenAt = p.risenAt.Add(-d)
 	c.videoProgress.m[key] = p
 }
 
 // A stream Wolf still lists but that sent no video for streamStallTimeout
 // froze (XERK-1741): its Session ends.
 func TestFrozenStreamEndsSession(t *testing.T) {
-	_, f, sess := streamingFixture(t, `{"counted":true,"packets":500}`)
+	agent, f, sess := streamingFixture(t, `{"counted":true,"flows":{"dst=c dport=1":500}}`)
 	ctx := context.Background()
 
+	if err := f.sc.reconcileActiveStreams(ctx, sess, readyPod(sess)); err != nil {
+		t.Fatal(err)
+	}
+	agent.setVideoPackets(`{"counted":true,"flows":{"dst=c dport=1":900}}`)
 	if err := f.sc.reconcileActiveStreams(ctx, sess, readyPod(sess)); err != nil {
 		t.Fatal(err)
 	}
@@ -66,12 +72,15 @@ func TestFrozenStreamEndsSession(t *testing.T) {
 
 // A count that keeps rising is a live stream, however long it runs.
 func TestFlowingStreamKeepsSession(t *testing.T) {
-	agent, f, sess := streamingFixture(t, `{"counted":true,"packets":500}`)
+	agent, f, sess := streamingFixture(t, `{"counted":true,"flows":{}}`)
 	ctx := context.Background()
-	for i := range 3 {
-		agent.mu.Lock()
-		agent.videoPackets = fmt.Sprintf(`{"counted":true,"packets":%d}`, 500+i)
-		agent.mu.Unlock()
+	for i := range 4 {
+		// The new flow rises while a previous attach's expires.
+		old := ""
+		if i < 2 {
+			old = `"dst=c dport=1":18638,`
+		}
+		agent.setVideoPackets(fmt.Sprintf(`{"counted":true,"flows":{%s"dst=c dport=2":%d}}`, old, 500+i))
 		if err := f.sc.reconcileActiveStreams(ctx, sess, readyPod(sess)); err != nil {
 			t.Fatal(err)
 		}
@@ -88,11 +97,14 @@ func TestUnknownVideoCountKeepsSession(t *testing.T) {
 	for name, body := range map[string]string{
 		"pod without the endpoint": "",
 		"node without accounting":  `{"counted":false,"packets":0}`,
-		"stream not started":       `{"counted":true,"packets":0}`,
-		"garbled":                  `{`,
+		"stream not started":       `{"counted":true}`,
+		// A /resume whose client has not started video yet: the previous
+		// attach's flow is still in the table at its final count.
+		"resumed, video not started": `{"counted":true,"flows":{"dst=c dport=1":18638}}`,
+		"garbled":                    `{`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, f, sess := streamingFixture(t, body)
+			agent, f, sess := streamingFixture(t, body)
 			for range 2 {
 				if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
 					t.Fatal(err)
@@ -100,6 +112,8 @@ func TestUnknownVideoCountKeepsSession(t *testing.T) {
 				if f.sc.videoProgress.m != nil {
 					f.sc.age(sess, time.Hour)
 				}
+				// A flow expiring is not a start either.
+				agent.setVideoPackets(strings.Replace(body, `"dst=c dport=1":18638`, "", 1))
 			}
 			if !f.sessionExists(t, sess.Name) {
 				t.Error("session ended without a known stall")
@@ -108,29 +122,49 @@ func TestUnknownVideoCountKeepsSession(t *testing.T) {
 	}
 }
 
-// A new attach (a /resume) starts its own count: the old stream's stale
-// timestamp must not end the new one.
+// A new attach (a /resume), even one that only bumps attachedGeneration,
+// starts its own clock and baseline: the old stream's stall must not end the
+// new one, and its leftover flow is not the new stream's start.
 func TestReattachRestartsStallClock(t *testing.T) {
 	var c SessionController
 	sess := &v1alpha1types.Session{}
 	sess.Namespace, sess.Name, sess.UID = "ns", "alex-1", "u1"
 	sess.Status.WolfSessionID, sess.Status.AttachedGeneration = "10", 1
 	now := time.Now()
-	c.videoProgress.stalledFor(sess, 500, now)
-	if d := c.videoProgress.stalledFor(sess, 500, now.Add(time.Minute)); d != time.Minute {
+	flows := func(n uint64) map[string]uint64 { return map[string]uint64{"dst=c dport=1": n} }
+	c.videoProgress.stalledFor(sess, flows(400), now)
+	c.videoProgress.stalledFor(sess, flows(500), now)
+	if d := c.videoProgress.stalledFor(sess, flows(500), now.Add(time.Minute)); d != time.Minute {
 		t.Fatalf("stalledFor = %s, want 1m", d)
 	}
-	sess.Status.WolfSessionID, sess.Status.AttachedGeneration = "11", 2
-	if d := c.videoProgress.stalledFor(sess, 500, now.Add(2*time.Minute)); d != 0 {
-		t.Errorf("stalledFor after a re-attach = %s, want 0", d)
+	for name, attach := range map[string]func(){
+		"new generation":  func() { sess.Status.AttachedGeneration++ },
+		"new Wolf stream": func() { sess.Status.WolfSessionID += "1" },
+		"new Session":     func() { sess.UID += "1" },
+	} {
+		attach()
+		for i := range 2 {
+			if d := c.videoProgress.stalledFor(sess, flows(500), now.Add(time.Duration(i+2)*time.Minute)); d != 0 {
+				t.Errorf("%s: stalledFor = %s, want 0", name, d)
+			}
+		}
 	}
-	sess.UID = "u2" // a new Session of the same name
-	if d := c.videoProgress.stalledFor(sess, 500, now.Add(3*time.Minute)); d != 0 {
-		t.Errorf("stalledFor for a recreated Session = %s, want 0", d)
+}
+
+// A deleted Session's progress is dropped.
+func TestDeletedSessionForgetsProgress(t *testing.T) {
+	_, f, sess := streamingFixture(t, `{"counted":true,"flows":{"dst=c dport=1":5}}`)
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatal(err)
 	}
-	c.videoProgress.forget("ns", "alex-1")
-	if len(c.videoProgress.m) != 0 {
-		t.Errorf("forget left %v", c.videoProgress.m)
+	if len(f.sc.videoProgress.m) != 1 {
+		t.Fatalf("progress %v, want the session's", f.sc.videoProgress.m)
+	}
+	if err := f.sc.Reconcile(sess.Namespace, sess.Name, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.sc.videoProgress.m) != 0 {
+		t.Errorf("Reconcile of a deleted Session left %v", f.sc.videoProgress.m)
 	}
 }
 
@@ -147,7 +181,7 @@ func TestReadVideoPackets(t *testing.T) {
 		port int
 		want VideoPackets
 	}{
-		{"1\n", 20004, VideoPackets{Counted: true, Packets: 42}},
+		{"1\n", 20004, VideoPackets{Counted: true, Flows: map[string]uint64{"dst=c dport=5": 42}}},
 		{"0\n", 20004, VideoPackets{}},
 		{"1\n", 0, VideoPackets{}},
 	} {
@@ -155,7 +189,7 @@ func TestReadVideoPackets(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, err := ReadVideoPackets(tc.port, acct, table)
-		if err != nil || got != tc.want {
+		if err != nil || got.Counted != tc.want.Counted || !maps.Equal(got.Flows, tc.want.Flows) {
 			t.Errorf("ReadVideoPackets(%d) with acct %q = %+v, %v; want %+v", tc.port, tc.acct, got, err, tc.want)
 		}
 	}

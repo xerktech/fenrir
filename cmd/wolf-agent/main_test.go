@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"games-on-whales.github.io/direwolf/pkg/controllers"
 	"games-on-whales.github.io/direwolf/pkg/util"
 	"games-on-whales.github.io/direwolf/pkg/wolfapi"
 )
@@ -533,4 +534,30 @@ func TestProxyFlushesHeadersOfIdleStream(t *testing.T) {
 	}
 	cancel()
 	resp.Body.Close()
+}
+
+// The video flow counts need the token too.
+func TestVideoPacketsRequiresToken(t *testing.T) {
+	f, _ := testTokenFile(t, "s3cret")
+	agent := httptest.NewServer(videoPacketsHandler(f, func() (controllers.VideoPackets, error) {
+		return controllers.VideoPackets{Counted: true}, nil
+	}))
+	defer agent.Close()
+	for auth, want := range map[string]int{"": http.StatusUnauthorized, "Bearer nope": http.StatusUnauthorized, "Bearer s3cret": http.StatusOK} {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, agent.URL+controllers.VideoPacketsPath, http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("Authorization %q: %d, want %d", auth, resp.StatusCode, want)
+		}
+	}
 }

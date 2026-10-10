@@ -1,6 +1,7 @@
 package conntrack
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,7 +10,7 @@ import (
 
 // The tuple whose sport is the port counts, in either direction; other
 // ports, protocols, and flows without counters don't.
-func TestUDPPacketsFrom(t *testing.T) {
+func TestUDPFlowsFrom(t *testing.T) {
 	table := strings.Join([]string{
 		// Client-originated (its pings come first): Wolf's packets are the reply's.
 		"ipv4     2 udp      17 119 src=10.0.0.9 dst=10.10.10.34 sport=51000 dport=20004 packets=40 bytes=800 src=10.10.10.34 dst=10.0.0.9 sport=20004 dport=51000 packets=1000 bytes=900000 [ASSURED] mark=0 zone=0 use=2",
@@ -27,26 +28,27 @@ func TestUDPPacketsFrom(t *testing.T) {
 	if err := os.WriteFile(path, []byte(table), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := UDPPacketsFrom(path, 20004)
+	got, err := UDPFlowsFrom(path, 20004)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != 1007 {
-		t.Errorf("UDPPacketsFrom = %d, want 1007", got)
+	want := map[string]uint64{"dst=10.0.0.9 dport=51000": 1000, "dst=fd00::9 dport=51001": 7}
+	if !maps.Equal(got, want) {
+		t.Errorf("UDPFlowsFrom = %v, want %v", got, want)
 	}
-	if got, err := UDPPacketsFrom(path, 2000); err != nil || got != 0 {
-		t.Errorf("UDPPacketsFrom(prefix port) = %d, %v; want 0", got, err)
+	if got, err := UDPFlowsFrom(path, 2000); err != nil || len(got) != 0 {
+		t.Errorf("UDPFlowsFrom(prefix port) = %v, %v; want none", got, err)
 	}
 }
 
-func TestUDPPacketsFromRejectsBadCounter(t *testing.T) {
+func TestUDPFlowsFromRejectsBadCounter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nf_conntrack")
 	line := "ipv4 2 udp 17 1 src=a dst=b sport=1 dport=2 packets=x bytes=1\n"
 	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UDPPacketsFrom(path, 1); err == nil {
-		t.Error("UDPPacketsFrom accepted a non-numeric counter")
+	if _, err := UDPFlowsFrom(path, 1); err == nil {
+		t.Error("UDPFlowsFrom accepted a non-numeric counter")
 	}
 }
 

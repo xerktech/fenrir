@@ -271,6 +271,12 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 	return a
 }
 
+func (a *fakeAgent) setVideoPackets(body string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.videoPackets = body
+}
+
 // testAgentCert is the serving cert every fakeAgent presents and tokenSecret
 // pins.
 var testAgentCert = sync.OnceValues(func() ([][]byte, error) {

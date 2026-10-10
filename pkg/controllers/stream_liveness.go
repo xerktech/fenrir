@@ -27,12 +27,15 @@ const VideoPacketsPath = "/agent/v1/video-packets"
 // only a new pod streams again (XERK-1688), so the game is lost either way.
 const streamStallTimeout = 30 * time.Second
 
-// VideoPackets is VideoPacketsPath's response. Counted is false where the
-// node does not count packets per flow (net.netfilter.nf_conntrack_acct off)
-// or the agent was not given the video port; Packets is then meaningless.
+// VideoPackets is VideoPacketsPath's response: the packets sent so far by
+// each flow from the video port, keyed by peer. The node's table also keeps a
+// previous attach's flow for minutes after it ended, so only a flow's count
+// rising shows video. Counted is false where the node does not count packets
+// per flow (net.netfilter.nf_conntrack_acct off) or the agent was not given
+// the video port; Flows is then empty.
 type VideoPackets struct {
-	Counted bool   `json:"counted"`
-	Packets uint64 `json:"packets"`
+	Counted bool              `json:"counted"`
+	Flows   map[string]uint64 `json:"flows,omitempty"`
 }
 
 // ReadVideoPackets counts the packets sent from videoPort in the node's
@@ -49,11 +52,11 @@ func ReadVideoPackets(videoPort int, acctPath, tablePath string) (VideoPackets, 
 	if !counted {
 		return VideoPackets{}, nil
 	}
-	n, err := conntrack.UDPPacketsFrom(tablePath, videoPort)
+	flows, err := conntrack.UDPFlowsFrom(tablePath, videoPort)
 	if err != nil {
 		return VideoPackets{}, fmt.Errorf("reading conntrack table: %w", err)
 	}
-	return VideoPackets{Counted: true, Packets: n}, nil
+	return VideoPackets{Counted: true, Flows: flows}, nil
 }
 
 // VideoPacketsHandler serves read's count as JSON.
@@ -92,13 +95,16 @@ func fetchVideoPackets(ctx context.Context, client *http.Client, baseURL string)
 	return v, nil
 }
 
-// streamProgress is the last change seen in one attach's video packet count.
+// streamProgress is what one attach's video flows last looked like.
 type streamProgress struct {
 	uid           types.UID
 	wolfSessionID string
 	generation    int64 // status.attachedGeneration
-	packets       uint64
-	changedAt     time.Time
+	flows         map[string]uint64
+	// rose is whether any flow's count has risen since the attach was first
+	// seen, and risenAt when one last did.
+	rose    bool
+	risenAt time.Time
 }
 
 // videoProgress tracks streamProgress per Session ("namespace/name"). It is
@@ -109,10 +115,13 @@ type videoProgress struct {
 	m  map[string]streamProgress
 }
 
-// stalledFor records count for session's current attach at now, and returns
-// how long its count has not changed, or 0 while it has never been above
-// zero (the client has not started the stream yet).
-func (p *videoProgress) stalledFor(session *v1alpha1types.Session, count uint64, now time.Time) time.Duration {
+// stalledFor records flows for session's current attach at now, and returns
+// how long since a flow's count last rose, or 0 while none has risen since
+// the attach was first seen (its client has not started video yet). The
+// flows first seen are only a baseline: they may be a previous attach's,
+// still counted at their final value. A flow that expires is no progress, and
+// no stall either.
+func (p *videoProgress) stalledFor(session *v1alpha1types.Session, flows map[string]uint64, now time.Time) time.Duration {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.m == nil {
@@ -121,17 +130,25 @@ func (p *videoProgress) stalledFor(session *v1alpha1types.Session, count uint64,
 	key := session.Namespace + "/" + session.Name
 	prev, ok := p.m[key]
 	if !ok || prev.uid != session.UID || prev.wolfSessionID != session.Status.WolfSessionID ||
-		prev.generation != session.Status.AttachedGeneration || prev.packets != count {
+		prev.generation != session.Status.AttachedGeneration {
 		p.m[key] = streamProgress{
 			uid: session.UID, wolfSessionID: session.Status.WolfSessionID,
-			generation: session.Status.AttachedGeneration, packets: count, changedAt: now,
+			generation: session.Status.AttachedGeneration, flows: flows,
 		}
 		return 0
 	}
-	if count == 0 {
+	for peer, n := range flows {
+		if n > prev.flows[peer] {
+			prev.rose, prev.risenAt = true, now
+			break
+		}
+	}
+	prev.flows = flows
+	p.m[key] = prev
+	if !prev.rose {
 		return 0
 	}
-	return now.Sub(prev.changedAt)
+	return now.Sub(prev.risenAt)
 }
 
 // forget drops a deleted Session's progress.
@@ -142,8 +159,9 @@ func (p *videoProgress) forget(namespace, name string) {
 }
 
 // streamStalledReason asks wolf-agent for the attached stream's video packet
-// count and returns why the Session should end if it has not risen for
-// streamStallTimeout, else "". Not knowing the count (an old pod, a node
+// counts and returns why the Session should end if, having risen during this
+// attach, none has risen for streamStallTimeout, else "". Not knowing the
+// counts (an old pod, a node
 // without packet accounting, an agent error) never ends a Session.
 func (c *SessionController) streamStalledReason(ctx context.Context, session *v1alpha1types.Session, client *http.Client, baseURL string) string {
 	v, err := fetchVideoPackets(ctx, client, baseURL)
@@ -155,7 +173,7 @@ func (c *SessionController) streamStalledReason(ctx context.Context, session *v1
 		klog.V(2).Infof("Session %s/%s: node does not count video packets (net.netfilter.nf_conntrack_acct); not checking for a frozen stream", session.Namespace, session.Name)
 		return ""
 	}
-	if d := c.videoProgress.stalledFor(session, v.Packets, time.Now()); d >= streamStallTimeout {
+	if d := c.videoProgress.stalledFor(session, v.Flows, time.Now()); d >= streamStallTimeout {
 		return fmt.Sprintf("its stream %s sent no video for %s while Wolf still lists it: the stream froze", session.Status.WolfSessionID, d.Round(time.Second))
 	}
 	return ""

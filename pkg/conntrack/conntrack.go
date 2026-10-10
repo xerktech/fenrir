@@ -28,36 +28,39 @@ func Counted(acctPath string) (bool, error) {
 	return strings.TrimSpace(string(b)) == "1", nil
 }
 
-// UDPPacketsFrom sums, over the UDP flows in the table at path, the packets
-// sent from local port port: the counter of each tuple (original or reply
+// UDPFlowsFrom returns, for each UDP flow in the table at path that sends
+// from local port port, the packets it has sent, keyed by its peer
+// ("dst=ADDR dport=PORT"): the counter of the tuple (original or reply
 // direction) whose sport is port. Flows created before accounting was turned
-// on have no counters and add nothing. A forwarded flow whose source port
-// happens to be port adds its packets too: that can only hide a stall, never
-// fake one.
-func UDPPacketsFrom(path string, port int) (uint64, error) {
+// on have no counters and are left out. A forwarded flow whose source port
+// happens to be port is included too: a caller watching for counts to rise
+// can only be misled into seeing progress, never a stall.
+func UDPFlowsFrom(path string, port int) (map[string]uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, fmt.Errorf("opening %s: %w", path, err)
+		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer f.Close()
-	return udpPacketsFrom(f, port)
+	return udpFlowsFrom(f, port)
 }
 
-// udpPacketsFrom parses lines such as
+// udpFlowsFrom parses lines such as
 //
 //	ipv4 2 udp 17 29 src=A dst=B sport=1 dport=2 packets=3 bytes=4 src=B dst=A sport=2 dport=1 packets=5 bytes=6 [ASSURED] mark=0 use=2
 //
 // where each tuple's counters follow its ports.
-func udpPacketsFrom(r io.Reader, port int) (uint64, error) {
+func udpFlowsFrom(r io.Reader, port int) (map[string]uint64, error) {
 	want := strconv.Itoa(port)
-	var total uint64
+	flows := map[string]uint64{}
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) < 3 || fields[2] != "udp" {
 			continue
 		}
-		fromPort := false // the current tuple's sport is port
+		// The current tuple's peer, and whether its sport is port.
+		var dst, dport string
+		fromPort := false
 		for _, f := range fields[3:] {
 			k, v, ok := strings.Cut(f, "=")
 			if !ok {
@@ -65,23 +68,27 @@ func udpPacketsFrom(r io.Reader, port int) (uint64, error) {
 			}
 			switch k {
 			case "src":
-				fromPort = false
+				dst, dport, fromPort = "", "", false
+			case "dst":
+				dst = v
 			case "sport":
 				fromPort = v == want
+			case "dport":
+				dport = v
 			case "packets":
 				if !fromPort {
 					continue
 				}
 				n, err := strconv.ParseUint(v, 10, 64)
 				if err != nil {
-					return 0, fmt.Errorf("parsing %q: %w", f, err)
+					return nil, fmt.Errorf("parsing %q: %w", f, err)
 				}
-				total += n
+				flows["dst="+dst+" dport="+dport] += n
 			}
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return 0, fmt.Errorf("reading conntrack table: %w", err)
+		return nil, fmt.Errorf("reading conntrack table: %w", err)
 	}
-	return total, nil
+	return flows, nil
 }

@@ -109,9 +109,9 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.Handle("/api/v1/", apiHandler(token, &client, &ready))
-	mux.Handle(controllers.VideoPacketsPath, wolfapi.RequireBearerToken(token.Token, controllers.VideoPacketsHandler(func() (controllers.VideoPackets, error) {
+	mux.Handle(controllers.VideoPacketsPath, videoPacketsHandler(token, func() (controllers.VideoPackets, error) {
 		return controllers.ReadVideoPackets(*videoPort, conntrack.AcctPath, conntrack.TablePath)
-	})))
+	}))
 
 	// Start HTTPS server
 	server := newServer(*serverPort, mux, serverTLSConfig(certs))
@@ -128,6 +128,12 @@ func main() {
 // *tokenFile rather than a token so the file can't be snapshotted at startup.
 func apiHandler(token *tokenFile, client *http.Client, ready *atomic.Bool) http.Handler {
 	return wolfapi.RequireBearerToken(token.Token, proxyHandler(client, ready))
+}
+
+// videoPacketsHandler serves the video flow counts behind the bearer token,
+// like /api/v1/: under hostNetwork the agent port is on the node IP.
+func videoPacketsHandler(token *tokenFile, read func() (controllers.VideoPackets, error)) http.Handler {
+	return wolfapi.RequireBearerToken(token.Token, controllers.VideoPacketsHandler(read))
 }
 
 // Under hostNetwork the agent port is on the node IP, so anyone who can reach
