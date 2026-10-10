@@ -641,6 +641,8 @@ func appResourceClaims(containers []corev1.Container) []corev1.ResourceClaim {
 // validateAppResources checks if the app's resource requirements are within the user's policy.
 // It returns an error if any app request/limit exceeds the user policy.
 // If the policy is nil, it allows any resources.
+// DRA claims (appResources.Claims) are deliberately not checked: Apps are
+// admin-authored, and an App author can already run any pod spec (XERK-1329).
 func validateAppResources(appResources corev1.ResourceRequirements, userPolicy *corev1.ResourceRequirements) (corev1.ResourceRequirements, error) {
 	// If there's no policy, the app's resources are inherently valid.
 	if userPolicy == nil {
