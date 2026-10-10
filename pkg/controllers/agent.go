@@ -103,7 +103,7 @@ func (a *Agent) Run(ctx context.Context) {
 // A stream that ended before it joined is not caught: nothing tells it from
 // one still waiting for its pings.
 func (a *Agent) catchUpMissedEnd(ctx context.Context) {
-	stream := a.lobby.joinedStream()
+	stream, key := a.lobby.joinedStream()
 	if stream == "" {
 		return
 	}
@@ -125,15 +125,22 @@ func (a *Agent) catchUpMissedEnd(ctx context.Context) {
 		return
 	}
 	klog.Infof("Session %s left the lobby while the event stream was down: ending it", stream)
-	a.lobby.ended(stream)
-	// Wolf lists a stream's session ID as client_id.
-	if slices.ContainsFunc(sessions, func(s wolfapi.Session) bool { return s.ClientID == stream }) {
-		// Paused: stop it as a pause event would have.
+	// Wolf lists a stream's session ID as client_id. IDs repeat across
+	// streams (wolf_clients.go), so a listed stream with the ID but another
+	// key is a resume Wolf started since: ours was stopped, and the new one
+	// must be left alone.
+	paused := slices.ContainsFunc(sessions, func(s wolfapi.Session) bool {
+		return s.ClientID == stream && (key == "" || s.AESKey == key)
+	})
+	if paused {
+		// Stop it as a pause event would have. Failed, the stream stays
+		// joined, so the next subscribe tries again.
 		if err := a.WolfClient.StopSession(ctx, stream); err != nil {
 			utilruntime.HandleError(err)
 			return
 		}
 	}
+	a.lobby.ended(stream)
 	a.clearDevices()
 }
 
@@ -206,7 +213,7 @@ func (a *Agent) handleEvents(ctx context.Context, ch <-chan *sse.Event) {
 					utilruntime.HandleError(fmt.Errorf("failed to unmarshal %s: %w", ev.Event, err))
 					continue
 				}
-				a.lobby.streamSetup(setup.SessionID, wolfapi.WolfEventType(ev.Event) == wolfapi.VideoSessionEventType)
+				a.lobby.streamSetup(setup.SessionID, setup.AESKey, wolfapi.WolfEventType(ev.Event) == wolfapi.VideoSessionEventType)
 			case wolfapi.RTPVideoPingEventType, wolfapi.RTPAudioPingEventType:
 				a.lobby.ping(ctx, wolfapi.WolfEventType(ev.Event) == wolfapi.RTPVideoPingEventType)
 			default:

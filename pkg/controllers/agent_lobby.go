@@ -57,6 +57,7 @@ type lobbyJoiner struct {
 
 	mu                   sync.Mutex
 	stream               string // Wolf session ID being (or already) joined
+	key                  string // its AES key, from the AudioSession event
 	video, audio         bool   // its setup events were seen
 	videoPing, audioPing bool   // pings seen after them
 	state                lobbyJoinState
@@ -65,8 +66,9 @@ type lobbyJoiner struct {
 	held                 []wolfapi.UnplugDeviceEvent // unplugs seen while a join was in flight
 }
 
-// streamSetup records a VideoSession (video) or AudioSession event.
-func (j *lobbyJoiner) streamSetup(sessionID string, video bool) {
+// streamSetup records a VideoSession (video) or AudioSession event; key is
+// an AudioSession's AES key.
+func (j *lobbyJoiner) streamSetup(sessionID, key string, video bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if sessionID != j.stream || (video && j.video) || (!video && j.audio) {
@@ -76,6 +78,7 @@ func (j *lobbyJoiner) streamSetup(sessionID string, video bool) {
 		j.video = true
 	} else {
 		j.audio = true
+		j.key = key
 	}
 }
 
@@ -154,14 +157,15 @@ func (j *lobbyJoiner) joinLobby(ctx context.Context, stream string) (string, err
 	return lobbies[0].ID, nil
 }
 
-// joinedStream returns the stream joined to the lobby, if any.
-func (j *lobbyJoiner) joinedStream() string {
+// joinedStream returns the session ID and AES key of the stream joined to
+// the lobby, if any.
+func (j *lobbyJoiner) joinedStream() (stream, key string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.state != lobbyJoinDone {
-		return ""
+		return "", ""
 	}
-	return j.stream
+	return j.stream, j.key
 }
 
 // ended forgets a paused or stopped stream.
@@ -200,6 +204,7 @@ func (j *lobbyJoiner) holdsUnplug(ev wolfapi.UnplugDeviceEvent) bool {
 func (j *lobbyJoiner) reset(stream string) {
 	j.ticket++ // cancels a scheduled or in-flight join
 	j.stream = stream
+	j.key = ""
 	j.video, j.audio, j.videoPing, j.audioPing = false, false, false, false
 	j.state = lobbyJoinWaiting
 	j.attempts = 0

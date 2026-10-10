@@ -155,7 +155,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     - Wolf replays no events and its session list has no paused state, so a pause sent while
       no stream is connected is lost. After each subscribe, a joined stream missing from the
       lobby's `connected_sessions` is ended as a pause would (`catchUpMissedEnd`, XERK-1378).
-      Not caught: a stream that ended before it joined. Tests: `TestAgentCatchesUp*`.
+      It stops Wolf's listed session only if its AES key matches: a resume may reuse the ID.
+      Not caught: a stream that ended before it joined. Tests: `TestAgentCatch*`.
   - `fakeudev` is Linux-only for real work (`fakeudev_linux.go` vs `fakeudev_other.go` stub);
     tests touching it behave differently on Windows/macOS.
 - **`pkg/generic`**: typed generic wrappers over client-go informers/listers plus a reusable
