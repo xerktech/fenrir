@@ -10,6 +10,10 @@ paths:
 - An error the Moonlight user should read goes out as HTTP 200 with the error in the XML
   `status_code`/`status_message` (as Sunshine does), via `sendXMLWithHTTPStatus`.
   - moonlight-qt turns a non-2xx HTTP status into a transport error and never shows the message.
+- A `/launch` reply carries `<gamesession>`, a `/resume` reply `<resume>` (as Sunshine does), keyed on
+  the route because a resume with nothing to resume is served by `launchHandler`. Moonlight for
+  Android fails a resume without it: "Missing mandatory field in host response: resume".
+  Tests: `TestLaunchReplyFieldFollowsTheRoute`, `TestResume*` in `resume_test.go`.
 - `--launch-timeout` must stay under moonlight-qt's 120s launch request timeout, or the client
   gives up first and shows a generic error while the session keeps starting.
   - The operator's `unstartedSessionTTL` reaper must outlast it, or cold starts get reaped mid-launch.

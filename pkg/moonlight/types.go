@@ -68,5 +68,9 @@ type App struct {
 type LaunchResponse struct {
 	Response       `xml:",inline"`
 	RTSPSessionURL string `xml:"sessionUrl0"`
-	GameSession    int    `xml:"gamesession"`
+	// A launch answers gamesession, a resume answers resume (as Sunshine
+	// does): Moonlight for Android refuses a /resume reply without
+	// <resume>, "Missing mandatory field in host response: resume".
+	GameSession int `xml:"gamesession,omitempty"`
+	Resume      int `xml:"resume,omitempty"`
 }
