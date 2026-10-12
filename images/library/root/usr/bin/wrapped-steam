@@ -1,0 +1,51 @@
+#! /bin/bash
+
+# Replaces the base image's /usr/bin/wrapped-steam (XERK-1815). That one runs
+# Steam inside a full-screen terminal (`foot -e steam` on Wayland), which
+# covers the labwc desktop: minimising Steam leaves its log in the way, so the
+# right-click menu, the only way to open Heroic, cannot be reached. Here Steam
+# runs without a terminal, its output goes to a log, and Heroic starts beside
+# it. This file is the hook because the labwc autostart, copied to the shared
+# home on first run and never refreshed, calls only /usr/bin/wrapped-steam.
+
+LOG_DIR="${HOME}/.local/state/library"
+mkdir -p "${LOG_DIR}"
+
+# 64 and 32 bit input interposers and fake udev for gamepads
+STEAM_PRELOAD="/usr/lib/selkies_input_interposer.so:/usr/lib/libudev.so.1.0.0-fake:/usr/lib/selkies_input_interposer_32.so:/usr/lib/libudev.so.1.0.0-fake_32"
+PROOT_BWRAP="${HOME}/.local/bin/proot-bwrap"
+STEAM_ARGS=()
+
+# Wayland check
+if [ "${PIXELFLUX_WAYLAND,,}" == "true" ]; then
+  STEAM_ARGS+=(--ozone-platform=wayland)
+fi
+
+bwrap_works() {
+  env -u LD_PRELOAD bwrap \
+    --ro-bind / / \
+    --dev /dev \
+    --proc /proc \
+    --unshare-pid \
+    /bin/true >/dev/null 2>&1
+}
+
+if bwrap_works; then
+  echo "wrapped-steam: user namespaces are available, using bubblewrap"
+  unset BWRAP
+else
+  echo "wrapped-steam: user namespaces are not available, falling back to proot-bwrap"
+  export BWRAP="${BWRAP:-${PROOT_BWRAP}}"
+  if [ ! -x "${BWRAP}" ]; then
+    echo "wrapped-steam: ${BWRAP} is missing or not executable, Steam will not be able to launch games" >&2
+  fi
+  STEAM_ARGS+=(-no-cef-sandbox)
+fi
+
+# setsid: Heroic must outlive this script's session (it otherwise dies with
+# its stdout); wrapped-heroic sets its own preloads.
+setsid -f /usr/bin/wrapped-heroic >"${LOG_DIR}/heroic.log" 2>&1 </dev/null
+
+export LD_PRELOAD="${STEAM_PRELOAD}"
+# In the foreground, as the base image ran it.
+exec /usr/bin/steam "${STEAM_ARGS[@]}" "$@" >"${LOG_DIR}/steam.log" 2>&1 </dev/null
