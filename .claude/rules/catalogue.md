@@ -58,6 +58,8 @@ paths:
 - A name held by a hand-made App is never overwritten; that game is skipped, with an error.
 - Moonlight IDs are an FNV hash in 2^30..2^31-1, clear of hand-written Apps' small IDs.
 - moonlight-proxy serves `appAssetWebP` as WebP, PNG or JPEG (Steam's CDN is JPEG).
+- It serves every cover as PNG scaled to fit 600x800 (`fitBoxArt`): Epic's 1200x1600 took ~8s
+  per request to encode at full size on talos04, and Moonlight showed no cover (XERK-1343).
 - A hidden App is neither listed nor launchable by ID.
 - `App.spec.gpu` is a per-Session ResourceClaim `<session>-gpu` owned by the Session:
   `capacity.requests.memory` for a share, none for the whole card (NVIDIA DRA consumable shares).

@@ -59,20 +59,29 @@ func TestHiddenAppsAreNotListed(t *testing.T) {
 
 // The catalogue stores the box art it fetches (JPEG from Steam's CDN) as is;
 // Moonlight gets it as PNG like a WebP asset.
-func TestAppAssetServesJPEGAsPNG(t *testing.T) {
-	var jpg bytes.Buffer
-	if err := jpeg.Encode(&jpg, image.NewRGBA(image.Rect(0, 0, 6, 9)), nil); err != nil {
-		t.Fatal(err)
-	}
-	s := appServer(t, testApp("game", 7, false, jpg.Bytes()))
 
-	rec := httptest.NewRecorder()
-	s.appAssetHandler(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/appasset?appid=7", http.NoBody))
-	img, err := png.Decode(rec.Body)
-	if err != nil {
-		t.Fatalf("appasset is not a PNG: %v", err)
-	}
-	if b := img.Bounds(); b.Dx() != 6 || b.Dy() != 9 {
-		t.Errorf("appasset is %v, want 6x9", b)
+// A JPEG cover is served as PNG, and one larger than box art needs is scaled
+// down to fit 600x800 (XERK-1343: Epic's 1200x1600 covers timed Moonlight out).
+func TestAppAssetServesJPEGAsPNG(t *testing.T) {
+	for _, tc := range []struct{ w, h, wantW, wantH int }{
+		{6, 9, 6, 9},
+		{1200, 1600, 600, 800},
+		{2560, 1440, 600, 337},
+	} {
+		var jpg bytes.Buffer
+		if err := jpeg.Encode(&jpg, image.NewRGBA(image.Rect(0, 0, tc.w, tc.h)), nil); err != nil {
+			t.Fatal(err)
+		}
+		s := appServer(t, testApp("game", 7, false, jpg.Bytes()))
+
+		rec := httptest.NewRecorder()
+		s.appAssetHandler(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/appasset?appid=7", http.NoBody))
+		img, err := png.Decode(rec.Body)
+		if err != nil {
+			t.Fatalf("%dx%d: appasset is not a PNG: %v", tc.w, tc.h, err)
+		}
+		if b := img.Bounds(); b.Dx() != tc.wantW || b.Dy() != tc.wantH {
+			t.Errorf("%dx%d: appasset is %v, want %dx%d", tc.w, tc.h, b, tc.wantW, tc.wantH)
+		}
 	}
 }
