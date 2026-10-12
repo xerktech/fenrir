@@ -67,6 +67,8 @@ func TestAppAssetServesJPEGAsPNG(t *testing.T) {
 		{6, 9, 6, 9},
 		{1200, 1600, 600, 800},
 		{2560, 1440, 600, 337},
+		{500, 1600, 250, 800},
+		{4096, 10, 600, 1},
 	} {
 		var jpg bytes.Buffer
 		if err := jpeg.Encode(&jpg, image.NewRGBA(image.Rect(0, 0, tc.w, tc.h)), nil); err != nil {
@@ -83,5 +85,16 @@ func TestAppAssetServesJPEGAsPNG(t *testing.T) {
 		if b := img.Bounds(); b.Dx() != tc.wantW || b.Dy() != tc.wantH {
 			t.Errorf("%dx%d: appasset is %v, want %dx%d", tc.w, tc.h, b, tc.wantW, tc.wantH)
 		}
+	}
+}
+
+// An asset that does not decode is an error, not a 200 with an empty body.
+func TestAppAssetUndecodableIsAnError(t *testing.T) {
+	s := appServer(t, testApp("game", 7, false, []byte("garbage")))
+
+	rec := httptest.NewRecorder()
+	s.appAssetHandler(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/appasset?appid=7", http.NoBody))
+	if rec.Code == http.StatusOK {
+		t.Errorf("undecodable appasset answered %d, want an error status", rec.Code)
 	}
 }

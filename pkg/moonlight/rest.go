@@ -985,25 +985,25 @@ func (s *RESTServer) appAssetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "image/png")
-	w.WriteHeader(200)
-
+	// Encoded before any header is written, so a failure is an error status
+	// rather than a 200 with an empty body, and Content-Length is really sent.
 	img, err := decodeAppAsset(app.Spec.AppAssetWebP)
 	if err != nil {
-		klog.Infof("Failed to decode app asset: %s", err)
+		writeErrorResponse(w, http.StatusInternalServerError, fmt.Errorf("decode app asset for %s: %w", appID, err))
 		return
 	}
 
 	pngData := new(bytes.Buffer)
 	encoder := png.Encoder{CompressionLevel: png.BestSpeed}
 	if err = encoder.Encode(pngData, fitBoxArt(img)); err != nil {
-		klog.Infof("Failed to encode png: %s", err)
+		writeErrorResponse(w, http.StatusInternalServerError, fmt.Errorf("encode app asset for %s: %w", appID, err))
 		return
 	}
 
+	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Content-Length", strconv.Itoa(pngData.Len()))
-	_, err = io.Copy(w, pngData)
-	if err != nil {
+	w.WriteHeader(http.StatusOK)
+	if _, err = io.Copy(w, pngData); err != nil {
 		klog.Infof("Failed to write png: %s", err)
 		return
 	}
@@ -1021,6 +1021,9 @@ const (
 
 // fitBoxArt scales img down, keeping its aspect ratio, to fit within
 // boxArtMaxWidth x boxArtMaxHeight. A cover that already fits is unchanged.
+// ApproxBiLinear, not CatmullRom: the kernel scalers allocate a dstW x srcH
+// float buffer (~78MB for a 4096-tall cover), and Moonlight fetches four
+// covers at once against the proxy's 256Mi limit.
 func fitBoxArt(img image.Image) image.Image {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
@@ -1029,7 +1032,7 @@ func fitBoxArt(img image.Image) image.Image {
 	}
 	scale := min(float64(boxArtMaxWidth)/float64(w), float64(boxArtMaxHeight)/float64(h))
 	dst := image.NewRGBA(image.Rect(0, 0, max(1, int(float64(w)*scale)), max(1, int(float64(h)*scale))))
-	draw.CatmullRom.Scale(dst, dst.Bounds(), img, b, draw.Src, nil)
+	draw.ApproxBiLinear.Scale(dst, dst.Bounds(), img, b, draw.Src, nil)
 	return dst
 }
 
