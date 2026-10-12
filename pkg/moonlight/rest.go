@@ -666,13 +666,20 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sendXML(w, LaunchResponse{
+	resp := LaunchResponse{
 		Response: Response{
 			StatusCode: 200,
 		},
 		RTSPSessionURL: streamURL,
-		GameSession:    1,
-	})
+	}
+	// resumeHandler serves a /resume with nothing to resume from here, and
+	// Moonlight reads a resume reply's <resume>, not <gamesession>.
+	if r.URL.Path == "/resume" {
+		resp.Resume = 1
+	} else {
+		resp.GameSession = 1
+	}
+	sendXML(w, resp)
 }
 
 // createSession runs create unless the host is busy for user, in which case
@@ -912,7 +919,7 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 			StatusCode: 200,
 		},
 		RTSPSessionURL: streamURL,
-		GameSession:    1,
+		Resume:         1,
 	})
 }
 

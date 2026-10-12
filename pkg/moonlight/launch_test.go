@@ -744,3 +744,30 @@ func TestLaunchConcurrentUsersRespectLimit(t *testing.T) {
 		t.Errorf("session count = %d, want 1", n)
 	}
 }
+
+// A launch answers <gamesession>; a /resume with no session to resume is a
+// launch too, but must answer <resume> (Moonlight for Android requires it).
+func TestLaunchReplyFieldFollowsTheRoute(t *testing.T) {
+	for path, want := range map[string]string{
+		"/launch": "<gamesession>1</gamesession>",
+		"/resume": "<resume>1</resume>",
+	} {
+		f := newLaunchFixture(t, &RESTServerOptions{})
+		ctx := context.WithValue(context.Background(), userContextKey{}, &v1alpha1types.User{
+			ObjectMeta: metav1.ObjectMeta{Name: "alice", Namespace: testNamespace},
+		})
+		ctx = context.WithValue(ctx, pairingContextKey{}, &v1alpha1types.Pairing{
+			ObjectMeta: metav1.ObjectMeta{Name: "alice-pairing", Namespace: testNamespace},
+		})
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, path+"?appid=1&rikey=00&rikeyid=1&mode=1920x1080x60", http.NoBody)
+		rec := httptest.NewRecorder()
+		if path == "/resume" {
+			f.server.resumeHandler(rec, req)
+		} else {
+			f.server.launchHandler(rec, req)
+		}
+		if body := rec.Body.String(); !strings.Contains(body, want) {
+			t.Errorf("%s reply = %d %s, want %s", path, rec.Code, body, want)
+		}
+	}
+}
