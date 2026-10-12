@@ -3,6 +3,7 @@ package moonlight
 import (
 	"bytes"
 	"image"
+	"image/color"
 	"image/jpeg"
 	"image/png"
 	"net/http"
@@ -69,6 +70,7 @@ func TestAppAssetServesJPEGAsPNG(t *testing.T) {
 		{2560, 1440, 600, 337},
 		{500, 1600, 250, 800},
 		{4096, 10, 600, 1},
+		{4096, 1, 600, 1},
 	} {
 		var jpg bytes.Buffer
 		if err := jpeg.Encode(&jpg, image.NewRGBA(image.Rect(0, 0, tc.w, tc.h)), nil); err != nil {
@@ -96,5 +98,54 @@ func TestAppAssetUndecodableIsAnError(t *testing.T) {
 	s.appAssetHandler(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/appasset?appid=7", http.NoBody))
 	if rec.Code == http.StatusOK {
 		t.Errorf("undecodable appasset answered %d, want an error status", rec.Code)
+	}
+}
+
+// A scaled cover is the picture scaled, not a blank of the right size, and
+// its Content-Length really reaches the client (it is lost if set after
+// WriteHeader, which a ResponseRecorder does not show).
+func TestAppAssetScaledOverTheWire(t *testing.T) {
+	src := image.NewRGBA(image.Rect(0, 0, 1200, 1600))
+	for y := range 1600 {
+		for x := range 1200 {
+			if x < 600 {
+				src.Set(x, y, color.RGBA{R: 255, A: 255})
+			} else {
+				src.Set(x, y, color.RGBA{B: 255, A: 255})
+			}
+		}
+	}
+	var pngSrc bytes.Buffer
+	if err := png.Encode(&pngSrc, src); err != nil {
+		t.Fatal(err)
+	}
+	s := appServer(t, testApp("game", 7, false, pngSrc.Bytes()))
+	srv := httptest.NewServer(http.HandlerFunc(s.appAssetHandler))
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/appasset?appid=7", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.ContentLength <= 0 {
+		t.Errorf("Content-Length = %d, want the PNG's size", resp.ContentLength)
+	}
+	img, err := png.Decode(resp.Body)
+	if err != nil {
+		t.Fatalf("appasset is not a PNG: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != 600 || b.Dy() != 800 {
+		t.Fatalf("appasset is %v, want 600x800", b)
+	}
+	if r, _, b, _ := img.At(10, 400).RGBA(); r>>8 < 250 || b>>8 > 5 {
+		t.Errorf("left edge is not red: r=%d b=%d", r>>8, b>>8)
+	}
+	if r, _, b, _ := img.At(590, 400).RGBA(); b>>8 < 250 || r>>8 > 5 {
+		t.Errorf("right edge is not blue: r=%d b=%d", r>>8, b>>8)
 	}
 }
