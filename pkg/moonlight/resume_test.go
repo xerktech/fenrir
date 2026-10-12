@@ -68,8 +68,8 @@ func TestResumeReattachesRunningSession(t *testing.T) {
 		t.Fatalf("resume response = %d %s, want the attached stream URL", w.Code, body)
 	}
 	// Moonlight for Android requires <resume> in a resume reply.
-	if body := w.Body.String(); !strings.Contains(body, "<resume>1</resume>") {
-		t.Errorf("resume response = %s, want <resume>1</resume>", body)
+	if body := w.Body.String(); !strings.Contains(body, "<resume>1</resume>") || strings.Contains(body, "<gamesession") {
+		t.Errorf("resume response = %s, want <resume>1</resume> and no gamesession", body)
 	}
 	s, err := sessions.Get(ctx, "alex-steam-abcde", metav1.GetOptions{})
 	if err != nil {

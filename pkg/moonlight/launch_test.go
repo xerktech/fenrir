@@ -748,9 +748,11 @@ func TestLaunchConcurrentUsersRespectLimit(t *testing.T) {
 // A launch answers <gamesession>; a /resume with no session to resume is a
 // launch too, but must answer <resume> (Moonlight for Android requires it).
 func TestLaunchReplyFieldFollowsTheRoute(t *testing.T) {
-	for path, want := range map[string]string{
-		"/launch": "<gamesession>1</gamesession>",
-		"/resume": "<resume>1</resume>",
+	// The other field must be absent, not 0: moonlight-embedded reads
+	// gamesession first and fails a resume on "0".
+	for path, want := range map[string][2]string{
+		"/launch": {"<gamesession>1</gamesession>", "<resume"},
+		"/resume": {"<resume>1</resume>", "<gamesession"},
 	} {
 		f := newLaunchFixture(t, &RESTServerOptions{})
 		ctx := context.WithValue(context.Background(), userContextKey{}, &v1alpha1types.User{
@@ -766,8 +768,8 @@ func TestLaunchReplyFieldFollowsTheRoute(t *testing.T) {
 		} else {
 			f.server.launchHandler(rec, req)
 		}
-		if body := rec.Body.String(); !strings.Contains(body, want) {
-			t.Errorf("%s reply = %d %s, want %s", path, rec.Code, body, want)
+		if body := rec.Body.String(); !strings.Contains(body, want[0]) || strings.Contains(body, want[1]) {
+			t.Errorf("%s reply = %d %s, want %s and no %s", path, rec.Code, body, want[0], want[1])
 		}
 	}
 }
