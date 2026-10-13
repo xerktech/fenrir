@@ -773,3 +773,25 @@ func TestLaunchReplyFieldFollowsTheRoute(t *testing.T) {
 		}
 	}
 }
+
+// /cancel answers <cancel>1</cancel>, with or without a session to stop:
+// Moonlight for Android's "quit and start" fails without it.
+func TestCancelReplyCarriesCancel(t *testing.T) {
+	for name, existing := range map[string][]*v1alpha1types.Session{
+		"running session": {sessionFor("alice")},
+		"no session":      nil,
+	} {
+		f := newLaunchFixture(t, &RESTServerOptions{}, existing...)
+		ctx := context.WithValue(context.Background(), userContextKey{}, &v1alpha1types.User{
+			ObjectMeta: metav1.ObjectMeta{Name: "alice", Namespace: testNamespace},
+		})
+		rec := httptest.NewRecorder()
+		f.server.cancelHandler(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/cancel", http.NoBody))
+		if body := rec.Body.String(); rec.Code != http.StatusOK || !strings.Contains(body, "<cancel>1</cancel>") {
+			t.Errorf("%s: cancel reply = %d %s, want 200 with <cancel>1</cancel>", name, rec.Code, body)
+		}
+		if n := f.sessionCount(t); n != 0 {
+			t.Errorf("%s: %d sessions left, want none", name, n)
+		}
+	}
+}

@@ -65,6 +65,14 @@ type App struct {
 	v1alpha1.AppSpec `xml:",inline"`
 }
 
+// CancelResponse answers /cancel. Moonlight for Android and iOS read
+// <cancel> and fail "quit and start" without it, as with <resume>; Sunshine
+// sends cancel=1.
+type CancelResponse struct {
+	Response
+	Cancel int `xml:"cancel"`
+}
+
 type LaunchResponse struct {
 	Response       `xml:",inline"`
 	RTSPSessionURL string `xml:"sessionUrl0"`

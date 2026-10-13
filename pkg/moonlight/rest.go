@@ -934,7 +934,7 @@ func (s *RESTServer) cancelHandler(w http.ResponseWriter, r *http.Request) {
 		writeErrorResponse(w, 500, fmt.Errorf("failed to cancel session: %s", err))
 		return
 	}
-	sendXML(w, Response{StatusCode: 200})
+	sendXML(w, CancelResponse{Response: Response{StatusCode: 200}, Cancel: 1})
 }
 
 func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1types.User, shouldWait bool) error {
