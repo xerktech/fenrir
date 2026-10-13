@@ -30,6 +30,8 @@ RUN \
   sed -i 's|^Exec=/opt/Heroic/heroic|Exec=/usr/bin/wrapped-heroic|' /usr/share/applications/heroic.desktop && \
   ! grep -q '^Exec=/opt/Heroic' /usr/share/applications/heroic.desktop && \
   echo "**** route steam.desktop through wrapped-steam ****" && \
+  # /usr/lib/steam/steam.desktop, which bin_steam.sh copies to ~/Desktop on a
+  # fresh home, is a symlink to this file, so it is covered too.
   sed -i 's|^Exec=/usr/bin/steam|Exec=/usr/bin/wrapped-steam|' /usr/share/applications/steam.desktop && \
   ! grep -q '^Exec=/usr/bin/steam' /usr/share/applications/steam.desktop && \
   echo "**** add heroic to the openbox menus ****" && \

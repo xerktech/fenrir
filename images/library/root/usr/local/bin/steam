@@ -4,4 +4,10 @@
 # "Exec=steam steam://rungameid/...") and the taskbar's start menu launch, so
 # route it through wrapped-steam: Steam started that way gets the same
 # sandbox fallback and input preloads as at login (XERK-1878).
+
+# Without the steam package the base init links /usr/bin/steam to this shim,
+# and wrapped-steam -> /usr/bin/steam would loop; fall back as the base shim did.
+if [ "$(readlink -f /usr/bin/steam)" = "$(readlink -f "$0")" ] || [ ! -e /usr/bin/steam ]; then
+  exec selkies-proot install steam
+fi
 exec /usr/bin/wrapped-steam "$@"
