@@ -934,7 +934,7 @@ func (s *RESTServer) cancelHandler(w http.ResponseWriter, r *http.Request) {
 		writeErrorResponse(w, 500, fmt.Errorf("failed to cancel session: %s", err))
 		return
 	}
-	sendXML(w, Response{StatusCode: 200})
+	sendXML(w, CancelResponse{Response: Response{StatusCode: 200}, Cancel: 1})
 }
 
 func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1types.User, shouldWait bool) error {
@@ -957,9 +957,11 @@ func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1type
 
 	if !didDelete {
 		klog.Warningf("Not stopping any sessions. No sessions found for user %s", user.Name)
-		return k8serrors.NewNotFound(v1alpha1types.Resource("session"), user.Name)
 	}
 
+	// Waited for even when no Session was left to delete: its pod may still be
+	// terminating, and serverinfo reports busy until it is gone, which
+	// Moonlight's quit-then-launch reads as a failed quit.
 	if shouldWait {
 		// Wait for pods to be cleaned up
 		err = wait.PollUntilContextTimeout(context.Background(), 250*time.Millisecond, 25*time.Second, true, func(ctx context.Context) (bool, error) {
@@ -976,6 +978,9 @@ func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1type
 		}
 	}
 
+	if !didDelete {
+		return k8serrors.NewNotFound(v1alpha1types.Resource("session"), user.Name)
+	}
 	return nil
 }
 

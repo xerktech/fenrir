@@ -14,6 +14,8 @@ paths:
   the route because a resume with nothing to resume is served by `launchHandler`. Moonlight for
   Android fails a resume without it: "Missing mandatory field in host response: resume".
   Tests: `TestLaunchReplyFieldFollowsTheRoute`, `TestResume*` in `resume_test.go`.
+- A `/cancel` reply carries `<cancel>1</cancel>`; without it Android's "quit and start" fails with
+  `error 0`. Tests: `TestCancelReplyCarriesCancel`.
 - `--launch-timeout` must stay under moonlight-qt's 120s launch request timeout, or the client
   gives up first and shows a generic error while the session keeps starting.
   - The operator's `unstartedSessionTTL` reaper must outlast it, or cold starts get reaped mid-launch.
