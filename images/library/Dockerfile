@@ -29,6 +29,11 @@ RUN \
   update-alternatives --install /usr/bin/heroic heroic /usr/bin/wrapped-heroic 1000 && \
   sed -i 's|^Exec=/opt/Heroic/heroic|Exec=/usr/bin/wrapped-heroic|' /usr/share/applications/heroic.desktop && \
   ! grep -q '^Exec=/opt/Heroic' /usr/share/applications/heroic.desktop && \
+  echo "**** route steam.desktop through wrapped-steam ****" && \
+  # /usr/lib/steam/steam.desktop, which bin_steam.sh copies to ~/Desktop on a
+  # fresh home, is a symlink to this file, so it is covered too.
+  sed -i 's|^Exec=/usr/bin/steam|Exec=/usr/bin/wrapped-steam|' /usr/share/applications/steam.desktop && \
+  ! grep -q '^Exec=/usr/bin/steam' /usr/share/applications/steam.desktop && \
   echo "**** add heroic to the openbox menus ****" && \
   for menu in /defaults/menu.xml /defaults/menu_wayland.xml; do \
     sed -i 's|</menu>|<item label="Heroic" icon="/usr/share/icons/hicolor/48x48/apps/heroic.png"><action name="Execute"><command>/usr/bin/wrapped-heroic</command></action></item>\n</menu>|' "$menu" && \

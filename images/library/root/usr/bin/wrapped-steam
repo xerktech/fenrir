@@ -11,6 +11,19 @@
 LOG_DIR="${HOME}/.local/state/library"
 mkdir -p "${LOG_DIR}"
 
+# The taskbar's start menu and Steam's own shortcuts also land here (via the
+# /usr/local/bin/steam shim and steam.desktop). With Steam already up, hand
+# the request (a steam:// URL, say) to the running client and start nothing.
+if pgrep -x steam >/dev/null; then
+  exec /usr/bin/steam "$@"
+fi
+
+# The home's ~/Desktop copy of steam.desktop predates this image and names
+# /usr/bin/steam directly, bypassing this wrapper; repoint it (idempotent).
+if [ -f "${HOME}/Desktop/steam.desktop" ]; then
+  sed -i 's|^Exec=/usr/bin/steam|Exec=/usr/bin/wrapped-steam|' "${HOME}/Desktop/steam.desktop"
+fi
+
 # 64 and 32 bit input interposers and fake udev for gamepads
 STEAM_PRELOAD="/usr/lib/selkies_input_interposer.so:/usr/lib/libudev.so.1.0.0-fake:/usr/lib/selkies_input_interposer_32.so:/usr/lib/libudev.so.1.0.0-fake_32"
 PROOT_BWRAP="${HOME}/.local/bin/proot-bwrap"
@@ -44,7 +57,9 @@ fi
 
 # setsid: Heroic must outlive this script's session (it otherwise dies with
 # its stdout); wrapped-heroic sets its own preloads.
-setsid -f /usr/bin/wrapped-heroic >"${LOG_DIR}/heroic.log" 2>&1 </dev/null
+if ! pgrep -x heroic >/dev/null; then
+  setsid -f /usr/bin/wrapped-heroic >"${LOG_DIR}/heroic.log" 2>&1 </dev/null
+fi
 
 export LD_PRELOAD="${STEAM_PRELOAD}"
 # In the foreground, as the base image ran it.

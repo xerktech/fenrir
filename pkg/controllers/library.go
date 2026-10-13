@@ -728,6 +728,12 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 					{Name: "PUID", Value: libraryUID},
 					{Name: "PGID", Value: libraryUID},
 					{Name: "CUSTOM_USER", Value: libraryAuthUser},
+					// The image's own desktop shell (selkies-desktop): a
+					// taskbar listing every window with minimize, maximize
+					// and close, launchers and a wallpaper. Bare labwc has
+					// none, so a window covering the screen had no way out
+					// (XERK-1878).
+					{Name: "SELKIES_DESKTOP", Value: "true"},
 					{Name: "PASSWORD", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: libraryAuthSecret},
 						Key:                  libraryAuthKey,
