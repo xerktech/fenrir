@@ -795,3 +795,42 @@ func TestCancelReplyCarriesCancel(t *testing.T) {
 		}
 	}
 }
+
+// /cancel returns only once the user's pods are gone, Session or not:
+// serverinfo reports busy while one exists, and Moonlight's quit-then-launch
+// reads that as a failed quit.
+func TestCancelWaitsForPods(t *testing.T) {
+	for name, existing := range map[string][]*v1alpha1types.Session{
+		"running session":          {sessionFor("alice")},
+		"session gone, pod ending": nil,
+	} {
+		f := newLaunchFixture(t, &RESTServerOptions{}, existing...)
+		pods := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: "alice-pod", Namespace: testNamespace, Labels: map[string]string{"direwolf/user": "alice"},
+		}}
+		if err := pods.Add(pod); err != nil {
+			t.Fatal(err)
+		}
+		f.server.PodLister = generic.NewLister[*corev1.Pod](pods).Namespaced(testNamespace)
+
+		var podGone atomic.Bool
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			podGone.Store(true)
+			_ = pods.Delete(pod)
+		}()
+
+		ctx := context.WithValue(context.Background(), userContextKey{}, &v1alpha1types.User{
+			ObjectMeta: metav1.ObjectMeta{Name: "alice", Namespace: testNamespace},
+		})
+		rec := httptest.NewRecorder()
+		f.server.cancelHandler(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/cancel", http.NoBody))
+		if !podGone.Load() {
+			t.Errorf("%s: cancel returned while the pod still existed", name)
+		}
+		if body := rec.Body.String(); rec.Code != http.StatusOK || !strings.Contains(body, "<cancel>1</cancel>") {
+			t.Errorf("%s: cancel reply = %d %s, want 200 with <cancel>1</cancel>", name, rec.Code, body)
+		}
+	}
+}
