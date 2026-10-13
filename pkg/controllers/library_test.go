@@ -457,6 +457,9 @@ func TestLibraryEnsurePodStartsLibrary(t *testing.T) {
 		}
 	}
 	// The Steam home is the game sessions' too: same uid/gid as GoW's retro.
+	if env["SELKIES_DESKTOP"] != "true" {
+		t.Errorf("Library SELKIES_DESKTOP = %q, want true (the taskbar)", env["SELKIES_DESKTOP"])
+	}
 	if env["PUID"] != "1000" || env["PGID"] != "1000" {
 		t.Errorf("Library runs as PUID %q PGID %q, want the sessions' 1000:1000", env["PUID"], env["PGID"])
 	}
