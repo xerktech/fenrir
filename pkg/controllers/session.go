@@ -783,17 +783,18 @@ func (c *SessionController) unstreamableReason(ctx context.Context, session *v1a
 	if ipErr == nil {
 		return "", nil
 	}
+	// An earlier same-named Session's pod is not this one's game.
 	podName := c.podName(session)
-	_, err := c.podController.Informer().Namespaced(session.Namespace).Get(podName)
-	if err == nil {
+	pod, err := c.podController.Informer().Namespaced(session.Namespace).Get(podName)
+	if err == nil && metav1.IsControlledBy(pod, session) {
 		return "", nil
-	} else if !errors.IsNotFound(err) {
+	} else if err != nil && !errors.IsNotFound(err) {
 		return "", fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
 	}
-	_, err = c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, podName, metav1.GetOptions{})
-	if err == nil {
+	pod, err = c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err == nil && metav1.IsControlledBy(pod, session) {
 		return "", nil
-	} else if !errors.IsNotFound(err) {
+	} else if err != nil && !errors.IsNotFound(err) {
 		return "", fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
 	}
 	return ipErr.Error(), nil

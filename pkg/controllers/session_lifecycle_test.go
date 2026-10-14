@@ -872,3 +872,66 @@ func TestUnstreamableClientIPEndsSessionBeforePod(t *testing.T) {
 		})
 	}
 }
+
+// The pod is looked up live when the cache misses it, a failed lookup is
+// retried rather than read as "no pod", and an earlier same-named Session's
+// pod does not count as this Session's.
+func TestUnstreamableClientIPLooksUpPod(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cached    func(*v1alpha1types.Session) []runtime.Object
+		live      func(*v1alpha1types.Session) *k8sfake.Clientset
+		wantErr   bool
+		wantEnded bool
+	}{
+		{name: "pod only in live API", live: func(s *v1alpha1types.Session) *k8sfake.Clientset {
+			p := readyPod(s)
+			p.Annotations[portBlockAnnotation] = "20000" // the block Reconcile allocates
+			return k8sfake.NewClientset(p)
+		}},
+		{name: "live lookup fails", wantErr: true, live: func(*v1alpha1types.Session) *k8sfake.Clientset {
+			c := k8sfake.NewClientset()
+			c.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewInternalError(errors.New("etcd down"))
+			})
+			return c
+		}},
+		{name: "foreign pod", wantEnded: true, cached: func(s *v1alpha1types.Session) []runtime.Object {
+			p := readyPod(s)
+			p.OwnerReferences[0].UID = "someone-else"
+			return []runtime.Object{p}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := f.session("alex-1", f.user)
+				s.CreationTimestamp = metav1.Now()
+				s.Spec.Config.ClientIP = "2001:db8::1"
+				return s
+			}, tc.cached)
+			if tc.cached != nil {
+				for range 500 {
+					if _, err := f.sc.podController.Informer().Namespaced(portsTestNS).Get(sess.Name); err == nil {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			if tc.live != nil {
+				f.sc.K8sClient = tc.live(sess)
+			}
+			err := f.sc.Reconcile(portsTestNS, sess.Name, sess.DeepCopy())
+			if tc.wantErr && err == nil {
+				t.Error("Reconcile = nil, want the lookup error")
+			}
+			if got := f.sessionExists(t, sess.Name); got == tc.wantEnded {
+				t.Errorf("session exists = %v, want %v", got, !tc.wantEnded)
+			}
+			if tc.wantErr || tc.wantEnded {
+				if n := len(f.sc.ports.blocks); n != 0 {
+					t.Errorf("allocated %d port blocks", n)
+				}
+			}
+		})
+	}
+}
