@@ -25,8 +25,9 @@ paths:
     dangling `/config/...` link to its own dir.
   - Never make `debian-installation` the link: the GoW image isn't ours.
   - A real `~/.local/share/Steam` next to it is moved aside (`Steam.library-<time>`), never
-    deleted; games installed only there (StateFlags bit 4, as the catalogue reads it) are moved into the shared install first,
-    or the catalogue would see them uninstalled and delete their Apps.
+    deleted; games installed only there (StateFlags bit 4, as the catalogue reads it) are moved
+    into the shared install first, or the catalogue would see them uninstalled and delete their
+    Apps.
   - `init-steam-home` never exits non-zero: a failed oneshot stops s6 starting the desktop, and
     the pod stays Running, never Ready, holding the Steam lock.
   - Tests: `images/library/init_steam_home_test.go` (runs the real script).
