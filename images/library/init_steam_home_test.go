@@ -23,12 +23,12 @@ func manifest(state, dir string) string {
 // runInit runs the image's init-steam-home with HOME set to a fresh home
 // seeded with files (path -> content; a trailing / makes a directory), and
 // returns the home and the script's output.
-func runInit(t *testing.T, files map[string]string, setup func(home string)) (string, string) {
+func runInit(t *testing.T, files map[string]string, setup func(home string)) (home, out string) {
 	t.Helper()
 	if os.Getuid() == 0 {
 		t.Skip("as root the script re-execs via s6-setuidgid; run as a non-root user (CI is)")
 	}
-	home := t.TempDir()
+	home = t.TempDir()
 	for name, data := range files {
 		p := filepath.Join(home, name)
 		if strings.HasSuffix(name, "/") {
@@ -40,20 +40,20 @@ func runInit(t *testing.T, files map[string]string, setup func(home string)) (st
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if setup != nil {
 		setup(home)
 	}
-	cmd := exec.Command("bash", initSteamHome)
+	cmd := exec.CommandContext(t.Context(), "bash", initSteamHome)
 	cmd.Env = append(os.Environ(), "HOME="+home)
-	out, err := cmd.CombinedOutput()
+	b, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("init-steam-home must never fail (a failed oneshot hangs the pod): %v\n%s", err, out)
+		t.Fatalf("init-steam-home must never fail (a failed oneshot hangs the pod): %v\n%s", err, b)
 	}
-	return home, string(out)
+	return home, string(b)
 }
 
 func assertLinked(t *testing.T, home string) {
@@ -101,7 +101,7 @@ func TestInitSteamHomeLibraryOnlyBecomesShared(t *testing.T) {
 func TestInitSteamHomeIdempotent(t *testing.T) {
 	home, _ := runInit(t, map[string]string{debSteam + "/steam.sh": "x"}, nil)
 	assertLinked(t, home)
-	cmd := exec.Command("bash", initSteamHome)
+	cmd := exec.CommandContext(t.Context(), "bash", initSteamHome)
 	cmd.Env = append(os.Environ(), "HOME="+home)
 	if out, err := cmd.CombinedOutput(); err != nil || len(out) != 0 {
 		t.Fatalf("second run: %v %q", err, out)
@@ -208,10 +208,10 @@ func TestInitSteamHomeGivesUpQuietly(t *testing.T) {
 	})
 	t.Run("unwritable home", func(t *testing.T) {
 		home, _ := runInit(t, map[string]string{".local/share/": ""}, func(home string) {
-			if err := os.Chmod(filepath.Join(home, ".local/share"), 0o555); err != nil {
+			if err := os.Chmod(filepath.Join(home, ".local", "share"), 0o555); err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { _ = os.Chmod(filepath.Join(home, ".local/share"), 0o755) })
+			t.Cleanup(func() { _ = os.Chmod(filepath.Join(home, ".local", "share"), 0o755) })
 		})
 		if exists(home, libSteam) {
 			t.Fatal("nothing should be linked")
