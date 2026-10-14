@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/utils/ptr"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	"games-on-whales.github.io/direwolf/pkg/generic"
@@ -807,5 +808,130 @@ func TestAttachWithoutWolfClientsUsesDummy(t *testing.T) {
 	}
 	if agent.added != 1 || agent.last.ClientID != "" {
 		t.Errorf("adds %d with client %q, want one with the dummy", agent.added, agent.last.ClientID)
+	}
+}
+
+// A Session whose clientIP Wolf could never stream to ends before its pod
+// is created (port block, image pull, GPU claim). Once a pod exists, a bad IP
+// from a /resume only fails the attach: a later /resume may still save the
+// game. That holds even when PodCreated is False or missing (a failed
+// reconcile, a lost status write) while the pod runs.
+func TestUnstreamableClientIPEndsSessionBeforePod(t *testing.T) {
+	for _, tc := range []struct {
+		name, ip  string
+		hasPod    bool
+		podCond   *metav1.ConditionStatus // nil: no PodCreated condition
+		wantEnded bool
+	}{
+		{name: "empty", ip: "", wantEnded: true},
+		{name: "ipv6", ip: "2001:db8::1", wantEnded: true},
+		{name: "unspecified", ip: "0.0.0.0", wantEnded: true},
+		{name: "garbage", ip: "not-an-ip", wantEnded: true},
+		{name: "ipv4", ip: "192.0.2.10"},
+		{name: "ipv6 with pod", ip: "2001:db8::1", hasPod: true, podCond: ptr.To(metav1.ConditionTrue)},
+		{name: "ipv6 with pod after failed reconcile", ip: "2001:db8::1", hasPod: true, podCond: ptr.To(metav1.ConditionFalse)},
+		{name: "ipv6 with pod after lost status write", ip: "2001:db8::1", hasPod: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := f.session("alex-1", f.user)
+				if tc.hasPod {
+					s = podReadySession(f)
+					s.Status.Conditions = s.Status.Conditions[:1] // PortsAllocated
+					if tc.podCond != nil {
+						s.Status.Conditions = append(s.Status.Conditions, metav1.Condition{Type: podCreatedCondition, Status: *tc.podCond, Reason: "Test"})
+					}
+				}
+				s.CreationTimestamp = metav1.Now() // not yet reaped as unstarted
+				s.Spec.Config.ClientIP = tc.ip
+				return s
+			}, func(s *v1alpha1types.Session) []runtime.Object {
+				if tc.hasPod {
+					return []runtime.Object{readyPod(s)}
+				}
+				return nil
+			})
+			_ = f.sc.Reconcile(portsTestNS, sess.Name, sess.DeepCopy())
+			if got := f.sessionExists(t, sess.Name); got == tc.wantEnded {
+				t.Errorf("session exists = %v, want %v", got, !tc.wantEnded)
+			}
+			pods, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).List(context.Background(), metav1.ListOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantEnded {
+				if len(pods.Items) != 0 {
+					t.Errorf("created %d pods for a session that cannot stream", len(pods.Items))
+				}
+				if n := len(f.sc.ports.blocks); n != 0 {
+					t.Errorf("allocated %d port blocks for a session that cannot stream", n)
+				}
+			} else if len(pods.Items) != 1 {
+				t.Errorf("%d pods, want 1", len(pods.Items))
+			}
+		})
+	}
+}
+
+// The pod is looked up live when the cache misses it, a failed lookup is
+// retried rather than read as "no pod", and an earlier same-named Session's
+// pod does not count as this Session's.
+func TestUnstreamableClientIPLooksUpPod(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cached    func(*v1alpha1types.Session) []runtime.Object
+		live      func(*v1alpha1types.Session) *k8sfake.Clientset
+		wantErr   bool
+		wantEnded bool
+	}{
+		{name: "pod only in live API", live: func(s *v1alpha1types.Session) *k8sfake.Clientset {
+			p := readyPod(s)
+			p.Annotations[portBlockAnnotation] = "20000" // the block Reconcile allocates
+			return k8sfake.NewClientset(p)
+		}},
+		{name: "live lookup fails", wantErr: true, live: func(*v1alpha1types.Session) *k8sfake.Clientset {
+			c := k8sfake.NewClientset()
+			c.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewInternalError(errors.New("etcd down"))
+			})
+			return c
+		}},
+		{name: "foreign pod", wantEnded: true, cached: func(s *v1alpha1types.Session) []runtime.Object {
+			p := readyPod(s)
+			p.OwnerReferences[0].UID = "someone-else"
+			return []runtime.Object{p}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := f.session("alex-1", f.user)
+				s.CreationTimestamp = metav1.Now()
+				s.Spec.Config.ClientIP = "2001:db8::1"
+				return s
+			}, tc.cached)
+			if tc.cached != nil {
+				for range 500 {
+					if _, err := f.sc.podController.Informer().Namespaced(portsTestNS).Get(sess.Name); err == nil {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			if tc.live != nil {
+				f.sc.K8sClient = tc.live(sess)
+			}
+			err := f.sc.Reconcile(portsTestNS, sess.Name, sess.DeepCopy())
+			if tc.wantErr && err == nil {
+				t.Error("Reconcile = nil, want the lookup error")
+			}
+			if got := f.sessionExists(t, sess.Name); got == tc.wantEnded {
+				t.Errorf("session exists = %v, want %v", got, !tc.wantEnded)
+			}
+			if tc.wantErr || tc.wantEnded {
+				if n := len(f.sc.ports.blocks); n != 0 {
+					t.Errorf("allocated %d port blocks", n)
+				}
+			}
+		})
 	}
 }
