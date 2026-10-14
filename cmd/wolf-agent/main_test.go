@@ -537,8 +537,8 @@ func TestProxyFlushesHeadersOfIdleStream(t *testing.T) {
 }
 
 // A Wolf response that breaks off mid-body must reach the client as a failed
-// read, not a clean end: SSE readers take a clean end's partial event as
-// whole, and the agent only logs why a stream ended on an error (XERK-1449).
+// read, not a clean end: the agent only logs why a stream ended on an error
+// (XERK-1449).
 func TestProxyAbortsOnBackendError(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "w.sock")
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", sock)

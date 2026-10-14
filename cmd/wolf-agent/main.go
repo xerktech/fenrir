@@ -240,10 +240,14 @@ func proxyHandler(client *http.Client, ready *atomic.Bool) http.Handler {
 				if err == io.EOF {
 					break
 				}
+				if r.Context().Err() != nil {
+					klog.Info("Client connection closed")
+					return
+				}
 				klog.ErrorS(err, "Error reading from backend")
 				// The status is sent: abort the connection so the client
-				// sees the stream fail, not a clean end that could pass a
-				// truncated event off as whole (XERK-1449).
+				// sees the stream fail rather than end cleanly, and the
+				// agent logs why (XERK-1449).
 				panic(http.ErrAbortHandler)
 			}
 		}
