@@ -74,7 +74,8 @@ controllers:
               fieldRef:
                 fieldPath: metadata.name
           POD_NAMESPACE: "{{ .Release.Namespace }}"
-          WOLF_IMAGE: ghcr.io/games-on-whales/wolf:stable
+          # Wolf with a patched waylanddisplaysrc (images/wolf, XERK-1740).
+          WOLF_IMAGE: ghcr.io/games-on-whales/fenrir/wolf:main
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
