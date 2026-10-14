@@ -898,6 +898,9 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_RAW", c}}}
 		}
 	}
+	tests["gated cap first"] = func(_ *corev1.PodSpec, ctr *corev1.Container) {
+		ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN", "NET_RAW"}}}
+	}
 	for name, mutate := range tests {
 		for _, initCtr := range []bool{false, true} {
 			sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")

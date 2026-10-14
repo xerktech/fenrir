@@ -66,7 +66,7 @@ paths:
   clears both dirs on pause (`clearDevices`), or a stale 0666 node would open whatever device the
   kernel gives that minor next (another session's keyboard). Tests: `TestAgentPauseClearsDevices`.
 - Joining a stream to the Wolf lobby moves its joypads with an unplug addressed to the stream; once
-  joined, real unplugs are re-fired addressed to the lobby. So the agent skips unplugs addressed to a
+  joined, real unplugs are re-fired addressed to the lobby. So the agent skips unplugs to a
   joining/joined stream (`ignoresUnplug`). Tests: `TestAgentKeepsDevicesMovedToLobby`.
 - The dirs are writable by the app container, which can swap a node for a symlink at any moment:
   never chmod/chown by path after mknod (`setNodeMode` goes through an O_PATH fd).
