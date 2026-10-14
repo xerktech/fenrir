@@ -53,6 +53,17 @@ type SessionSpec struct {
 	Config SessionInfo `json:"config"`
 }
 
+const (
+	// SessionStreamStartedCondition is the Session condition for its stream.
+	SessionStreamStartedCondition = "StreamStarted"
+	// SessionStreamRefusedReason marks a SessionStreamStartedCondition that
+	// is False for good: the operator will never start a stream for this
+	// spec.config (e.g. a client IP Wolf cannot stream to), so waiting for
+	// one is pointless. Any other False reason may still clear on a retry.
+	// Its observedGeneration is the generation it was judged on.
+	SessionStreamRefusedReason = "StreamRefused"
+)
+
 // Session State machine
 // Pending -> Initializing -> WaitForPing -> Streaming -> Ended
 type SessionStatus struct {

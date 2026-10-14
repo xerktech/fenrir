@@ -15,6 +15,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
@@ -30,6 +31,8 @@ type launchFixture struct {
 	server  *RESTServer
 	client  *fake.Clientset
 	created atomic.Int32
+	// remoteAddr is the client's address, if not httptest's default.
+	remoteAddr string
 }
 
 // newLaunchFixture builds a RESTServer over a fake clientset seeded with one
@@ -112,6 +115,9 @@ func (f *launchFixture) launch(t *testing.T, user string) (int, Response) {
 		ObjectMeta: metav1.ObjectMeta{Name: user + "-pairing", Namespace: testNamespace},
 	})
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/launch?appid=1&rikey=00&rikeyid=1&mode=1920x1080x60", http.NoBody)
+	if f.remoteAddr != "" {
+		req.RemoteAddr = f.remoteAddr
+	}
 	rec := httptest.NewRecorder()
 	f.server.launchHandler(rec, req)
 
@@ -832,5 +838,85 @@ func TestCancelWaitsForPods(t *testing.T) {
 		if body := rec.Body.String(); rec.Code != http.StatusOK || !strings.Contains(body, "<cancel>1</cancel>") {
 			t.Errorf("%s: cancel reply = %d %s, want 200 with <cancel>1</cancel>", name, rec.Code, body)
 		}
+	}
+}
+
+// streamStarted makes the operator's Session report StreamStarted=False with
+// reason, and never a stream URL.
+func (f *launchFixture) streamStarted(reason, message string) {
+	f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		get, ok := action.(k8stesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+		s := &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: get.GetName(), Namespace: testNamespace}}
+		s.Status.Conditions = []metav1.Condition{{
+			Type: v1alpha1types.SessionStreamStartedCondition, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+		}}
+		return true, s, nil
+	})
+}
+
+// A stream the operator refuses (e.g. an IPv6 client) fails the launch at
+// once with the operator's reason, instead of waiting out LaunchTimeout
+// (XERK-1336).
+func TestLaunchStreamRefusedFailsFast(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 5 * time.Second})
+	const message = "stream refused: client IP 2001:db8::1 is not an IPv4 address; streaming needs IPv4"
+	f.streamStarted(v1alpha1types.SessionStreamRefusedReason, message)
+
+	start := time.Now()
+	code, resp := f.launch(t, "alice")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("launch took %s, want it to fail fast", elapsed)
+	}
+	// HTTP 200 so moonlight-qt parses the XML and shows the message.
+	if code != http.StatusOK || resp.StatusCode != streamRefusedStatusCode || resp.StatusMessage != message {
+		t.Errorf("launch = HTTP %d / %d %q, want 200 / %d %q", code, resp.StatusCode, resp.StatusMessage, streamRefusedStatusCode, message)
+	}
+	f.waitForSessionCount(t, 0)
+}
+
+// Any other StreamStarted failure (the pod still starting, during every cold
+// start) is waited out.
+func TestLaunchWaitsOutStreamStartFailed(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 300 * time.Millisecond})
+	f.streamStarted("StreamStartFailed", "pod not ready")
+
+	start := time.Now()
+	code, _ := f.launch(t, "alice")
+	if elapsed := time.Since(start); code != http.StatusInternalServerError || elapsed < 300*time.Millisecond {
+		t.Errorf("launch = HTTP %d after %s, want 500 at the timeout", code, elapsed)
+	}
+}
+
+// The operator deletes a launch's Session it can never stream (an IPv6
+// client) before starting its pod; /launch says so at once rather than
+// answering a transport error (XERK-1336, XERK-1335).
+func TestLaunchSessionEndedByOperator(t *testing.T) {
+	for _, tc := range []struct{ remoteAddr, want string }{
+		{"[2001:db8::1]:51000", "The host ended the session before its stream started: streaming needs IPv4, and this client connected from 2001:db8::1"},
+		{"192.0.2.7:51000", "The host ended the session before its stream started"},
+	} {
+		t.Run(tc.remoteAddr, func(t *testing.T) {
+			f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 5 * time.Second})
+			f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				get, ok := action.(k8stesting.GetAction)
+				if !ok {
+					return false, nil, nil
+				}
+				return true, nil, k8serrors.NewNotFound(v1alpha1types.Resource("sessions"), get.GetName())
+			})
+			f.remoteAddr = tc.remoteAddr
+
+			start := time.Now()
+			code, resp := f.launch(t, "alice")
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Errorf("launch took %s, want it to fail fast", elapsed)
+			}
+			if code != http.StatusOK || resp.StatusCode != streamRefusedStatusCode || resp.StatusMessage != tc.want {
+				t.Errorf("launch = HTTP %d / %d %q, want 200 / %d %q", code, resp.StatusCode, resp.StatusMessage, streamRefusedStatusCode, tc.want)
+			}
+		})
 	}
 }

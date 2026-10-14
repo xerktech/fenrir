@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
@@ -194,5 +196,83 @@ func TestResumeWithUnchangedKeysFailsFast(t *testing.T) {
 	srv.resumeHandler(w, resumeRequest("rikey=k&rikeyid=1"))
 	if !strings.Contains(w.Body.String(), "previous stream keys") || time.Since(start) > 2*time.Second {
 		t.Errorf("response after %s = %d %s, want a fast keys error", time.Since(start), w.Code, w.Body.String())
+	}
+}
+
+// A refusal of the resume's own keys (e.g. it came from an IPv6 address)
+// answers at once; one from an earlier generation is not this resume's
+// (XERK-1336).
+func TestResumeStreamRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		refusedAt     int64
+		wantImmediate bool
+	}{
+		{name: "this resume", refusedAt: 2, wantImmediate: true},
+		{name: "earlier generation", refusedAt: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dw := generatedclient.NewSimpleClientset(&v1alpha1types.Session{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "alex-steam-abcde", Namespace: "ns", Generation: 1,
+					Labels: map[string]string{"direwolf/user": "alex"},
+				},
+				Status: v1alpha1types.SessionStatus{
+					AttachedGeneration: 1,
+					DisconnectedAt:     &metav1.Time{Time: time.Now()},
+					Conditions: []metav1.Condition{{
+						Type: v1alpha1types.SessionStreamStartedCondition, Status: metav1.ConditionFalse,
+						Reason: v1alpha1types.SessionStreamRefusedReason, Message: "not IPv4", ObservedGeneration: tc.refusedAt,
+					}},
+				},
+			})
+			bumpGeneration(dw)
+			srv := &RESTServer{SessionClient: dw.DirewolfV1alpha1().Sessions("ns"), RESTServerOptions: RESTServerOptions{LaunchTimeout: 500 * time.Millisecond}}
+
+			start := time.Now()
+			w := httptest.NewRecorder()
+			srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+			elapsed := time.Since(start)
+
+			if tc.wantImmediate {
+				if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "not IPv4") || elapsed > 400*time.Millisecond {
+					t.Errorf("resume = %d %s after %s, want the refusal at once", w.Code, w.Body.String(), elapsed)
+				}
+				return
+			}
+			if w.Code != http.StatusInternalServerError {
+				t.Errorf("resume = %d %s, want 500 at the timeout", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// A Session deleted while /resume waits (cancelled from another device, or
+// reaped) gets a message, not a transport error (XERK-1336).
+func TestResumeSessionEndedWhileWaiting(t *testing.T) {
+	dw := generatedclient.NewSimpleClientset(alexSession("alex-a", time.Now()))
+	bumpGeneration(dw)
+	sessions := dw.DirewolfV1alpha1().Sessions("ns")
+	// Gone once the resume has written its keys. (A reactor must not call
+	// the fake: reactors run under its lock.)
+	var updated atomic.Bool
+	dw.PrependReactor("update", "sessions", func(k8stesting.Action) (bool, runtime.Object, error) {
+		updated.Store(true)
+		return false, nil, nil
+	})
+	dw.PrependReactor("get", "sessions", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if updated.Load() {
+			return true, nil, k8serrors.NewNotFound(v1alpha1types.Resource("sessions"), "alex-a")
+		}
+		return false, nil, nil
+	})
+	srv := &RESTServer{SessionClient: sessions, RESTServerOptions: RESTServerOptions{LaunchTimeout: 5 * time.Second}}
+
+	start := time.Now()
+	w := httptest.NewRecorder()
+	srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `status_message="The host ended the session before its stream started"`) ||
+		time.Since(start) > 2*time.Second {
+		t.Errorf("resume = %d %s after %s, want the ended message at once", w.Code, w.Body.String(), time.Since(start))
 	}
 }
