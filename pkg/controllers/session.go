@@ -426,7 +426,7 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	case stderrors.Is(streamError, errEndSessionFailed):
 		return streamError
 	case stderrors.Is(streamError, errStreamRefused):
-		klog.Errorf("Refusing stream: %s", streamError)
+		klog.Infof("Session %s/%s: refusing stream: %s", newObj.Namespace, newObj.Name, streamError)
 		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
 			Type:               v1alpha1types.SessionStreamStartedCondition,
 			Status:             metav1.ConditionFalse,
@@ -2293,7 +2293,7 @@ func (c *SessionController) reconcileActiveStreams(
 		// Create the session
 		wolfSession, err := wolfSessionFor(session, podIP)
 		if err != nil {
-			return fmt.Errorf("%w: %w", errStreamRefused, err)
+			return err
 		}
 		if stopErr := c.stopStaleStreams(ctx, wolfclient, session, sessions); stopErr != nil {
 			return stopErr
@@ -2432,17 +2432,15 @@ func (c *SessionController) ensureLobby(ctx context.Context, wolfclient wolfapi.
 }
 
 // streamClientIP is the session's client IP as Wolf needs it (see
-// wolfSessionFor).
+// wolfSessionFor). Its error is shown to the Moonlight user.
 func streamClientIP(session *v1alpha1types.Session) (netip.Addr, error) {
 	clientIP, err := netip.ParseAddr(session.Spec.Config.ClientIP)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("session %s/%s has no valid spec.config.clientIP %q: %w",
-			session.Namespace, session.Name, session.Spec.Config.ClientIP, err)
+		return netip.Addr{}, fmt.Errorf("no valid client IP %q: %w", session.Spec.Config.ClientIP, err)
 	}
 	clientIP = clientIP.Unmap()
 	if !clientIP.Is4() || clientIP.IsUnspecified() {
-		return netip.Addr{}, fmt.Errorf("session %s/%s: spec.config.clientIP %s is not an IPv4 address; Wolf streams over IPv4 only",
-			session.Namespace, session.Name, clientIP)
+		return netip.Addr{}, fmt.Errorf("client IP %s is not an IPv4 address; streaming needs IPv4", clientIP)
 	}
 	return clientIP, nil
 }

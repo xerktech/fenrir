@@ -856,7 +856,7 @@ func (f *launchFixture) streamStarted(reason, message string) {
 // (XERK-1336).
 func TestLaunchStreamRefusedFailsFast(t *testing.T) {
 	f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 5 * time.Second})
-	const message = "stream refused: spec.config.clientIP 2001:db8::1 is not an IPv4 address; Wolf streams over IPv4 only"
+	const message = "stream refused: client IP 2001:db8::1 is not an IPv4 address; streaming needs IPv4"
 	f.streamStarted(v1alpha1types.SessionStreamRefusedReason, message)
 
 	start := time.Now()
