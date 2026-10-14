@@ -21,7 +21,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Non-Go images live in `images/<name>/` (own Dockerfile + context), e.g. `images/library`
   (linuxserver/steam + Heroic), `images/retroarch` (GoW RetroArch + pinned cores).
   CI builds them via matrix `include:` entries carrying `context:`.
-  - `images/wolf` is the Wolf every session runs (chart `WOLF_IMAGE`): wolf:stable with
+  - `images/wolf` is the chart's `WOLF_IMAGE` (xerktech's ArgoCD `apps/direwolf.yaml` overrides
+    it by digest; point that at this image too): wolf:stable with
     waylanddisplaysrc rebuilt from a gst-wayland-display fix. Unfixed, each stream drops a ref
     on Wolf's cached CUDA context until a stream freezes (XERK-1740, upstream
     gst-wayland-display#67). Bump its base Wolf by digest and keep the fix commit on that Wolf's

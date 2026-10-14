@@ -13,7 +13,8 @@ ARG WOLF_IMAGE=ghcr.io/games-on-whales/wolf:stable@sha256:b0ef253739f9bd49b71eba
 # plugin links the GStreamer it runs against.
 FROM ghcr.io/games-on-whales/gstreamer:1.26.7@sha256:512b53b03b256a87fb4bd204ed1d91219148b0b77ff4ee4fc121c37d869f8d29 AS plugin
 
-# xerktech/gst-wayland-display fix/cuda-context-slot-ownership: 016b4fc + #67.
+# Tag xerk-1740 on xerktech/gst-wayland-display: 016b4fc + #67. The tag keeps
+# the commit fetchable if the PR branch is deleted after a squash merge.
 ARG GWD_REPO=https://github.com/xerktech/gst-wayland-display
 ARG GWD_COMMIT=58c55f7d9b9466c2d8b0b78a5d32bf6465fc2189
 ARG RUST_VERSION=1.96.0
@@ -26,10 +27,11 @@ RUN apt-get update -y && \
     rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain $RUST_VERSION && \
     cargo install cargo-c@0.10.23 --locked
+# The plugin crate's install_subdir puts it in <libdir>/gstreamer-1.0/.
 RUN git clone $GWD_REPO /tmp/gwd && \
     cd /tmp/gwd && git checkout $GWD_COMMIT && \
     cargo cinstall --release --features=cuda \
-      --prefix=/out --libdir=/out/gstreamer-1.0 && \
+      --prefix=/out --libdir=/out && \
     test -f /out/gstreamer-1.0/libgstwaylanddisplaysrc.so
 
 FROM $WOLF_IMAGE
