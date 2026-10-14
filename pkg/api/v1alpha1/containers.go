@@ -10,10 +10,14 @@ const (
 	// WolfContainerName is the only container that creates virtual input
 	// devices, so it alone gets /dev/uinput.
 	WolfContainerName = "wolf"
-	// The rest open no device nodes: wolf-agent mknods and chmods them
+	// WolfAgentContainerName opens no device nodes: it mknods and chmods them
 	// (through O_PATH fds), which the device cgroup doesn't gate.
-	WolfAgentContainerName    = "wolf-agent"
-	PulseAudioContainerName   = "pulseaudio"
-	InitContainerName         = "init"
+	WolfAgentContainerName = "wolf-agent"
+	// PulseAudioContainerName opens no device nodes.
+	PulseAudioContainerName = "pulseaudio"
+	// InitContainerName seeds Wolf's config; it opens no device nodes.
+	InitContainerName = "init"
+	// LoopbackShimContainerName copies Wolf's bind() shim; it opens no device
+	// nodes.
 	LoopbackShimContainerName = "wolf-loopback-shim"
 )
