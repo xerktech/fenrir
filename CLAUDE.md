@@ -155,6 +155,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
   - App template containers (init too) may not mount any operator volume by name (`operatorVolumes`,
     XERK-1366): they'd get the token and key, or Wolf's socket. Add each new pod volume there.
     Tests: `TestBuildPodRejectsAppMountOfOperatorVolume`, `TestOperatorVolumesListsEveryOperatorVolume`.
+  - Nor set `hostPID`/`shareProcessNamespace` (`validateAppConfinement`, XERK-1781): a root App
+    reads the sidecars' mounts through `/proc/<pid>/root`. Tests: `TestBuildPodRejectsAppHostDevices`.
   - wolf-agent re-reads its token and its cert on every request/handshake: the operator may
     regenerate the Secret under a running pod and uses the new token and cert at once.
   - `Agent.Run` resubscribes to Wolf's `/api/v1/events` itself; `SubscribeToEvents` is one

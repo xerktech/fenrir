@@ -885,6 +885,11 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 		"all, seccomp unset": func(_ *corev1.PodSpec, ctr *corev1.Container) {
 			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"ALL"}}}
 		},
+		// Both expose wolf-agent's /proc/<pid>/root (XERK-1781).
+		"host pid": func(spec *corev1.PodSpec, _ *corev1.Container) { spec.HostPID = true },
+		"share process namespace": func(spec *corev1.PodSpec, _ *corev1.Container) {
+			spec.ShareProcessNamespace = new(true)
+		},
 		"host root":   hostPath("/"),
 		"host dev":    hostPath("/dev/"),
 		"host input":  hostPath("/dev/input"),
@@ -933,6 +938,7 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 	app.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: new(false)}
 	app.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}}
 	app.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities = &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}}
+	app.Spec.Template.Spec.ShareProcessNamespace = new(false)
 	if _, err := sc.buildPod(sess); err != nil {
 		t.Errorf("buildPod err = %v, want it allowed", err)
 	}
