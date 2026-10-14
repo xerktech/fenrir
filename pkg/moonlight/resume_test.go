@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
@@ -242,5 +244,35 @@ func TestResumeStreamRefused(t *testing.T) {
 				t.Errorf("resume = %d %s, want 500 at the timeout", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+// A Session deleted while /resume waits (cancelled from another device, or
+// reaped) gets a message, not a transport error (XERK-1336).
+func TestResumeSessionEndedWhileWaiting(t *testing.T) {
+	dw := generatedclient.NewSimpleClientset(alexSession("alex-a", time.Now()))
+	bumpGeneration(dw)
+	sessions := dw.DirewolfV1alpha1().Sessions("ns")
+	// Gone once the resume has written its keys. (A reactor must not call
+	// the fake: reactors run under its lock.)
+	var updated atomic.Bool
+	dw.PrependReactor("update", "sessions", func(k8stesting.Action) (bool, runtime.Object, error) {
+		updated.Store(true)
+		return false, nil, nil
+	})
+	dw.PrependReactor("get", "sessions", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if updated.Load() {
+			return true, nil, k8serrors.NewNotFound(v1alpha1types.Resource("sessions"), "alex-a")
+		}
+		return false, nil, nil
+	})
+	srv := &RESTServer{SessionClient: sessions, RESTServerOptions: RESTServerOptions{LaunchTimeout: 5 * time.Second}}
+
+	start := time.Now()
+	w := httptest.NewRecorder()
+	srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `status_message="The host ended the session before its stream started"`) ||
+		time.Since(start) > 2*time.Second {
+		t.Errorf("resume = %d %s after %s, want the ended message at once", w.Code, w.Body.String(), time.Since(start))
 	}
 }

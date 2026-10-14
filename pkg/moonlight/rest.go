@@ -955,6 +955,10 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 	var streamURL string
 	err = wait.PollUntilContextCancel(ctx, 250*time.Millisecond, true, func(ctx context.Context) (bool, error) {
 		live, getErr := s.SessionClient.Get(ctx, session.Name, metav1.GetOptions{})
+		if k8serrors.IsNotFound(getErr) {
+			// Cancelled from another device, or reaped.
+			return false, &streamRefusedError{message: sessionEndedMessage(clientIP)}
+		}
 		if getErr != nil {
 			return false, fmt.Errorf("failed to get session: %w", getErr)
 		}
