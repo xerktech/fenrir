@@ -8,6 +8,11 @@
 // containers get nothing, and every other container (the App's) gets the
 // /dev/input and /dev/hidraw majors.
 //
+// The App's containers also get a seccomp filter denying host-kernel
+// interfaces no game needs (deniedSyscalls). Steam-style Apps add SYS_ADMIN
+// with seccomp Unconfined, and with bpf() such a container detached its own
+// device-cgroup program and opened the node's disks (XERK-1915).
+//
 // Only pods carrying v1alpha1.SessionPodLabel are adjusted; every other pod is
 // left untouched. Because any pod author can set a label, the plugin refuses to
 // start unless --namespaces names the namespaces the operator runs sessions in,
@@ -18,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -53,10 +59,82 @@ func (p *plugin) CreateContainer(
 	ctr *api.Container,
 ) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	adjust := p.adjustment(pod, ctr.GetName())
-	if adjust != nil {
-		klog.InfoS("Granting input devices", "namespace", pod.GetNamespace(), "pod", pod.GetName(), "container", ctr.GetName())
+	if adjust == nil {
+		return nil, nil, nil
 	}
+	if !isOperatorContainer(ctr.GetName()) {
+		if policy := confinedSeccomp(ctr.GetLinux()); policy != nil {
+			adjust.SetLinuxSeccompPolicy(policy)
+		}
+	}
+	klog.InfoS("Granting input devices", "namespace", pod.GetNamespace(), "pod", pod.GetName(), "container", ctr.GetName())
 	return adjust, nil, nil
+}
+
+// deniedSyscalls are host-kernel interfaces an App container never gets, even
+// with SYS_ADMIN: bpf() detaches the container's device-cgroup program
+// (XERK-1915), and the rest load kernel code, read other processes' keys or
+// files by handle, or reach hardware. Steam's bwrap needs mount, unshare and
+// clone, so those stay; seccomp can't see a mount's fstype anyway.
+var deniedSyscalls = []string{
+	"bpf",
+	"perf_event_open",
+	"kexec_load", "kexec_file_load",
+	"init_module", "finit_module", "delete_module",
+	"open_by_handle_at", "name_to_handle_at",
+	"keyctl", "add_key", "request_key",
+	"iopl", "ioperm",
+	"swapon", "swapoff",
+	"reboot",
+	"acct",
+	"lookup_dcookie",
+	"quotactl", "quotactl_fd",
+}
+
+// seccompArches are the ABIs a default-allow filter must cover: the filter
+// kills a syscall from an ABI it doesn't list, and Proton runs 32-bit games.
+// Matches the arches of containerd's default profile. On other GOARCHes the
+// list is empty, which runc reads as the native ABI only.
+var seccompArches = map[string][]string{
+	"amd64": {"SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"},
+	"arm64": {"SCMP_ARCH_AARCH64", "SCMP_ARCH_ARM"},
+}
+
+// confinedSeccomp returns a seccomp policy for a seccomp-Unconfined
+// container that allows everything but deniedSyscalls, which return EPERM, or
+// nil to leave the container's policy alone.
+//
+// Only Unconfined containers are adjusted: the adjustment replaces the whole
+// policy, and containerd (2.2.6) reports a container's profile type but never
+// its resolved policy, so a RuntimeDefault or Localhost one can't be extended
+// without loosening it. The operator refuses App containers that add SYS_ADMIN
+// under RuntimeDefault, which allows bpf() (validateNoHostDevices).
+func confinedSeccomp(linux *api.LinuxContainer) *api.LinuxSeccomp {
+	// A nil profile reads as RUNTIME_DEFAULT.
+	if linux.GetSeccompProfile().GetProfileType() != api.SecurityProfile_UNCONFINED {
+		return nil
+	}
+	return &api.LinuxSeccomp{
+		DefaultAction: "SCMP_ACT_ALLOW",
+		Architectures: seccompArches[runtime.GOARCH],
+		Syscalls: []*api.LinuxSyscall{{
+			Names:    deniedSyscalls,
+			Action:   "SCMP_ACT_ERRNO",
+			ErrnoRet: api.UInt32(uint32(1)), // EPERM
+		}},
+	}
+}
+
+// isOperatorContainer reports whether ctrName is one of the operator's own
+// containers rather than the App's.
+func isOperatorContainer(ctrName string) bool {
+	switch ctrName {
+	case v1alpha1types.WolfContainerName, v1alpha1types.WolfAgentContainerName,
+		v1alpha1types.PulseAudioContainerName, v1alpha1types.InitContainerName,
+		v1alpha1types.LoopbackShimContainerName:
+		return true
+	}
+	return false
 }
 
 // adjustment returns the device adjustment for the container named ctrName in

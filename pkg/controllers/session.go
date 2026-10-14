@@ -1046,6 +1046,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	if err := validateNoOperatorVolumeMounts(&podToCreate.Spec); err != nil {
 		return nil, invalidSpec(err)
 	}
+	if err := validateAppConfinement(&podToCreate.Spec); err != nil {
+		return nil, invalidSpec(err)
+	}
 
 	if podToCreate.Labels == nil {
 		podToCreate.Labels = map[string]string{}
@@ -1964,6 +1967,80 @@ func validateNoOperatorVolumeMounts(spec *corev1.PodSpec) error {
 		}
 	}
 	return nil
+}
+
+// validateAppConfinement rejects App template containers (init too) that run
+// privileged or mount a hostPath at or above the host's /dev. cmd/nri-input
+// grants App containers every /dev/input and /dev/hidraw node by number, so
+// either would hand the game the host's keyboards and other sessions' pads,
+// and privileged also every disk and no seccomp filter (XERK-1915).
+//
+// It also rejects one adding a capability that opens containerd's default
+// seccomp profile (defaultProfileHoleCapability) under RuntimeDefault: with
+// SYS_ADMIN it allows bpf(), with which a container detached its device-cgroup
+// program and opened the node's disks.
+// cmd/nri-input denies bpf() only to Unconfined containers, so such an App
+// must ask for Unconfined. A Localhost profile is the App author's to vet.
+func validateAppConfinement(spec *corev1.PodSpec) error {
+	hostDev := map[string]string{}
+	for _, v := range spec.Volumes {
+		if v.HostPath == nil {
+			continue
+		}
+		p := path.Clean("/" + v.HostPath.Path)
+		if p == "/" || p == "/dev" || strings.HasPrefix(p, "/dev/") {
+			hostDev[v.Name] = v.HostPath.Path
+		}
+	}
+	for _, ctrs := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
+		for _, ctr := range ctrs {
+			if sc := ctr.SecurityContext; sc != nil && sc.Privileged != nil && *sc.Privileged {
+				return fmt.Errorf("validation failed: container %q in the App template is privileged", ctr.Name)
+			}
+			if c := defaultProfileHoleCapability(ctr.SecurityContext); c != "" && runtimeDefaultSeccomp(spec, &ctr) {
+				return fmt.Errorf("validation failed: container %q in the App template adds %s under RuntimeDefault seccomp, "+
+					"which then allows host-kernel syscalls; set seccompProfile Unconfined so the node's filter applies", ctr.Name, c)
+			}
+			for _, m := range ctr.VolumeMounts {
+				if p, ok := hostDev[m.Name]; ok {
+					return fmt.Errorf("validation failed: container %q in the App template mounts host path %q", ctr.Name, p)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// defaultProfileHoleCapability returns the first added capability with which
+// containerd's default seccomp profile allows a syscall cmd/nri-input denies
+// (bpf, perf_event_open, module loading, iopl/ioperm, reboot, acct,
+// open_by_handle_at), or "".
+func defaultProfileHoleCapability(sc *corev1.SecurityContext) corev1.Capability {
+	if sc == nil || sc.Capabilities == nil {
+		return ""
+	}
+	for _, c := range sc.Capabilities.Add {
+		switch strings.TrimPrefix(strings.ToUpper(string(c)), "CAP_") {
+		case "SYS_ADMIN", "BPF", "PERFMON", "SYS_MODULE", "SYS_RAWIO", "SYS_BOOT", "SYS_PACCT",
+			"DAC_READ_SEARCH", "ALL":
+			return c
+		}
+	}
+	return ""
+}
+
+// runtimeDefaultSeccomp reports whether ctr runs under the runtime's default
+// seccomp profile. An unset profile counts: the session node's kubelet runs
+// with seccompDefault.
+func runtimeDefaultSeccomp(spec *corev1.PodSpec, ctr *corev1.Container) bool {
+	var profile *corev1.SeccompProfile
+	if spec.SecurityContext != nil {
+		profile = spec.SecurityContext.SeccompProfile
+	}
+	if ctr.SecurityContext != nil && ctr.SecurityContext.SeccompProfile != nil {
+		profile = ctr.SecurityContext.SeccompProfile
+	}
+	return profile == nil || profile.Type == corev1.SeccompProfileTypeRuntimeDefault
 }
 
 // validateNoHotplugOverride rejects wolf-agent mounts at or under the hotplug

@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -849,6 +850,91 @@ func TestBuildPodRejectsAppDeviceOfOperatorVolume(t *testing.T) {
 		if _, err := sc.buildPod(sess); err == nil || !strings.Contains(err.Error(), "reserved for the operator") {
 			t.Errorf("init container %v: buildPod err = %v, want the wolf-data volumeDevice rejected", initCtr, err)
 		}
+	}
+}
+
+// cmd/nri-input grants App containers every input node by number, so a host
+// /dev or a privileged container hands the game the host's input (XERK-1915).
+func TestBuildPodRejectsAppHostDevices(t *testing.T) {
+	hostPath := func(p string) func(*corev1.PodSpec, *corev1.Container) {
+		return func(spec *corev1.PodSpec, ctr *corev1.Container) {
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "host", VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: p},
+			}})
+			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: "host", MountPath: "/x"})
+		}
+	}
+	tests := map[string]func(*corev1.PodSpec, *corev1.Container){
+		"privileged": func(_ *corev1.PodSpec, ctr *corev1.Container) {
+			ctr.SecurityContext = &corev1.SecurityContext{Privileged: new(true)}
+		},
+		"sys_admin, seccomp unset": func(_ *corev1.PodSpec, ctr *corev1.Container) {
+			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"cap_sys_admin"}}}
+		},
+		"bpf, pod runtime default": func(spec *corev1.PodSpec, ctr *corev1.Container) {
+			spec.SecurityContext = &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}}
+			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"BPF"}}}
+		},
+		"sys_rawio, container runtime default over pod unconfined": func(spec *corev1.PodSpec, ctr *corev1.Container) {
+			spec.SecurityContext = &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}}
+			ctr.SecurityContext = &corev1.SecurityContext{
+				Capabilities:   &corev1.Capabilities{Add: []corev1.Capability{"SYS_RAWIO"}},
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			}
+		},
+		"all, seccomp unset": func(_ *corev1.PodSpec, ctr *corev1.Container) {
+			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"ALL"}}}
+		},
+		"host root":   hostPath("/"),
+		"host dev":    hostPath("/dev/"),
+		"host input":  hostPath("/dev/input"),
+		"host uinput": hostPath("/dev/uinput"),
+		"unclean dev": hostPath("/var/../dev//input"),
+	}
+	// Every capability that opens a syscall cmd/nri-input denies, also when
+	// it isn't the first one added.
+	for _, c := range []corev1.Capability{"SYS_ADMIN", "BPF", "PERFMON", "SYS_MODULE", "SYS_RAWIO", "SYS_BOOT", "SYS_PACCT", "DAC_READ_SEARCH", "ALL"} {
+		tests["add "+string(c)] = func(_ *corev1.PodSpec, ctr *corev1.Container) {
+			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_RAW", c}}}
+		}
+	}
+	tests["gated cap first"] = func(_ *corev1.PodSpec, ctr *corev1.Container) {
+		ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN", "NET_RAW"}}}
+	}
+	for name, mutate := range tests {
+		for _, initCtr := range []bool{false, true} {
+			sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+			app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The informer's copy: buildPod reads it back below.
+			spec := &app.Spec.Template.Spec
+			if initCtr {
+				spec.InitContainers = append(spec.InitContainers, corev1.Container{Name: "steal", Image: "busybox"})
+				mutate(spec, &spec.InitContainers[len(spec.InitContainers)-1])
+			} else {
+				mutate(spec, &spec.Containers[0])
+			}
+			if _, err := sc.buildPod(sess); !errors.Is(err, errInvalidSpec) {
+				t.Errorf("%s (init container: %v): buildPod err = %v, want it rejected", name, initCtr, err)
+			}
+		}
+	}
+
+	// Other host paths, an unprivileged container and a SYS_ADMIN one under
+	// Unconfined seccomp (cmd/nri-input filters it) stay allowed.
+	sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+	app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostPath("/devices")(&app.Spec.Template.Spec, &app.Spec.Template.Spec.Containers[0])
+	app.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: new(false)}
+	app.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}}
+	app.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities = &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}}
+	if _, err := sc.buildPod(sess); err != nil {
+		t.Errorf("buildPod err = %v, want it allowed", err)
 	}
 }
 

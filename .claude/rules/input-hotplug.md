@@ -26,13 +26,27 @@ paths:
   - containerd prefixes `CAP_` itself: a listed `CAP_MKNOD` drop is a no-op (`CAP_CAP_MKNOD`), so
     only a bare `MKNOD` counts as dropped. Tests: `TestDropMknod`.
   - NRI can't narrow the grant per minor: device rules are set only at container create.
-  - Not covered: a privileged App, or one adding SYS_ADMIN (mounts a devtmpfs), or mounting hostPath
-    `/dev/input`. The Steam/Heroic Apps add SYS_ADMIN with seccomp Unconfined (XERK-1433).
+  - A privileged App container, or one mounting a hostPath at or above `/dev`, is refused
+    (`validateAppConfinement`, XERK-1915). Tests: `TestBuildPodRejectsAppHostDevices`.
+  - Not covered: an App adding SYS_ADMIN mounts a devtmpfs and opens every `13:*`/`241:*` node,
+    host keyboards included. The Steam/Heroic Apps add SYS_ADMIN with seccomp Unconfined.
   - Steam can't drop SYS_ADMIN: Proton's bwrap mounts a fresh `/proc`, which a masked `/proc`
     forbids (EPERM, measured on talos04); `procMount: Unmasked` needs `hostUsers: false`, which
     the apiserver rejects with hostNetwork. A per-minor eBPF device filter doesn't help either:
     SYS_ADMIN with no seccomp detaches its own `cgroup_device` program via bpf() and then opens
     any device, host disks included (measured on talos04, XERK-1915).
+- `cmd/nri-input` gives every seccomp-Unconfined App container a default-allow filter denying bpf,
+  perf_event_open, module/kexec loading, open_by_handle_at, keyctl and the like (`deniedSyscalls`,
+  XERK-1915). Others keep their profile untouched.
+  - An NRI seccomp adjustment replaces the whole policy, and containerd 2.2.6 reports only the
+    profile type, never the resolved policy: extending RuntimeDefault would replace it.
+  - containerd's RuntimeDefault opens denied syscalls to some caps (bpf to SYS_ADMIN/BPF,
+    open_by_handle_at to DAC_READ_SEARCH, ...), so the operator refuses an App container adding one
+    under RuntimeDefault, unset included (talos04's kubelet runs `seccompDefault`).
+    Such an App must ask for Unconfined (`defaultProfileHoleCapability`).
+  - The filter lists the 32-bit arches, or Proton's 32-bit games are killed.
+  - seccomp can't see a mount's fstype or path, so devtmpfs and procfs mounts stay possible.
+  - Tests: `TestConfinedSeccomp*`, `TestCreateContainerConfinesOnlyApp`.
 - `cmd/nri-input` grants by container name (`pkg/api/v1alpha1/containers.go`): only `wolf` gets
   `/dev/uinput`; wolf-agent, pulseaudio and the init containers get nothing (wolf-agent's mknod
   is covered by containerd's default `c *:* m`, and it opens nodes only `O_PATH`); every other
@@ -40,7 +54,8 @@ paths:
   `TestSessionPodOperatorContainerNames`.
 - Only char major 13 under `/dev/input/` is created (`CreateDeviceNode`); a Wolf event can't make
   a disk node. `/dev/hidraw*` is not handled: pads are uinput Xbox pads (no uhid on Talos).
-- An App that mounts its own `/dev/input` keeps it (`withHotplugMounts` skips taken paths).
+- An App that mounts its own `/dev/input` (not hostPath) keeps it (`withHotplugMounts` skips
+  taken paths).
   A wolfAgent sidecar policy may not mount there (`validateNoHotplugOverride`).
   - Compare mounts via `mountTarget`: the apiserver accepts relative mountPaths (`run/udev/data`),
     which the runtime resolves against `/`; `/var/run` (Alpine symlink) is reserved as an alias.
@@ -51,7 +66,7 @@ paths:
   clears both dirs on pause (`clearDevices`), or a stale 0666 node would open whatever device the
   kernel gives that minor next (another session's keyboard). Tests: `TestAgentPauseClearsDevices`.
 - Joining a stream to the Wolf lobby moves its joypads with an unplug addressed to the stream; once
-  joined, real unplugs are re-fired addressed to the lobby. So the agent skips unplugs addressed to a
+  joined, real unplugs are re-fired addressed to the lobby. So the agent skips unplugs to a
   joining/joined stream (`ignoresUnplug`). Tests: `TestAgentKeepsDevicesMovedToLobby`.
 - The dirs are writable by the app container, which can swap a node for a symlink at any moment:
   never chmod/chown by path after mknod (`setNodeMode` goes through an O_PATH fd).

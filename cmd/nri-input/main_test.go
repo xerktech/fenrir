@@ -138,3 +138,66 @@ func TestNewPluginScope(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, p.namespaces)
 }
+
+func denied(t *testing.T, policy *api.LinuxSeccomp) []string {
+	t.Helper()
+	var names []string
+	for _, sc := range policy.GetSyscalls() {
+		if sc.Action == "SCMP_ACT_ERRNO" {
+			names = append(names, sc.Names...)
+		} else {
+			for _, n := range sc.Names {
+				require.NotContains(t, deniedSyscalls, n, "denied syscall left in a %s rule", sc.Action)
+			}
+		}
+	}
+	return names
+}
+
+// An Unconfined App (Steam adds SYS_ADMIN) could detach its device-cgroup
+// program with bpf() and open host disks (XERK-1915).
+func TestConfinedSeccompUnconfined(t *testing.T) {
+	policy := confinedSeccomp(&api.LinuxContainer{
+		SeccompProfile: &api.SecurityProfile{ProfileType: api.SecurityProfile_UNCONFINED},
+	})
+	require.NotNil(t, policy)
+	require.Equal(t, "SCMP_ACT_ALLOW", policy.DefaultAction)
+	require.NotEmpty(t, policy.Architectures, "32-bit syscalls would be killed")
+	require.ElementsMatch(t, deniedSyscalls, denied(t, policy))
+}
+
+// containerd reports no resolved policy, so replacing a confined container's
+// would loosen it.
+func TestConfinedSeccompLeavesConfinedAlone(t *testing.T) {
+	for name, linux := range map[string]*api.LinuxContainer{
+		"nil":             nil,
+		"no profile":      {},
+		"runtime default": {SeccompProfile: &api.SecurityProfile{ProfileType: api.SecurityProfile_RUNTIME_DEFAULT}},
+		"localhost":       {SeccompProfile: &api.SecurityProfile{ProfileType: api.SecurityProfile_LOCALHOST, LocalhostRef: "x.json"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Nil(t, confinedSeccomp(linux))
+		})
+	}
+}
+
+func TestCreateContainerConfinesOnlyApp(t *testing.T) {
+	unconfined := &api.LinuxContainer{SeccompProfile: &api.SecurityProfile{ProfileType: api.SecurityProfile_UNCONFINED}}
+	p := &plugin{}
+	adjust, _, err := p.CreateContainer(t.Context(), sessionPod("games"), &api.Container{Name: "app", Linux: unconfined})
+	require.NoError(t, err)
+	require.NotNil(t, adjust.GetLinux().GetSeccompPolicy())
+
+	adjust, _, err = p.CreateContainer(t.Context(), sessionPod("games"), &api.Container{Name: v1alpha1types.WolfContainerName, Linux: unconfined})
+	require.NoError(t, err)
+	require.Nil(t, adjust.GetLinux().GetSeccompPolicy(), "Wolf's own policy is the operator's")
+
+	adjust, _, err = p.CreateContainer(t.Context(), sessionPod("games"), &api.Container{Name: "app"})
+	require.NoError(t, err)
+	require.NotNil(t, adjust, "devices still granted")
+	require.Nil(t, adjust.GetLinux().GetSeccompPolicy(), "RuntimeDefault left alone")
+
+	adjust, _, err = p.CreateContainer(t.Context(), &api.PodSandbox{Name: "other"}, &api.Container{Name: "app", Linux: unconfined})
+	require.NoError(t, err)
+	require.Nil(t, adjust, "other pods untouched")
+}
