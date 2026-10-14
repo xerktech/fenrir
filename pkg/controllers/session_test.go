@@ -891,6 +891,13 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 		"host uinput": hostPath("/dev/uinput"),
 		"unclean dev": hostPath("/var/../dev//input"),
 	}
+	// Every capability that opens a syscall cmd/nri-input denies, also when
+	// it isn't the first one added.
+	for _, c := range []corev1.Capability{"SYS_ADMIN", "BPF", "PERFMON", "SYS_MODULE", "SYS_RAWIO", "SYS_BOOT", "SYS_PACCT", "DAC_READ_SEARCH", "ALL"} {
+		tests["add "+string(c)] = func(_ *corev1.PodSpec, ctr *corev1.Container) {
+			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_RAW", c}}}
+		}
+	}
 	for name, mutate := range tests {
 		for _, initCtr := range []bool{false, true} {
 			sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")

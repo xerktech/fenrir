@@ -2013,14 +2013,16 @@ func validateAppConfinement(spec *corev1.PodSpec) error {
 
 // defaultProfileHoleCapability returns the first added capability with which
 // containerd's default seccomp profile allows a syscall cmd/nri-input denies
-// (bpf, perf_event_open, module loading, iopl/ioperm, reboot, acct), or "".
+// (bpf, perf_event_open, module loading, iopl/ioperm, reboot, acct,
+// open_by_handle_at), or "".
 func defaultProfileHoleCapability(sc *corev1.SecurityContext) corev1.Capability {
 	if sc == nil || sc.Capabilities == nil {
 		return ""
 	}
 	for _, c := range sc.Capabilities.Add {
 		switch strings.TrimPrefix(strings.ToUpper(string(c)), "CAP_") {
-		case "SYS_ADMIN", "BPF", "PERFMON", "SYS_MODULE", "SYS_RAWIO", "SYS_BOOT", "SYS_PACCT", "ALL":
+		case "SYS_ADMIN", "BPF", "PERFMON", "SYS_MODULE", "SYS_RAWIO", "SYS_BOOT", "SYS_PACCT",
+			"DAC_READ_SEARCH", "ALL":
 			return c
 		}
 	}

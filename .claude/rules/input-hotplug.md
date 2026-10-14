@@ -40,9 +40,10 @@ paths:
   XERK-1915). Others keep their profile untouched.
   - An NRI seccomp adjustment replaces the whole policy, and containerd 2.2.6 reports only the
     profile type, never the resolved policy: extending RuntimeDefault would replace it.
-  - containerd's RuntimeDefault allows bpf() to SYS_ADMIN/BPF/PERFMON (and module, rawio, boot, pacct syscalls to their caps), so the operator refuses an
-    App container adding one of those under RuntimeDefault, unset included (talos04's kubelet runs
-    `seccompDefault`). Such an App must ask for Unconfined.
+  - containerd's RuntimeDefault opens denied syscalls to some caps (bpf to SYS_ADMIN/BPF,
+    open_by_handle_at to DAC_READ_SEARCH, ...), so the operator refuses an App container adding one
+    under RuntimeDefault, unset included (talos04's kubelet runs `seccompDefault`).
+    Such an App must ask for Unconfined (`defaultProfileHoleCapability`).
   - The filter lists the 32-bit arches, or Proton's 32-bit games are killed.
   - seccomp can't see a mount's fstype or path, so devtmpfs and procfs mounts stay possible.
   - Tests: `TestConfinedSeccomp*`, `TestCreateContainerConfinesOnlyApp`.
@@ -53,7 +54,8 @@ paths:
   `TestSessionPodOperatorContainerNames`.
 - Only char major 13 under `/dev/input/` is created (`CreateDeviceNode`); a Wolf event can't make
   a disk node. `/dev/hidraw*` is not handled: pads are uinput Xbox pads (no uhid on Talos).
-- An App that mounts its own `/dev/input` (not hostPath) keeps it (`withHotplugMounts` skips taken paths).
+- An App that mounts its own `/dev/input` (not hostPath) keeps it (`withHotplugMounts` skips
+  taken paths).
   A wolfAgent sidecar policy may not mount there (`validateNoHotplugOverride`).
   - Compare mounts via `mountTarget`: the apiserver accepts relative mountPaths (`run/udev/data`),
     which the runtime resolves against `/`; `/var/run` (Alpine symlink) is reserved as an alias.
