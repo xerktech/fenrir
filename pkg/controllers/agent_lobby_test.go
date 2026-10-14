@@ -807,3 +807,149 @@ func TestAgentResubscribeKeepsStreamStillInLobby(t *testing.T) {
 		t.Errorf("joined state lost across resubscribe: %v", err)
 	}
 }
+
+// A stream started while the event stream is down loses its setup events for
+// good, but Wolf lists it, outside the lobby. After resubscribing, the agent
+// must join it on its next pings, or the client sees the stream's own empty
+// display instead of the game (XERK-1797).
+func TestAgentJoinsStreamStartedWhileResubscribing(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a, ch, _ := joinedOnFreshSubscription(t, client, func() {
+		// The joined stream paused and was stopped; a resume reusing its
+		// ID started.
+		client.leave(false)
+		client.mu.Lock()
+		client.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: "resumed"}}
+		client.mu.Unlock()
+	})
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+	sendOn(ch, "Done", "")
+	if s, k := a.lobby.joinedStream(); s != wolfStreamID || k != "resumed" {
+		t.Errorf("joined stream %q key %q, want %s key resumed", s, k, wolfStreamID)
+	}
+}
+
+// The agent can start (or restart) while a stream already runs.
+func TestAgentJoinsStreamStartedBeforeFirstSubscribe(t *testing.T) {
+	client := newLobbyClient()
+	client.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey}}
+	lobbyAgent(t, client)
+	client.send(wolfapi.RTPVideoPingEventType, `{}`)
+	client.send(wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+}
+
+// A stream whose setup events were seen keeps its progress across a
+// resubscribe: re-seeding would forget the ping already seen.
+func TestAgentCatchUpKeepsKnownStream(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a := hotplugAgent(t, client)
+	a.lobby.settle = 0
+	a.minResubscribeDelay = time.Millisecond
+	go a.Run(t.Context())
+	ch := <-client.subs
+	sendOn(ch, wolfapi.VideoSessionEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	sendOn(ch, wolfapi.AudioSessionEventType, `{"session_id":"`+wolfStreamID+`","aes_key":"`+streamKey+`"}`)
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	client.mu.Lock()
+	client.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey}}
+	client.mu.Unlock()
+	close(ch)
+	ch = <-client.subs
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+}
+
+// No stream is seeded when the live one is already in the lobby, or when
+// several unknown streams can't be told apart.
+func TestAgentCatchUpLeavesAmbiguousStreams(t *testing.T) {
+	for name, setup := range map[string]func(*lobbyClient){
+		"lobby occupied": func(c *lobbyClient) {
+			c.connected = []string{"other"}
+			c.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey}}
+		},
+		"several unknown": func(c *lobbyClient) {
+			c.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey}, {ClientID: "other", AESKey: "k2"}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := newLobbyClient()
+			setup(client)
+			lobbyAgent(t, client)
+			client.send(wolfapi.RTPVideoPingEventType, `{}`)
+			client.send(wolfapi.RTPAudioPingEventType, `{}`)
+			client.send("Done", "")
+			client.wantNoJoin(t)
+		})
+	}
+}
+
+// A resume reusing the ID of a stream whose joins all failed starts afresh:
+// the old stream's spent attempts must not stop it joining.
+func TestAgentJoinsStreamStartedAfterExhaustedJoins(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	client.joinErr = errors.New("wolf refused")
+	a := hotplugAgent(t, client)
+	a.lobby.settle = 0
+	a.minResubscribeDelay = time.Millisecond
+	go a.Run(t.Context())
+	ch := <-client.subs
+	sendOn(ch, wolfapi.VideoSessionEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	sendOn(ch, wolfapi.AudioSessionEventType, `{"session_id":"`+wolfStreamID+`","aes_key":"`+streamKey+`"}`)
+	for range maxLobbyJoinAttempts {
+		sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+		sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+		<-client.joined
+		waitLobbyState(t, a, lobbyJoinWaiting)
+	}
+	client.mu.Lock()
+	client.joinErr = nil
+	client.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: "resumed"}}
+	client.mu.Unlock()
+	close(ch)
+	ch = <-client.subs
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+}
+
+// A stream whose AudioSession was lost with the event stream is seeded too:
+// without it, its audio pings never count.
+func TestAgentJoinsStreamStartedAcrossDroppedAudioSetup(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a := hotplugAgent(t, client)
+	a.lobby.settle = 0
+	a.minResubscribeDelay = time.Millisecond
+	go a.Run(t.Context())
+	ch := <-client.subs
+	sendOn(ch, wolfapi.VideoSessionEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	client.mu.Lock()
+	client.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey}}
+	client.mu.Unlock()
+	close(ch)
+	ch = <-client.subs
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+}
+
+// waitLobbyState waits for a's joiner to reach state, as a failed join
+// returns to waiting only after JoinLobby returns.
+func waitLobbyState(t *testing.T, a *Agent, state lobbyJoinState) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a.lobby.mu.Lock()
+		got := a.lobby.state
+		a.lobby.mu.Unlock()
+		if got == state {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("lobby joiner state %d, want %d", got, state)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

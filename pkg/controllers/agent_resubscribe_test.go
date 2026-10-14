@@ -98,6 +98,11 @@ func (f *scriptedEventsClient) SubscribeToEvents(ctx context.Context) (<-chan *s
 	return step(ctx)
 }
 
+// ListSessions lists no streams, so no missed start is caught up.
+func (f *scriptedEventsClient) ListSessions(context.Context) ([]wolfapi.Session, error) {
+	return nil, nil
+}
+
 func refused(context.Context) (<-chan *sse.Event, error) {
 	return nil, errors.New("401 Unauthorized")
 }

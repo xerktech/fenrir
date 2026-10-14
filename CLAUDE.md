@@ -161,6 +161,9 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       lobby's `connected_sessions` is ended as a pause would (`catchUpMissedEnd`, XERK-1378).
       It stops Wolf's listed session only if its AES key matches: a resume may reuse the ID.
       Not caught: a stream that ended before it joined. Tests: `TestAgentCatch*`.
+    - The missed start too: with the lobby empty, the one listed stream the joiner doesn't know is
+      seeded as if its setup events were seen, and joins on its next pings (`catchUpMissedStart`,
+      XERK-1797). Several unknown streams are left alone. Tests: `TestAgentJoinsStreamStarted*`.
   - `fakeudev` is Linux-only for real work (`fakeudev_linux.go` vs `fakeudev_other.go` stub);
     tests touching it behave differently on Windows/macOS.
 - **`pkg/generic`**: typed generic wrappers over client-go informers/listers plus a reusable
