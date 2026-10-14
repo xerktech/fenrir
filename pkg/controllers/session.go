@@ -1981,7 +1981,19 @@ func validateNoOperatorVolumeMounts(spec *corev1.PodSpec) error {
 // program and opened the node's disks.
 // cmd/nri-input denies bpf() only to Unconfined containers, so such an App
 // must ask for Unconfined. A Localhost profile is the App author's to vet.
+//
+// And it rejects hostPID and shareProcessNamespace: with either, a root App
+// sees wolf-agent's and Wolf's processes and can read their mounts through
+// /proc/<pid>/root (the agent token and key, Wolf's socket), which
+// validateNoOperatorVolumeMounts cannot stop (XERK-1781). The pod's own
+// processes need neither.
 func validateAppConfinement(spec *corev1.PodSpec) error {
+	if spec.HostPID {
+		return stderrors.New("validation failed: the App template sets hostPID")
+	}
+	if spec.ShareProcessNamespace != nil && *spec.ShareProcessNamespace {
+		return stderrors.New("validation failed: the App template sets shareProcessNamespace")
+	}
 	hostDev := map[string]string{}
 	for _, v := range spec.Volumes {
 		if v.HostPath == nil {
