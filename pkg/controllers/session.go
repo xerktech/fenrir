@@ -311,6 +311,11 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	} else if reason != "" {
 		return c.endSession(ctx, newObj, reason)
 	}
+	if reason, err := c.unstreamableReason(ctx, newObj); err != nil {
+		return err
+	} else if reason != "" {
+		return c.endSession(ctx, newObj, reason)
+	}
 	oldStatus := newObj.Status.DeepCopy()
 	portsError := c.allocatePorts(ctx, newObj)
 
@@ -768,6 +773,33 @@ func (c *SessionController) expiredReason(session *v1alpha1types.Session, now ti
 	return ""
 }
 
+// unstreamableReason is why session should end before it gets a pod: Wolf
+// could never stream to its clientIP, so its image pull and GPU claim would
+// be wasted. Once a pod exists a bad IP only fails the attach, since a later
+// /resume from a usable address may still save the game; the pod is looked
+// up live, as PodCreated can be False or missing while one runs.
+func (c *SessionController) unstreamableReason(ctx context.Context, session *v1alpha1types.Session) (string, error) {
+	_, ipErr := streamClientIP(session)
+	if ipErr == nil {
+		return "", nil
+	}
+	// An earlier same-named Session's pod is not this one's game.
+	podName := c.podName(session)
+	pod, err := c.podController.Informer().Namespaced(session.Namespace).Get(podName)
+	if err == nil && metav1.IsControlledBy(pod, session) {
+		return "", nil
+	} else if err != nil && !errors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
+	}
+	pod, err = c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err == nil && metav1.IsControlledBy(pod, session) {
+		return "", nil
+	} else if err != nil && !errors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
+	}
+	return ipErr.Error(), nil
+}
+
 // reconcilePod ensures the session's pod exists and returns it. The pod runs
 // once, like a Job's: restartPolicy Never, and never recreated. Once it has
 // finished (a container exited, or it was deleted), the Session is deleted and
@@ -1070,7 +1102,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 
 	podToCreate.Spec.InitContainers = append(podToCreate.Spec.InitContainers,
 		corev1.Container{
-			Name:  "init",
+			Name:  v1alpha1types.InitContainerName,
 			Image: "ghcr.io/games-on-whales/base:edge",
 			// This will need to be updated / removed since /etc/wolf/cfg is no longer used by wolf
 			// Also, we're no longer injecting the app info into the config.toml
@@ -1126,7 +1158,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	// image: Wolf's image is upstream's.
 	podToCreate.Spec.InitContainers = append(podToCreate.Spec.InitContainers,
 		corev1.Container{
-			Name:            wolfLoopbackShimVolume,
+			Name:            v1alpha1types.LoopbackShimContainerName,
 			Image:           c.WolfAgentImage,
 			ImagePullPolicy: corev1.PullAlways,
 			Command:         []string{"cp", wolfLoopbackShimImagePath, wolfLoopbackShimPath},
@@ -1264,7 +1296,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 
 	podToCreate.Spec.Containers = append(podToCreate.Spec.Containers,
 		corev1.Container{
-			Name:            "wolf-agent",
+			Name:            v1alpha1types.WolfAgentContainerName,
 			Image:           c.WolfAgentImage,
 			ImagePullPolicy: corev1.PullAlways,
 			// ImagePullPolicy: corev1.PullIfNotPresent,
@@ -1362,7 +1394,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 			}, withHotplugMounts(wolfAgentVolumeMounts)...),
 		},
 		corev1.Container{
-			Name:  "pulseaudio",
+			Name:  v1alpha1types.PulseAudioContainerName,
 			Image: "ghcr.io/games-on-whales/pulseaudio:edge",
 			Env: append([]corev1.EnvVar{
 				{Name: "TZ", Value: wolfEnvVars["TZ"]},
@@ -1382,7 +1414,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 			}, pulseAudioVolumeMounts...),
 		},
 		corev1.Container{
-			Name:    "wolf",
+			Name:    v1alpha1types.WolfContainerName,
 			Image:   WOLF_IMAGE,
 			Command: wolfCommand,
 			Env:     append(wolfEnvVarsSlice, wolfEnv...),
@@ -2424,21 +2456,30 @@ func (c *SessionController) ensureLobby(ctx context.Context, wolfclient wolfapi.
 	return nil
 }
 
-// wolfSessionFor builds the Wolf AddSession request for session. Wolf streams
-// to ClientIP, so it must be the Moonlight client's real address (recorded by
+// streamClientIP is the address Wolf streams session to. Wolf streams to
+// ClientIP, so it must be the Moonlight client's real address (recorded by
 // moonlight-proxy at /launch); there is no usable default. Wolf's stream
 // sockets are IPv4-only and it matches peers by exact IP string, so an IPv6
-// client could never stream: refuse it here with a clear error instead.
-func wolfSessionFor(session *v1alpha1types.Session, podIP string) (wolfapi.Session, error) {
+// client could never stream: refuse it with a clear error instead.
+func streamClientIP(session *v1alpha1types.Session) (netip.Addr, error) {
 	clientIP, err := netip.ParseAddr(session.Spec.Config.ClientIP)
 	if err != nil {
-		return wolfapi.Session{}, fmt.Errorf("session %s/%s has no valid spec.config.clientIP %q: %w",
+		return netip.Addr{}, fmt.Errorf("session %s/%s has no valid spec.config.clientIP %q: %w",
 			session.Namespace, session.Name, session.Spec.Config.ClientIP, err)
 	}
 	clientIP = clientIP.Unmap()
 	if !clientIP.Is4() || clientIP.IsUnspecified() {
-		return wolfapi.Session{}, fmt.Errorf("session %s/%s: spec.config.clientIP %s is not an IPv4 address; Wolf streams over IPv4 only",
+		return netip.Addr{}, fmt.Errorf("session %s/%s: spec.config.clientIP %s is not an IPv4 address; Wolf streams over IPv4 only",
 			session.Namespace, session.Name, clientIP)
+	}
+	return clientIP, nil
+}
+
+// wolfSessionFor builds the Wolf AddSession request for session.
+func wolfSessionFor(session *v1alpha1types.Session, podIP string) (wolfapi.Session, error) {
+	clientIP, err := streamClientIP(session)
+	if err != nil {
+		return wolfapi.Session{}, err
 	}
 
 	return wolfapi.Session{
