@@ -75,6 +75,12 @@ const wolfAgentTimeout = 10 * time.Second
 // its pod finished, so there is nothing left to reconcile.
 var errSessionEnded = stderrors.New("session ended")
 
+// errInvalidSpec marks a buildPod error caused by the App or User spec, not by
+// a lookup: every retry fails the same way, so reconcilePod ends the Session.
+var errInvalidSpec = stderrors.New("invalid App or User spec")
+
+func invalidSpec(err error) error { return fmt.Errorf("%w: %w", errInvalidSpec, err) }
+
 // errEndSessionFailed wraps a failed attempt to delete the Session (e.g. a
 // resourceVersion conflict). Reconcile must requeue without writing status:
 // recording it as PodCreated=False would make the next reconcile recreate a
@@ -843,7 +849,20 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 	}
 
 	pod, err := c.buildPod(session)
-	if err != nil {
+	switch {
+	case stderrors.Is(err, errInvalidSpec):
+		// Like an Invalid pod create below: end the Session now rather than
+		// at the unstarted TTL, which the client only sees as a timeout. But
+		// not if a pod the cache has yet to see was created before the App or
+		// User changed (its PodCreated status write lost): that game runs.
+		live, getErr := c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, podName, metav1.GetOptions{})
+		if getErr == nil {
+			return c.checkPod(ctx, session, live)
+		} else if !errors.IsNotFound(getErr) {
+			return nil, fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, getErr)
+		}
+		return nil, c.endSessionErr(ctx, session, err.Error())
+	case err != nil:
 		return nil, err
 	}
 	// Before the pod, which mounts it.
@@ -1014,7 +1033,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		podToCreate.Spec = *app.Spec.Template.Spec.DeepCopy()
 	}
 	if err := addAppGPUClaim(&podToCreate.Spec, app, session); err != nil {
-		return nil, err
+		return nil, invalidSpec(err)
 	}
 	// Before the operator's own containers are added: only the App's are
 	// stripped.
@@ -1025,7 +1044,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		dropMknod(&podToCreate.Spec.Containers[i])
 	}
 	if err := validateNoOperatorVolumeMounts(&podToCreate.Spec); err != nil {
-		return nil, err
+		return nil, invalidSpec(err)
 	}
 
 	if podToCreate.Labels == nil {
@@ -1108,8 +1127,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		// Validate the main app container's resources against the user's policy.
 		validatedResources, err := validateAppResources(podToCreate.Spec.Containers[i].Resources, user.Spec.Resources)
 		if err != nil {
-			// The error will be handled by the main Reconcile loop to update the session status.
-			return nil, fmt.Errorf("resource validation for main app container failed: %w", err)
+			return nil, invalidSpec(fmt.Errorf("resource validation for main app container failed: %w", err))
 		}
 		podToCreate.Spec.Containers[i].Resources = validatedResources
 	}
@@ -1222,10 +1240,10 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		policies := user.Spec.SidecarPolicies
 		if policies.WolfAgent != nil {
 			if err := validateVolumeMounts(policies.WolfAgent.VolumeMounts, validVolumes, "wolfAgent"); err != nil {
-				return nil, err
+				return nil, invalidSpec(err)
 			}
 			if err := validateNoHotplugOverride(policies.WolfAgent.VolumeMounts); err != nil {
-				return nil, err
+				return nil, invalidSpec(err)
 			}
 			wolfAgentEnv = policies.WolfAgent.Env
 			// klog.debug("User defined env vars: %+v", wolfAgentEnv)
@@ -1240,7 +1258,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		}
 		if policies.PulseAudio != nil {
 			if err := validateVolumeMounts(policies.PulseAudio.VolumeMounts, validVolumes, "pulseAudio"); err != nil {
-				return nil, err
+				return nil, invalidSpec(err)
 			}
 			pulseAudioEnv = policies.PulseAudio.Env
 			// klog.Infof("User defined env vars: %+v", pulseAudioEnv)
@@ -1253,7 +1271,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		}
 		if policies.Wolf != nil {
 			if err := validateVolumeMounts(policies.Wolf.VolumeMounts, validVolumes, "wolf"); err != nil {
-				return nil, err
+				return nil, invalidSpec(err)
 			}
 			wolfEnv = policies.Wolf.Env
 			// klog.Infof("User defined env vars: %+v", wolfEnv)
