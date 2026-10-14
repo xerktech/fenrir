@@ -311,6 +311,14 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	} else if reason != "" {
 		return c.endSession(ctx, newObj, reason)
 	}
+	if !meta.IsStatusConditionTrue(newObj.Status.Conditions, podCreatedCondition) {
+		// It could never stream, so don't pull its image or claim its GPU.
+		// Once the pod exists a bad IP only fails the attach: a later
+		// /resume from a usable address may still save the game.
+		if _, err := streamClientIP(newObj); err != nil {
+			return c.endSession(ctx, newObj, err.Error())
+		}
+	}
 	oldStatus := newObj.Status.DeepCopy()
 	portsError := c.allocatePorts(ctx, newObj)
 
@@ -2411,21 +2419,30 @@ func (c *SessionController) ensureLobby(ctx context.Context, wolfclient wolfapi.
 	return nil
 }
 
-// wolfSessionFor builds the Wolf AddSession request for session. Wolf streams
-// to ClientIP, so it must be the Moonlight client's real address (recorded by
+// streamClientIP is the address Wolf streams session to. Wolf streams to
+// ClientIP, so it must be the Moonlight client's real address (recorded by
 // moonlight-proxy at /launch); there is no usable default. Wolf's stream
 // sockets are IPv4-only and it matches peers by exact IP string, so an IPv6
-// client could never stream: refuse it here with a clear error instead.
-func wolfSessionFor(session *v1alpha1types.Session, podIP string) (wolfapi.Session, error) {
+// client could never stream: refuse it with a clear error instead.
+func streamClientIP(session *v1alpha1types.Session) (netip.Addr, error) {
 	clientIP, err := netip.ParseAddr(session.Spec.Config.ClientIP)
 	if err != nil {
-		return wolfapi.Session{}, fmt.Errorf("session %s/%s has no valid spec.config.clientIP %q: %w",
+		return netip.Addr{}, fmt.Errorf("session %s/%s has no valid spec.config.clientIP %q: %w",
 			session.Namespace, session.Name, session.Spec.Config.ClientIP, err)
 	}
 	clientIP = clientIP.Unmap()
 	if !clientIP.Is4() || clientIP.IsUnspecified() {
-		return wolfapi.Session{}, fmt.Errorf("session %s/%s: spec.config.clientIP %s is not an IPv4 address; Wolf streams over IPv4 only",
+		return netip.Addr{}, fmt.Errorf("session %s/%s: spec.config.clientIP %s is not an IPv4 address; Wolf streams over IPv4 only",
 			session.Namespace, session.Name, clientIP)
+	}
+	return clientIP, nil
+}
+
+// wolfSessionFor builds the Wolf AddSession request for session.
+func wolfSessionFor(session *v1alpha1types.Session, podIP string) (wolfapi.Session, error) {
+	clientIP, err := streamClientIP(session)
+	if err != nil {
+		return wolfapi.Session{}, err
 	}
 
 	return wolfapi.Session{

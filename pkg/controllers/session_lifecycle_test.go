@@ -809,3 +809,53 @@ func TestAttachWithoutWolfClientsUsesDummy(t *testing.T) {
 		t.Errorf("adds %d with client %q, want one with the dummy", agent.added, agent.last.ClientID)
 	}
 }
+
+// A Session whose clientIP Wolf could never stream to ends before its pod
+// is created (image pull, GPU claim). Once the pod exists, a bad IP from a
+// /resume only fails the attach: a later /resume may still save the game.
+func TestUnstreamableClientIPEndsSessionBeforePod(t *testing.T) {
+	for _, tc := range []struct {
+		name, ip   string
+		podCreated bool
+		wantEnded  bool
+	}{
+		{name: "empty", ip: "", wantEnded: true},
+		{name: "ipv6", ip: "2001:db8::1", wantEnded: true},
+		{name: "garbage", ip: "not-an-ip", wantEnded: true},
+		{name: "ipv4", ip: "192.0.2.10"},
+		{name: "ipv6 after pod created", ip: "2001:db8::1", podCreated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				var s *v1alpha1types.Session
+				if tc.podCreated {
+					s = podReadySession(f)
+				} else {
+					s = f.session("alex-1", f.user)
+				}
+				s.CreationTimestamp = metav1.Now() // not yet reaped as unstarted
+				s.Spec.Config.ClientIP = tc.ip
+				return s
+			}, func(s *v1alpha1types.Session) []runtime.Object {
+				if tc.podCreated {
+					return []runtime.Object{readyPod(s)}
+				}
+				return nil
+			})
+			_ = f.sc.Reconcile(portsTestNS, sess.Name, sess.DeepCopy())
+			if got := f.sessionExists(t, sess.Name); got == tc.wantEnded {
+				t.Errorf("session exists = %v, want %v", got, !tc.wantEnded)
+			}
+			pods, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).List(context.Background(), metav1.ListOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantEnded && len(pods.Items) != 0 {
+				t.Errorf("created %d pods for a session that cannot stream", len(pods.Items))
+			}
+			if !tc.wantEnded && !tc.podCreated && len(pods.Items) != 1 {
+				t.Errorf("created %d pods, want 1", len(pods.Items))
+			}
+		})
+	}
+}
