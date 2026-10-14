@@ -414,42 +414,50 @@ func TestInvalidSpecEndsSession(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		mutate    func(*v1alpha1types.App, *v1alpha1types.User, *v1alpha1types.Session)
-		livePod   bool
+		livePod   func(*corev1.Pod) // nil: none
+		getErr    error             // from the live pod GET
 		wantEnded bool
 	}{
 		{"operator volume mount", func(app *v1alpha1types.App, _ *v1alpha1types.User, _ *v1alpha1types.Session) {
 			ctr := &app.Spec.Template.Spec.Containers[0]
 			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: "wolf-agent-token", MountPath: "/x"})
-		}, false, true},
+		}, nil, nil, true},
 		{"gpu memory", func(app *v1alpha1types.App, _ *v1alpha1types.User, _ *v1alpha1types.Session) {
 			app.Spec.GPU = &v1alpha1types.AppGPU{Memory: new(resource.MustParse("0"))}
-		}, false, true},
+		}, nil, nil, true},
 		{"resources over user policy", func(app *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
 			app.Spec.Template.Spec.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}
 			user.Spec.Resources = &corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}}
-		}, false, true},
+		}, nil, nil, true},
 		{"wolfAgent volume", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
 			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{WolfAgent: sidecar(badMount)}
-		}, false, true},
+		}, nil, nil, true},
 		{"wolfAgent hotplug override", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
 			user.Spec.Volumes = append(user.Spec.Volumes, corev1.Volume{Name: "input"})
 			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{WolfAgent: sidecar(corev1.VolumeMount{Name: "input", MountPath: InputDevPath})}
-		}, false, true},
+		}, nil, nil, true},
 		{"pulseaudio volume", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
 			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{PulseAudio: sidecar(badMount)}
-		}, false, true},
+		}, nil, nil, true},
 		{"wolf volume", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
 			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{Wolf: sidecar(badMount)}
-		}, false, true},
+		}, nil, nil, true},
 		{"uncached pod", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
 			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{Wolf: sidecar(badMount)}
-		}, true, false},
+		}, func(*corev1.Pod) {}, nil, false},
+		// checkPod still judges it.
+		{"uncached failed pod", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
+			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{Wolf: sidecar(badMount)}
+		}, func(p *corev1.Pod) { p.Status.Phase = corev1.PodFailed }, nil, true},
+		{"pod lookup fails", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
+			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{Wolf: sidecar(badMount)}
+		}, nil, apierrors.NewServiceUnavailable("down"), false},
 		{"missing app", func(_ *v1alpha1types.App, _ *v1alpha1types.User, s *v1alpha1types.Session) {
 			s.Spec.GameReference.Name = "missing"
-		}, false, false},
+		}, nil, nil, false},
 		{"missing user", func(_ *v1alpha1types.App, _ *v1alpha1types.User, s *v1alpha1types.Session) {
 			s.Spec.UserReference.Name = "missing"
-		}, false, false},
+		}, nil, nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
@@ -468,11 +476,18 @@ func TestInvalidSpecEndsSession(t *testing.T) {
 			// The informers' copies: buildPod reads them back.
 			tc.mutate(app, user, sess)
 			var objs []runtime.Object
-			if tc.livePod {
+			if tc.livePod != nil {
 				// Created, but neither recorded in status nor in the pod informer.
-				objs = append(objs, readyPod(sess))
+				pod := readyPod(sess)
+				tc.livePod(pod)
+				objs = append(objs, pod)
 			}
 			client := k8sfake.NewClientset(objs...)
+			if tc.getErr != nil {
+				client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, tc.getErr
+				})
+			}
 			f.sc.K8sClient = client
 			pod, err := f.sc.reconcilePod(context.Background(), sess)
 			switch {
@@ -480,7 +495,7 @@ func TestInvalidSpecEndsSession(t *testing.T) {
 				if !errors.Is(err, errSessionEnded) {
 					t.Fatalf("reconcilePod = %v, want errSessionEnded", err)
 				}
-			case tc.livePod:
+			case tc.livePod != nil:
 				if err != nil || pod == nil {
 					t.Fatalf("reconcilePod = %v, %v, want the live pod", pod, err)
 				}
