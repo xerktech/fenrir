@@ -180,9 +180,9 @@ func (a *Agent) handleEvents(ctx context.Context, ch <-chan *sse.Event) {
 				}
 				a.clearDevices()
 			// Wolf hotplugged a virtual input device. Play the role of
-			// fake-udev: publish the udev db entry and broadcast a
-			// synthetic udev netlink event in the pod's network
-			// namespace so the app container's SDL/Steam notices it.
+			// fake-udev: publish its node and udev db entry. The app
+			// container hears of it from the node's udevd, whose
+			// events reach it through the host network namespace.
 			case wolfapi.PlugDeviceEventType:
 				var plugEvent wolfapi.PlugDeviceEvent
 				if err := json.Unmarshal(ev.Data, &plugEvent); err != nil {
@@ -253,12 +253,13 @@ func (a *Agent) clearDevices() {
 func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
 	// Wolf reports MAJOR/MINOR as "0" when it cannot stat the device node
 	// in its own container; resolve the real numbers from sysfs so both
-	// the netlink event and the hwdb filename are correct.
+	// the node and the hwdb filename are correct.
 	for _, udevEvent := range ev.UdevEvents {
 		fakeudev.ResolveDevNumbers(udevEvent)
-		// Before the event is sent: SDL opens DEVNAME as soon as it hears it.
-		// Events without a /dev/input node (the parent input device, hidraw)
-		// have nothing to create here.
+		// Promptly: the node's udevd announces the device ~40ms after it
+		// appears (measured on talos04), and SDL opens DEVNAME as soon as
+		// it hears of it. Events without a /dev/input node (the parent
+		// input device, hidraw) have nothing to create here.
 		if !fakeudev.IsInputDeviceNode(udevEvent) {
 			continue
 		}
@@ -284,14 +285,6 @@ func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
 			klog.InfoS("Wrote udev hwdb entry", "file", filename, "session", ev.SessionID)
 		}
 	}
-
-	for _, udevEvent := range ev.UdevEvents {
-		if err := fakeudev.SendEvent(udevEvent); err != nil {
-			utilruntime.HandleError(fmt.Errorf("failed to send udev event for %q: %w", udevEvent["DEVNAME"], err))
-		} else {
-			klog.InfoS("Sent fake udev event", "action", udevEvent["ACTION"], "devname", udevEvent["DEVNAME"], "session", ev.SessionID)
-		}
-	}
 }
 
 func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
@@ -314,15 +307,6 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 		}
 		if err := fakeudev.RemoveHwDbEntry(a.udevDataPath, filename); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to remove udev hwdb entry %q: %w", filename, err))
-		}
-	}
-
-	for _, udevEvent := range ev.UdevEvents {
-		udevEvent["ACTION"] = "remove"
-		if err := fakeudev.SendEvent(udevEvent); err != nil {
-			utilruntime.HandleError(fmt.Errorf("failed to send udev remove event for %q: %w", udevEvent["DEVNAME"], err))
-		} else {
-			klog.InfoS("Sent fake udev remove event", "devname", udevEvent["DEVNAME"], "session", ev.SessionID)
 		}
 	}
 }

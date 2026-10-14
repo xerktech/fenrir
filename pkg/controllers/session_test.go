@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -414,6 +415,25 @@ func TestSessionPodSharesHotplugVolumes(t *testing.T) {
 		if _, ok := got["/dev/input"]; ok {
 			t.Errorf("container %s should not mount /dev/input", name)
 		}
+	}
+}
+
+// Without udevd's control file libudev never subscribes to udev events, and
+// SDL misses every controller plugged after the game starts (XERK-1337).
+func TestSessionPodCreatesUdevControl(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/nvidia_devices/user.yaml", "../../examples/nvidia_devices/firefox.yaml") //nolint:dogsled // only the Pod matters here
+	i := slices.IndexFunc(pod.Spec.InitContainers, func(c corev1.Container) bool { return c.Name == "init" })
+	if i < 0 {
+		t.Fatalf("no init container: %+v", pod.Spec.InitContainers)
+	}
+	ic := pod.Spec.InitContainers[i]
+	if !slices.ContainsFunc(ic.VolumeMounts, func(m corev1.VolumeMount) bool {
+		return m.Name == hotplugUdevVolume && m.MountPath == path.Dir(udevControlPath)
+	}) {
+		t.Errorf("init mounts %+v, want %s at %s", ic.VolumeMounts, hotplugUdevVolume, path.Dir(udevControlPath))
+	}
+	if script := strings.Join(ic.Command, " "); !strings.Contains(script, "touch "+udevControlPath+"\n") {
+		t.Errorf("init command does not create %s: %q", udevControlPath, script)
 	}
 }
 
