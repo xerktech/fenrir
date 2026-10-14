@@ -9,6 +9,7 @@ import (
 
 	"github.com/r3labs/sse/v2"
 	"gopkg.in/cenkalti/backoff.v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
 type Session struct {
@@ -161,25 +162,30 @@ const maxEventSize = 4 << 20
 // SubscribeToEvents opens one connection to Wolf's event stream. It returns
 // once Wolf has answered; the channel is closed when that connection ends,
 // for whatever reason, so the caller sees every disconnect and resubscribes.
+// Why an answered stream ended (a read error, an event over maxEventSize) is
+// logged here: a closed channel can't carry it, and it is the only trace of
+// the events lost with the stream (XERK-1449).
 // The SSE library's own retry is off: it never runs when the stream ends
 // with EOF, and it would hide a failing first connection for 15 minutes.
+// With it off, the library returns the read error as is.
 func (c *client) SubscribeToEvents(ctx context.Context) (<-chan *sse.Event, error) {
 	events := make(chan *sse.Event)
-	// Only the first value is read: the response status, or why the request
-	// never got one.
+	// Sent once: nil when Wolf answers OK, else why it didn't.
 	answered := make(chan error, 1)
+	// Set by the validator, which runs on the subscribing goroutine below.
+	streaming := false
 	sseClient := sse.NewClient(c.apiURL+"/api/v1/events", func(cl *sse.Client) {
 		cl.Connection = c.httpClient
 		cl.ReconnectStrategy = &backoff.StopBackOff{}
 		sse.ClientMaxBufferSize(maxEventSize)(cl)
 		cl.ResponseValidator = func(_ *sse.Client, resp *http.Response) error {
-			var err error
 			if resp.StatusCode != http.StatusOK {
 				resp.Body.Close()
-				err = fmt.Errorf("could not connect to event stream: %s", resp.Status)
+				return fmt.Errorf("could not connect to event stream: %s", resp.Status)
 			}
-			answered <- err
-			return err
+			streaming = true
+			answered <- nil
+			return nil
 		}
 	})
 
@@ -191,12 +197,14 @@ func (c *client) SubscribeToEvents(ctx context.Context) (<-chan *sse.Event, erro
 			case <-ctx.Done():
 			}
 		})
-		if err == nil {
-			err = errors.New("event stream ended before a response")
-		}
-		select {
-		case answered <- err:
-		default:
+		switch {
+		case !streaming:
+			if err == nil {
+				err = errors.New("event stream ended before a response")
+			}
+			answered <- err
+		case err != nil && ctx.Err() == nil:
+			utilruntime.HandleErrorWithContext(ctx, err, "Wolf event stream ended")
 		}
 	}()
 
