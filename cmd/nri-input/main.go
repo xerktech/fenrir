@@ -117,10 +117,12 @@ func confinedSeccomp(linux *api.LinuxContainer) *api.LinuxSeccomp {
 	return &api.LinuxSeccomp{
 		DefaultAction: "SCMP_ACT_ALLOW",
 		Architectures: seccompArches[runtime.GOARCH],
+		// No ErrnoRet: containerd 2.2.6's NRI (v0.11.0) writes it through a
+		// nil pointer and the whole runtime panics (XERK-1915). runc returns
+		// EPERM for an ERRNO action without one.
 		Syscalls: []*api.LinuxSyscall{{
-			Names:    deniedSyscalls,
-			Action:   "SCMP_ACT_ERRNO",
-			ErrnoRet: api.UInt32(uint32(1)), // EPERM
+			Names:  deniedSyscalls,
+			Action: "SCMP_ACT_ERRNO",
 		}},
 	}
 }

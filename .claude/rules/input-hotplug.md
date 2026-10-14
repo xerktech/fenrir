@@ -45,6 +45,10 @@ paths:
     under RuntimeDefault, unset included (talos04's kubelet runs `seccompDefault`).
     Such an App must ask for Unconfined (`defaultProfileHoleCapability`).
   - The filter lists the 32-bit arches, or Proton's 32-bit games are killed.
+  - Never set a rule's `ErrnoRet`: containerd 2.2.6 vendors NRI v0.11.0, whose
+    `ToOCILinuxSyscalls` writes it through a nil pointer, and containerd panicked on talos04 at the
+    first Steam container. runc already returns EPERM for an ERRNO action. Recheck before using
+    any other seccomp field once containerd bumps NRI.
   - seccomp can't see a mount's fstype or path, so devtmpfs and procfs mounts stay possible.
   - Tests: `TestConfinedSeccomp*`, `TestCreateContainerConfinesOnlyApp`.
 - `cmd/nri-input` grants by container name (`pkg/api/v1alpha1/containers.go`): only `wolf` gets
