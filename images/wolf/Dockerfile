@@ -1,6 +1,6 @@
 # Wolf for direwolf sessions: games-on-whales' Wolf image with its
-# waylanddisplaysrc GStreamer plugin rebuilt with the fix in
-# games-on-whales/gst-wayland-display#67 (XERK-1740). Unpatched, every stream's
+# waylanddisplaysrc GStreamer plugin rebuilt with the fix on our fork
+# (xerktech/gst-wayland-display, tag xerk-1740; XERK-1740). Unpatched, every stream's
 # waylanddisplaysrc releases Wolf's process-wide cached CUDA context once more
 # than it takes it; after a few streams the context is finalized under a live
 # pipeline and the stream freezes.
@@ -13,8 +13,8 @@ ARG WOLF_IMAGE=ghcr.io/games-on-whales/wolf:stable@sha256:b0ef253739f9bd49b71eba
 # plugin links the GStreamer it runs against.
 FROM ghcr.io/games-on-whales/gstreamer:1.26.7@sha256:512b53b03b256a87fb4bd204ed1d91219148b0b77ff4ee4fc121c37d869f8d29 AS plugin
 
-# Tag xerk-1740 on xerktech/gst-wayland-display: 016b4fc + #67. The tag keeps
-# the commit fetchable if the PR branch is deleted after a squash merge.
+# Tag xerk-1740 on xerktech/gst-wayland-display: 016b4fc + the fix. The tag
+# keeps the commit fetchable whatever happens to its branch.
 ARG GWD_REPO=https://github.com/xerktech/gst-wayland-display
 ARG GWD_COMMIT=58c55f7d9b9466c2d8b0b78a5d32bf6465fc2189
 ARG RUST_VERSION=1.96.0
