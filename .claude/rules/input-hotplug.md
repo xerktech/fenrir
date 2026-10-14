@@ -40,7 +40,7 @@ paths:
   XERK-1915). Others keep their profile untouched.
   - An NRI seccomp adjustment replaces the whole policy, and containerd 2.2.6 reports only the
     profile type, never the resolved policy: extending RuntimeDefault would replace it.
-  - containerd's RuntimeDefault allows bpf() to SYS_ADMIN/BPF/PERFMON, so the operator refuses an
+  - containerd's RuntimeDefault allows bpf() to SYS_ADMIN/BPF/PERFMON (and module, rawio, boot, pacct syscalls to their caps), so the operator refuses an
     App container adding one of those under RuntimeDefault, unset included (talos04's kubelet runs
     `seccompDefault`). Such an App must ask for Unconfined.
   - The filter lists the 32-bit arches, or Proton's 32-bit games are killed.

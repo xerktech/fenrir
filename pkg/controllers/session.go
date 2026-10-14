@@ -1975,9 +1975,10 @@ func validateNoOperatorVolumeMounts(spec *corev1.PodSpec) error {
 // either would hand the game the host's keyboards and other sessions' pads,
 // and privileged also every disk and no seccomp filter (XERK-1915).
 //
-// It also rejects one adding SYS_ADMIN, BPF or PERFMON under RuntimeDefault
-// seccomp: containerd's default profile then allows bpf(), with which a
-// container detached its device-cgroup program and opened the node's disks.
+// It also rejects one adding a capability that opens containerd's default
+// seccomp profile (defaultProfileHoleCapability) under RuntimeDefault: with
+// SYS_ADMIN it allows bpf(), with which a container detached its device-cgroup
+// program and opened the node's disks.
 // cmd/nri-input denies bpf() only to Unconfined containers, so such an App
 // must ask for Unconfined. A Localhost profile is the App author's to vet.
 func validateAppConfinement(spec *corev1.PodSpec) error {
@@ -1996,9 +1997,9 @@ func validateAppConfinement(spec *corev1.PodSpec) error {
 			if sc := ctr.SecurityContext; sc != nil && sc.Privileged != nil && *sc.Privileged {
 				return fmt.Errorf("validation failed: container %q in the App template is privileged", ctr.Name)
 			}
-			if c := bpfCapability(ctr.SecurityContext); c != "" && runtimeDefaultSeccomp(spec, &ctr) {
+			if c := defaultProfileHoleCapability(ctr.SecurityContext); c != "" && runtimeDefaultSeccomp(spec, &ctr) {
 				return fmt.Errorf("validation failed: container %q in the App template adds %s under RuntimeDefault seccomp, "+
-					"which allows bpf(); set seccompProfile Unconfined so the node's filter applies", ctr.Name, c)
+					"which then allows host-kernel syscalls; set seccompProfile Unconfined so the node's filter applies", ctr.Name, c)
 			}
 			for _, m := range ctr.VolumeMounts {
 				if p, ok := hostDev[m.Name]; ok {
@@ -2010,15 +2011,16 @@ func validateAppConfinement(spec *corev1.PodSpec) error {
 	return nil
 }
 
-// bpfCapability returns the first added capability with which containerd's
-// default seccomp profile allows bpf() or perf_event_open(), or "".
-func bpfCapability(sc *corev1.SecurityContext) corev1.Capability {
+// defaultProfileHoleCapability returns the first added capability with which
+// containerd's default seccomp profile allows a syscall cmd/nri-input denies
+// (bpf, perf_event_open, module loading, iopl/ioperm, reboot, acct), or "".
+func defaultProfileHoleCapability(sc *corev1.SecurityContext) corev1.Capability {
 	if sc == nil || sc.Capabilities == nil {
 		return ""
 	}
 	for _, c := range sc.Capabilities.Add {
 		switch strings.TrimPrefix(strings.ToUpper(string(c)), "CAP_") {
-		case "SYS_ADMIN", "BPF", "PERFMON", "ALL":
+		case "SYS_ADMIN", "BPF", "PERFMON", "SYS_MODULE", "SYS_RAWIO", "SYS_BOOT", "SYS_PACCT", "ALL":
 			return c
 		}
 	}

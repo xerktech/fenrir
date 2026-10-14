@@ -868,6 +868,23 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 		"privileged": func(_ *corev1.PodSpec, ctr *corev1.Container) {
 			ctr.SecurityContext = &corev1.SecurityContext{Privileged: new(true)}
 		},
+		"sys_admin, seccomp unset": func(_ *corev1.PodSpec, ctr *corev1.Container) {
+			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"cap_sys_admin"}}}
+		},
+		"bpf, pod runtime default": func(spec *corev1.PodSpec, ctr *corev1.Container) {
+			spec.SecurityContext = &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}}
+			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"BPF"}}}
+		},
+		"sys_rawio, container runtime default over pod unconfined": func(spec *corev1.PodSpec, ctr *corev1.Container) {
+			spec.SecurityContext = &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}}
+			ctr.SecurityContext = &corev1.SecurityContext{
+				Capabilities:   &corev1.Capabilities{Add: []corev1.Capability{"SYS_RAWIO"}},
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			}
+		},
+		"all, seccomp unset": func(_ *corev1.PodSpec, ctr *corev1.Container) {
+			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"ALL"}}}
+		},
 		"host root":   hostPath("/"),
 		"host dev":    hostPath("/dev/"),
 		"host input":  hostPath("/dev/input"),
