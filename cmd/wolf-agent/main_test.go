@@ -536,6 +536,53 @@ func TestProxyFlushesHeadersOfIdleStream(t *testing.T) {
 	resp.Body.Close()
 }
 
+// A Wolf response that breaks off mid-body must reach the client as a failed
+// read, not a clean end: SSE readers take a clean end's partial event as
+// whole, and the agent only logs why a stream ended on an error (XERK-1449).
+func TestProxyAbortsOnBackendError(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "w.sock")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wolf := &httptest.Server{
+		Listener: ln,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "event: PauseStreamEvent\ndata: {\"session")
+			if flushErr := http.NewResponseController(w).Flush(); flushErr != nil {
+				t.Error(flushErr)
+			}
+			panic(http.ErrAbortHandler)
+		})},
+	}
+	wolf.Start()
+	defer wolf.Close()
+
+	var ready atomic.Bool
+	ready.Store(true)
+	client := UnixHTTPClient(sock)
+	f, _ := testTokenFile(t, "s3cret")
+	agent := httptest.NewServer(apiHandler(f, &client, &ready))
+	defer agent.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agent.URL+"/api/v1/events", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer s3cret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if body, err := io.ReadAll(resp.Body); err == nil {
+		t.Errorf("read %q to a clean end, want an error", body)
+	}
+}
+
 // The video flow counts need the token too.
 func TestVideoPacketsRequiresToken(t *testing.T) {
 	f, _ := testTokenFile(t, "s3cret")

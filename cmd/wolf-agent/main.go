@@ -241,7 +241,10 @@ func proxyHandler(client *http.Client, ready *atomic.Bool) http.Handler {
 					break
 				}
 				klog.ErrorS(err, "Error reading from backend")
-				return
+				// The status is sent: abort the connection so the client
+				// sees the stream fail, not a clean end that could pass a
+				// truncated event off as whole (XERK-1449).
+				panic(http.ErrAbortHandler)
 			}
 		}
 		klog.InfoS("Request completed", "statusCode", response.StatusCode)

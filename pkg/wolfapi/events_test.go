@@ -171,7 +171,7 @@ func TestSubscribeToEventsLogsStreamError(t *testing.T) {
 	}
 }
 
-// A stream Wolf closes cleanly, or one the caller cancels, logs no error.
+// A stream Wolf closes cleanly, or one the caller ends, logs no error.
 func TestSubscribeToEventsLogsNoErrorOnCleanEnd(t *testing.T) {
 	errs := captureErrors(t)
 	closes := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -198,6 +198,15 @@ func TestSubscribeToEventsLogsNoErrorOnCleanEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	cancel()
+	drain(t, ch)
+
+	// A deadline ends the read with an error the library passes through.
+	ctx, cancel = context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	ch, err = wolfapi.NewClient(holds.URL, holds.Client()).SubscribeToEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	drain(t, ch)
 
 	if got := errs(); len(got) != 0 {
