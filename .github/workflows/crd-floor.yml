@@ -1,0 +1,29 @@
+name: CRDs on Chart Floor
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crds/**'
+      - 'pkg/api/**'
+      - 'hack/check-crds-on-floor.sh'
+      # Raising the chart's kubeVersion floor means raising the version checked here.
+      - 'charts/direwolf-operator/Chart.yaml'
+      - '.github/workflows/crd-floor.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  crd-floor:
+    name: CRDs install on kube-apiserver 1.28
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # Keep in step with kubeVersion in charts/direwolf-operator/Chart.yaml.
+      - name: Create every CRD on the floor apiserver
+        run: hack/check-crds-on-floor.sh 1.28.3
