@@ -39,6 +39,10 @@ RUN \
     sed -i 's|</menu>|<item label="Heroic" icon="/usr/share/icons/hicolor/48x48/apps/heroic.png"><action name="Execute"><command>/usr/bin/wrapped-heroic</command></action></item>\n</menu>|' "$menu" && \
     grep -q wrapped-heroic "$menu" || exit 1; \
   done && \
+  echo "**** resolve game sessions' Steam paths ****" && \
+  # Sessions mount the shared Steam home at /home/retro, and Steam records
+  # absolute paths (~/.steam/steam, library folders); see init-steam-home.
+  mkdir -p /home && ln -s /config /home/retro && \
   echo "**** cleanup ****" && \
   apt-get autoclean && \
   rm -rf \

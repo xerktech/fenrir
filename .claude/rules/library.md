@@ -4,6 +4,7 @@ paths:
   - pkg/moonlight/library*.go
   - pkg/moonlight/rest.go
   - cmd/operator/**
+  - images/library/**
 ---
 
 # Library (on-demand Steam + Heroic desktop)
@@ -15,6 +16,15 @@ paths:
     be seconds old.
   - The operator side also counts session pods, not just Sessions: a terminating pod still
     runs Steam.
+- One Steam install: `~/.local/share/Steam` (Valve's launcher, here) is a relative link to
+  `~/.steam/debian-installation` (sessions' Debian launcher), made by the image's
+  `init-steam-home` before the desktop starts (XERK-1559).
+  - Each launcher points `~/.steam/steam` at its own dir by an absolute path. `/home/retro`
+    (sessions' mount) links to `/config` here so the sessions' path resolves; Valve's
+    launcher otherwise falls back to `~/.local/share/Steam`, and the Debian one relinks a
+    dangling `/config/...` link to its own dir.
+  - Never make `debian-installation` the link: the GoW image isn't ours, and a real
+    `~/.local/share/Steam` found next to it is moved aside (`Steam.library-<time>`), not merged.
 - Idle rule: (no browser traffic for `--library-idle-timeout` OR no user-opened page load for
   `--library-max-runtime`) AND nothing downloading.
   - An open Selkies tab sends WebSocket traffic every few seconds with nobody there, so traffic
