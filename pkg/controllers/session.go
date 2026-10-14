@@ -316,6 +316,11 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	} else if reason != "" {
 		return c.endSession(ctx, newObj, reason)
 	}
+	if reason, err := c.unstreamableReason(ctx, newObj); err != nil {
+		return err
+	} else if reason != "" {
+		return c.endSession(ctx, newObj, reason)
+	}
 	oldStatus := newObj.Status.DeepCopy()
 	portsError := c.allocatePorts(ctx, newObj)
 
@@ -780,6 +785,33 @@ func (c *SessionController) expiredReason(session *v1alpha1types.Session, now ti
 		return fmt.Sprintf("older than %s and has no wolf session ID", unstartedSessionTTL)
 	}
 	return ""
+}
+
+// unstreamableReason is why session should end before it gets a pod: Wolf
+// could never stream to its clientIP, so its image pull and GPU claim would
+// be wasted. Once a pod exists a bad IP only fails the attach, since a later
+// /resume from a usable address may still save the game; the pod is looked
+// up live, as PodCreated can be False or missing while one runs.
+func (c *SessionController) unstreamableReason(ctx context.Context, session *v1alpha1types.Session) (string, error) {
+	_, ipErr := streamClientIP(session)
+	if ipErr == nil {
+		return "", nil
+	}
+	// An earlier same-named Session's pod is not this one's game.
+	podName := c.podName(session)
+	pod, err := c.podController.Informer().Namespaced(session.Namespace).Get(podName)
+	if err == nil && metav1.IsControlledBy(pod, session) {
+		return "", nil
+	} else if err != nil && !errors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
+	}
+	pod, err = c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err == nil && metav1.IsControlledBy(pod, session) {
+		return "", nil
+	} else if err != nil && !errors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
+	}
+	return ipErr.Error(), nil
 }
 
 // reconcilePod ensures the session's pod exists and returns it. The pod runs
@@ -2100,8 +2132,9 @@ func (c *SessionController) reconcileActiveStreams(
 	session *v1alpha1types.Session,
 	pod *corev1.Pod,
 ) error {
-	// A launch's refusal is checked before the pod is ready, so /launch
-	// hears of it without waiting out a cold start. Once attached, the
+	// Reconcile ends a launch whose IP fails before it has a pod
+	// (unstreamableReason); one that has a pod is refused before the pod is
+	// ready, so /launch hears of it without waiting out a cold start. Once attached, the
 	// disconnect handling below must run first, or a refused resume would
 	// never be marked disconnected and reaped. Nothing a retry can fix: the
 	// client IP is the client's.
@@ -2435,8 +2468,12 @@ func (c *SessionController) ensureLobby(ctx context.Context, wolfclient wolfapi.
 	return nil
 }
 
-// streamClientIP is the session's client IP as Wolf needs it (see
-// wolfSessionFor). Its error is shown to the Moonlight user.
+// streamClientIP is the address Wolf streams session to. Wolf streams to
+// ClientIP, so it must be the Moonlight client's real address (recorded by
+// moonlight-proxy at /launch); there is no usable default. Wolf's stream
+// sockets are IPv4-only and it matches peers by exact IP string, so an IPv6
+// client could never stream: refuse it with a clear error instead. The error
+// is shown to the Moonlight user, so it names no internal objects.
 func streamClientIP(session *v1alpha1types.Session) (netip.Addr, error) {
 	clientIP, err := netip.ParseAddr(session.Spec.Config.ClientIP)
 	if err != nil {
@@ -2452,11 +2489,7 @@ func streamClientIP(session *v1alpha1types.Session) (netip.Addr, error) {
 	return clientIP, nil
 }
 
-// wolfSessionFor builds the Wolf AddSession request for session. Wolf streams
-// to ClientIP, so it must be the Moonlight client's real address (recorded by
-// moonlight-proxy at /launch); there is no usable default. Wolf's stream
-// sockets are IPv4-only and it matches peers by exact IP string, so an IPv6
-// client could never stream: refuse it here with a clear error instead.
+// wolfSessionFor builds the Wolf AddSession request for session.
 func wolfSessionFor(session *v1alpha1types.Session, podIP string) (wolfapi.Session, error) {
 	clientIP, err := streamClientIP(session)
 	if err != nil {

@@ -98,6 +98,17 @@ const (
 	busyMessage    = "An app is already running on this host"
 )
 
+// sessionEndedMessage answers a /launch whose Session the operator deleted
+// before its stream started. The operator logs why; the likely reason, an
+// address it can't stream to, is named when the client's address is one.
+func sessionEndedMessage(clientIP string) string {
+	const ended = "The host ended the session before its stream started"
+	if addr, err := netip.ParseAddr(clientIP); err == nil && !addr.Unmap().Is4() {
+		return ended + ": streaming needs IPv4, and this client connected from " + addr.String()
+	}
+	return ended
+}
+
 // streamRefusedStatusCode is the XML status of a launch the operator refused.
 // Moonlight shows any status other than 200 with its message.
 const streamRefusedStatusCode = 503
@@ -641,6 +652,11 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 	var streamURL string
 	err = wait.PollUntilContextCancel(launchCtx, 250*time.Millisecond, true, func(ctx context.Context) (bool, error) {
 		session, err := s.SessionClient.Get(ctx, session.Name, metav1.GetOptions{})
+		if k8serrors.IsNotFound(err) {
+			// The operator ended it, e.g. for a client IP it can never
+			// stream to (it deletes those before starting their pod).
+			return false, &streamRefusedError{message: sessionEndedMessage(clientIP)}
+		}
 		if err != nil {
 			return false, err
 		}

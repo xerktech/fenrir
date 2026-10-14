@@ -15,6 +15,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
@@ -30,6 +31,8 @@ type launchFixture struct {
 	server  *RESTServer
 	client  *fake.Clientset
 	created atomic.Int32
+	// remoteAddr is the client's address, if not httptest's default.
+	remoteAddr string
 }
 
 // newLaunchFixture builds a RESTServer over a fake clientset seeded with one
@@ -112,6 +115,9 @@ func (f *launchFixture) launch(t *testing.T, user string) (int, Response) {
 		ObjectMeta: metav1.ObjectMeta{Name: user + "-pairing", Namespace: testNamespace},
 	})
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/launch?appid=1&rikey=00&rikeyid=1&mode=1920x1080x60", http.NoBody)
+	if f.remoteAddr != "" {
+		req.RemoteAddr = f.remoteAddr
+	}
 	rec := httptest.NewRecorder()
 	f.server.launchHandler(rec, req)
 
@@ -881,5 +887,36 @@ func TestLaunchWaitsOutStreamStartFailed(t *testing.T) {
 	code, _ := f.launch(t, "alice")
 	if elapsed := time.Since(start); code != http.StatusInternalServerError || elapsed < 300*time.Millisecond {
 		t.Errorf("launch = HTTP %d after %s, want 500 at the timeout", code, elapsed)
+	}
+}
+
+// The operator deletes a launch's Session it can never stream (an IPv6
+// client) before starting its pod; /launch says so at once rather than
+// answering a transport error (XERK-1336, XERK-1335).
+func TestLaunchSessionEndedByOperator(t *testing.T) {
+	for _, tc := range []struct{ remoteAddr, want string }{
+		{"[2001:db8::1]:51000", "The host ended the session before its stream started: streaming needs IPv4, and this client connected from 2001:db8::1"},
+		{"192.0.2.7:51000", "The host ended the session before its stream started"},
+	} {
+		t.Run(tc.remoteAddr, func(t *testing.T) {
+			f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 5 * time.Second})
+			f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				get, ok := action.(k8stesting.GetAction)
+				if !ok {
+					return false, nil, nil
+				}
+				return true, nil, k8serrors.NewNotFound(v1alpha1types.Resource("sessions"), get.GetName())
+			})
+			f.remoteAddr = tc.remoteAddr
+
+			start := time.Now()
+			code, resp := f.launch(t, "alice")
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Errorf("launch took %s, want it to fail fast", elapsed)
+			}
+			if code != http.StatusOK || resp.StatusCode != streamRefusedStatusCode || resp.StatusMessage != tc.want {
+				t.Errorf("launch = HTTP %d / %d %q, want 200 / %d %q", code, resp.StatusCode, resp.StatusMessage, streamRefusedStatusCode, tc.want)
+			}
+		})
 	}
 }
