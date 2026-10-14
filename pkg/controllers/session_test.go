@@ -1022,3 +1022,31 @@ func TestSessionPodRunsWolfWithoutZeroCopy(t *testing.T) {
 	}
 	t.Fatal("no wolf container")
 }
+
+// An App mount at /dev/input replaces the operator's hotplug dir, so the game
+// would see whatever the mount holds (a hostPath hands it every input device on
+// the node); cmd/nri-input withholds /dev/uinput from Apps (XERK-1433).
+func TestExampleAppsMountNoInputDevices(t *testing.T) {
+	top, _ := filepath.Glob("../../examples/*.yaml")
+	nested, _ := filepath.Glob("../../examples/*/*.yaml")
+	for _, path := range slices.Concat(top, nested) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for doc := range strings.SplitSeq(string(data), "\n---") {
+			var app v1alpha1api.App
+			if err := sigsyaml.Unmarshal([]byte(doc), &app); err != nil || app.Kind != "App" || app.Spec.Template == nil {
+				continue
+			}
+			spec := app.Spec.Template.Spec
+			for _, ctr := range slices.Concat(spec.InitContainers, spec.Containers) {
+				for _, m := range ctr.VolumeMounts {
+					if m.MountPath == "/dev/input" || m.MountPath == "/dev/uinput" {
+						t.Errorf("%s: App %s container %s mounts %s", path, app.Name, ctr.Name, m.MountPath)
+					}
+				}
+			}
+		}
+	}
+}
