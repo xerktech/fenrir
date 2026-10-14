@@ -9,6 +9,10 @@
 # games. The sessions' path wins (only this image is ours to change), and
 # ~/.local/share/Steam becomes a relative link to it, valid in both pods and
 # the path the catalogue and the downloads check read.
+#
+# Never exits non-zero: a failed oneshot stops s6 starting the desktop and
+# leaves the pod Running but never Ready, which would hold the Steam lock.
+# On any error the Library keeps its old, separate install.
 
 # As the desktop user: the home is user-writable, and root would follow
 # links planted there.
@@ -20,25 +24,83 @@ canon="${HOME}/.steam/debian-installation"
 link="${HOME}/.local/share/Steam"
 target="../../.steam/debian-installation"
 
-if [[ -L "${canon}" ]]; then
-  echo "init-steam-home: ${canon} is a symlink, leaving the Steam home as it is" >&2
+give_up() {
+  echo "init-steam-home: $*; leaving the Steam home as it is" >&2
   exit 0
+}
+
+# installed reports whether a manifest says its game is fully installed.
+installed() {
+  [[ -f "$1" ]] && grep -Eq '^[[:space:]]*"StateFlags"[[:space:]]*"4"[[:space:]]*$' "$1"
+}
+
+# merge moves games fully installed in $1 (the Library's old install, now
+# aside) but not in the shared one into it, so they stay installed. What
+# they replace (a session's partial download) goes to $1/.replaced.
+merge() {
+  local src="$1/steamapps" dst="${canon}/steamapps" bak="$1/.replaced"
+  local m id dir sub
+  for m in "${src}"/appmanifest_*.acf; do
+    id="${m##*/appmanifest_}"
+    id="${id%.acf}"
+    [[ "${id}" =~ ^[0-9]+$ ]] || continue
+    installed "${m}" || continue
+    installed "${dst}/appmanifest_${id}.acf" && continue
+    # User-writable: never let it name a path outside common/.
+    dir="$(sed -n 's/^[[:space:]]*"installdir"[[:space:]]*"\([^"/]*\)"[[:space:]]*$/\1/p' "${m}" | head -n 1)"
+    if [[ -z "${dir}" || "${dir}" == . || "${dir}" == .. || ! -d "${src}/common/${dir}" ]]; then
+      continue
+    fi
+    echo "init-steam-home: moving installed app ${id} (${dir}) into the shared install"
+    mkdir -p "${bak}/common" "${bak}/downloading" "${dst}/common" || return 1
+    if [[ -e "${dst}/common/${dir}" ]]; then
+      mv "${dst}/common/${dir}" "${bak}/common/" || return 1
+    fi
+    mv "${src}/common/${dir}" "${dst}/common/" || return 1
+    for sub in compatdata shadercache; do
+      [[ -e "${src}/${sub}/${id}" ]] || continue
+      mkdir -p "${bak}/${sub}" "${dst}/${sub}" || return 1
+      if [[ -e "${dst}/${sub}/${id}" ]]; then
+        mv "${dst}/${sub}/${id}" "${bak}/${sub}/" || return 1
+      fi
+      mv "${src}/${sub}/${id}" "${dst}/${sub}/" || return 1
+    done
+    # The session's download of it is moot; Steam would resume it.
+    for sub in "${dst}/downloading/${id}" "${dst}/downloading/state_${id}_"*.patch; do
+      if [[ -e "${sub}" ]]; then
+        mv "${sub}" "${bak}/downloading/" || return 1
+      fi
+    done
+    # Last: the manifest makes the shared install count it as installed.
+    mv "${m}" "${dst}/appmanifest_${id}.acf" || return 1
+  done
+}
+
+if [[ -L "${canon}" || ( -e "${canon}" && ! -d "${canon}" ) ]]; then
+  give_up "${canon} is not a directory"
 fi
 
-if [[ -e "${link}" && ! -L "${link}" ]]; then
+if [[ -d "${link}" && ! -L "${link}" ]]; then
   if [[ ! -e "${canon}" ]]; then
     # Only the Library has run here: its install becomes the shared one.
-    mkdir -p "${canon%/*}" && mv "${link}" "${canon}" || exit 1
+    { mkdir -p "${canon%/*}" && mv "${link}" "${canon}"; } || give_up "can't move ${link} to ${canon}"
   else
     # Both have run. Never delete: a login or a game may be in it.
     aside="${link}.library-$(date +%Y%m%d%H%M%S)"
     echo "init-steam-home: moving the Library's own Steam install aside to ${aside}"
-    mv "${link}" "${aside}" || exit 1
+    mv "${link}" "${aside}" || give_up "can't move ${link} aside"
+    merge "${aside}" || echo "init-steam-home: merging games from ${aside} failed" >&2
   fi
+elif [[ -e "${link}" && ! -L "${link}" ]]; then
+  give_up "${link} is not a directory"
 fi
 
 # Valve's launcher can't install through a link to a missing dir.
-mkdir -p "${canon}" "${link%/*}" || exit 1
-if [[ "$(readlink "${link}")" != "${target}" ]]; then
-  ln -sfn "${target}" "${link}" || exit 1
+mkdir -p "${canon}" "${link%/*}" || give_up "can't create ${canon}"
+current="$(readlink "${link}")"
+if [[ "${current}" != "${target}" ]]; then
+  if [[ -n "${current}" ]]; then
+    echo "init-steam-home: replacing link ${link} -> ${current}"
+  fi
+  ln -sfn "${target}" "${link}" || give_up "can't link ${link}"
 fi
