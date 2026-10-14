@@ -6,6 +6,7 @@ paths:
   - pkg/controllers/session.go
   - pkg/controllers/session_test.go
   - cmd/nri-input/**
+  - pkg/api/v1alpha1/containers.go
 ---
 
 # Controller hotplug into the game container
@@ -26,7 +27,16 @@ paths:
     only a bare `MKNOD` counts as dropped. Tests: `TestDropMknod`.
   - NRI can't narrow the grant per minor: device rules are set only at container create.
   - Not covered: a privileged App, or one adding SYS_ADMIN (mounts a devtmpfs), or mounting hostPath
-    `/dev/input` (`examples/steam.yaml` does all but privileged).
+    `/dev/input`. The Steam/Heroic Apps add SYS_ADMIN with seccomp Unconfined (XERK-1433).
+  - Steam can't drop SYS_ADMIN: Proton's bwrap mounts a fresh `/proc`, which a masked `/proc`
+    forbids (EPERM, measured on talos04); `procMount: Unmasked` needs `hostUsers: false`, which
+    the apiserver rejects with hostNetwork. A per-minor eBPF device filter doesn't help either:
+    SYS_ADMIN with no seccomp may call bpf() to detach it (reasoned, not measured).
+- `cmd/nri-input` grants by container name (`pkg/api/v1alpha1/containers.go`): only `wolf` gets
+  `/dev/uinput`; wolf-agent, pulseaudio and the init containers get nothing (wolf-agent's mknod
+  is covered by containerd's default `c *:* m`, and it opens nodes only `O_PATH`); every other
+  container, i.e. the App's, gets `13:*` and `241:*`. Tests: `TestAdjustment*` (`cmd/nri-input`),
+  `TestSessionPodOperatorContainerNames`.
 - Only char major 13 under `/dev/input/` is created (`CreateDeviceNode`); a Wolf event can't make
   a disk node. `/dev/hidraw*` is not handled: pads are uinput Xbox pads (no uhid on Talos).
 - An App that mounts its own `/dev/input` keeps it (`withHotplugMounts` skips taken paths).
