@@ -58,7 +58,16 @@ paths:
   Tests: `TestSetNodeModeRefusesSwappedNode`.
 - CI runs tests non-root, so mknod EPERMs there: logic tests stub `makeCharNode`, or a refusal
   test passes for the wrong reason.
-- The udev netlink send (`SendEvent`) gets EPERM under hostNetwork without CAP_NET_ADMIN on the
-  host netns, and with it reaches every hostNetwork pod on the node (XERK-1337).
+- No synthetic udev netlink event: under hostNetwork it needs CAP_NET_ADMIN on the host netns and
+  then reaches every hostNetwork process on the node. The App hears the node's udevd instead
+  (XERK-1337, measured on talos04):
+  - libudev subscribes to udev events only if `/run/udev/control` exists; without it SDL2 missed
+    every pad plugged after it started. The `init` init container creates it in the udev volume, as
+    libudev checks once, at monitor creation. Tests: `TestSessionPodCreatesUdevControl`.
+  - Ordering relies on udevd being slower than wolf-agent: its event came 29-71ms after the mknod
+    (14/14). SDL does not retry an add whose node is missing, so a slow agent loses the pad.
+  - The App also sees every other uevent on the node (host netns); it can open only its own nodes.
+  - `SDL_JOYSTICK_DISABLE_UDEV=1` (inotify on /dev/input) also works, but only for SDL.
+  - talos04 has no `joydev`: pads get `eventN` only, no `jsN`.
 - Pod-spec tests: `TestSessionPodSharesHotplugVolumes`, `TestSessionPodKeepsAppsOwnInputMount`
   (`pkg/controllers/session_test.go`); `TestCreateAndRemoveDeviceNode` (`pkg/fakeudev`).

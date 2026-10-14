@@ -1086,9 +1086,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 			{Name: "GST_DEBUG", Value: "2"},
 
 			// Gamescape envar injection. Ham-handed. Why not.
-			{Name: "GAMESCOPE_WIDTH", Value: fmt.Sprint(session.Spec.Config.VideoWidth)},
-			{Name: "GAMESCOPE_HEIGHT", Value: fmt.Sprint(session.Spec.Config.VideoHeight)},
-			{Name: "GAMESCOPE_REFRESH", Value: fmt.Sprint(session.Spec.Config.VideoRefreshRate)},
+			{Name: "GAMESCOPE_WIDTH", Value: strconv.Itoa(session.Spec.Config.VideoWidth)},
+			{Name: "GAMESCOPE_HEIGHT", Value: strconv.Itoa(session.Spec.Config.VideoHeight)},
+			{Name: "GAMESCOPE_REFRESH", Value: strconv.Itoa(session.Spec.Config.VideoRefreshRate)},
 		}...)
 
 		// Validate the main app container's resources against the user's policy.
@@ -1120,6 +1120,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 				# cp -LR /cfg/* /etc/wolf/cfg
 				chown -R ubuntu:ubuntu /etc/wolf
 				chmod 777 -R /etc/wolf
+				touch ` + udevControlPath + `
 			`,
 			},
 			Env: []corev1.EnvVar{{Name: wolfConfigSeedEnv, Value: wolfConfigSeed}},
@@ -1140,6 +1141,10 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 				{
 					Name:      "wolf-runtime",
 					MountPath: "/tmp/.X11-unix",
+				},
+				{
+					Name:      hotplugUdevVolume,
+					MountPath: path.Dir(UdevDataPath),
 				},
 				// {
 				// 	Name:      "config",
@@ -1879,6 +1884,14 @@ const (
 	hotplugDevVolume  = "direwolf-dev-input"
 	hotplugUdevVolume = "direwolf-udev"
 )
+
+// udevControlPath is udevd's control socket. libudev subscribes a monitor to
+// udev's netlink events only if it exists, so without it SDL and Steam never
+// hear of a controller plugged after they start (XERK-1337). Session pods are
+// hostNetwork, so the events they then receive are the node's udevd's; the
+// init container creates the file in the shared udev volume before any App
+// container starts, since libudev checks it once, when the monitor is created.
+const udevControlPath = "/run/udev/control"
 
 // operatorVolumes are the pod volumes buildPod adds. Their contents are the
 // operator's sidecars' alone: wolf-agent's bearer token and TLS key, Wolf's API
