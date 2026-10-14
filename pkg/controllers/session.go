@@ -2100,11 +2100,15 @@ func (c *SessionController) reconcileActiveStreams(
 	session *v1alpha1types.Session,
 	pod *corev1.Pod,
 ) error {
-	// Checked before the pod is ready, so /launch hears of it without
-	// waiting out a cold start. Nothing a retry can fix: the client IP is
-	// the client's.
-	if _, err := streamClientIP(session); err != nil {
-		return fmt.Errorf("%w: %w", errStreamRefused, err)
+	// A launch's refusal is checked before the pod is ready, so /launch
+	// hears of it without waiting out a cold start. Once attached, the
+	// disconnect handling below must run first, or a refused resume would
+	// never be marked disconnected and reaped. Nothing a retry can fix: the
+	// client IP is the client's.
+	if session.Status.AttachedGeneration == 0 {
+		if _, err := streamClientIP(session); err != nil {
+			return fmt.Errorf("%w: %w", errStreamRefused, err)
+		}
 	}
 	if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" || !podReady(pod) {
 		return fmt.Errorf("pod %s/%s not ready (phase %s)", pod.Namespace, pod.Name, pod.Status.Phase)
@@ -2293,7 +2297,7 @@ func (c *SessionController) reconcileActiveStreams(
 		// Create the session
 		wolfSession, err := wolfSessionFor(session, podIP)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %w", errStreamRefused, err)
 		}
 		if stopErr := c.stopStaleStreams(ctx, wolfclient, session, sessions); stopErr != nil {
 			return stopErr
@@ -2439,8 +2443,11 @@ func streamClientIP(session *v1alpha1types.Session) (netip.Addr, error) {
 		return netip.Addr{}, fmt.Errorf("no valid client IP %q: %w", session.Spec.Config.ClientIP, err)
 	}
 	clientIP = clientIP.Unmap()
-	if !clientIP.Is4() || clientIP.IsUnspecified() {
+	if !clientIP.Is4() {
 		return netip.Addr{}, fmt.Errorf("client IP %s is not an IPv4 address; streaming needs IPv4", clientIP)
+	}
+	if clientIP.IsUnspecified() {
+		return netip.Addr{}, fmt.Errorf("client IP %s is unspecified", clientIP)
 	}
 	return clientIP, nil
 }
