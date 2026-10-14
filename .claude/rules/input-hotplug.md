@@ -31,7 +31,8 @@ paths:
   - Steam can't drop SYS_ADMIN: Proton's bwrap mounts a fresh `/proc`, which a masked `/proc`
     forbids (EPERM, measured on talos04); `procMount: Unmasked` needs `hostUsers: false`, which
     the apiserver rejects with hostNetwork. A per-minor eBPF device filter doesn't help either:
-    SYS_ADMIN with no seccomp may call bpf() to detach it (reasoned, not measured).
+    SYS_ADMIN with no seccomp detaches its own `cgroup_device` program via bpf() and then opens
+    any device, host disks included (measured on talos04, XERK-1915).
 - `cmd/nri-input` grants by container name (`pkg/api/v1alpha1/containers.go`): only `wolf` gets
   `/dev/uinput`; wolf-agent, pulseaudio and the init containers get nothing (wolf-agent's mknod
   is covered by containerd's default `c *:* m`, and it opens nodes only `O_PATH`); every other
