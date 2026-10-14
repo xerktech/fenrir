@@ -1086,9 +1086,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 			{Name: "GST_DEBUG", Value: "2"},
 
 			// Gamescape envar injection. Ham-handed. Why not.
-			{Name: "GAMESCOPE_WIDTH", Value: fmt.Sprint(session.Spec.Config.VideoWidth)},
-			{Name: "GAMESCOPE_HEIGHT", Value: fmt.Sprint(session.Spec.Config.VideoHeight)},
-			{Name: "GAMESCOPE_REFRESH", Value: fmt.Sprint(session.Spec.Config.VideoRefreshRate)},
+			{Name: "GAMESCOPE_WIDTH", Value: strconv.Itoa(session.Spec.Config.VideoWidth)},
+			{Name: "GAMESCOPE_HEIGHT", Value: strconv.Itoa(session.Spec.Config.VideoHeight)},
+			{Name: "GAMESCOPE_REFRESH", Value: strconv.Itoa(session.Spec.Config.VideoRefreshRate)},
 		}...)
 
 		// Validate the main app container's resources against the user's policy.
