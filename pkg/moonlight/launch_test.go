@@ -834,3 +834,52 @@ func TestCancelWaitsForPods(t *testing.T) {
 		}
 	}
 }
+
+// streamStarted makes the operator's Session report StreamStarted=False with
+// reason, and never a stream URL.
+func (f *launchFixture) streamStarted(reason, message string) {
+	f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		get, ok := action.(k8stesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+		s := &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: get.GetName(), Namespace: testNamespace}}
+		s.Status.Conditions = []metav1.Condition{{
+			Type: v1alpha1types.SessionStreamStartedCondition, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+		}}
+		return true, s, nil
+	})
+}
+
+// A stream the operator refuses (e.g. an IPv6 client) fails the launch at
+// once with the operator's reason, instead of waiting out LaunchTimeout
+// (XERK-1336).
+func TestLaunchStreamRefusedFailsFast(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 5 * time.Second})
+	const message = "stream refused: spec.config.clientIP 2001:db8::1 is not an IPv4 address; Wolf streams over IPv4 only"
+	f.streamStarted(v1alpha1types.SessionStreamRefusedReason, message)
+
+	start := time.Now()
+	code, resp := f.launch(t, "alice")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("launch took %s, want it to fail fast", elapsed)
+	}
+	// HTTP 200 so moonlight-qt parses the XML and shows the message.
+	if code != http.StatusOK || resp.StatusCode != streamRefusedStatusCode || resp.StatusMessage != message {
+		t.Errorf("launch = HTTP %d / %d %q, want 200 / %d %q", code, resp.StatusCode, resp.StatusMessage, streamRefusedStatusCode, message)
+	}
+	f.waitForSessionCount(t, 0)
+}
+
+// Any other StreamStarted failure (the pod still starting, during every cold
+// start) is waited out.
+func TestLaunchWaitsOutStreamStartFailed(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 300 * time.Millisecond})
+	f.streamStarted("StreamStartFailed", "pod not ready")
+
+	start := time.Now()
+	code, _ := f.launch(t, "alice")
+	if elapsed := time.Since(start); code != http.StatusInternalServerError || elapsed < 300*time.Millisecond {
+		t.Errorf("launch = HTTP %d after %s, want 500 at the timeout", code, elapsed)
+	}
+}

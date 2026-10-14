@@ -196,3 +196,51 @@ func TestResumeWithUnchangedKeysFailsFast(t *testing.T) {
 		t.Errorf("response after %s = %d %s, want a fast keys error", time.Since(start), w.Code, w.Body.String())
 	}
 }
+
+// A refusal of the resume's own keys (e.g. it came from an IPv6 address)
+// answers at once; one from an earlier generation is not this resume's
+// (XERK-1336).
+func TestResumeStreamRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		refusedAt     int64
+		wantImmediate bool
+	}{
+		{name: "this resume", refusedAt: 2, wantImmediate: true},
+		{name: "earlier generation", refusedAt: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dw := generatedclient.NewSimpleClientset(&v1alpha1types.Session{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "alex-steam-abcde", Namespace: "ns", Generation: 1,
+					Labels: map[string]string{"direwolf/user": "alex"},
+				},
+				Status: v1alpha1types.SessionStatus{
+					AttachedGeneration: 1,
+					DisconnectedAt:     &metav1.Time{Time: time.Now()},
+					Conditions: []metav1.Condition{{
+						Type: v1alpha1types.SessionStreamStartedCondition, Status: metav1.ConditionFalse,
+						Reason: v1alpha1types.SessionStreamRefusedReason, Message: "not IPv4", ObservedGeneration: tc.refusedAt,
+					}},
+				},
+			})
+			bumpGeneration(dw)
+			srv := &RESTServer{SessionClient: dw.DirewolfV1alpha1().Sessions("ns"), RESTServerOptions: RESTServerOptions{LaunchTimeout: 500 * time.Millisecond}}
+
+			start := time.Now()
+			w := httptest.NewRecorder()
+			srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+			elapsed := time.Since(start)
+
+			if tc.wantImmediate {
+				if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "not IPv4") || elapsed > 400*time.Millisecond {
+					t.Errorf("resume = %d %s after %s, want the refusal at once", w.Code, w.Body.String(), elapsed)
+				}
+				return
+			}
+			if w.Code != http.StatusInternalServerError {
+				t.Errorf("resume = %d %s, want 500 at the timeout", w.Code, w.Body.String())
+			}
+		})
+	}
+}

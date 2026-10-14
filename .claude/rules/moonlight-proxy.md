@@ -20,6 +20,13 @@ paths:
   gives up first and shows a generic error while the session keeps starting.
   - The operator's `unstartedSessionTTL` reaper must outlast it, or cold starts get reaped mid-launch.
     Tests: `TestUnstartedSessionTTLOutlastsLaunchTimeout` in `pkg/controllers/reaper_test.go`.
+- `/launch` and `/resume` stop waiting early only on StreamStarted=False reason `StreamRefused`
+  (a spec.config the operator can never stream, e.g. a non-IPv4 client), answered as an XML error.
+  - Never fail fast on `StreamStartFailed`: it also means the pod is still starting, on every cold
+    start. A new permanent refusal wraps `errStreamRefused` in the operator.
+  - `/resume` honours a refusal only if its `observedGeneration` is the resume's own.
+  - Tests: `TestLaunchStreamRefusedFailsFast`, `TestLaunchWaitsOutStreamStartFailed`,
+    `TestResumeStreamRefused`, `TestStreamRefusedForUnstreamableClientIP`.
 - The session limit (`createSession`) holds only because the check and the Create share
   `launchSlot` and count users from a live `List`, not the informer.
   - An orphaned Session from a failed launch would lock every other user out.

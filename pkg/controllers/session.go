@@ -81,6 +81,11 @@ var errSessionEnded = stderrors.New("session ended")
 // pod that is gone instead of ending the Session.
 var errEndSessionFailed = stderrors.New("failed to end session")
 
+// errStreamRefused marks a stream that can never start for the Session's
+// spec.config. Reconcile records it as SessionStreamRefusedReason so /launch
+// stops waiting instead of running out its timeout.
+var errStreamRefused = stderrors.New("stream refused")
+
 // podCreatedCondition is True once the session's pod has been created. The pod
 // is never recreated, so a Session with it True and no pod has ended.
 const podCreatedCondition = "PodCreated"
@@ -420,17 +425,26 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 		return nil
 	case stderrors.Is(streamError, errEndSessionFailed):
 		return streamError
+	case stderrors.Is(streamError, errStreamRefused):
+		klog.Errorf("Refusing stream: %s", streamError)
+		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1types.SessionStreamStartedCondition,
+			Status:             metav1.ConditionFalse,
+			Reason:             v1alpha1types.SessionStreamRefusedReason,
+			Message:            streamError.Error(),
+			ObservedGeneration: newObj.Generation,
+		})
 	case streamError != nil:
 		klog.Errorf("Failed to reconcile active streams: %s", streamError)
 		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
-			Type:    "StreamStarted",
+			Type:    v1alpha1types.SessionStreamStartedCondition,
 			Status:  metav1.ConditionFalse,
 			Reason:  "StreamStartFailed",
 			Message: streamError.Error(),
 		})
 	default:
 		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
-			Type:   "StreamStarted",
+			Type:   v1alpha1types.SessionStreamStartedCondition,
 			Status: metav1.ConditionTrue,
 			Reason: "WaitForPing", //!TOOD: use actual current stream status?
 		})
@@ -2086,6 +2100,12 @@ func (c *SessionController) reconcileActiveStreams(
 	session *v1alpha1types.Session,
 	pod *corev1.Pod,
 ) error {
+	// Checked before the pod is ready, so /launch hears of it without
+	// waiting out a cold start. Nothing a retry can fix: the client IP is
+	// the client's.
+	if _, err := streamClientIP(session); err != nil {
+		return fmt.Errorf("%w: %w", errStreamRefused, err)
+	}
 	if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" || !podReady(pod) {
 		return fmt.Errorf("pod %s/%s not ready (phase %s)", pod.Namespace, pod.Name, pod.Status.Phase)
 	}
@@ -2273,7 +2293,7 @@ func (c *SessionController) reconcileActiveStreams(
 		// Create the session
 		wolfSession, err := wolfSessionFor(session, podIP)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %w", errStreamRefused, err)
 		}
 		if stopErr := c.stopStaleStreams(ctx, wolfclient, session, sessions); stopErr != nil {
 			return stopErr
@@ -2411,21 +2431,31 @@ func (c *SessionController) ensureLobby(ctx context.Context, wolfclient wolfapi.
 	return nil
 }
 
+// streamClientIP is the session's client IP as Wolf needs it (see
+// wolfSessionFor).
+func streamClientIP(session *v1alpha1types.Session) (netip.Addr, error) {
+	clientIP, err := netip.ParseAddr(session.Spec.Config.ClientIP)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("session %s/%s has no valid spec.config.clientIP %q: %w",
+			session.Namespace, session.Name, session.Spec.Config.ClientIP, err)
+	}
+	clientIP = clientIP.Unmap()
+	if !clientIP.Is4() || clientIP.IsUnspecified() {
+		return netip.Addr{}, fmt.Errorf("session %s/%s: spec.config.clientIP %s is not an IPv4 address; Wolf streams over IPv4 only",
+			session.Namespace, session.Name, clientIP)
+	}
+	return clientIP, nil
+}
+
 // wolfSessionFor builds the Wolf AddSession request for session. Wolf streams
 // to ClientIP, so it must be the Moonlight client's real address (recorded by
 // moonlight-proxy at /launch); there is no usable default. Wolf's stream
 // sockets are IPv4-only and it matches peers by exact IP string, so an IPv6
 // client could never stream: refuse it here with a clear error instead.
 func wolfSessionFor(session *v1alpha1types.Session, podIP string) (wolfapi.Session, error) {
-	clientIP, err := netip.ParseAddr(session.Spec.Config.ClientIP)
+	clientIP, err := streamClientIP(session)
 	if err != nil {
-		return wolfapi.Session{}, fmt.Errorf("session %s/%s has no valid spec.config.clientIP %q: %w",
-			session.Namespace, session.Name, session.Spec.Config.ClientIP, err)
-	}
-	clientIP = clientIP.Unmap()
-	if !clientIP.Is4() || clientIP.IsUnspecified() {
-		return wolfapi.Session{}, fmt.Errorf("session %s/%s: spec.config.clientIP %s is not an IPv4 address; Wolf streams over IPv4 only",
-			session.Namespace, session.Name, clientIP)
+		return wolfapi.Session{}, err
 	}
 
 	return wolfapi.Session{

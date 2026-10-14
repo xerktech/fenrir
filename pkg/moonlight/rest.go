@@ -27,6 +27,7 @@ import (
 	"golang.org/x/image/webp"
 	v1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
@@ -96,6 +97,10 @@ const (
 	busyStatusCode = 400
 	busyMessage    = "An app is already running on this host"
 )
+
+// streamRefusedStatusCode is the XML status of a launch the operator refused.
+// Moonlight shows any status other than 200 with its message.
+const streamRefusedStatusCode = 503
 
 type RESTServer struct {
 	router       *http.ServeMux
@@ -640,6 +645,9 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 			return false, err
 		}
 
+		if refusal := streamRefusal(session); refusal != nil {
+			return false, refusal
+		}
 		if session.Status.StreamURL == "" {
 			return false, nil
 		}
@@ -662,6 +670,11 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 			defer cancel()
 			s.drainCleanups(ctx)
 		}()
+		if refusal := (*streamRefusedError)(nil); errors.As(err, &refusal) {
+			klog.Infof("Launch of app %s for user %s refused: %s", app.Name, user.Name, refusal)
+			sendXMLWithHTTPStatus(w, http.StatusOK, refusal.response())
+			return
+		}
 		writeErrorResponse(w, 500, fmt.Errorf("failed to launch app: %w", err))
 		return
 	}
@@ -813,6 +826,32 @@ func (s *RESTServer) deleteLaunch(ctx context.Context, launchID string) error {
 	return nil
 }
 
+// streamRefusedError is the operator refusing ever to stream a Session as
+// configured (SessionStreamRefusedReason): /launch and /resume answer at once
+// rather than wait out LaunchTimeout.
+type streamRefusedError struct {
+	message    string
+	generation int64
+}
+
+func (e *streamRefusedError) Error() string { return e.message }
+
+// response tells the client why, as an XML status: moonlight-qt shows a
+// non-2xx HTTP status only as a transport error.
+func (e *streamRefusedError) response() Response {
+	return Response{StatusCode: streamRefusedStatusCode, StatusMessage: e.message}
+}
+
+// streamRefusal is the Session's stream refusal, or nil. Other StreamStarted
+// failures (e.g. pod not ready yet during a cold start) are worth waiting out.
+func streamRefusal(session *v1alpha1types.Session) *streamRefusedError {
+	cond := meta.FindStatusCondition(session.Status.Conditions, v1alpha1types.SessionStreamStartedCondition)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != v1alpha1types.SessionStreamRefusedReason {
+		return nil
+	}
+	return &streamRefusedError{message: cond.Message, generation: cond.ObservedGeneration}
+}
+
 func busyResponse(reason string) Response {
 	return Response{StatusCode: busyStatusCode, StatusMessage: reason}
 }
@@ -903,12 +942,20 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 		if getErr != nil {
 			return false, fmt.Errorf("failed to get session: %w", getErr)
 		}
+		if refusal := streamRefusal(live); refusal != nil && refusal.generation >= generation {
+			return false, refusal
+		}
 		if live.Status.AttachedGeneration < generation || live.Status.WolfSessionID == "" || live.Status.StreamURL == "" {
 			return false, nil
 		}
 		streamURL = live.Status.StreamURL
 		return true, nil
 	})
+	if refusal := (*streamRefusedError)(nil); errors.As(err, &refusal) {
+		klog.Infof("Resume of session %s for user %s refused: %s", session.Name, user.Name, refusal)
+		sendXMLWithHTTPStatus(w, http.StatusOK, refusal.response())
+		return
+	}
 	if err != nil {
 		writeErrorResponse(w, 500, fmt.Errorf("failed to resume session %s: %w", session.Name, err))
 		return
