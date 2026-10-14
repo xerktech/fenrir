@@ -92,12 +92,13 @@ func (j *lobbyJoiner) seed(sessionID, key string) {
 	j.key = key
 }
 
-// knows reports whether the stream with sessionID and key is the joiner's:
-// IDs repeat across streams, keys don't. A key not yet seen matches any.
+// knows reports whether the stream with sessionID and key is the joiner's,
+// with its AudioSession (which carries the key) seen: IDs repeat across
+// streams, keys don't. Without it, its audio pings would never count.
 func (j *lobbyJoiner) knows(sessionID, key string) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return sessionID == j.stream && (j.key == "" || j.key == key)
+	return sessionID == j.stream && j.audio && j.key == key
 }
 
 // ping records an RTP ping and joins the stream once both of its pipelines

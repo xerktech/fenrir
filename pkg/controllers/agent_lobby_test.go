@@ -885,3 +885,71 @@ func TestAgentCatchUpLeavesAmbiguousStreams(t *testing.T) {
 		})
 	}
 }
+
+// A resume reusing the ID of a stream whose joins all failed starts afresh:
+// the old stream's spent attempts must not stop it joining.
+func TestAgentJoinsStreamStartedAfterExhaustedJoins(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	client.joinErr = errors.New("wolf refused")
+	a := hotplugAgent(t, client)
+	a.lobby.settle = 0
+	a.minResubscribeDelay = time.Millisecond
+	go a.Run(t.Context())
+	ch := <-client.subs
+	sendOn(ch, wolfapi.VideoSessionEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	sendOn(ch, wolfapi.AudioSessionEventType, `{"session_id":"`+wolfStreamID+`","aes_key":"`+streamKey+`"}`)
+	for range maxLobbyJoinAttempts {
+		sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+		sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+		<-client.joined
+		waitLobbyState(t, a, lobbyJoinWaiting)
+	}
+	client.mu.Lock()
+	client.joinErr = nil
+	client.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: "resumed"}}
+	client.mu.Unlock()
+	close(ch)
+	ch = <-client.subs
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+}
+
+// A stream whose AudioSession was lost with the event stream is seeded too:
+// without it, its audio pings never count.
+func TestAgentJoinsStreamStartedAcrossDroppedAudioSetup(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a := hotplugAgent(t, client)
+	a.lobby.settle = 0
+	a.minResubscribeDelay = time.Millisecond
+	go a.Run(t.Context())
+	ch := <-client.subs
+	sendOn(ch, wolfapi.VideoSessionEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	client.mu.Lock()
+	client.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey}}
+	client.mu.Unlock()
+	close(ch)
+	ch = <-client.subs
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+}
+
+// waitLobbyState waits for a's joiner to reach state, as a failed join
+// returns to waiting only after JoinLobby returns.
+func waitLobbyState(t *testing.T, a *Agent, state lobbyJoinState) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a.lobby.mu.Lock()
+		got := a.lobby.state
+		a.lobby.mu.Unlock()
+		if got == state {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("lobby joiner state %d, want %d", got, state)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
