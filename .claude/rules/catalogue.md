@@ -33,6 +33,8 @@ paths:
   - Library paths come from a user-writable file; a relative one once hung `reachable`
     forever. The script runs under `timeout`: a cancelled exec leaves its process running. `TestCatalogueScanUnreadableDirFails` skips
     as root, so run it as a non-root user (CI is).
+  - `$home/.local/share/Steam` is a link to the sessions' install (see `library.md`); the
+    scan reads through it, so keep `tar -h` and never resolve or reject that link.
   - A launcher whose base App is missing is skipped: its Apps stay, never "uninstalled".
   - Only Apps labelled `direwolf/catalogue=<store>` are ever updated or deleted.
 - Generated Apps are a copy of `--catalogue-steam-app` / `--catalogue-heroic-app`.

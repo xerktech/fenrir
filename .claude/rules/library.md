@@ -4,6 +4,7 @@ paths:
   - pkg/moonlight/library*.go
   - pkg/moonlight/rest.go
   - cmd/operator/**
+  - images/library/**
 ---
 
 # Library (on-demand Steam + Heroic desktop)
@@ -15,6 +16,23 @@ paths:
     be seconds old.
   - The operator side also counts session pods, not just Sessions: a terminating pod still
     runs Steam.
+- One Steam install: `~/.local/share/Steam` (Valve's launcher, here) is a relative link to
+  `~/.steam/debian-installation` (sessions' Debian launcher), made by the image's
+  `init-steam-home` before the desktop starts (XERK-1559).
+  - Each launcher points `~/.steam/steam` at its own dir by an absolute path. `/home/retro`
+    (sessions' mount) links to `/config` here so the sessions' path resolves; Valve's
+    launcher otherwise falls back to `~/.local/share/Steam`, and the Debian one relinks a
+    dangling `/config/...` link to its own dir.
+  - Never make `debian-installation` the link: the GoW image isn't ours.
+  - A real `~/.local/share/Steam` next to it is moved aside (`Steam.library-<time>`), never
+    deleted; games installed only there (StateFlags bit 4, as the catalogue reads it) are moved
+    into the shared install first, or the catalogue would see them uninstalled and delete their
+    Apps.
+  - `init-steam-home` never exits non-zero: a failed oneshot stops s6 starting the desktop, and
+    the pod stays Running, never Ready, holding the Steam lock.
+  - Tests: `images/library/init_steam_home_test.go` (runs the real script).
+  - GoW's cont-init dies on a dangling `~/.steam/steam` when `~/homebrew/services/PluginLoader`
+    is missing (`mkdir -p ~/.steam/steam/`), i.e. a fresh home where the Library ran first.
 - Idle rule: (no browser traffic for `--library-idle-timeout` OR no user-opened page load for
   `--library-max-runtime`) AND nothing downloading.
   - An open Selkies tab sends WebSocket traffic every few seconds with nobody there, so traffic
