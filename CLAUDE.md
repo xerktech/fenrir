@@ -112,6 +112,9 @@ Three binaries in `cmd/`, all sharing `pkg/`:
   - Wolf's HTTP/HTTPS bind to 127.0.0.1 via a `bind()` preload shim (`cmd/wolf-agent/shim`,
     `wolfCommand`): Wolf hardcodes 0.0.0.0 and its HTTPS accepts any cert naming an unknown issuer
     as paired (XERK-1682). Flannel enforces no NetworkPolicy, and none applies to hostNetwork.
+    - Loopback is shared by every hostNetwork pod, so the shim also closes every connection those
+      two listeners accept (XERK-1737); nothing uses them. Not an AF_UNIX swap: asio registers the
+      fd with epoll before bind, so a swapped file never wakes accept. `TestLoopbackShimDrops*`.
     - The shim ships in the wolf-agent image (own Dockerfile); an init container copies it in.
       Wolf refuses to start without it. Tests: `TestLoopbackShim`, `TestSessionPodPreloadsLoopbackShim`.
   - Chart: moonlight-proxy is host-networked with a nodeSelector and tolerations that must match
