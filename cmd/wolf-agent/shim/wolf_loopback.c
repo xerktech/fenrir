@@ -48,10 +48,20 @@ static long env_port(const char *name, long def) {
   return (unsigned short)strtol(v, NULL, 10);
 }
 
+/* Read once at load: accept() runs on Wolf's threads for its whole life, and
+ * getenv there could race a setenv elsewhere in Wolf. */
+static long wolf_http_port, wolf_https_port;
+
+__attribute__((constructor)) static void read_wolf_ports(void) {
+  wolf_http_port = env_port("WOLF_HTTP_PORT", WOLF_DEFAULT_HTTP_PORT);
+  wolf_https_port = env_port("WOLF_HTTPS_PORT", WOLF_DEFAULT_HTTPS_PORT);
+}
+
 static int is_wolf_rest_port(in_port_t net_port) {
   long port = ntohs(net_port);
-  return port == env_port("WOLF_HTTP_PORT", WOLF_DEFAULT_HTTP_PORT) ||
-         port == env_port("WOLF_HTTPS_PORT", WOLF_DEFAULT_HTTPS_PORT);
+  /* Port 0 (an ephemeral bind, or one before read_wolf_ports ran) is never
+   * one of Wolf's servers. */
+  return port != 0 && (port == wolf_http_port || port == wolf_https_port);
 }
 
 int bind(int fd, const struct sockaddr *addr, socklen_t len) {

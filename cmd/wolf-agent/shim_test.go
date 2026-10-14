@@ -67,16 +67,16 @@ func TestLoopbackShimDropsWolfConnections(t *testing.T) {
 import ctypes, errno, socket, sys, threading
 libc = ctypes.CDLL(None, use_errno=True)
 
-def listener(port):
-    s = socket.socket()
+def listener(port, family=socket.AF_INET):
+    s = socket.socket(family)
     # Like asio's acceptor: closed connections leave the port in TIME_WAIT.
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("0.0.0.0", port))
+    s.bind(("0.0.0.0" if family == socket.AF_INET else "::", port))
     s.listen(8)
     return s
 
-def connect(port):
-    c = socket.create_connection(("127.0.0.1", port))
+def connect(port, host="127.0.0.1"):
+    c = socket.create_connection((host, port))
     c.settimeout(2)
     return c
 
@@ -109,6 +109,13 @@ for name in sys.argv[1:]:
         for c in clients:
             c.close()
         s.close()
+    s = listener(port, socket.AF_INET6)
+    s.setblocking(False)
+    c = connect(port, "::1")
+    got = accepted(s, False)
+    print(port, "ipv6", got, closed(c) if got != "accepted" else "")
+    c.close()
+    s.close()
     # A blocking accept never returns for a Wolf listener, but still drops.
     s = listener(port)
     kept = []  # an accepted socket that is garbage-collected closes
@@ -129,12 +136,15 @@ for name in sys.argv[1:]:
 	want := strings.Join([]string{
 		http + " accept4 EAGAIN True",
 		http + " plain EAGAIN True",
+		http + " ipv6 EAGAIN True",
 		http + " blocking True",
 		https + " accept4 EAGAIN True",
 		https + " plain EAGAIN True",
+		https + " ipv6 EAGAIN True",
 		https + " blocking True",
 		other + " accept4 accepted ",
 		other + " plain accepted ",
+		other + " ipv6 accepted ",
 		other + " blocking False",
 	}, "\n")
 	if got != want {
