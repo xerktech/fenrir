@@ -895,7 +895,8 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 		}
 	}
 
-	// Other host paths and an unprivileged container stay allowed.
+	// Other host paths, an unprivileged container and a SYS_ADMIN one under
+	// Unconfined seccomp (cmd/nri-input filters it) stay allowed.
 	sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
 	app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
 	if err != nil {
@@ -903,8 +904,10 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 	}
 	hostPath("/devices")(&app.Spec.Template.Spec, &app.Spec.Template.Spec.Containers[0])
 	app.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: new(false)}
+	app.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}}
+	app.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities = &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}}
 	if _, err := sc.buildPod(sess); err != nil {
-		t.Errorf("buildPod err = %v, want /devices allowed", err)
+		t.Errorf("buildPod err = %v, want it allowed", err)
 	}
 }
 

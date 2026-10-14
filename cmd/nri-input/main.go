@@ -23,14 +23,12 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
 	"runtime"
 	"slices"
 	"strings"
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
-	"google.golang.org/protobuf/proto"
 	"k8s.io/klog/v2"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -65,13 +63,9 @@ func (p *plugin) CreateContainer(
 		return nil, nil, nil
 	}
 	if !isOperatorContainer(ctr.GetName()) {
-		policy, err := confinedSeccomp(ctr.GetLinux())
-		if err != nil {
-			// Failing the create ends the Session: better than a game
-			// running without the filter.
-			return nil, nil, fmt.Errorf("container %s/%s/%s: %w", pod.GetNamespace(), pod.GetName(), ctr.GetName(), err)
+		if policy := confinedSeccomp(ctr.GetLinux()); policy != nil {
+			adjust.SetLinuxSeccompPolicy(policy)
 		}
-		adjust.SetLinuxSeccompPolicy(policy)
 	}
 	klog.InfoS("Granting input devices", "namespace", pod.GetNamespace(), "pod", pod.GetName(), "container", ctr.GetName())
 	return adjust, nil, nil
@@ -99,50 +93,36 @@ var deniedSyscalls = []string{
 
 // seccompArches are the ABIs a default-allow filter must cover: the filter
 // kills a syscall from an ABI it doesn't list, and Proton runs 32-bit games.
-// Matches the arches of containerd's default profile.
+// Matches the arches of containerd's default profile. On other GOARCHes the
+// list is empty, which runc reads as the native ABI only.
 var seccompArches = map[string][]string{
 	"amd64": {"SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"},
 	"arm64": {"SCMP_ARCH_AARCH64", "SCMP_ARCH_ARM"},
 }
 
-// confinedSeccomp returns the container's seccomp policy with deniedSyscalls
-// returning EPERM. An Unconfined container gets a default-allow policy.
+// confinedSeccomp returns a seccomp policy for a seccomp-Unconfined
+// container that allows everything but deniedSyscalls, which return EPERM, or
+// nil to leave the container's policy alone.
 //
-// The adjustment replaces the whole policy, so a confined container's own is
-// kept with the denied names taken out of its rules. A confined container
-// whose policy the runtime didn't report is refused, not loosened.
-func confinedSeccomp(linux *api.LinuxContainer) (*api.LinuxSeccomp, error) {
-	deny := &api.LinuxSyscall{
-		Names:    deniedSyscalls,
-		Action:   "SCMP_ACT_ERRNO",
-		ErrnoRet: api.UInt32(uint32(1)), // EPERM
+// Only Unconfined containers are adjusted: the adjustment replaces the whole
+// policy, and containerd (2.2.6) reports a container's profile type but never
+// its resolved policy, so a RuntimeDefault or Localhost one can't be extended
+// without loosening it. The operator refuses App containers that add SYS_ADMIN
+// under RuntimeDefault, which allows bpf() (validateNoHostDevices).
+func confinedSeccomp(linux *api.LinuxContainer) *api.LinuxSeccomp {
+	// A nil profile reads as RUNTIME_DEFAULT.
+	if linux.GetSeccompProfile().GetProfileType() != api.SecurityProfile_UNCONFINED {
+		return nil
 	}
-	current := linux.GetSeccompPolicy()
-	if current == nil {
-		// A nil profile reads as RUNTIME_DEFAULT.
-		if linux.GetSeccompProfile().GetProfileType() != api.SecurityProfile_UNCONFINED {
-			return nil, errors.New("runtime reported no seccomp policy for a confined container")
-		}
-		arches, ok := seccompArches[runtime.GOARCH]
-		if !ok {
-			return nil, fmt.Errorf("no seccomp architectures known for %s", runtime.GOARCH)
-		}
-		return &api.LinuxSeccomp{
-			DefaultAction: "SCMP_ACT_ALLOW",
-			Architectures: arches,
-			Syscalls:      []*api.LinuxSyscall{deny},
-		}, nil
+	return &api.LinuxSeccomp{
+		DefaultAction: "SCMP_ACT_ALLOW",
+		Architectures: seccompArches[runtime.GOARCH],
+		Syscalls: []*api.LinuxSyscall{{
+			Names:    deniedSyscalls,
+			Action:   "SCMP_ACT_ERRNO",
+			ErrnoRet: api.UInt32(uint32(1)), // EPERM
+		}},
 	}
-	policy, _ := proto.Clone(current).(*api.LinuxSeccomp)
-	syscalls := policy.Syscalls[:0]
-	for _, sc := range policy.Syscalls {
-		sc.Names = slices.DeleteFunc(sc.Names, func(n string) bool { return slices.Contains(deniedSyscalls, n) })
-		if len(sc.Names) > 0 {
-			syscalls = append(syscalls, sc)
-		}
-	}
-	policy.Syscalls = append(syscalls, deny)
-	return policy, nil
 }
 
 // isOperatorContainer reports whether ctrName is one of the operator's own

@@ -27,7 +27,7 @@ paths:
     only a bare `MKNOD` counts as dropped. Tests: `TestDropMknod`.
   - NRI can't narrow the grant per minor: device rules are set only at container create.
   - A privileged App container, or one mounting a hostPath at or above `/dev`, is refused
-    (`validateNoHostDevices`, XERK-1915). Tests: `TestBuildPodRejectsAppHostDevices`.
+    (`validateAppConfinement`, XERK-1915). Tests: `TestBuildPodRejectsAppHostDevices`.
   - Not covered: an App adding SYS_ADMIN mounts a devtmpfs and opens every `13:*`/`241:*` node,
     host keyboards included. The Steam/Heroic Apps add SYS_ADMIN with seccomp Unconfined.
   - Steam can't drop SYS_ADMIN: Proton's bwrap mounts a fresh `/proc`, which a masked `/proc`
@@ -35,12 +35,15 @@ paths:
     the apiserver rejects with hostNetwork. A per-minor eBPF device filter doesn't help either:
     SYS_ADMIN with no seccomp detaches its own `cgroup_device` program via bpf() and then opens
     any device, host disks included (measured on talos04, XERK-1915).
-- `cmd/nri-input` sets a seccomp policy on every App container denying bpf, perf_event_open,
-  module/kexec loading, open_by_handle_at, keyctl and the like (`deniedSyscalls`, XERK-1915).
-  - The adjustment replaces the whole policy: an Unconfined container gets default-allow; a
-    confined one keeps its own with those names stripped. Never loosen RuntimeDefault.
-  - No policy reported for a confined container fails the create (fail closed).
-  - A default-allow filter must list the 32-bit arches, or Proton's 32-bit games are killed.
+- `cmd/nri-input` gives every seccomp-Unconfined App container a default-allow filter denying bpf,
+  perf_event_open, module/kexec loading, open_by_handle_at, keyctl and the like (`deniedSyscalls`,
+  XERK-1915). Others keep their profile untouched.
+  - An NRI seccomp adjustment replaces the whole policy, and containerd 2.2.6 reports only the
+    profile type, never the resolved policy: extending RuntimeDefault would replace it.
+  - containerd's RuntimeDefault allows bpf() to SYS_ADMIN/BPF/PERFMON, so the operator refuses an
+    App container adding one of those under RuntimeDefault, unset included (talos04's kubelet runs
+    `seccompDefault`). Such an App must ask for Unconfined.
+  - The filter lists the 32-bit arches, or Proton's 32-bit games are killed.
   - seccomp can't see a mount's fstype or path, so devtmpfs and procfs mounts stay possible.
   - Tests: `TestConfinedSeccomp*`, `TestCreateContainerConfinesOnlyApp`.
 - `cmd/nri-input` grants by container name (`pkg/api/v1alpha1/containers.go`): only `wolf` gets
