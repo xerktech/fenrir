@@ -138,3 +138,87 @@ func TestNewPluginScope(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, p.namespaces)
 }
+
+func denied(t *testing.T, policy *api.LinuxSeccomp) []string {
+	t.Helper()
+	var names []string
+	for _, sc := range policy.GetSyscalls() {
+		if sc.Action == "SCMP_ACT_ERRNO" {
+			names = append(names, sc.Names...)
+		} else {
+			for _, n := range sc.Names {
+				require.NotContains(t, deniedSyscalls, n, "denied syscall left in a %s rule", sc.Action)
+			}
+		}
+	}
+	return names
+}
+
+// An Unconfined App (Steam adds SYS_ADMIN) could detach its device-cgroup
+// program with bpf() and open host disks (XERK-1915).
+func TestConfinedSeccompUnconfined(t *testing.T) {
+	policy, err := confinedSeccomp(&api.LinuxContainer{
+		SeccompProfile: &api.SecurityProfile{ProfileType: api.SecurityProfile_UNCONFINED},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "SCMP_ACT_ALLOW", policy.DefaultAction)
+	require.NotEmpty(t, policy.Architectures, "32-bit syscalls would be killed")
+	require.ElementsMatch(t, deniedSyscalls, denied(t, policy))
+}
+
+func TestConfinedSeccompKeepsOwnPolicy(t *testing.T) {
+	current := &api.LinuxSeccomp{
+		DefaultAction: "SCMP_ACT_ERRNO",
+		Architectures: []string{"SCMP_ARCH_X86_64"},
+		Syscalls: []*api.LinuxSyscall{
+			{Names: []string{"read", "bpf", "write"}, Action: "SCMP_ACT_ALLOW"},
+			{Names: []string{"perf_event_open"}, Action: "SCMP_ACT_ALLOW"},
+		},
+	}
+	policy, err := confinedSeccomp(&api.LinuxContainer{
+		SeccompProfile: &api.SecurityProfile{ProfileType: api.SecurityProfile_RUNTIME_DEFAULT},
+		SeccompPolicy:  current,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "SCMP_ACT_ERRNO", policy.DefaultAction)
+	require.Equal(t, []string{"SCMP_ARCH_X86_64"}, policy.Architectures)
+	require.Equal(t, []string{"read", "write"}, policy.Syscalls[0].Names)
+	require.Len(t, policy.Syscalls, 2, "emptied rule dropped, deny rule added")
+	require.ElementsMatch(t, deniedSyscalls, denied(t, policy))
+	require.Equal(t, []string{"read", "bpf", "write"}, current.Syscalls[0].Names, "runtime's policy not modified")
+}
+
+// Without the runtime's policy the adjustment would replace RuntimeDefault
+// with a looser one.
+func TestConfinedSeccompRefusesUnknownPolicy(t *testing.T) {
+	for name, linux := range map[string]*api.LinuxContainer{
+		"nil":             nil,
+		"no profile":      {},
+		"runtime default": {SeccompProfile: &api.SecurityProfile{ProfileType: api.SecurityProfile_RUNTIME_DEFAULT}},
+		"localhost":       {SeccompProfile: &api.SecurityProfile{ProfileType: api.SecurityProfile_LOCALHOST}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := confinedSeccomp(linux)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestCreateContainerConfinesOnlyApp(t *testing.T) {
+	unconfined := &api.LinuxContainer{SeccompProfile: &api.SecurityProfile{ProfileType: api.SecurityProfile_UNCONFINED}}
+	p := &plugin{}
+	adjust, _, err := p.CreateContainer(t.Context(), sessionPod("games"), &api.Container{Name: "app", Linux: unconfined})
+	require.NoError(t, err)
+	require.NotNil(t, adjust.GetLinux().GetSeccompPolicy())
+
+	adjust, _, err = p.CreateContainer(t.Context(), sessionPod("games"), &api.Container{Name: v1alpha1types.WolfContainerName, Linux: unconfined})
+	require.NoError(t, err)
+	require.Nil(t, adjust.GetLinux().GetSeccompPolicy(), "Wolf's own policy is the operator's")
+
+	_, _, err = p.CreateContainer(t.Context(), sessionPod("games"), &api.Container{Name: "app"})
+	require.Error(t, err, "fails closed")
+
+	adjust, _, err = p.CreateContainer(t.Context(), &api.PodSandbox{Name: "other"}, &api.Container{Name: "app"})
+	require.NoError(t, err)
+	require.Nil(t, adjust, "other pods untouched")
+}

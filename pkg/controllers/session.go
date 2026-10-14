@@ -1046,6 +1046,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	if err := validateNoOperatorVolumeMounts(&podToCreate.Spec); err != nil {
 		return nil, invalidSpec(err)
 	}
+	if err := validateNoHostDevices(&podToCreate.Spec); err != nil {
+		return nil, invalidSpec(err)
+	}
 
 	if podToCreate.Labels == nil {
 		podToCreate.Labels = map[string]string{}
@@ -1959,6 +1962,37 @@ func validateNoOperatorVolumeMounts(spec *corev1.PodSpec) error {
 			for _, name := range names {
 				if slices.Contains(operatorVolumes, name) {
 					return fmt.Errorf("validation failed: container %q in the App template mounts volume %q, which is reserved for the operator", ctr.Name, name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateNoHostDevices rejects App template containers (init too) that run
+// privileged or mount a hostPath at or above the host's /dev. cmd/nri-input
+// grants App containers every /dev/input and /dev/hidraw node by number, so
+// either would hand the game the host's keyboards and other sessions' pads,
+// and privileged also every disk and no seccomp filter (XERK-1915).
+func validateNoHostDevices(spec *corev1.PodSpec) error {
+	hostDev := map[string]string{}
+	for _, v := range spec.Volumes {
+		if v.HostPath == nil {
+			continue
+		}
+		p := path.Clean("/" + v.HostPath.Path)
+		if p == "/" || p == "/dev" || strings.HasPrefix(p, "/dev/") {
+			hostDev[v.Name] = v.HostPath.Path
+		}
+	}
+	for _, ctrs := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
+		for _, ctr := range ctrs {
+			if sc := ctr.SecurityContext; sc != nil && sc.Privileged != nil && *sc.Privileged {
+				return fmt.Errorf("validation failed: container %q in the App template is privileged", ctr.Name)
+			}
+			for _, m := range ctr.VolumeMounts {
+				if p, ok := hostDev[m.Name]; ok {
+					return fmt.Errorf("validation failed: container %q in the App template mounts host path %q", ctr.Name, p)
 				}
 			}
 		}

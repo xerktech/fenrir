@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -849,6 +850,61 @@ func TestBuildPodRejectsAppDeviceOfOperatorVolume(t *testing.T) {
 		if _, err := sc.buildPod(sess); err == nil || !strings.Contains(err.Error(), "reserved for the operator") {
 			t.Errorf("init container %v: buildPod err = %v, want the wolf-data volumeDevice rejected", initCtr, err)
 		}
+	}
+}
+
+// cmd/nri-input grants App containers every input node by number, so a host
+// /dev or a privileged container hands the game the host's input (XERK-1915).
+func TestBuildPodRejectsAppHostDevices(t *testing.T) {
+	hostPath := func(p string) func(*corev1.PodSpec, *corev1.Container) {
+		return func(spec *corev1.PodSpec, ctr *corev1.Container) {
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "host", VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: p},
+			}})
+			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: "host", MountPath: "/x"})
+		}
+	}
+	tests := map[string]func(*corev1.PodSpec, *corev1.Container){
+		"privileged": func(_ *corev1.PodSpec, ctr *corev1.Container) {
+			ctr.SecurityContext = &corev1.SecurityContext{Privileged: new(true)}
+		},
+		"host root":   hostPath("/"),
+		"host dev":    hostPath("/dev/"),
+		"host input":  hostPath("/dev/input"),
+		"host uinput": hostPath("/dev/uinput"),
+		"unclean dev": hostPath("/var/../dev//input"),
+	}
+	for name, mutate := range tests {
+		for _, initCtr := range []bool{false, true} {
+			sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+			app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The informer's copy: buildPod reads it back below.
+			spec := &app.Spec.Template.Spec
+			if initCtr {
+				spec.InitContainers = append(spec.InitContainers, corev1.Container{Name: "steal", Image: "busybox"})
+				mutate(spec, &spec.InitContainers[len(spec.InitContainers)-1])
+			} else {
+				mutate(spec, &spec.Containers[0])
+			}
+			if _, err := sc.buildPod(sess); !errors.Is(err, errInvalidSpec) {
+				t.Errorf("%s (init container: %v): buildPod err = %v, want it rejected", name, initCtr, err)
+			}
+		}
+	}
+
+	// Other host paths and an unprivileged container stay allowed.
+	sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+	app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostPath("/devices")(&app.Spec.Template.Spec, &app.Spec.Template.Spec.Containers[0])
+	app.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: new(false)}
+	if _, err := sc.buildPod(sess); err != nil {
+		t.Errorf("buildPod err = %v, want /devices allowed", err)
 	}
 }
 

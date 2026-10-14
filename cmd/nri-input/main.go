@@ -8,6 +8,11 @@
 // containers get nothing, and every other container (the App's) gets the
 // /dev/input and /dev/hidraw majors.
 //
+// The App's containers also get a seccomp filter denying host-kernel
+// interfaces no game needs (deniedSyscalls). Steam-style Apps add SYS_ADMIN
+// with seccomp Unconfined, and with bpf() such a container detached its own
+// device-cgroup program and opened the node's disks (XERK-1915).
+//
 // Only pods carrying v1alpha1.SessionPodLabel are adjusted; every other pod is
 // left untouched. Because any pod author can set a label, the plugin refuses to
 // start unless --namespaces names the namespaces the operator runs sessions in,
@@ -18,11 +23,14 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
+	"google.golang.org/protobuf/proto"
 	"k8s.io/klog/v2"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -53,10 +61,100 @@ func (p *plugin) CreateContainer(
 	ctr *api.Container,
 ) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	adjust := p.adjustment(pod, ctr.GetName())
-	if adjust != nil {
-		klog.InfoS("Granting input devices", "namespace", pod.GetNamespace(), "pod", pod.GetName(), "container", ctr.GetName())
+	if adjust == nil {
+		return nil, nil, nil
 	}
+	if !isOperatorContainer(ctr.GetName()) {
+		policy, err := confinedSeccomp(ctr.GetLinux())
+		if err != nil {
+			// Failing the create ends the Session: better than a game
+			// running without the filter.
+			return nil, nil, fmt.Errorf("container %s/%s/%s: %w", pod.GetNamespace(), pod.GetName(), ctr.GetName(), err)
+		}
+		adjust.SetLinuxSeccompPolicy(policy)
+	}
+	klog.InfoS("Granting input devices", "namespace", pod.GetNamespace(), "pod", pod.GetName(), "container", ctr.GetName())
 	return adjust, nil, nil
+}
+
+// deniedSyscalls are host-kernel interfaces an App container never gets, even
+// with SYS_ADMIN: bpf() detaches the container's device-cgroup program
+// (XERK-1915), and the rest load kernel code, read other processes' keys or
+// files by handle, or reach hardware. Steam's bwrap needs mount, unshare and
+// clone, so those stay; seccomp can't see a mount's fstype anyway.
+var deniedSyscalls = []string{
+	"bpf",
+	"perf_event_open",
+	"kexec_load", "kexec_file_load",
+	"init_module", "finit_module", "delete_module",
+	"open_by_handle_at", "name_to_handle_at",
+	"keyctl", "add_key", "request_key",
+	"iopl", "ioperm",
+	"swapon", "swapoff",
+	"reboot",
+	"acct",
+	"lookup_dcookie",
+	"quotactl", "quotactl_fd",
+}
+
+// seccompArches are the ABIs a default-allow filter must cover: the filter
+// kills a syscall from an ABI it doesn't list, and Proton runs 32-bit games.
+// Matches the arches of containerd's default profile.
+var seccompArches = map[string][]string{
+	"amd64": {"SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"},
+	"arm64": {"SCMP_ARCH_AARCH64", "SCMP_ARCH_ARM"},
+}
+
+// confinedSeccomp returns the container's seccomp policy with deniedSyscalls
+// returning EPERM. An Unconfined container gets a default-allow policy.
+//
+// The adjustment replaces the whole policy, so a confined container's own is
+// kept with the denied names taken out of its rules. A confined container
+// whose policy the runtime didn't report is refused, not loosened.
+func confinedSeccomp(linux *api.LinuxContainer) (*api.LinuxSeccomp, error) {
+	deny := &api.LinuxSyscall{
+		Names:    deniedSyscalls,
+		Action:   "SCMP_ACT_ERRNO",
+		ErrnoRet: api.UInt32(uint32(1)), // EPERM
+	}
+	current := linux.GetSeccompPolicy()
+	if current == nil {
+		// A nil profile reads as RUNTIME_DEFAULT.
+		if linux.GetSeccompProfile().GetProfileType() != api.SecurityProfile_UNCONFINED {
+			return nil, errors.New("runtime reported no seccomp policy for a confined container")
+		}
+		arches, ok := seccompArches[runtime.GOARCH]
+		if !ok {
+			return nil, fmt.Errorf("no seccomp architectures known for %s", runtime.GOARCH)
+		}
+		return &api.LinuxSeccomp{
+			DefaultAction: "SCMP_ACT_ALLOW",
+			Architectures: arches,
+			Syscalls:      []*api.LinuxSyscall{deny},
+		}, nil
+	}
+	policy, _ := proto.Clone(current).(*api.LinuxSeccomp)
+	syscalls := policy.Syscalls[:0]
+	for _, sc := range policy.Syscalls {
+		sc.Names = slices.DeleteFunc(sc.Names, func(n string) bool { return slices.Contains(deniedSyscalls, n) })
+		if len(sc.Names) > 0 {
+			syscalls = append(syscalls, sc)
+		}
+	}
+	policy.Syscalls = append(syscalls, deny)
+	return policy, nil
+}
+
+// isOperatorContainer reports whether ctrName is one of the operator's own
+// containers rather than the App's.
+func isOperatorContainer(ctrName string) bool {
+	switch ctrName {
+	case v1alpha1types.WolfContainerName, v1alpha1types.WolfAgentContainerName,
+		v1alpha1types.PulseAudioContainerName, v1alpha1types.InitContainerName,
+		v1alpha1types.LoopbackShimContainerName:
+		return true
+	}
+	return false
 }
 
 // adjustment returns the device adjustment for the container named ctrName in

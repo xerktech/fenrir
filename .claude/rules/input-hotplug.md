@@ -26,13 +26,23 @@ paths:
   - containerd prefixes `CAP_` itself: a listed `CAP_MKNOD` drop is a no-op (`CAP_CAP_MKNOD`), so
     only a bare `MKNOD` counts as dropped. Tests: `TestDropMknod`.
   - NRI can't narrow the grant per minor: device rules are set only at container create.
-  - Not covered: a privileged App, or one adding SYS_ADMIN (mounts a devtmpfs), or mounting hostPath
-    `/dev/input`. The Steam/Heroic Apps add SYS_ADMIN with seccomp Unconfined (XERK-1433).
+  - A privileged App container, or one mounting a hostPath at or above `/dev`, is refused
+    (`validateNoHostDevices`, XERK-1915). Tests: `TestBuildPodRejectsAppHostDevices`.
+  - Not covered: an App adding SYS_ADMIN mounts a devtmpfs and opens every `13:*`/`241:*` node,
+    host keyboards included. The Steam/Heroic Apps add SYS_ADMIN with seccomp Unconfined.
   - Steam can't drop SYS_ADMIN: Proton's bwrap mounts a fresh `/proc`, which a masked `/proc`
     forbids (EPERM, measured on talos04); `procMount: Unmasked` needs `hostUsers: false`, which
     the apiserver rejects with hostNetwork. A per-minor eBPF device filter doesn't help either:
     SYS_ADMIN with no seccomp detaches its own `cgroup_device` program via bpf() and then opens
     any device, host disks included (measured on talos04, XERK-1915).
+- `cmd/nri-input` sets a seccomp policy on every App container denying bpf, perf_event_open,
+  module/kexec loading, open_by_handle_at, keyctl and the like (`deniedSyscalls`, XERK-1915).
+  - The adjustment replaces the whole policy: an Unconfined container gets default-allow; a
+    confined one keeps its own with those names stripped. Never loosen RuntimeDefault.
+  - No policy reported for a confined container fails the create (fail closed).
+  - A default-allow filter must list the 32-bit arches, or Proton's 32-bit games are killed.
+  - seccomp can't see a mount's fstype or path, so devtmpfs and procfs mounts stay possible.
+  - Tests: `TestConfinedSeccomp*`, `TestCreateContainerConfinesOnlyApp`.
 - `cmd/nri-input` grants by container name (`pkg/api/v1alpha1/containers.go`): only `wolf` gets
   `/dev/uinput`; wolf-agent, pulseaudio and the init containers get nothing (wolf-agent's mknod
   is covered by containerd's default `c *:* m`, and it opens nodes only `O_PATH`); every other
@@ -40,7 +50,7 @@ paths:
   `TestSessionPodOperatorContainerNames`.
 - Only char major 13 under `/dev/input/` is created (`CreateDeviceNode`); a Wolf event can't make
   a disk node. `/dev/hidraw*` is not handled: pads are uinput Xbox pads (no uhid on Talos).
-- An App that mounts its own `/dev/input` keeps it (`withHotplugMounts` skips taken paths).
+- An App that mounts its own `/dev/input` (not hostPath) keeps it (`withHotplugMounts` skips taken paths).
   A wolfAgent sidecar policy may not mount there (`validateNoHotplugOverride`).
   - Compare mounts via `mountTarget`: the apiserver accepts relative mountPaths (`run/udev/data`),
     which the runtime resolves against `/`; `/var/run` (Alpine symlink) is reserved as an alias.
