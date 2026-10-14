@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/utils/ptr"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	"games-on-whales.github.io/direwolf/pkg/generic"
@@ -811,33 +812,41 @@ func TestAttachWithoutWolfClientsUsesDummy(t *testing.T) {
 }
 
 // A Session whose clientIP Wolf could never stream to ends before its pod
-// is created (image pull, GPU claim). Once the pod exists, a bad IP from a
-// /resume only fails the attach: a later /resume may still save the game.
+// is created (port block, image pull, GPU claim). Once a pod exists, a bad IP
+// from a /resume only fails the attach: a later /resume may still save the
+// game. That holds even when PodCreated is False or missing (a failed
+// reconcile, a lost status write) while the pod runs.
 func TestUnstreamableClientIPEndsSessionBeforePod(t *testing.T) {
 	for _, tc := range []struct {
-		name, ip   string
-		podCreated bool
-		wantEnded  bool
+		name, ip  string
+		hasPod    bool
+		podCond   *metav1.ConditionStatus // nil: no PodCreated condition
+		wantEnded bool
 	}{
 		{name: "empty", ip: "", wantEnded: true},
 		{name: "ipv6", ip: "2001:db8::1", wantEnded: true},
+		{name: "unspecified", ip: "0.0.0.0", wantEnded: true},
 		{name: "garbage", ip: "not-an-ip", wantEnded: true},
 		{name: "ipv4", ip: "192.0.2.10"},
-		{name: "ipv6 after pod created", ip: "2001:db8::1", podCreated: true},
+		{name: "ipv6 with pod", ip: "2001:db8::1", hasPod: true, podCond: ptr.To(metav1.ConditionTrue)},
+		{name: "ipv6 with pod after failed reconcile", ip: "2001:db8::1", hasPod: true, podCond: ptr.To(metav1.ConditionFalse)},
+		{name: "ipv6 with pod after lost status write", ip: "2001:db8::1", hasPod: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
-				var s *v1alpha1types.Session
-				if tc.podCreated {
+				s := f.session("alex-1", f.user)
+				if tc.hasPod {
 					s = podReadySession(f)
-				} else {
-					s = f.session("alex-1", f.user)
+					s.Status.Conditions = s.Status.Conditions[:1] // PortsAllocated
+					if tc.podCond != nil {
+						s.Status.Conditions = append(s.Status.Conditions, metav1.Condition{Type: podCreatedCondition, Status: *tc.podCond, Reason: "Test"})
+					}
 				}
 				s.CreationTimestamp = metav1.Now() // not yet reaped as unstarted
 				s.Spec.Config.ClientIP = tc.ip
 				return s
 			}, func(s *v1alpha1types.Session) []runtime.Object {
-				if tc.podCreated {
+				if tc.hasPod {
 					return []runtime.Object{readyPod(s)}
 				}
 				return nil
@@ -850,11 +859,15 @@ func TestUnstreamableClientIPEndsSessionBeforePod(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.wantEnded && len(pods.Items) != 0 {
-				t.Errorf("created %d pods for a session that cannot stream", len(pods.Items))
-			}
-			if !tc.wantEnded && !tc.podCreated && len(pods.Items) != 1 {
-				t.Errorf("created %d pods, want 1", len(pods.Items))
+			if tc.wantEnded {
+				if len(pods.Items) != 0 {
+					t.Errorf("created %d pods for a session that cannot stream", len(pods.Items))
+				}
+				if n := len(f.sc.ports.blocks); n != 0 {
+					t.Errorf("allocated %d port blocks for a session that cannot stream", n)
+				}
+			} else if len(pods.Items) != 1 {
+				t.Errorf("%d pods, want 1", len(pods.Items))
 			}
 		})
 	}

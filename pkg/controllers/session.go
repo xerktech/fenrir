@@ -311,13 +311,10 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	} else if reason != "" {
 		return c.endSession(ctx, newObj, reason)
 	}
-	if !meta.IsStatusConditionTrue(newObj.Status.Conditions, podCreatedCondition) {
-		// It could never stream, so don't pull its image or claim its GPU.
-		// Once the pod exists a bad IP only fails the attach: a later
-		// /resume from a usable address may still save the game.
-		if _, err := streamClientIP(newObj); err != nil {
-			return c.endSession(ctx, newObj, err.Error())
-		}
+	if reason, err := c.unstreamableReason(ctx, newObj); err != nil {
+		return err
+	} else if reason != "" {
+		return c.endSession(ctx, newObj, reason)
 	}
 	oldStatus := newObj.Status.DeepCopy()
 	portsError := c.allocatePorts(ctx, newObj)
@@ -774,6 +771,32 @@ func (c *SessionController) expiredReason(session *v1alpha1types.Session, now ti
 		return fmt.Sprintf("older than %s and has no wolf session ID", unstartedSessionTTL)
 	}
 	return ""
+}
+
+// unstreamableReason is why session should end before it gets a pod: Wolf
+// could never stream to its clientIP, so its image pull and GPU claim would
+// be wasted. Once a pod exists a bad IP only fails the attach, since a later
+// /resume from a usable address may still save the game; the pod is looked
+// up live, as PodCreated can be False or missing while one runs.
+func (c *SessionController) unstreamableReason(ctx context.Context, session *v1alpha1types.Session) (string, error) {
+	_, ipErr := streamClientIP(session)
+	if ipErr == nil {
+		return "", nil
+	}
+	podName := c.podName(session)
+	_, err := c.podController.Informer().Namespaced(session.Namespace).Get(podName)
+	if err == nil {
+		return "", nil
+	} else if !errors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
+	}
+	_, err = c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err == nil {
+		return "", nil
+	} else if !errors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
+	}
+	return ipErr.Error(), nil
 }
 
 // reconcilePod ensures the session's pod exists and returns it. The pod runs
