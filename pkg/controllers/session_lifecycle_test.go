@@ -11,6 +11,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -403,20 +404,52 @@ func TestInvalidPodEndsSession(t *testing.T) {
 }
 
 // An App or User spec that buildPod rejects fails every retry the same way, so
-// it ends the Session at once (XERK-1782); a failed lookup stays retryable.
+// it ends the Session at once (XERK-1782); a failed lookup stays retryable, and
+// a pod the cache has not seen yet is kept.
 func TestInvalidSpecEndsSession(t *testing.T) {
+	sidecar := func(mount corev1.VolumeMount) *v1alpha1types.SidecarPolicy {
+		return &v1alpha1types.SidecarPolicy{VolumeMounts: []corev1.VolumeMount{mount}}
+	}
+	badMount := corev1.VolumeMount{Name: "undefined", MountPath: "/x"}
 	for _, tc := range []struct {
 		name      string
-		mutate    func(*v1alpha1types.App, *v1alpha1types.Session)
+		mutate    func(*v1alpha1types.App, *v1alpha1types.User, *v1alpha1types.Session)
+		livePod   bool
 		wantEnded bool
 	}{
-		{"operator volume mount", func(app *v1alpha1types.App, _ *v1alpha1types.Session) {
+		{"operator volume mount", func(app *v1alpha1types.App, _ *v1alpha1types.User, _ *v1alpha1types.Session) {
 			ctr := &app.Spec.Template.Spec.Containers[0]
 			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: "wolf-agent-token", MountPath: "/x"})
-		}, true},
-		{"missing app", func(_ *v1alpha1types.App, s *v1alpha1types.Session) {
+		}, false, true},
+		{"gpu memory", func(app *v1alpha1types.App, _ *v1alpha1types.User, _ *v1alpha1types.Session) {
+			app.Spec.GPU = &v1alpha1types.AppGPU{Memory: new(resource.MustParse("0"))}
+		}, false, true},
+		{"resources over user policy", func(app *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
+			app.Spec.Template.Spec.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}
+			user.Spec.Resources = &corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}}
+		}, false, true},
+		{"wolfAgent volume", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
+			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{WolfAgent: sidecar(badMount)}
+		}, false, true},
+		{"wolfAgent hotplug override", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
+			user.Spec.Volumes = append(user.Spec.Volumes, corev1.Volume{Name: "input"})
+			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{WolfAgent: sidecar(corev1.VolumeMount{Name: "input", MountPath: InputDevPath})}
+		}, false, true},
+		{"pulseaudio volume", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
+			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{PulseAudio: sidecar(badMount)}
+		}, false, true},
+		{"wolf volume", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
+			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{Wolf: sidecar(badMount)}
+		}, false, true},
+		{"uncached pod", func(_ *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
+			user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{Wolf: sidecar(badMount)}
+		}, true, false},
+		{"missing app", func(_ *v1alpha1types.App, _ *v1alpha1types.User, s *v1alpha1types.Session) {
 			s.Spec.GameReference.Name = "missing"
-		}, false},
+		}, false, false},
+		{"missing user", func(_ *v1alpha1types.App, _ *v1alpha1types.User, s *v1alpha1types.Session) {
+			s.Spec.UserReference.Name = "missing"
+		}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
@@ -428,23 +461,37 @@ func TestInvalidSpecEndsSession(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// The informer's copy: buildPod reads it back.
-			tc.mutate(app, sess)
-			client := k8sfake.NewClientset()
+			user, err := f.sc.UserInformer.Namespaced(portsTestNS).Get(f.user)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The informers' copies: buildPod reads them back.
+			tc.mutate(app, user, sess)
+			var objs []runtime.Object
+			if tc.livePod {
+				// Created, but neither recorded in status nor in the pod informer.
+				objs = append(objs, readyPod(sess))
+			}
+			client := k8sfake.NewClientset(objs...)
 			f.sc.K8sClient = client
-			_, err = f.sc.reconcilePod(context.Background(), sess)
-			if tc.wantEnded {
+			pod, err := f.sc.reconcilePod(context.Background(), sess)
+			switch {
+			case tc.wantEnded:
 				if !errors.Is(err, errSessionEnded) {
 					t.Fatalf("reconcilePod = %v, want errSessionEnded", err)
 				}
-			} else if err == nil || errors.Is(err, errSessionEnded) {
+			case tc.livePod:
+				if err != nil || pod == nil {
+					t.Fatalf("reconcilePod = %v, %v, want the live pod", pod, err)
+				}
+			case err == nil || errors.Is(err, errSessionEnded):
 				t.Fatalf("reconcilePod = %v, want a retryable error", err)
 			}
 			if got := f.sessionExists(t, sess.Name); got == tc.wantEnded {
 				t.Errorf("session exists = %v, want %v", got, !tc.wantEnded)
 			}
-			if pods, _ := client.CoreV1().Pods(portsTestNS).List(context.Background(), metav1.ListOptions{}); len(pods.Items) != 0 {
-				t.Errorf("created %d pods, want none", len(pods.Items))
+			if pods, _ := client.CoreV1().Pods(portsTestNS).List(context.Background(), metav1.ListOptions{}); len(pods.Items) != len(objs) {
+				t.Errorf("%d pods, want %d", len(pods.Items), len(objs))
 			}
 		})
 	}

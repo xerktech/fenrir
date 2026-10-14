@@ -852,7 +852,15 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 	switch {
 	case stderrors.Is(err, errInvalidSpec):
 		// Like an Invalid pod create below: end the Session now rather than
-		// at the unstarted TTL, which the client only sees as a timeout.
+		// at the unstarted TTL, which the client only sees as a timeout. But
+		// not if a pod the cache has yet to see was created before the App or
+		// User changed (its PodCreated status write lost): that game runs.
+		live, getErr := c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, podName, metav1.GetOptions{})
+		if getErr == nil {
+			return c.checkPod(ctx, session, live)
+		} else if !errors.IsNotFound(getErr) {
+			return nil, fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, getErr)
+		}
 		return nil, c.endSessionErr(ctx, session, err.Error())
 	case err != nil:
 		return nil, err
