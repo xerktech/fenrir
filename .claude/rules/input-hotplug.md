@@ -53,8 +53,8 @@ paths:
   - libudev subscribes to udev events only if `/run/udev/control` exists; without it SDL2 missed
     every pad plugged after it started. The `init` init container creates it in the udev volume, as
     libudev checks once, at monitor creation. Tests: `TestSessionPodCreatesUdevControl`.
-  - Ordering relies on udevd being slower than wolf-agent: its event came 36-52ms after the mknod
-    (10/10). SDL does not retry an add whose node is missing.
+  - Ordering relies on udevd being slower than wolf-agent: its event came 29-71ms after the mknod
+    (14/14). SDL does not retry an add whose node is missing, so a slow agent loses the pad.
   - The App also sees every other uevent on the node (host netns); it can open only its own nodes.
   - `SDL_JOYSTICK_DISABLE_UDEV=1` (inotify on /dev/input) also works, but only for SDL.
   - talos04 has no `joydev`: pads get `eventN` only, no `jsN`.

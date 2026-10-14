@@ -427,13 +427,15 @@ func TestSessionPodCreatesUdevControl(t *testing.T) {
 		t.Fatalf("no init container: %+v", pod.Spec.InitContainers)
 	}
 	ic := pod.Spec.InitContainers[i]
+	// libudev's own path, not udevControlPath: a typo there must fail.
+	const control = "/run/udev/control"
 	if !slices.ContainsFunc(ic.VolumeMounts, func(m corev1.VolumeMount) bool {
-		return m.Name == hotplugUdevVolume && m.MountPath == path.Dir(udevControlPath)
+		return m.Name == hotplugUdevVolume && m.MountPath == path.Dir(control)
 	}) {
-		t.Errorf("init mounts %+v, want %s at %s", ic.VolumeMounts, hotplugUdevVolume, path.Dir(udevControlPath))
+		t.Errorf("init mounts %+v, want %s at %s", ic.VolumeMounts, hotplugUdevVolume, path.Dir(control))
 	}
-	if script := strings.Join(ic.Command, " "); !strings.Contains(script, "touch "+udevControlPath+"\n") {
-		t.Errorf("init command does not create %s: %q", udevControlPath, script)
+	if script := strings.Join(ic.Command, " "); !strings.Contains(script, "touch "+control+"\n") {
+		t.Errorf("init command does not create %s: %q", control, script)
 	}
 }
 
