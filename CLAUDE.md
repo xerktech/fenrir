@@ -82,6 +82,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       without it, or on an old pod, the check is off. Tests: `stream_liveness_test.go`.
     - A pod create rejected as Invalid ends the Session: CRD CEL cannot check every pod field
       (keys nested in arrays exceed the cost budget, annotation size). `TestInvalidPodEndsSession`.
+    - So does a buildPod error from the App/User spec (wrapped in `errInvalidSpec`); a failed
+      informer lookup stays retryable. `TestInvalidSpecEndsSession` (XERK-1782).
     - A Session whose `spec.pairingReference` Pairing is gone (client revoked) is ended; Pairing
       deletes end their Sessions directly. The cache miss is confirmed with a live GET first, as the
       Pairing watch can lag the Session's. Tests: `session_pairing_test.go`.

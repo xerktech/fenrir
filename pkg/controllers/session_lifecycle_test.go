@@ -402,6 +402,54 @@ func TestInvalidPodEndsSession(t *testing.T) {
 	}
 }
 
+// An App or User spec that buildPod rejects fails every retry the same way, so
+// it ends the Session at once (XERK-1782); a failed lookup stays retryable.
+func TestInvalidSpecEndsSession(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mutate    func(*v1alpha1types.App, *v1alpha1types.Session)
+		wantEnded bool
+	}{
+		{"operator volume mount", func(app *v1alpha1types.App, _ *v1alpha1types.Session) {
+			ctr := &app.Spec.Template.Spec.Containers[0]
+			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: "wolf-agent-token", MountPath: "/x"})
+		}, true},
+		{"missing app", func(_ *v1alpha1types.App, s *v1alpha1types.Session) {
+			s.Spec.GameReference.Name = "missing"
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := podReadySession(f)
+				s.Status.Conditions = s.Status.Conditions[:1] // PortsAllocated only: no pod yet
+				return s
+			}, nil)
+			app, err := f.sc.AppInformer.Namespaced(portsTestNS).Get(f.app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The informer's copy: buildPod reads it back.
+			tc.mutate(app, sess)
+			client := k8sfake.NewClientset()
+			f.sc.K8sClient = client
+			_, err = f.sc.reconcilePod(context.Background(), sess)
+			if tc.wantEnded {
+				if !errors.Is(err, errSessionEnded) {
+					t.Fatalf("reconcilePod = %v, want errSessionEnded", err)
+				}
+			} else if err == nil || errors.Is(err, errSessionEnded) {
+				t.Fatalf("reconcilePod = %v, want a retryable error", err)
+			}
+			if got := f.sessionExists(t, sess.Name); got == tc.wantEnded {
+				t.Errorf("session exists = %v, want %v", got, !tc.wantEnded)
+			}
+			if pods, _ := client.CoreV1().Pods(portsTestNS).List(context.Background(), metav1.ListOptions{}); len(pods.Items) != 0 {
+				t.Errorf("created %d pods, want none", len(pods.Items))
+			}
+		})
+	}
+}
+
 // Wolf streaming our keys without our record of it (the status write after
 // AddSession was lost) ends the session: the stream cannot be stopped by ID.
 func TestUnrecordedWolfStreamEndsSession(t *testing.T) {
