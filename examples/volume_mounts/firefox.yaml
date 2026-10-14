@@ -33,11 +33,9 @@ spec:
         # securityContext:
         #   privileged: true
         ## These Volumes are defined by the user, no need to re-add them here.
+        # No /dev/input or /dev/uinput: the operator shares a /dev/input holding
+        # only this session's controllers.
         volumeMounts:
-          - name: dev-input
-            mountPath: /dev/input
-          - name: dev-uinput
-            mountPath: /dev/uinput
           - name: host-dri
             mountPath: /dev/dri/renderD129
             readOnly: false

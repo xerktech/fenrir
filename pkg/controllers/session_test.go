@@ -418,14 +418,60 @@ func TestSessionPodSharesHotplugVolumes(t *testing.T) {
 }
 
 func TestSessionPodKeepsAppsOwnInputMount(t *testing.T) {
-	// steam.yaml mounts the host's /dev/input into the app itself.
-	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	data, err := os.ReadFile("../../examples/steam.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var app v1alpha1api.App
+	if err = sigsyaml.Unmarshal(data, &app); err != nil {
+		t.Fatal(err)
+	}
+	app.Spec.Template.Spec.Volumes = append(app.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name:         "input-events",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	appCtr := &app.Spec.Template.Spec.Containers[0]
+	appCtr.VolumeMounts = append(appCtr.VolumeMounts, corev1.VolumeMount{Name: "input-events", MountPath: "/dev/input"})
+	if data, err = sigsyaml.Marshal(&app); err != nil {
+		t.Fatal(err)
+	}
+	appPath := filepath.Join(t.TempDir(), "app.yaml")
+	if err = os.WriteFile(appPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", appPath) //nolint:dogsled // only the Pod matters here
 	got := mountsAt(t, &pod.Spec, "app")
 	if got["/dev/input"] != "input-events" {
 		t.Errorf("app /dev/input = %q, want the App's own input-events", got["/dev/input"])
 	}
 	if got["/run/udev"] != hotplugUdevVolume {
 		t.Errorf("app /run/udev = %q, want %s", got["/run/udev"], hotplugUdevVolume)
+	}
+}
+
+// cmd/nri-input grants devices by container name: a renamed operator container
+// would fall through to the App's grant, or Wolf would lose /dev/uinput.
+func TestSessionPodOperatorContainerNames(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	var got []string
+	for _, ctrs := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+		for _, ctr := range ctrs {
+			if ctr.Name != "app" {
+				got = append(got, ctr.Name)
+			}
+		}
+	}
+	want := []string{
+		v1alpha1types.InitContainerName,
+		v1alpha1types.LoopbackShimContainerName,
+		v1alpha1types.WolfAgentContainerName,
+		v1alpha1types.PulseAudioContainerName,
+		v1alpha1types.WolfContainerName,
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("operator containers = %v, want %v", got, want)
 	}
 }
 
@@ -975,4 +1021,32 @@ func TestSessionPodRunsWolfWithoutZeroCopy(t *testing.T) {
 		t.Fatal("wolf container runs with zero copy")
 	}
 	t.Fatal("no wolf container")
+}
+
+// An App mount at /dev/input replaces the operator's hotplug dir, so the game
+// would see whatever the mount holds (a hostPath hands it every input device on
+// the node); cmd/nri-input withholds /dev/uinput from Apps (XERK-1433).
+func TestExampleAppsMountNoInputDevices(t *testing.T) {
+	top, _ := filepath.Glob("../../examples/*.yaml")
+	nested, _ := filepath.Glob("../../examples/*/*.yaml")
+	for _, path := range slices.Concat(top, nested) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for doc := range strings.SplitSeq(string(data), "\n---") {
+			var app v1alpha1api.App
+			if err := sigsyaml.Unmarshal([]byte(doc), &app); err != nil || app.Kind != "App" || app.Spec.Template == nil {
+				continue
+			}
+			spec := app.Spec.Template.Spec
+			for _, ctr := range slices.Concat(spec.InitContainers, spec.Containers) {
+				for _, m := range ctr.VolumeMounts {
+					if m.MountPath == "/dev/input" || m.MountPath == "/dev/uinput" {
+						t.Errorf("%s: App %s container %s mounts %s", path, app.Name, ctr.Name, m.MountPath)
+					}
+				}
+			}
+		}
+	}
 }

@@ -3,6 +3,11 @@
 // /dev/uinput and the game container can open the resulting /dev/input and
 // /dev/hidraw nodes, without running the pod privileged.
 //
+// Grants are per container: only Wolf gets /dev/uinput (an App with it could
+// create keyboards and mice in the host kernel), the operator's other
+// containers get nothing, and every other container (the App's) gets the
+// /dev/input and /dev/hidraw majors.
+//
 // Only pods carrying v1alpha1.SessionPodLabel are adjusted; every other pod is
 // left untouched. Because any pod author can set a label, the plugin refuses to
 // start unless --namespaces names the namespaces the operator runs sessions in,
@@ -47,16 +52,16 @@ func (p *plugin) CreateContainer(
 	pod *api.PodSandbox,
 	ctr *api.Container,
 ) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
-	adjust := p.adjustment(pod)
+	adjust := p.adjustment(pod, ctr.GetName())
 	if adjust != nil {
 		klog.InfoS("Granting input devices", "namespace", pod.GetNamespace(), "pod", pod.GetName(), "container", ctr.GetName())
 	}
 	return adjust, nil, nil
 }
 
-// adjustment returns the device adjustment for a container in pod, or nil if
-// the pod is not a session pod this plugin should touch.
-func (p *plugin) adjustment(pod *api.PodSandbox) *api.ContainerAdjustment {
+// adjustment returns the device adjustment for the container named ctrName in
+// pod, or nil if it gets no devices.
+func (p *plugin) adjustment(pod *api.PodSandbox, ctrName string) *api.ContainerAdjustment {
 	if pod.GetLabels()[v1alpha1types.SessionPodLabel] != v1alpha1types.SessionPodLabelValue {
 		return nil
 	}
@@ -64,21 +69,31 @@ func (p *plugin) adjustment(pod *api.PodSandbox) *api.ContainerAdjustment {
 		return nil
 	}
 
-	adjust := &api.ContainerAdjustment{}
-	// Creates the /dev/uinput node in the container (the runtime also adds
-	// an "rw" cgroup rule for it; the explicit rule below adds "m").
-	adjust.AddDevice(&api.LinuxDevice{
-		Path:  uinputPath,
-		Type:  "c",
-		Major: miscMajor,
-		Minor: uinputMinor,
-	})
-	adjust.Linux.Resources = &api.LinuxResources{
-		Devices: []*api.LinuxDeviceCgroup{
-			{Allow: true, Type: "c", Major: api.Int64(inputMajor), Access: deviceRWM},
-			{Allow: true, Type: "c", Major: api.Int64(hidrawMajor), Access: deviceRWM},
-			{Allow: true, Type: "c", Major: api.Int64(miscMajor), Minor: api.Int64(uinputMinor), Access: deviceRWM},
-		},
+	inputRules := []*api.LinuxDeviceCgroup{
+		{Allow: true, Type: "c", Major: api.Int64(inputMajor), Access: deviceRWM},
+		{Allow: true, Type: "c", Major: api.Int64(hidrawMajor), Access: deviceRWM},
+	}
+	adjust := &api.ContainerAdjustment{Linux: &api.LinuxContainerAdjustment{}}
+	switch ctrName {
+	case v1alpha1types.WolfContainerName:
+		// Creates the /dev/uinput node in the container (the runtime also adds
+		// an "rw" cgroup rule for it; the explicit rule below adds "m").
+		adjust.AddDevice(&api.LinuxDevice{
+			Path:  uinputPath,
+			Type:  "c",
+			Major: miscMajor,
+			Minor: uinputMinor,
+		})
+		adjust.Linux.Resources = &api.LinuxResources{Devices: append(inputRules,
+			&api.LinuxDeviceCgroup{Allow: true, Type: "c", Major: api.Int64(miscMajor), Minor: api.Int64(uinputMinor), Access: deviceRWM},
+		)}
+	case v1alpha1types.WolfAgentContainerName, v1alpha1types.PulseAudioContainerName,
+		v1alpha1types.InitContainerName, v1alpha1types.LoopbackShimContainerName:
+		return nil
+	default:
+		// The App's containers open the nodes wolf-agent mknods into their
+		// shared /dev/input.
+		adjust.Linux.Resources = &api.LinuxResources{Devices: inputRules}
 	}
 	return adjust
 }

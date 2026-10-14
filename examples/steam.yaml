@@ -65,17 +65,6 @@ spec:
           chown -R $PUID:$PGID /home/retro
           chmod -R 777 /home/retro
           exec /entrypoint.sh
-        volumeMounts:
-        - name: uinput
-          mountPath: /dev/uinput
-        - name: input-events
-          mountPath: /dev/input
-      volumes:
-      - name: uinput
-        hostPath:
-          path: /dev/uinput
-          type: CharDevice
-      - name: input-events
-        hostPath:
-          path: /dev/input
-          type: Directory
+        # No /dev/input or /dev/uinput mounts: the operator shares a /dev/input
+        # that holds only this session's controllers. A hostPath one would hand
+        # the game every input device on the node.
