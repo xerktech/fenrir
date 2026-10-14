@@ -28,6 +28,9 @@ jobs:
             context: images/library
           - app: retroarch
             context: images/retroarch
+          # Wolf with a patched waylanddisplaysrc (XERK-1740).
+          - app: wolf
+            context: images/wolf
           # Go binary plus a C shim: repo-root context, own Dockerfile.
           - app: nri-nvenc-fix
             file: cmd/nri-nvenc-fix/Dockerfile
