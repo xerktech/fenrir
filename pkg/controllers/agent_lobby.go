@@ -82,6 +82,24 @@ func (j *lobbyJoiner) streamSetup(sessionID, key string, video bool) {
 	}
 }
 
+// seed records a stream's setup as if both of its setup events were seen,
+// for a stream whose events were missed.
+func (j *lobbyJoiner) seed(sessionID, key string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.reset(sessionID)
+	j.video, j.audio = true, true
+	j.key = key
+}
+
+// knows reports whether the stream with sessionID and key is the joiner's:
+// IDs repeat across streams, keys don't. A key not yet seen matches any.
+func (j *lobbyJoiner) knows(sessionID, key string) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return sessionID == j.stream && (j.key == "" || j.key == key)
+}
+
 // ping records an RTP ping and joins the stream once both of its pipelines
 // have had one.
 func (j *lobbyJoiner) ping(ctx context.Context, video bool) {

@@ -35,10 +35,15 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-// fakeEventsClient serves events to SubscribeToEvents; nothing else is used.
+// fakeEventsClient serves events to SubscribeToEvents, with no streams or
+// lobbies; nothing else is used.
 type fakeEventsClient struct {
 	wolfapi.Client
 	events chan *sse.Event
+}
+
+func (f *fakeEventsClient) ListSessions(context.Context) ([]wolfapi.Session, error) {
+	return nil, nil
 }
 
 func (f *fakeEventsClient) SubscribeToEvents(context.Context) (<-chan *sse.Event, error) {
