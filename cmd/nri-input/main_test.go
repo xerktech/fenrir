@@ -164,6 +164,10 @@ func TestConfinedSeccompUnconfined(t *testing.T) {
 	require.Equal(t, "SCMP_ACT_ALLOW", policy.DefaultAction)
 	require.NotEmpty(t, policy.Architectures, "32-bit syscalls would be killed")
 	require.ElementsMatch(t, deniedSyscalls, denied(t, policy))
+	for _, sc := range policy.Syscalls {
+		require.Nil(t, sc.ErrnoRet, "containerd 2.2.6 panics on a rule's errnoRet")
+	}
+	require.Nil(t, policy.DefaultErrno)
 }
 
 // containerd reports no resolved policy, so replacing a confined container's
