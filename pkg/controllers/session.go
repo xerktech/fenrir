@@ -2051,9 +2051,11 @@ const (
 // exist in the container is kept.
 //
 // It also preloads the loopback shim (cmd/wolf-agent/shim), which binds Wolf's
-// Moonlight HTTP/HTTPS servers to 127.0.0.1 instead of 0.0.0.0 (XERK-1682):
-// the pod is host-networked, and Wolf's HTTPS takes any client cert naming an
-// issuer it doesn't have as a paired client. Nothing uses either server: the
+// Moonlight HTTP/HTTPS servers to 127.0.0.1 instead of 0.0.0.0 (XERK-1682) and
+// closes every connection they accept (XERK-1737): the pod is host-networked,
+// node loopback is shared by every host-networked pod, and Wolf's HTTPS takes
+// any client cert naming an issuer it doesn't have as a paired client. Nothing
+// uses either server: the
 // operator drives Wolf through wolf-agent and its socket. Wolf refuses to
 // start without the shim rather than run exposed; a User's LD_PRELOAD is kept
 // after it.

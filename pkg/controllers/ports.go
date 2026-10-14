@@ -18,7 +18,8 @@ import (
 // HTTP/HTTPS are in the block although Moonlight never reaches them (it talks
 // to moonlight-proxy): Wolf always binds them, and on the host network two
 // Wolfs, or Wolf and a host-networked moonlight-proxy, would collide on the
-// defaults 47989/47984. They listen on loopback only (see wolfCommand).
+// defaults 47989/47984. They listen on loopback only and serve nobody (see
+// wolfCommand).
 const (
 	portOffsetHTTP = iota
 	portOffsetHTTPS

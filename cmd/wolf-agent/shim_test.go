@@ -13,16 +13,7 @@ import (
 // way Wolf does (0.0.0.0) and checks only Wolf's HTTP/HTTPS ports move to
 // loopback. Python stands in for Wolf: like it, Python binds through libc.
 func TestLoopbackShim(t *testing.T) {
-	for _, tool := range []string{"cc", "python3"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("no %s", tool)
-		}
-	}
-	so := filepath.Join(t.TempDir(), "libwolf_loopback.so")
-	if out, err := exec.CommandContext(t.Context(), "cc", "-O2", "-Wall", "-Werror", "-shared", "-fPIC",
-		"-o", so, "shim/wolf_loopback.c", "-ldl").CombinedOutput(); err != nil {
-		t.Fatalf("building shim: %v\n%s", err, out)
-	}
+	so := buildLoopbackShim(t)
 
 	// Port 0 picks a free port, so ask the kernel for one first and bind that.
 	const script = `
@@ -43,17 +34,7 @@ for family, any_addr in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
 		}
 		return strings.Fields(string(out))
 	}
-	freePort := func() string {
-		t.Helper()
-		out, err := exec.CommandContext(t.Context(), "python3", "-c",
-			`import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])`).Output()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return strings.TrimSpace(string(out))
-	}
-
-	http, https, other := freePort(), freePort(), freePort()
+	http, https, other := freePort(t), freePort(t), freePort(t)
 	env := []string{"WOLF_HTTP_PORT=" + http, "WOLF_HTTPS_PORT=" + https}
 	loopback := []string{"127.0.0.1", "::1"}
 	for _, port := range []string{http, https} {
@@ -72,4 +53,120 @@ for family, any_addr in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
 	if got, want := bound(other, env...), []string{"0.0.0.0", "::"}; !slices.Equal(got, want) {
 		t.Errorf("other port %s bound to %v, want %v", other, got, want)
 	}
+}
+
+// TestLoopbackShimDropsWolfConnections checks the shim closes every connection
+// to Wolf's HTTP/HTTPS listeners before Wolf can accept it (XERK-1737): node
+// loopback is shared by every host-networked pod. A non-blocking accept (asio's)
+// must end in EAGAIN once the queue is drained, through both accept4 (Python's
+// socket.accept) and plain accept; other listeners are untouched.
+func TestLoopbackShimDropsWolfConnections(t *testing.T) {
+	so := buildLoopbackShim(t)
+
+	const script = `
+import ctypes, errno, socket, sys, threading
+libc = ctypes.CDLL(None, use_errno=True)
+
+def listener(port):
+    s = socket.socket()
+    # Like asio's acceptor: closed connections leave the port in TIME_WAIT.
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", port))
+    s.listen(8)
+    return s
+
+def connect(port):
+    c = socket.create_connection(("127.0.0.1", port))
+    c.settimeout(2)
+    return c
+
+def closed(c):
+    try:
+        return c.recv(1) == b""
+    except ConnectionResetError:
+        return True
+    except socket.timeout:
+        return False
+
+def accepted(s, plain):
+    if plain:
+        fd = libc.accept(s.fileno(), None, None)
+        return "accepted" if fd >= 0 else errno.errorcode[ctypes.get_errno()]
+    try:
+        s.accept()
+        return "accepted"
+    except BlockingIOError:
+        return "EAGAIN"
+
+for name in sys.argv[1:]:
+    port = int(name)
+    for plain in (False, True):
+        s = listener(port)
+        s.setblocking(False)
+        clients = [connect(port) for _ in range(3)]
+        got = accepted(s, plain)
+        print(port, "plain" if plain else "accept4", got, all(closed(c) for c in clients) if got != "accepted" else "")
+        for c in clients:
+            c.close()
+        s.close()
+    # A blocking accept never returns for a Wolf listener, but still drops.
+    s = listener(port)
+    kept = []  # an accepted socket that is garbage-collected closes
+    threading.Thread(target=lambda: kept.append(s.accept()), daemon=True).start()
+    c = connect(port)
+    print(port, "blocking", closed(c))
+    c.close()
+    s.close()
+`
+	http, https, other := freePort(t), freePort(t), freePort(t)
+	cmd := exec.CommandContext(t.Context(), "python3", "-c", script, http, https, other)
+	cmd.Env = []string{"LD_PRELOAD=" + so, "WOLF_HTTP_PORT=" + http, "WOLF_HTTPS_PORT=" + https}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	got := strings.TrimSpace(string(out))
+	want := strings.Join([]string{
+		http + " accept4 EAGAIN True",
+		http + " plain EAGAIN True",
+		http + " blocking True",
+		https + " accept4 EAGAIN True",
+		https + " plain EAGAIN True",
+		https + " blocking True",
+		other + " accept4 accepted ",
+		other + " plain accepted ",
+		other + " blocking False",
+	}, "\n")
+	if got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// buildLoopbackShim compiles shim/wolf_loopback.c the way cmd/wolf-agent's
+// Dockerfile does. Python stands in for Wolf in the tests: like it, Python
+// binds and accepts through libc.
+func buildLoopbackShim(t *testing.T) string {
+	t.Helper()
+	for _, tool := range []string{"cc", "python3"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("no %s", tool)
+		}
+	}
+	so := filepath.Join(t.TempDir(), "libwolf_loopback.so")
+	if out, err := exec.CommandContext(t.Context(), "cc", "-O2", "-Wall", "-Werror", "-shared", "-fPIC",
+		"-o", so, "shim/wolf_loopback.c", "-ldl").CombinedOutput(); err != nil {
+		t.Fatalf("building shim: %v\n%s", err, out)
+	}
+	return so
+}
+
+// freePort asks the kernel for a free port (binding port 0 picks one).
+func freePort(t *testing.T) string {
+	t.Helper()
+	out, err := exec.CommandContext(t.Context(), "python3", "-c",
+		`import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])`).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
 }
