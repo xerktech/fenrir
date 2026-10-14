@@ -12,7 +12,7 @@
 #
 # Never exits non-zero: a failed oneshot stops s6 starting the desktop and
 # leaves the pod Running but never Ready, which would hold the Steam lock.
-# On any error the Library keeps its old, separate install.
+# On an error before the old install is moved aside, the Library keeps it.
 
 # As the desktop user: the home is user-writable, and root would follow
 # links planted there.
@@ -29,9 +29,13 @@ give_up() {
   exit 0
 }
 
-# installed reports whether a manifest says its game is fully installed.
+# installed reports whether a manifest says its game is fully installed:
+# StateFlags bit 4, as the catalogue reads it (6 is installed, update due).
 installed() {
-  [[ -f "$1" ]] && grep -Eq '^[[:space:]]*"StateFlags"[[:space:]]*"4"[[:space:]]*$' "$1"
+  local flags
+  [[ -f "$1" ]] || return 1
+  flags="$(sed -n 's/^[[:space:]]*"StateFlags"[[:space:]]*"\([0-9]\{1,9\}\)"[[:space:]]*$/\1/p' "$1" | head -n 1)"
+  [[ -n "${flags}" ]] && (( 10#${flags} & 4 ))
 }
 
 # merge moves games fully installed in $1 (the Library's old install, now
@@ -71,6 +75,9 @@ merge() {
         mv "${sub}" "${bak}/downloading/" || return 1
       fi
     done
+    if [[ -e "${dst}/appmanifest_${id}.acf" ]]; then
+      mkdir -p "${bak}/manifests" && mv "${dst}/appmanifest_${id}.acf" "${bak}/manifests/" || return 1
+    fi
     # Last: the manifest makes the shared install count it as installed.
     mv "${m}" "${dst}/appmanifest_${id}.acf" || return 1
   done

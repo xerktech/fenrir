@@ -132,6 +132,10 @@ func TestInitSteamHomeBothMergesInstalledGames(t *testing.T) {
 		// Only in the Library, not in the session at all.
 		libSteam + "/steamapps/appmanifest_30.acf": manifest("4", "Three"),
 		libSteam + "/steamapps/common/Three/bin":   "full",
+		// Installed with an update due (bit 4 set), as the catalogue counts it.
+		libSteam + "/steamapps/appmanifest_60.acf": manifest("6", "Six"),
+		libSteam + "/steamapps/common/Six/bin":     "full",
+		debSteam + "/steamapps/appmanifest_60.acf": manifest("1026", "Six"),
 		// Not fully installed in the Library: left aside.
 		libSteam + "/steamapps/appmanifest_40.acf": manifest("1026", "Four"),
 		libSteam + "/steamapps/common/Four/":       "",
@@ -149,6 +153,8 @@ func TestInitSteamHomeBothMergesInstalledGames(t *testing.T) {
 		d + "common/Three/bin", d + "appmanifest_30.acf",
 		aside + "/steamapps/common/Both/lib", aside + "/config/loginusers.vdf",
 		aside + "/steamapps/appmanifest_40.acf", aside + "/steamapps/appmanifest_50.acf",
+		d + "common/Six/bin", d + "appmanifest_60.acf", aside + "/.replaced/manifests/appmanifest_60.acf",
+		aside + "/.replaced/manifests/appmanifest_20.acf",
 		aside + "/.replaced/common/Game Two", aside + "/.replaced/shadercache/20/c",
 		aside + "/.replaced/downloading/20/part", aside + "/.replaced/downloading/state_20_21.patch",
 	} {
