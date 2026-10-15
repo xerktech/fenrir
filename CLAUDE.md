@@ -25,12 +25,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     the GoW images: Talos' toolkit extension has no lib32, so a GPU claim injects 64-bit only and
     32-bit games render on lavapipe (XERK-1930). Bump `NVIDIA_VERSION` with the Talos driver; on
     a mismatch its cont-init hook deletes them (CPU fallback, not a crash).
-  - `images/wolf` is the chart's `WOLF_IMAGE` (xerktech's ArgoCD `apps/direwolf.yaml` overrides
-    it by digest; point that at this image too): wolf:stable with
-    waylanddisplaysrc rebuilt from a gst-wayland-display fix. Unfixed, each stream drops a ref
-    on Wolf's cached CUDA context until a stream freezes (XERK-1740; fix on our
-    fork xerktech/gst-wayland-display, tag `xerk-1740`). Bump its base Wolf by digest and keep the fix commit on that Wolf's
-    own gst-wayland-display pin; drop the image once Wolf ships the fix.
+- The chart's `WOLF_IMAGE` is `ghcr.io/xerktech/wolf` (fork xerktech/wolf, branch `xerktech`;
+  XERK-1944), pinned by digest in `charts/direwolf-operator/values.yaml`; CI does not rebuild it.
+  - Bump it by hand to a digest the fork's Docker build printed for the `xerktech` branch.
+  - Fix Wolf behaviour in the fork (its `.claude/rules/xerktech-fork.md`), not with an overlay
+    image here. The fork carries the XERK-1740 waylanddisplaysrc CUDA-context fix.
 - Codegen after editing `pkg/api/v1alpha1/*.go`: `hack/update-codegen.sh` (bash + python3).
   - Regenerates `zz_generated.*`, `pkg/generated/` (clientset/listers/informers/applyconfig),
     `crds/`, and `schemas/`. All are committed — never hand-edit them.

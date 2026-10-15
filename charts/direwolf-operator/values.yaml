@@ -74,8 +74,9 @@ controllers:
               fieldRef:
                 fieldPath: metadata.name
           POD_NAMESPACE: "{{ .Release.Namespace }}"
-          # Wolf with a patched waylanddisplaysrc (images/wolf, XERK-1740).
-          WOLF_IMAGE: ghcr.io/games-on-whales/fenrir/wolf:main
+          # Wolf built from the xerktech/wolf fork (XERK-1944), which carries the
+          # waylanddisplaysrc fix (XERK-1740). Pinned by hand; CI does not set it.
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:XERK-1944-66d2832@sha256:277bf8dd73644199862b84b8d44879414fdf6c71cb264b508db5d897ec1f0761
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:

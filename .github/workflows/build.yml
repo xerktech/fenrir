@@ -28,9 +28,6 @@ jobs:
             context: images/library
           - app: retroarch
             context: images/retroarch
-          # Wolf with a patched waylanddisplaysrc (XERK-1740).
-          - app: wolf
-            context: images/wolf
           # GOW Steam/Heroic plus NVIDIA's 32-bit driver libraries (XERK-1930).
           - app: steam
             context: images/gow-nvidia32
