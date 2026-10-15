@@ -5,6 +5,7 @@
 # Electron both fall over on the 64Mi container default.
 FROM lscr.io/linuxserver/steam:latest@sha256:d1c9f2c6d522169f6dcede9b17076c0e31ddbc5f9c4a102562cecddfe2d4ecdb
 
+# The baseline: init-heroic-update installs a newer release at pod start.
 # renovate: datasource=github-releases depName=Heroic-Games-Launcher/HeroicGamesLauncher
 ARG HEROIC_VERSION=v2.22.3
 # Must be updated by hand with the version: a Renovate bump without it fails
@@ -21,14 +22,9 @@ RUN \
   echo "${HEROIC_SHA256}  /tmp/heroic.deb" | sha256sum -c - && \
   apt-get update && \
   apt-get install -y --no-install-recommends /tmp/heroic.deb && \
-  echo "**** drop setuid chrome-sandbox ****" && \
-  # postinst makes it setuid root or not depending on the build host; it is
-  # never needed, as wrapped-heroic uses user namespaces or --no-sandbox.
-  chmod 0755 /opt/Heroic/chrome-sandbox && \
-  echo "**** route every heroic launcher through wrapped-heroic ****" && \
-  update-alternatives --install /usr/bin/heroic heroic /usr/bin/wrapped-heroic 1000 && \
-  sed -i 's|^Exec=/opt/Heroic/heroic|Exec=/usr/bin/wrapped-heroic|' /usr/share/applications/heroic.desktop && \
-  ! grep -q '^Exec=/opt/Heroic' /usr/share/applications/heroic.desktop && \
+  echo "**** route heroic through wrapped-heroic ****" && \
+  # Also run by init-heroic-update after it installs a newer release.
+  heroic-postinstall && \
   echo "**** route steam.desktop through wrapped-steam ****" && \
   # /usr/lib/steam/steam.desktop, which bin_steam.sh copies to ~/Desktop on a
   # fresh home, is a symlink to this file, so it is covered too.
