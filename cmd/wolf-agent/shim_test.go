@@ -119,7 +119,12 @@ for name in sys.argv[1:]:
     # A blocking accept never returns for a Wolf listener, but still drops.
     s = listener(port)
     kept = []  # an accepted socket that is garbage-collected closes
-    threading.Thread(target=lambda: kept.append(s.accept()), daemon=True).start()
+    def accept_forever():
+        try:
+            kept.append(s.accept())
+        except OSError:
+            pass  # s.close() below; an unhandled EBADF would race the output
+    threading.Thread(target=accept_forever, daemon=True).start()
     c = connect(port)
     print(port, "blocking", closed(c))
     c.close()
