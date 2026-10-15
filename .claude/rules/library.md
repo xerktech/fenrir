@@ -39,8 +39,8 @@ paths:
   - A Library pod that ends without `stop()` (Failed, not Ready, node loss, a manual delete)
     skips that, so a session pod whose App mounts its own home at `/home/retro` runs the same
     script in the `steam-relink` init container (`steamRelinkContainer`, XERK-1951).
-    - It copies the App's mount whole (readOnly too) and the container's env: kubelet expands
-      `subPathExpr` from the mounting container's own env.
+    - It copies the App's mount whole (readOnly too) but never the App's env (a `PATH` could
+      hide `sh`), so a `subPathExpr` home, which kubelet expands from that env, is skipped.
     - It runs as uid 1000, never root, and only logs a failure: a failed init container ends
       the Session. Tests: `TestSessionPodRelinksSharedSteamHome`, `TestSteamRelinkContainerCommand`.
 - Idle rule: (no browser traffic for `--library-idle-timeout` OR no user-opened page load for
