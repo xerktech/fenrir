@@ -127,7 +127,8 @@ for name in sys.argv[1:]:
     t = threading.Thread(target=accept_forever, daemon=True)
     t.start()
     c = connect(port)
-    print(port, "blocking", closed(c))
+    # A Wolf port's accept is still looping in the shim; another port's returned.
+    print(port, "blocking", closed(c), t.is_alive())
     c.close()
     # End the accept before closing: a thread still looping in the shim would
     # re-enter accept on the reused fd number and take the next listener's
@@ -150,15 +151,15 @@ for name in sys.argv[1:]:
 		http + " accept4 EAGAIN True",
 		http + " plain EAGAIN True",
 		http + " ipv6 EAGAIN True",
-		http + " blocking True",
+		http + " blocking True True",
 		https + " accept4 EAGAIN True",
 		https + " plain EAGAIN True",
 		https + " ipv6 EAGAIN True",
-		https + " blocking True",
+		https + " blocking True True",
 		other + " accept4 accepted ",
 		other + " plain accepted ",
 		other + " ipv6 accepted ",
-		other + " blocking False",
+		other + " blocking False False",
 	}, "\n")
 	if got != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
