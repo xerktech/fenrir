@@ -454,6 +454,10 @@ func TestSteamRelinkCommand(t *testing.T) {
 		"rel":   links["rel"],
 		"pfx":   links["pfx"],
 	}
+	// Root would follow links planted in the home.
+	if want := []string{"s6-setuidgid", "abc"}; !slices.Equal(steamRelinkCommand[:2], want) {
+		t.Fatalf("relink runs as %q, want %q", steamRelinkCommand[:2], want)
+	}
 	// Drop s6-setuidgid (not on the test host) and the real homes.
 	command := append(slices.Clone(steamRelinkCommand[2:len(steamRelinkCommand)-2]), home, sessionHome)
 	for range 2 { // idempotent
