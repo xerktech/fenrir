@@ -3,6 +3,7 @@ package moonlight
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,6 +16,10 @@ import (
 
 // libraryBusyMessage is what a launch gets while the Library is open.
 const libraryBusyMessage = "The game library is open. Close it (or wait for it to stop) before launching a game"
+
+// libraryStoppingMessage is what a launch gets while the Library shuts down
+// (e.g. just after its "Close Library" tile, which is then no longer listed).
+const libraryStoppingMessage = "The game library is closing. Try again in a minute or two"
 
 // LibraryBusyCheck refuses launches while the operator's Library pod exists,
 // terminating or not: the Library and game sessions share one Steam home,
@@ -30,6 +35,9 @@ func LibraryBusyCheck(pods corev1client.PodInterface) BusyCheck {
 			return "", fmt.Errorf("failed to list Library pods: %w", err)
 		}
 		if len(list.Items) > 0 {
+			if list.Items[0].DeletionTimestamp != nil {
+				return libraryStoppingMessage, nil
+			}
 			return libraryBusyMessage, nil
 		}
 		return "", nil
@@ -40,16 +48,21 @@ func LibraryBusyCheck(pods corev1client.PodInterface) BusyCheck {
 // tile, listed while the Library is open so a Library left running in some
 // browser can be stopped from Moonlight. It sits just under the catalogue's
 // IDs (2^30..2^31-1) and far above hand-written Apps' small ones; an App with
-// this ID is shadowed by the tile while the Library is open.
+// this ID takes precedence and the tile is not offered.
 const CloseLibraryAppID = 1<<30 - 1
+
+// libraryCallTimeout bounds the tile's API calls: /applist used to be served
+// from the informer alone, and a hung API server must not hold it.
+const libraryCallTimeout = 2 * time.Second
 
 const (
 	closeLibraryTitle = "Close Library"
 	// libraryClosingStatusCode is the XML status of a "Close Library" launch:
 	// nothing streams, and Moonlight shows a non-200 status's message.
-	libraryClosingStatusCode = 400
-	libraryClosingMessage    = "Closing the game library. Games can be launched once it has stopped, within two minutes"
-	libraryNotOpenMessage    = "The game library is not open"
+	libraryClosingStatusCode  = 400
+	libraryClosingMessage     = "Closing the game library. Games can be launched once it has stopped, within two minutes"
+	libraryNotOpenMessage     = "The game library is not open"
+	libraryCloseFailedMessage = "The game library could not be closed. Try again, or wait for it to stop"
 )
 
 // Library is the operator's Library pod as Moonlight users see it.

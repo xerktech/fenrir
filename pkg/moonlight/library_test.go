@@ -2,6 +2,7 @@ package moonlight
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,9 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -30,17 +33,17 @@ func TestLibraryBusyCheck(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		pods []*corev1.Pod
-		busy bool
+		want string
 	}{
-		{"no pods", nil, false},
-		{"unrelated pod", []*corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: testNamespace}}}, false},
-		{"library pod", []*corev1.Pod{libraryPod("direwolf-library")}, true},
+		{"no pods", nil, ""},
+		{"unrelated pod", []*corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: testNamespace}}}, ""},
+		{"library pod", []*corev1.Pod{libraryPod("direwolf-library")}, libraryBusyMessage},
 		{"terminating library pod", []*corev1.Pod{func() *corev1.Pod {
 			p := libraryPod("direwolf-library")
 			p.DeletionTimestamp = &metav1.Time{}
 			p.Finalizers = []string{"test"}
 			return p
-		}()}, true},
+		}()}, libraryStoppingMessage},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := k8sfake.NewClientset()
@@ -53,8 +56,8 @@ func TestLibraryBusyCheck(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if (reason != "") != tc.busy {
-				t.Errorf("reason = %q, want busy=%v", reason, tc.busy)
+			if reason != tc.want {
+				t.Errorf("reason = %q, want %q", reason, tc.want)
 			}
 		})
 	}
@@ -127,14 +130,78 @@ func TestPodLibrary(t *testing.T) {
 
 type stubLibrary struct {
 	open   bool
+	err    error
 	closed atomic.Int32
 }
 
-func (l *stubLibrary) Open(context.Context) (bool, error) { return l.open, nil }
+func (l *stubLibrary) Open(context.Context) (bool, error) { return l.open, l.err }
 
 func (l *stubLibrary) Close(context.Context) (bool, error) {
 	l.closed.Add(1)
-	return l.open, nil
+	return l.open, l.err
+}
+
+// Close deletes only the pod it read: a Library opened in between (a new UID)
+// is someone's fresh session and is left alone, without an error.
+func TestPodLibraryCloseSparesAReplacedPod(t *testing.T) {
+	client := k8sfake.NewClientset()
+	pods := client.CoreV1().Pods(testNamespace)
+	pod := libraryPod(v1alpha1types.LibraryPodName)
+	pod.UID = "old"
+	if _, err := pods.Create(t.Context(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	client.PrependReactor("delete", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		del, ok := a.(k8stesting.DeleteActionImpl)
+		if !ok {
+			return false, nil, nil
+		}
+		pre := del.DeleteOptions.Preconditions
+		if pre == nil || pre.UID == nil || *pre.UID != "old" {
+			t.Errorf("delete preconditions = %+v, want UID old", pre)
+		}
+		return true, nil, k8serrors.NewConflict(corev1.Resource("pods"), pod.Name, errors.New("UID mismatch"))
+	})
+
+	closing, err := NewPodLibrary(pods).Close(t.Context())
+	if closing || err != nil {
+		t.Errorf("Close = %v, %v; want false, nil", closing, err)
+	}
+}
+
+// A failed Library check costs only the tile, never the game list; a failed
+// close tells the user so, without the API error's detail.
+func TestCloseLibraryTileFailures(t *testing.T) {
+	lib := &stubLibrary{open: true, err: errors.New(`pods "direwolf-library" is forbidden: User "system:serviceaccount:secret-ns:sa"`)}
+	f := newLaunchFixture(t, &RESTServerOptions{Library: lib})
+
+	rec := httptest.NewRecorder()
+	f.server.appListHandler(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/applist", http.NoBody))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<ID>1</ID>") {
+		t.Errorf("applist = %d %s, want the games listed", rec.Code, rec.Body.String())
+	}
+
+	f.appID = strconv.Itoa(CloseLibraryAppID)
+	_, resp := f.launch(t, "bob")
+	if resp.StatusMessage != libraryCloseFailedMessage {
+		t.Errorf("launch message = %q, want %q", resp.StatusMessage, libraryCloseFailedMessage)
+	}
+}
+
+// An App that holds the tile's ID wins: it is listed and launched as itself.
+func TestAppWithCloseLibraryIDShadowsTile(t *testing.T) {
+	lib := &stubLibrary{open: true}
+	s := appServer(t, testApp("mine", CloseLibraryAppID, false, nil))
+	s.Library = lib
+
+	rec := httptest.NewRecorder()
+	s.appListHandler(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/applist", http.NoBody))
+	if body := rec.Body.String(); strings.Contains(body, closeLibraryTitle) || !strings.Contains(body, "<AppTitle>mine</AppTitle>") {
+		t.Errorf("applist = %s, want the App and no tile", body)
+	}
+	if s.closeLibraryOffered() {
+		t.Error("tile still offered for launch")
+	}
 }
 
 // The tile is listed only while the Library is open, and launching it closes

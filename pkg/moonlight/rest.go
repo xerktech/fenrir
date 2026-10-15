@@ -458,8 +458,10 @@ func (s *RESTServer) appListHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if s.Library != nil {
-		open, err := s.Library.Open(r.Context())
+	if s.closeLibraryOffered() {
+		ctx, cancel := context.WithTimeout(r.Context(), libraryCallTimeout)
+		open, err := s.Library.Open(ctx)
+		cancel()
 		if err != nil {
 			// The games still list; only the tile is missing.
 			klog.Errorf("Failed to check whether the Library is open: %v", err)
@@ -515,7 +517,7 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.Library != nil && appID == strconv.Itoa(CloseLibraryAppID) {
+	if appID == strconv.Itoa(CloseLibraryAppID) && s.closeLibraryOffered() {
 		s.closeLibrary(w, r)
 		return
 	}
@@ -895,19 +897,33 @@ func streamRefusal(session *v1alpha1types.Session) *streamRefusedError {
 // may close it: the Library is one shared desktop, and while it runs nobody
 // can play. Nothing streams, so the answer is always a message.
 func (s *RESTServer) closeLibrary(w http.ResponseWriter, r *http.Request) {
-	closing, err := s.Library.Close(r.Context())
-	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, err)
-		return
-	}
+	ctx, cancel := context.WithTimeout(r.Context(), libraryCallTimeout)
+	defer cancel()
+	closing, err := s.Library.Close(ctx)
 	message := libraryNotOpenMessage
-	if closing {
+	switch {
+	case err != nil:
+		// The API error names the namespace and ServiceAccount; the user
+		// gets a plain message, the log the detail.
+		klog.Errorf("Failed to close the Library: %v", err)
+		message = libraryCloseFailedMessage
+	case closing:
 		if user, ok := r.Context().Value(userContextKey{}).(*v1alpha1types.User); ok {
 			klog.Infof("User %s closed the Library from Moonlight", user.Name)
 		}
 		message = libraryClosingMessage
 	}
 	sendXMLWithHTTPStatus(w, http.StatusOK, Response{StatusCode: libraryClosingStatusCode, StatusMessage: message})
+}
+
+// closeLibraryOffered reports whether the "Close Library" tile exists: a
+// Library is configured, and no App claims its ID.
+func (s *RESTServer) closeLibraryOffered() bool {
+	if s.Library == nil {
+		return false
+	}
+	_, err := s.getAppByID(strconv.Itoa(CloseLibraryAppID))
+	return err != nil
 }
 
 func busyResponse(reason string) Response {
