@@ -136,7 +136,7 @@ def installed(steam):
 
 
 def update(path, ids):
-    """Disables Steam Input for ids in one localconfig.vdf; True if it changed."""
+    """Disables Steam Input for ids in one localconfig.vdf; returns how many apps changed."""
     tree = parse(read(path))
     store = None
     for k, v in tree:
@@ -147,12 +147,12 @@ def update(path, ids):
     # Steam's per-game Steam Input setting writes both: the top-level "apps"
     # (controller config) and Software/Valve/Steam/apps (launch settings).
     steam_apps = block(block(block(block(store, '"Software"'), '"Valve"'), '"Steam"'), '"apps"')
-    changed = False
+    changed = 0
     for appid in ids:
-        changed |= disable(block(store, '"apps"'), appid)
-        changed |= disable(steam_apps, appid)
+        top = disable(block(store, '"apps"'), appid)
+        changed += disable(steam_apps, appid) or top
     if not changed:
-        return False
+        return 0
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".localconfig.")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -162,7 +162,7 @@ def update(path, ids):
     except BaseException:
         os.unlink(tmp)
         raise
-    return True
+    return changed
 
 
 def main(steam):
@@ -176,8 +176,9 @@ def main(steam):
     status = 0
     for path in sorted(glob.glob(os.path.join(steam, "userdata", "*", "config", "localconfig.vdf"))):
         try:
-            if update(path, ids):
-                print("Steam Input disabled for %d apps in %s" % (len(ids), path))
+            changed = update(path, ids)
+            if changed:
+                print("Steam Input disabled for %d apps in %s" % (changed, path))
         except (OSError, UnicodeError, VDFError) as e:
             # Never quote the file: it is user-writable.
             print("left %s unchanged: %s" % (path, type(e).__name__), file=sys.stderr)
