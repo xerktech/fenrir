@@ -14,6 +14,9 @@ import (
 
 const initHeroicUpdate = "root/etc/s6-overlay/s6-rc.d/init-heroic-update/run"
 
+// heroicLatest is the version every test's release publishes.
+const heroicLatest = "2.22.4"
+
 // heroicStubs replace every command init-heroic-update uses to reach the
 // network, the package database or another user. Each logs its call.
 var heroicStubs = map[string]string{
@@ -62,11 +65,20 @@ func newHeroicPod(t *testing.T) *heroicPod {
 		t.Fatal(err)
 	}
 	for name, body := range heroicStubs {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		writeStub(t, filepath.Join(bin, name), body)
 	}
 	return &heroicPod{t: t, dir: dir, home: filepath.Join(dir, "home"), log: filepath.Join(dir, "log"), dpkg: realDpkg}
+}
+
+// writeStub writes an executable sh script.
+func writeStub(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func sha256Hex(s string) string {
@@ -77,14 +89,15 @@ func sha256Hex(s string) string {
 // run runs the real script with Heroic installed at installed, against a
 // latest release whose amd64 .deb is deb, published with digest. It returns
 // the stubs' calls.
-func (p *heroicPod) run(installed, latest, deb, digest string, env ...string) string {
-	return p.runSized(installed, latest, deb, digest, len(deb), env...)
+func (p *heroicPod) run(installed, deb, digest string, env ...string) string {
+	return p.runSized(installed, deb, digest, len(deb), env...)
 }
 
 // runSized is run with the asset's published size given separately.
-func (p *heroicPod) runSized(installed, latest, deb, digest string, size int, env ...string) string {
+func (p *heroicPod) runSized(installed, deb, digest string, size int, env ...string) string {
 	t := p.t
 	t.Helper()
+	latest := heroicLatest
 	name := "Heroic-" + latest + "-linux-amd64.deb"
 	release, err := json.Marshal(map[string]any{
 		"tag_name": "v" + latest,
@@ -97,7 +110,7 @@ func (p *heroicPod) runSized(installed, latest, deb, digest string, size int, en
 		t.Fatal(err)
 	}
 	for f, s := range map[string]string{"release.json": string(release), "deb": deb, "log": ""} {
-		if err := os.WriteFile(filepath.Join(p.dir, f), []byte(s), 0o644); err != nil {
+		if err = os.WriteFile(filepath.Join(p.dir, f), []byte(s), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -121,14 +134,14 @@ func (p *heroicPod) runSized(installed, latest, deb, digest string, size int, en
 	return string(calls)
 }
 
-func (p *heroicPod) cached(latest string) string {
-	return filepath.Join(p.home, ".cache/direwolf-heroic", "Heroic-"+latest+"-linux-amd64.deb")
+func (p *heroicPod) cached() string {
+	return filepath.Join(p.home, ".cache", "direwolf-heroic", "Heroic-"+heroicLatest+"-linux-amd64.deb")
 }
 
 func TestHeroicUpdateInstallsNewerRelease(t *testing.T) {
 	p := newHeroicPod(t)
 	const deb = "heroic 2.22.4"
-	calls := p.run("2.22.3", "2.22.4", deb, "sha256:"+sha256Hex(deb))
+	calls := p.run("2.22.3", deb, "sha256:"+sha256Hex(deb))
 	want := "download -fsSL"
 	if !strings.Contains(calls, want) {
 		t.Fatalf("want a download, calls:\n%s", calls)
@@ -136,7 +149,7 @@ func TestHeroicUpdateInstallsNewerRelease(t *testing.T) {
 	if !strings.Contains(calls, "apt-get install "+sha256Hex(deb)+"\npostinstall\n") {
 		t.Fatalf("want the published .deb installed, then heroic-postinstall, calls:\n%s", calls)
 	}
-	if b, err := os.ReadFile(p.cached("2.22.4")); err != nil || string(b) != deb {
+	if b, err := os.ReadFile(p.cached()); err != nil || string(b) != deb {
 		t.Fatalf("want the .deb cached for the next pod: %q, %v", b, err)
 	}
 }
@@ -145,7 +158,7 @@ func TestHeroicUpdateSkipsCurrentOrOlderRelease(t *testing.T) {
 	for _, installed := range []string{"2.22.4", "2.23.0"} {
 		p := newHeroicPod(t)
 		const deb = "heroic 2.22.4"
-		if calls := p.run(installed, "2.22.4", deb, "sha256:"+sha256Hex(deb)); calls != "" {
+		if calls := p.run(installed, deb, "sha256:"+sha256Hex(deb)); calls != "" {
 			t.Fatalf("installed %s: want no download or install, calls:\n%s", installed, calls)
 		}
 	}
@@ -153,11 +166,11 @@ func TestHeroicUpdateSkipsCurrentOrOlderRelease(t *testing.T) {
 
 func TestHeroicUpdateRejectsDigestMismatch(t *testing.T) {
 	p := newHeroicPod(t)
-	calls := p.run("2.22.3", "2.22.4", "tampered", "sha256:"+sha256Hex("heroic 2.22.4"))
+	calls := p.run("2.22.3", "tampered", "sha256:"+sha256Hex("heroic 2.22.4"))
 	if strings.Contains(calls, "install") {
 		t.Fatalf("must not install a .deb that fails its digest, calls:\n%s", calls)
 	}
-	if _, err := os.Stat(p.cached("2.22.4")); err == nil {
+	if _, err := os.Stat(p.cached()); err == nil {
 		t.Fatal("must not cache a .deb that fails its digest")
 	}
 }
@@ -165,7 +178,7 @@ func TestHeroicUpdateRejectsDigestMismatch(t *testing.T) {
 func TestHeroicUpdateRejectsMissingDigest(t *testing.T) {
 	for _, digest := range []string{"", "md5:0123", "sha256:" + strings.Repeat("A", 64)} {
 		p := newHeroicPod(t)
-		if calls := p.run("2.22.3", "2.22.4", "heroic", digest); calls != "" {
+		if calls := p.run("2.22.3", "heroic", digest); calls != "" {
 			t.Fatalf("digest %q: a release without a sha256 digest must be skipped, calls:\n%s", digest, calls)
 		}
 	}
@@ -175,10 +188,10 @@ func TestHeroicUpdateUsesVerifiedCache(t *testing.T) {
 	p := newHeroicPod(t)
 	const deb = "heroic 2.22.4"
 	digest := "sha256:" + sha256Hex(deb)
-	p.run("2.22.3", "2.22.4", deb, digest)
+	p.run("2.22.3", deb, digest)
 
 	// The next pod starts from the image's Heroic again, with the cache in its home.
-	calls := p.run("2.22.3", "2.22.4", deb, digest)
+	calls := p.run("2.22.3", deb, digest)
 	if strings.Contains(calls, "download") {
 		t.Fatalf("a verified cached .deb must not be downloaded again, calls:\n%s", calls)
 	}
@@ -191,31 +204,29 @@ func TestHeroicUpdateRedownloadsTamperedCache(t *testing.T) {
 	p := newHeroicPod(t)
 	const deb = "heroic 2.22.4"
 	digest := "sha256:" + sha256Hex(deb)
-	if err := os.MkdirAll(filepath.Dir(p.cached("2.22.4")), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p.cached()), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// The desktop runs user code, which can write the cache.
-	if err := os.WriteFile(p.cached("2.22.4"), []byte("planted"), 0o644); err != nil {
+	if err := os.WriteFile(p.cached(), []byte("planted"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	calls := p.run("2.22.3", "2.22.4", deb, digest)
+	calls := p.run("2.22.3", deb, digest)
 	if strings.Contains(calls, sha256Hex("planted")) {
 		t.Fatalf("installed the planted .deb, calls:\n%s", calls)
 	}
 	if !strings.Contains(calls, "download") || !strings.Contains(calls, "apt-get install "+sha256Hex(deb)) {
 		t.Fatalf("want a fresh download installed, calls:\n%s", calls)
 	}
-	if b, _ := os.ReadFile(p.cached("2.22.4")); string(b) != deb {
+	if b, _ := os.ReadFile(p.cached()); string(b) != deb {
 		t.Fatalf("want the cache replaced with the verified .deb, got %q", b)
 	}
 }
 
 func TestHeroicUpdateKeepsInstalledWhenOffline(t *testing.T) {
 	p := newHeroicPod(t)
-	if err := os.WriteFile(filepath.Join(p.dir, "bin", "curl"), []byte("#!/bin/sh\nexit 6\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if calls := p.run("2.22.3", "2.22.4", "heroic", ""); calls != "" {
+	writeStub(t, filepath.Join(p.dir, "bin", "curl"), "exit 6")
+	if calls := p.run("2.22.3", "heroic", ""); calls != "" {
 		t.Fatalf("want nothing installed when GitHub is unreachable, calls:\n%s", calls)
 	}
 }
@@ -223,7 +234,7 @@ func TestHeroicUpdateKeepsInstalledWhenOffline(t *testing.T) {
 func TestHeroicUpdateReadsCacheOnlyAsDesktopUser(t *testing.T) {
 	p := newHeroicPod(t)
 	const deb = "heroic 2.22.4"
-	calls := p.run("2.22.3", "2.22.4", deb, "sha256:"+sha256Hex(deb))
+	calls := p.run("2.22.3", deb, "sha256:"+sha256Hex(deb))
 	// The cache read and the cache write: the home is user-writable.
 	if n := strings.Count(calls, "as-abc sh\n"); n != 2 {
 		t.Fatalf("want the cache read and written as abc, got %d, calls:\n%s", n, calls)
@@ -231,30 +242,33 @@ func TestHeroicUpdateReadsCacheOnlyAsDesktopUser(t *testing.T) {
 }
 
 func TestHeroicUpdateIgnoresPlantedSpecialFiles(t *testing.T) {
-	plants := map[string]func(path string) error{
-		"fifo":      func(path string) error { return exec.Command("mkfifo", path).Run() },
-		"/dev/zero": func(path string) error { return os.Symlink("/dev/zero", path) },
+	plants := map[string]func(t *testing.T, path string) error{
+		"fifo": func(t *testing.T, path string) error {
+			t.Helper()
+			return exec.CommandContext(t.Context(), "mkfifo", path).Run()
+		},
+		"/dev/zero": func(_ *testing.T, path string) error { return os.Symlink("/dev/zero", path) },
 		// Sparse: as big as you like, without the disk to back it.
-		"oversized": func(path string) error { return os.Truncate(path, 1<<40) },
+		"oversized": func(_ *testing.T, path string) error { return os.Truncate(path, 1<<40) },
 	}
 	for name, plant := range plants {
 		t.Run(name, func(t *testing.T) {
 			p := newHeroicPod(t)
 			const deb = "heroic 2.22.4"
-			path := p.cached("2.22.4")
+			path := p.cached()
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			if name == "oversized" {
-				if err := os.WriteFile(path, nil, 0o644); err != nil {
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if err := plant(path); err != nil {
+			if err := plant(t, path); err != nil {
 				t.Skipf("cannot plant %s: %v", name, err)
 			}
 			start := time.Now()
-			calls := p.run("2.22.3", "2.22.4", deb, "sha256:"+sha256Hex(deb))
+			calls := p.run("2.22.3", deb, "sha256:"+sha256Hex(deb))
 			if d := time.Since(start); d > 30*time.Second {
 				t.Fatalf("took %s: a planted %s must not stall the desktop's start", d, name)
 			}
@@ -268,7 +282,7 @@ func TestHeroicUpdateIgnoresPlantedSpecialFiles(t *testing.T) {
 func TestHeroicUpdateReportsFailedInstall(t *testing.T) {
 	p := newHeroicPod(t)
 	const deb = "heroic 2.22.4"
-	calls := p.run("2.22.3", "2.22.4", deb, "sha256:"+sha256Hex(deb), "FAKE_APT_FAIL=1")
+	calls := p.run("2.22.3", deb, "sha256:"+sha256Hex(deb), "FAKE_APT_FAIL=1")
 	if strings.Contains(calls, "--fix-broken") || strings.Contains(calls, " -f ") {
 		t.Fatalf("must not let apt fix (remove) packages, calls:\n%s", calls)
 	}
@@ -293,7 +307,7 @@ func TestHeroicUpdateRejectsBadSize(t *testing.T) {
 	// Zero or 1 GiB and over: not a plausible .deb.
 	for _, size := range []int{len(deb) - 1, 0, 1 << 30} {
 		p := newHeroicPod(t)
-		if calls := p.runSized("2.22.3", "2.22.4", deb, digest, size); strings.Contains(calls, "install") {
+		if calls := p.runSized("2.22.3", deb, digest, size); strings.Contains(calls, "install") {
 			t.Fatalf("size %d: must not install, calls:\n%s", size, calls)
 		}
 	}
