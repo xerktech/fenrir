@@ -110,6 +110,32 @@ func TestCallReportsHTTPStatus(t *testing.T) {
 	}
 }
 
+// The session list as Wolf (xerktech/wolf 581dba2) writes it: the session's
+// fields flat, next to its state. wolf-agent's catch-up depends on both.
+func TestListSessionsDecodesState(t *testing.T) {
+	reply := `{"success":true,"sessions":[` +
+		`{"client_ip":"10.0.0.2","aes_key":"k1","aes_iv":"iv","rtsp_fake_ip":"1.2.3.4","video_width":1920,"video_height":1080,"video_refresh_rate":60,"audio_channel_count":2,"app_id":"1","client_id":"42","state":"paused"},` +
+		`{"client_ip":"10.0.0.2","aes_key":"k2","aes_iv":"iv","rtsp_fake_ip":"1.2.3.5","video_width":1920,"video_height":1080,"video_refresh_rate":60,"audio_channel_count":2,"app_id":"1","client_id":"43","state":"streaming"},` +
+		`{"client_ip":"10.0.0.2","aes_key":"k3","aes_iv":"iv","rtsp_fake_ip":"1.2.3.6","video_width":1920,"video_height":1080,"video_refresh_rate":60,"audio_channel_count":2,"app_id":"1","client_id":"44","state":"setup"}]}`
+	sessions, err := statusServer(t, http.StatusOK, reply).ListSessions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []wolfapi.Session{
+		{ClientID: "42", AESKey: "k1", State: wolfapi.SessionPaused},
+		{ClientID: "43", AESKey: "k2", State: wolfapi.SessionStreaming},
+		{ClientID: "44", AESKey: "k3", State: wolfapi.SessionSetup},
+	}
+	if len(sessions) != len(want) {
+		t.Fatalf("got %d sessions, want %d", len(sessions), len(want))
+	}
+	for i, w := range want {
+		if g := sessions[i]; g.ClientID != w.ClientID || g.AESKey != w.AESKey || g.State != w.State {
+			t.Errorf("session %d: client_id %q aes_key %q state %q, want %q %q %q", i, g.ClientID, g.AESKey, g.State, w.ClientID, w.AESKey, w.State)
+		}
+	}
+}
+
 func TestCallTruncatesBody(t *testing.T) {
 	_, err := statusServer(t, http.StatusInternalServerError, strings.Repeat("x", 10000)).ListApps(t.Context())
 	if err == nil || len(err.Error()) > 500 {

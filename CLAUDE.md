@@ -175,14 +175,16 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     regenerate the Secret under a running pod and uses the new token and cert at once.
   - `Agent.Run` resubscribes to Wolf's `/api/v1/events` itself; `SubscribeToEvents` is one
     connection whose channel closes when it ends. r3labs/sse never retries an EOF'd stream.
-    - Wolf replays no events and its session list has no paused state, so a pause sent while
-      no stream is connected is lost. After each subscribe, a joined stream missing from the
-      lobby's `connected_sessions` is ended as a pause would (`catchUpMissedEnd`, XERK-1378).
-      It stops Wolf's listed session only if its AES key matches: a resume may reuse the ID.
-      Not caught: a stream that ended before it joined. Tests: `TestAgentCatch*`.
-    - The missed start too: with the lobby empty, the one listed stream the joiner doesn't know is
-      seeded as if its setup events were seen, and joins on its next pings (`catchUpMissedStart`,
-      XERK-1797). Several unknown streams are left alone. Tests: `TestAgentJoinsStreamStarted*`.
+    - Wolf replays no events, so after each subscribe `catchUp` rebuilds what was missed from the
+      `state` Wolf lists per stream (`setup`/`streaming`/`paused`; xerktech/wolf, XERK-1947).
+      Needs a Wolf image with that field (the operator defaults to `ghcr.io/xerktech/wolf:xerktech`):
+      upstream images list no state, so missed pauses are lost. Tests: `TestListSessionsDecodesState`.
+    - Listed `paused` is stopped as a pause event would (XERK-1378). A joined stream no longer
+      listed under its AES key was stopped. Session IDs repeat across resumes; keys don't.
+      Tests: `TestAgentCatch*`.
+    - With the lobby empty, the one live stream the joiner doesn't know is seeded as if its setup
+      events were seen, and joins on its next pings (XERK-1797). Several live unknown streams
+      are left alone. Tests: `TestAgentJoinsStreamStarted*`, `TestAgentCatchUpStopsPaused*`.
   - `fakeudev` is Linux-only for real work (`fakeudev_linux.go` vs `fakeudev_other.go` stub);
     tests touching it behave differently on Windows/macOS.
 - **`pkg/generic`**: typed generic wrappers over client-go informers/listers plus a reusable

@@ -79,7 +79,7 @@ func (c *lobbyClient) leave(listed bool) {
 	c.connected = nil
 	c.listed = nil
 	if listed {
-		c.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey}}
+		c.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionPaused}}
 	}
 }
 
@@ -473,6 +473,9 @@ func TestAgentResubscribeBetweenSetupAndPings(t *testing.T) {
 	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
 	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
 	client.wantJoin(t)
+	client.mu.Lock()
+	client.listed = []wolfapi.Session{{ClientID: wolfStreamID, State: wolfapi.SessionStreaming}}
+	client.mu.Unlock()
 	// joined state survives another resubscribe: the stream's own unplug stays held
 	entry := deviceEntry(t, a)
 	close(ch)
@@ -790,7 +793,11 @@ func TestAgentCatchesUpStopMissedWhileResubscribing(t *testing.T) {
 // keeps its joined state.
 func TestAgentResubscribeKeepsStreamStillInLobby(t *testing.T) {
 	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
-	a, ch, entry := joinedOnFreshSubscription(t, client, func() {})
+	a, ch, entry := joinedOnFreshSubscription(t, client, func() {
+		client.mu.Lock()
+		client.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionStreaming}}
+		client.mu.Unlock()
+	})
 	if got := client.stopCalls(); len(got) != 0 {
 		t.Errorf("StopSession calls %v for a stream still in the lobby", got)
 	}
@@ -870,8 +877,11 @@ func TestAgentCatchUpLeavesAmbiguousStreams(t *testing.T) {
 			c.connected = []string{"other"}
 			c.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey}}
 		},
-		"several unknown": func(c *lobbyClient) {
-			c.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey}, {ClientID: "other", AESKey: "k2"}}
+		"several unknown live": func(c *lobbyClient) {
+			c.listed = []wolfapi.Session{
+				{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionStreaming},
+				{ClientID: "other", AESKey: "k2", State: wolfapi.SessionSetup},
+			}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -883,6 +893,123 @@ func TestAgentCatchUpLeavesAmbiguousStreams(t *testing.T) {
 			client.send("Done", "")
 			client.wantNoJoin(t)
 		})
+	}
+}
+
+// A stream that paused before it joined was a gap of the lobby-based catch-up:
+// nothing told it from one still waiting for its pings. Wolf lists it paused,
+// so it is stopped like a seen pause would have.
+func TestAgentCatchesUpPauseOfStreamNotYetJoined(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a := hotplugAgent(t, client)
+	a.minResubscribeDelay = time.Millisecond
+	go a.Run(t.Context())
+	ch := <-client.subs
+	sendOn(ch, wolfapi.VideoSessionEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	sendOn(ch, wolfapi.AudioSessionEventType, `{"session_id":"`+wolfStreamID+`","aes_key":"`+streamKey+`"}`)
+	entry := deviceEntry(t, a)
+	client.mu.Lock()
+	client.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionPaused}}
+	client.mu.Unlock()
+	close(ch)
+	ch = <-client.subs
+	sendOn(ch, "Done", "")
+	if got := client.stopCalls(); !slices.Equal(got, []string{wolfStreamID}) {
+		t.Errorf("StopSession calls %v, want [%s]", got, wolfStreamID)
+	}
+	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("device of the missed-paused stream kept: %v", err)
+	}
+	// Its pings, had any come, no longer join it.
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	sendOn(ch, "Done", "")
+	client.wantNoJoin(t)
+}
+
+// A paused stream next to a live one no longer makes them ambiguous: the
+// paused one is stopped, and the live one joins on its pings.
+func TestAgentCatchUpStopsPausedAndJoinsLiveStream(t *testing.T) {
+	client := newLobbyClient()
+	client.listed = []wolfapi.Session{
+		{ClientID: "old", AESKey: "k-old", State: wolfapi.SessionPaused},
+		{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionStreaming},
+	}
+	lobbyAgent(t, client)
+	client.send(wolfapi.RTPVideoPingEventType, `{}`)
+	client.send(wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+	if got := client.stopCalls(); !slices.Equal(got, []string{"old"}) {
+		t.Errorf("StopSession calls %v, want [old]", got)
+	}
+}
+
+// Wolf stops streams by ID: a paused stream sharing its ID with a live one is
+// left alone, or stopping it would end the live one too.
+func TestAgentCatchUpSparesLiveStreamSharingPausedID(t *testing.T) {
+	client := newLobbyClient()
+	client.listed = []wolfapi.Session{
+		{ClientID: wolfStreamID, AESKey: "k-old", State: wolfapi.SessionPaused},
+		{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionSetup},
+	}
+	lobbyAgent(t, client)
+	client.send(wolfapi.RTPVideoPingEventType, `{}`)
+	client.send(wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+	if got := client.stopCalls(); len(got) != 0 {
+		t.Errorf("StopSession calls %v: stopped the live stream's ID", got)
+	}
+}
+
+// A joined stream paused and resumed under its ID during the outage: the
+// paused entry is spared (the resume shares its ID), but the joined stream
+// is over, so its devices go.
+func TestAgentCatchUpEndsJoinedStreamResumedUnderItsID(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a, _, entry := joinedOnFreshSubscription(t, client, func() {
+		client.leave(false)
+		client.mu.Lock()
+		client.listed = []wolfapi.Session{
+			{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionPaused},
+			{ClientID: wolfStreamID, AESKey: "resumed", State: wolfapi.SessionSetup},
+		}
+		client.mu.Unlock()
+	})
+	if got := client.stopCalls(); len(got) != 0 {
+		t.Errorf("StopSession calls %v: stopped the resumed stream's ID", got)
+	}
+	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("device of the ended stream kept: %v", err)
+	}
+	if s, k := a.lobby.joinedStream(); s != "" {
+		t.Errorf("joined stream %q key %q after catching up its end, want none", s, k)
+	}
+}
+
+// A spared paused entry doesn't make the agent forget the live joined stream
+// sharing its ID: its end in a later outage is still caught.
+func TestAgentCatchUpKeepsJoinedStreamSharingPausedID(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a, ch, entry := joinedOnFreshSubscription(t, client, func() {
+		client.mu.Lock()
+		client.listed = []wolfapi.Session{
+			{ClientID: wolfStreamID, AESKey: "k-old", State: wolfapi.SessionPaused},
+			{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionStreaming},
+		}
+		client.mu.Unlock()
+	})
+	if s, _ := a.lobby.joinedStream(); s != wolfStreamID {
+		t.Fatalf("joined stream %q after the first catch-up, want %s", s, wolfStreamID)
+	}
+	if _, err := os.Stat(entry); err != nil {
+		t.Fatalf("device of the live stream dropped: %v", err)
+	}
+	client.leave(false)
+	close(ch)
+	ch = <-client.subs
+	sendOn(ch, "Done", "")
+	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("device of the stream stopped in the second outage kept: %v", err)
 	}
 }
 
