@@ -17,8 +17,11 @@ const initHeroicUpdate = "root/etc/s6-overlay/s6-rc.d/init-heroic-update/run"
 // heroicStubs replace every command init-heroic-update uses to reach the
 // network, the package database or another user. Each logs its call.
 var heroicStubs = map[string]string{
-	"curl": `for a; do [ "$prev" = -o ] && out=$a; prev=$a; done
-if [ -n "$out" ]; then echo "download $*" >>"$LOG"; cp "$FAKE_DEB" "$out"; else cat "$FAKE_RELEASE"; fi`,
+	"curl": `for a; do [ "$prev" = -o ] && out=$a; [ "$prev" = --max-filesize ] && max=$a; prev=$a; done
+[ -z "$out" ] && exec cat "$FAKE_RELEASE"
+echo "download $*" >>"$LOG"
+[ -n "$max" ] && [ "$(wc -c <"$FAKE_DEB")" -gt "$max" ] && exit 63
+cp "$FAKE_DEB" "$out"`,
 	// Reports $FAKE_INSTALLED until apt-get installs a version.
 	"dpkg-query": `v=$FAKE_INSTALLED; [ -f "$LOG.installed" ] && v=$(cat "$LOG.installed")
 case "$2" in *Status*) printf 'install ok installed %s' "$v";; *) printf %s "$v";; esac`,
@@ -30,7 +33,11 @@ case "$2" in *Status*) printf 'install ok installed %s' "$v";; *) printf %s "$v"
 	"apt-get": `if [ "$1" = install ]; then
   for deb; do :; done
   echo "apt-get install $(sha256sum <"$deb" | cut -d' ' -f1)" >>"$LOG"
-  [ -n "$FAKE_APT_FAIL" ] && exit 100
+  # Like apt resolving an unfetchable dependency: without --no-remove, by removing Heroic.
+  if [ -n "$FAKE_APT_FAIL" ]; then
+    case " $* " in *" --no-remove "*) ;; *) echo "removed" >"$LOG.installed";; esac
+    exit 100
+  fi
   basename "$deb" | sed 's/^Heroic-//; s/-linux-amd64.deb$//' >"$LOG.installed"
 else echo "apt-get $*" >>"$LOG"; fi`,
 }
@@ -70,6 +77,11 @@ func sha256Hex(s string) string {
 // latest release whose amd64 .deb is deb, published with digest. It returns
 // the stubs' calls.
 func (p *heroicPod) run(installed, latest, deb, digest string, env ...string) string {
+	return p.runSized(installed, latest, deb, digest, len(deb), env...)
+}
+
+// runSized is run with the asset's published size given separately.
+func (p *heroicPod) runSized(installed, latest, deb, digest string, size int, env ...string) string {
 	t := p.t
 	t.Helper()
 	name := "Heroic-" + latest + "-linux-amd64.deb"
@@ -77,7 +89,7 @@ func (p *heroicPod) run(installed, latest, deb, digest string, env ...string) st
 		"tag_name": "v" + latest,
 		"assets": []map[string]any{
 			{"name": "Heroic-" + latest + "-linux-arm64.deb", "browser_download_url": "https://github.com/x/arm", "digest": "sha256:" + strings.Repeat("0", 64)},
-			{"name": name, "browser_download_url": "https://github.com/x/" + name, "size": len(deb), "digest": digest},
+			{"name": name, "browser_download_url": "https://github.com/x/" + name, "size": size, "digest": digest},
 		},
 	})
 	if err != nil {
@@ -262,7 +274,26 @@ func TestHeroicUpdateReportsFailedInstall(t *testing.T) {
 	if !strings.Contains(calls, "apt-get update") || strings.Count(calls, "apt-get install") != 2 {
 		t.Fatalf("want one retry after fetching package lists, calls:\n%s", calls)
 	}
-	if strings.Contains(p.out, "updated Heroic") || !strings.Contains(p.out, "failed") {
+	if !strings.Contains(calls, "postinstall") {
+		t.Fatalf("heroic-postinstall must run after a failed install too, calls:\n%s", calls)
+	}
+	if !strings.Contains(p.out, "failed (heroic: install ok installed 2.22.3)") {
+		t.Fatalf("want 2.22.3 kept installed and reported:\n%s", p.out)
+	}
+	if strings.Contains(p.out, "updated Heroic") {
 		t.Fatalf("a failed install must not report an update:\n%s", p.out)
+	}
+}
+
+func TestHeroicUpdateRejectsBadSize(t *testing.T) {
+	const deb = "heroic 2.22.4"
+	digest := "sha256:" + sha256Hex(deb)
+	// Published smaller than the download: --max-filesize stops it.
+	// Zero or 1 GiB and over: not a plausible .deb.
+	for _, size := range []int{len(deb) - 1, 0, 1 << 30} {
+		p := newHeroicPod(t)
+		if calls := p.runSized("2.22.3", "2.22.4", deb, digest, size); strings.Contains(calls, "install") {
+			t.Fatalf("size %d: must not install, calls:\n%s", size, calls)
+		}
 	}
 }

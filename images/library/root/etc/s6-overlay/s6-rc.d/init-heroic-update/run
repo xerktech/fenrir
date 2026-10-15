@@ -90,8 +90,9 @@ fi
 # --no-remove: never let it make room by removing packages (Heroic included).
 # The image ships no package lists; they are fetched only for a new dependency.
 export DEBIAN_FRONTEND=noninteractive
+# No timeout: killing dpkg mid-unpack leaves Heroic half-installed.
 install_deb() {
-  timeout 300 apt-get install -y --no-install-recommends --no-remove "${deb}"
+  apt-get install -y --no-install-recommends --no-remove "${deb}"
 }
 if ! install_deb; then
   timeout 300 apt-get update -qq
