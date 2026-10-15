@@ -20,7 +20,8 @@ var heroicStubs = map[string]string{
 	"curl": `for a; do [ "$prev" = -o ] && out=$a; [ "$prev" = --max-filesize ] && max=$a; prev=$a; done
 [ -z "$out" ] && exec cat "$FAKE_RELEASE"
 echo "download $*" >>"$LOG"
-[ -n "$max" ] && [ "$(wc -c <"$FAKE_DEB")" -gt "$max" ] && exit 63
+# As real curl: 0 means no limit.
+[ "${max:-0}" -gt 0 ] && [ "$(wc -c <"$FAKE_DEB")" -gt "$max" ] && exit 63
 cp "$FAKE_DEB" "$out"`,
 	// Reports $FAKE_INSTALLED until apt-get installs a version.
 	"dpkg-query": `v=$FAKE_INSTALLED; [ -f "$LOG.installed" ] && v=$(cat "$LOG.installed")
