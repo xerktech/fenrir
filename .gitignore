@@ -40,3 +40,6 @@ packaged/
 # Default --tls-cert/--tls-key paths; moonlight-proxy writes a throwaway pair here when run locally.
 /server.crt
 /server.key
+
+# Python bytecode (image scripts run in tests)
+__pycache__/

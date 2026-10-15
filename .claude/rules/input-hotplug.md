@@ -7,6 +7,7 @@ paths:
   - pkg/controllers/session_test.go
   - cmd/nri-input/**
   - pkg/api/v1alpha1/containers.go
+  - images/gow-nvidia32/**
 ---
 
 # Controller hotplug into the game container
@@ -93,9 +94,14 @@ paths:
   - With Steam Input on for a game, Steam still lists Wolf's pad (`0x045e/0x02ea`) in the game's
     `SDL_GAMECONTROLLER_IGNORE_DEVICES`; Proton's winebus drops it and the game sees no pad, while
     Big Picture works. Steam logs `Couldn't initialize virtual gamepad: Couldn't open /dev/uinput`.
-  - Fix per game: Steam Input "Disabled" (`localconfig.vdf` `UseSteamControllerConfig` "0"); Steam
+  - Fix: Steam Input "Disabled" (`localconfig.vdf` `UseSteamControllerConfig` "0"); Steam
     then drops the ID from the list. `SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT` in the App env
-    does not help. A fix for all games needs a design decision (XERK-1953).
+    does not help.
+  - The Steam image forces that for every app in `libraryfolders.vdf`, in both places Steam keeps
+    it, before Steam starts (`images/gow-nvidia32` cont-init `20-steam-input-off.sh`, XERK-1953).
+    It overrides the user's choice; it never fails the pod and leaves an unparseable file alone.
+  - Not chosen: uinput for Apps with wolf-agent mirroring their nodes; it undoes XERK-1433's
+    confinement. Tests: `images/gow-nvidia32/steam_input_off_test.go`.
   - Repro without Moonlight: privileged pod with the App image and Steam home, a uinput Xbox pad
     (045e:02ea v0408) mknod'ed into a tmpfs `/dev/input`, sway headless, `PROTON_LOG=1
     WINEDEBUG=+hid,+xinput`; grep the log for `bus_create_hid_device desc {vid 045e`.
