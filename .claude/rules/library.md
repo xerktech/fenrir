@@ -33,6 +33,10 @@ paths:
   - Tests: `images/library/init_steam_home_test.go` (runs the real script).
   - GoW's cont-init dies on a dangling `~/.steam/steam` when `~/homebrew/services/PluginLoader`
     is missing (`mkdir -p ~/.steam/steam/`), i.e. a fresh home where the Library ran first.
+    So `stop()` repoints every absolute `/config/...` link in `~/.steam` to `/home/retro/...`
+    after `steam -shutdown` (`steamRelinkCommand`, XERK-1916); that path resolves in both pods.
+    A Library pod that dies without `stop()` (not Ready, node loss) leaves the link dangling.
+    Tests: `TestSteamRelinkCommand`, `TestLibraryStopRelinksSteamForSessions`.
 - Idle rule: (no browser traffic for `--library-idle-timeout` OR no user-opened page load for
   `--library-max-runtime`) AND nothing downloading.
   - An open Selkies tab sends WebSocket traffic every few seconds with nobody there, so traffic
