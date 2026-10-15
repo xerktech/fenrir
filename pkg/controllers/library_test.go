@@ -963,3 +963,42 @@ func TestPodExecutorRetriesUpgradeFailure(t *testing.T) {
 		t.Errorf("err %v (upgrade failure: %v), %d requests; want an upgrade failure after 2", err, httpstream.IsUpgradeFailure(err), requests.Load())
 	}
 }
+
+// moonlight-proxy's "Close Library" tile only deletes the pod, so the pod
+// itself must shut Steam down and relink its home first, and the kubelet must
+// wait for that before SIGKILL.
+func TestLibraryPodShutsSteamDownOnAnyDelete(t *testing.T) {
+	f := newLibraryFixture(t, nil)
+	pod := f.library.buildPod()
+
+	if g := pod.Spec.TerminationGracePeriodSeconds; g == nil || time.Duration(*g)*time.Second < 60*time.Second+libraryExecTimeout {
+		t.Errorf("terminationGracePeriodSeconds = %v, want room for the 60s Steam shutdown and the relink", g)
+	}
+	lc := pod.Spec.Containers[0].Lifecycle
+	if lc == nil || lc.PreStop == nil || lc.PreStop.Exec == nil {
+		t.Fatal("Library container has no preStop exec hook")
+	}
+
+	// Run the hook with Steam not running and a stub s6-setuidgid recording
+	// the relink it is asked to run: the shutdown's early exit must not skip it.
+	dir := t.TempDir()
+	record := filepath.Join(dir, "relink-args")
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + record + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "s6-setuidgid"), []byte(stub), 0o755); err != nil { //nolint:gosec // test stub must be executable
+		t.Fatal(err)
+	}
+	command := lc.PreStop.Exec.Command
+	cmd := exec.CommandContext(context.Background(), command[0], command[1:]...) //nolint:gosec // the code's own script
+	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("preStop: %v: %s", err, out)
+	}
+	got, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("preStop never ran the relink: %v", err)
+	}
+	want := strings.Join(append(slices.Clone(steamRelinkCommand[1:]), ""), "\n")
+	if string(got) != want {
+		t.Errorf("preStop relink args = %q, want %q", got, want)
+	}
+}

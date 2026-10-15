@@ -1,6 +1,7 @@
 package moonlight
 
 import (
+	"cmp"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -33,6 +34,8 @@ type launchFixture struct {
 	created atomic.Int32
 	// remoteAddr is the client's address, if not httptest's default.
 	remoteAddr string
+	// appID is the app launched, if not the seeded App's "1".
+	appID string
 }
 
 // newLaunchFixture builds a RESTServer over a fake clientset seeded with one
@@ -114,7 +117,8 @@ func (f *launchFixture) launch(t *testing.T, user string) (int, Response) {
 	ctx = context.WithValue(ctx, pairingContextKey{}, &v1alpha1types.Pairing{
 		ObjectMeta: metav1.ObjectMeta{Name: user + "-pairing", Namespace: testNamespace},
 	})
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/launch?appid=1&rikey=00&rikeyid=1&mode=1920x1080x60", http.NoBody)
+	appID := cmp.Or(f.appID, "1")
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/launch?appid="+appID+"&rikey=00&rikeyid=1&mode=1920x1080x60", http.NoBody)
 	if f.remoteAddr != "" {
 		req.RemoteAddr = f.remoteAddr
 	}

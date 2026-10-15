@@ -65,6 +65,10 @@ type RESTServerOptions struct {
 	// that reason (e.g. the Library pod holds Steam's single-writer lock).
 	BusyCheck BusyCheck
 
+	// Library, if set, adds the "Close Library" tile (CloseLibraryAppID) to
+	// the app list while the Library is open; launching it stops the Library.
+	Library Library
+
 	// PinPage serves the pairing page on its own listener. Disabled when
 	// PinPage.Port is 0; there is deliberately no fallback onto Port, which
 	// Moonlight clients reach directly.
@@ -454,6 +458,20 @@ func (s *RESTServer) appListHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	if s.Library != nil {
+		open, err := s.Library.Open(r.Context())
+		if err != nil {
+			// The games still list; only the tile is missing.
+			klog.Errorf("Failed to check whether the Library is open: %v", err)
+		}
+		if open {
+			appsList = append(appsList, App{AppSpec: v1alpha1types.AppSpec{
+				Title: closeLibraryTitle,
+				ID:    CloseLibraryAppID,
+			}})
+		}
+	}
+
 	sendXML(w, AppListResponse{
 		Response: Response{
 			StatusCode: 200,
@@ -494,6 +512,11 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 
 	if appID == "" {
 		writeErrorResponse(w, 400, fmt.Errorf("appid required"))
+		return
+	}
+
+	if s.Library != nil && appID == strconv.Itoa(CloseLibraryAppID) {
+		s.closeLibrary(w, r)
 		return
 	}
 
@@ -866,6 +889,25 @@ func streamRefusal(session *v1alpha1types.Session) *streamRefusedError {
 		return nil
 	}
 	return &streamRefusedError{message: cond.Message, generation: cond.ObservedGeneration}
+}
+
+// closeLibrary answers a launch of the "Close Library" tile. Any paired user
+// may close it: the Library is one shared desktop, and while it runs nobody
+// can play. Nothing streams, so the answer is always a message.
+func (s *RESTServer) closeLibrary(w http.ResponseWriter, r *http.Request) {
+	closing, err := s.Library.Close(r.Context())
+	if err != nil {
+		writeErrorResponse(w, http.StatusInternalServerError, err)
+		return
+	}
+	message := libraryNotOpenMessage
+	if closing {
+		if user, ok := r.Context().Value(userContextKey{}).(*v1alpha1types.User); ok {
+			klog.Infof("User %s closed the Library from Moonlight", user.Name)
+		}
+		message = libraryClosingMessage
+	}
+	sendXMLWithHTTPStatus(w, http.StatusOK, Response{StatusCode: libraryClosingStatusCode, StatusMessage: message})
 }
 
 func busyResponse(reason string) Response {

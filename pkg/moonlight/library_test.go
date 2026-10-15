@@ -2,12 +2,19 @@ package moonlight
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
@@ -71,4 +78,95 @@ func TestLaunchBacksOutWhenBusyAfterCreate(t *testing.T) {
 
 	assertBusy(t, code, resp, libraryBusyMessage)
 	f.waitForSessionCount(t, 0)
+}
+
+func TestPodLibrary(t *testing.T) {
+	terminating := libraryPod(v1alpha1types.LibraryPodName)
+	terminating.DeletionTimestamp = &metav1.Time{}
+	terminating.Finalizers = []string{"test"}
+	unlabelled := libraryPod(v1alpha1types.LibraryPodName)
+	unlabelled.Labels = nil
+
+	for _, tc := range []struct {
+		name        string
+		pod         *corev1.Pod
+		open        bool
+		closing     bool
+		wantDeleted bool
+	}{
+		{name: "no pod"},
+		{name: "unlabelled pod of that name", pod: unlabelled},
+		{name: "running", pod: libraryPod(v1alpha1types.LibraryPodName), open: true, closing: true, wantDeleted: true},
+		{name: "already stopping", pod: terminating, closing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := k8sfake.NewClientset()
+			pods := client.CoreV1().Pods(testNamespace)
+			if tc.pod != nil {
+				if _, err := pods.Create(t.Context(), tc.pod, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lib := NewPodLibrary(pods)
+
+			open, err := lib.Open(t.Context())
+			if err != nil || open != tc.open {
+				t.Errorf("Open = %v, %v; want %v", open, err, tc.open)
+			}
+			closing, err := lib.Close(t.Context())
+			if err != nil || closing != tc.closing {
+				t.Errorf("Close = %v, %v; want %v", closing, err, tc.closing)
+			}
+			deleted := slices.ContainsFunc(client.Actions(), func(a k8stesting.Action) bool { return a.GetVerb() == "delete" })
+			if deleted != tc.wantDeleted {
+				t.Errorf("deleted = %v, want %v", deleted, tc.wantDeleted)
+			}
+		})
+	}
+}
+
+type stubLibrary struct {
+	open   bool
+	closed atomic.Int32
+}
+
+func (l *stubLibrary) Open(context.Context) (bool, error) { return l.open, nil }
+
+func (l *stubLibrary) Close(context.Context) (bool, error) {
+	l.closed.Add(1)
+	return l.open, nil
+}
+
+// The tile is listed only while the Library is open, and launching it closes
+// the Library with a message instead of starting a Session.
+func TestCloseLibraryTile(t *testing.T) {
+	for _, open := range []bool{true, false} {
+		t.Run(fmt.Sprintf("open=%v", open), func(t *testing.T) {
+			lib := &stubLibrary{open: open}
+			f := newLaunchFixture(t, &RESTServerOptions{Library: lib})
+
+			rec := httptest.NewRecorder()
+			f.server.appListHandler(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/applist", http.NoBody))
+			listed := strings.Contains(rec.Body.String(), fmt.Sprintf("<AppTitle>Close Library</AppTitle><ID>%d</ID>", CloseLibraryAppID))
+			if listed != open {
+				t.Errorf("tile listed = %v, want %v: %s", listed, open, rec.Body.String())
+			}
+
+			f.appID = strconv.Itoa(CloseLibraryAppID)
+			code, resp := f.launch(t, "bob")
+			want := libraryNotOpenMessage
+			if open {
+				want = libraryClosingMessage
+			}
+			if code != http.StatusOK || resp.StatusCode != libraryClosingStatusCode || resp.StatusMessage != want {
+				t.Errorf("launch = HTTP %d, %d %q; want 200, %d %q", code, resp.StatusCode, resp.StatusMessage, libraryClosingStatusCode, want)
+			}
+			if lib.closed.Load() != 1 {
+				t.Errorf("Close called %d times, want 1", lib.closed.Load())
+			}
+			if n := f.sessionCount(t); n != 0 {
+				t.Errorf("%d Sessions created, want none", n)
+			}
+		})
+	}
 }

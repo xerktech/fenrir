@@ -137,6 +137,7 @@ func main() {
 			LaunchTimeout:         *launchTimeout,
 			MaxConcurrentSessions: *maxSessions,
 			BusyCheck:             moonlight.LibraryBusyCheck(k8sClient.CoreV1().Pods(*namespace)),
+			Library:               moonlight.NewPodLibrary(k8sClient.CoreV1().Pods(*namespace)),
 			PinPage: moonlight.PinPageOptions{
 				Port:           *pinPort,
 				TrustedProxies: trustedProxies,
