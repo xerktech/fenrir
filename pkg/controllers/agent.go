@@ -113,17 +113,25 @@ func (a *Agent) catchUp(ctx context.Context) {
 
 	// Wolf lists a stream's session ID as client_id. IDs repeat across
 	// streams (wolf_clients.go), so streams are told apart by AES key.
-	var live []wolfapi.Session
+	var live, paused []wolfapi.Session
 	for _, s := range sessions {
-		if s.State != wolfapi.SessionPaused {
+		if s.State == wolfapi.SessionPaused {
+			paused = append(paused, s)
+		} else {
 			live = append(live, s)
+		}
+	}
+	for _, s := range paused {
+		// Wolf stops by ID, which would end a live stream sharing it too.
+		if slices.ContainsFunc(live, func(l wolfapi.Session) bool { return l.ClientID == s.ClientID }) {
+			klog.Warningf("Session %s paused while the event stream was down, but a live stream shares its ID: not stopping it", s.ClientID)
 			continue
 		}
 		klog.Infof("Session %s paused while the event stream was down: stopping it", s.ClientID)
 		a.lobby.ended(s.ClientID)
 		// Failed, Wolf keeps listing it paused, so the next subscribe tries
 		// again.
-		if err := a.WolfClient.StopSession(ctx, s.ClientID); err != nil {
+		if err = a.WolfClient.StopSession(ctx, s.ClientID); err != nil {
 			utilruntime.HandleError(err)
 			continue
 		}

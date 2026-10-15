@@ -944,6 +944,23 @@ func TestAgentCatchUpStopsPausedAndJoinsLiveStream(t *testing.T) {
 	}
 }
 
+// Wolf stops streams by ID: a paused stream sharing its ID with a live one is
+// left alone, or stopping it would end the live one too.
+func TestAgentCatchUpSparesLiveStreamSharingPausedID(t *testing.T) {
+	client := newLobbyClient()
+	client.listed = []wolfapi.Session{
+		{ClientID: wolfStreamID, AESKey: "k-old", State: wolfapi.SessionPaused},
+		{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionSetup},
+	}
+	lobbyAgent(t, client)
+	client.send(wolfapi.RTPVideoPingEventType, `{}`)
+	client.send(wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+	if got := client.stopCalls(); len(got) != 0 {
+		t.Errorf("StopSession calls %v: stopped the live stream's ID", got)
+	}
+}
+
 // A resume reusing the ID of a stream whose joins all failed starts afresh:
 // the old stream's spent attempts must not stop it joining.
 func TestAgentJoinsStreamStartedAfterExhaustedJoins(t *testing.T) {

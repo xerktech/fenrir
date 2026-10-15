@@ -177,7 +177,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     connection whose channel closes when it ends. r3labs/sse never retries an EOF'd stream.
     - Wolf replays no events, so after each subscribe `catchUp` rebuilds what was missed from the
       `state` Wolf lists per stream (`setup`/`streaming`/`paused`; xerktech/wolf, XERK-1947).
-      Needs a Wolf image with that field: an older one lists no state, so missed pauses are lost.
+      Needs a Wolf image with that field (the operator defaults to `ghcr.io/xerktech/wolf:xerktech`):
+      upstream images list no state, so missed pauses are lost. Tests: `TestListSessionsDecodesState`.
     - Listed `paused` is stopped as a pause event would (XERK-1378). A joined stream no longer
       listed under its AES key was stopped. Session IDs repeat across resumes; keys don't.
       Tests: `TestAgentCatch*`.

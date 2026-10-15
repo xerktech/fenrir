@@ -57,7 +57,9 @@ var (
 			return im
 		}
 
-		return "ghcr.io/games-on-whales/wolf:stable"
+		// The fork's branch build: wolf-agent's catch-up needs the stream
+		// state it lists (XERK-1947), which upstream's images lack.
+		return "ghcr.io/xerktech/wolf:xerktech"
 	}()
 )
 
