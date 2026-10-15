@@ -895,6 +895,19 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 		"host input":  hostPath("/dev/input"),
 		"host uinput": hostPath("/dev/uinput"),
 		"unclean dev": hostPath("/var/../dev//input"),
+		// Every other host path too: these expose the agent token (XERK-1921).
+		"host proc":  hostPath("/proc"),
+		"host pid 1": hostPath("/proc/1"),
+		"kubelet":    hostPath("/var/lib/kubelet/pods"),
+		"containerd": hostPath("/run/containerd"),
+		"pod logs":   hostPath("/var/log/pods"),
+		"other":      hostPath("/devices"),
+		"relative":   hostPath("proc"),
+		"unmounted": func(spec *corev1.PodSpec, _ *corev1.Container) {
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "host", VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/kubelet"},
+			}})
+		},
 	}
 	// Every capability that opens a syscall cmd/nri-input denies, also when
 	// it isn't the first one added.
@@ -927,14 +940,13 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 		}
 	}
 
-	// Other host paths, an unprivileged container and a SYS_ADMIN one under
-	// Unconfined seccomp (cmd/nri-input filters it) stay allowed.
+	// An unprivileged container and a SYS_ADMIN one under Unconfined seccomp
+	// (cmd/nri-input filters it) stay allowed.
 	sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
 	app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostPath("/devices")(&app.Spec.Template.Spec, &app.Spec.Template.Spec.Containers[0])
 	app.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: new(false)}
 	app.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}}
 	app.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities = &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}}

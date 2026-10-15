@@ -1970,10 +1970,15 @@ func validateNoOperatorVolumeMounts(spec *corev1.PodSpec) error {
 }
 
 // validateAppConfinement rejects App template containers (init too) that run
-// privileged or mount a hostPath at or above the host's /dev. cmd/nri-input
-// grants App containers every /dev/input and /dev/hidraw node by number, so
-// either would hand the game the host's keyboards and other sessions' pads,
-// and privileged also every disk and no seccomp filter (XERK-1915).
+// privileged. cmd/nri-input grants App containers every /dev/input and
+// /dev/hidraw node by number, so that would hand the game the host's keyboards
+// and other sessions' pads, every disk and no seccomp filter (XERK-1915).
+//
+// It rejects every hostPath volume too, mounted or not (DirectoryOrCreate
+// writes to the node either way). Host paths expose the same things too many
+// ways to deny one by one: /dev the input nodes, /proc every process's
+// /proc/<pid>/root, /var/lib/kubelet the agent token Secret (XERK-1921). No
+// App needs one; a game library on the node goes in a local PV.
 //
 // It also rejects one adding a capability that opens containerd's default
 // seccomp profile (defaultProfileHoleCapability) under RuntimeDefault: with
@@ -1994,14 +1999,9 @@ func validateAppConfinement(spec *corev1.PodSpec) error {
 	if spec.ShareProcessNamespace != nil && *spec.ShareProcessNamespace {
 		return stderrors.New("validation failed: the App template sets shareProcessNamespace")
 	}
-	hostDev := map[string]string{}
 	for _, v := range spec.Volumes {
-		if v.HostPath == nil {
-			continue
-		}
-		p := path.Clean("/" + v.HostPath.Path)
-		if p == "/" || p == "/dev" || strings.HasPrefix(p, "/dev/") {
-			hostDev[v.Name] = v.HostPath.Path
+		if v.HostPath != nil {
+			return fmt.Errorf("validation failed: volume %q in the App template is a hostPath (%q); use a PersistentVolumeClaim", v.Name, v.HostPath.Path)
 		}
 	}
 	for _, ctrs := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
@@ -2012,11 +2012,6 @@ func validateAppConfinement(spec *corev1.PodSpec) error {
 			if c := defaultProfileHoleCapability(ctr.SecurityContext); c != "" && runtimeDefaultSeccomp(spec, &ctr) {
 				return fmt.Errorf("validation failed: container %q in the App template adds %s under RuntimeDefault seccomp, "+
 					"which then allows host-kernel syscalls; set seccompProfile Unconfined so the node's filter applies", ctr.Name, c)
-			}
-			for _, m := range ctr.VolumeMounts {
-				if p, ok := hostDev[m.Name]; ok {
-					return fmt.Errorf("validation failed: container %q in the App template mounts host path %q", ctr.Name, p)
-				}
 			}
 		}
 	}

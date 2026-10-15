@@ -163,6 +163,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     Tests: `TestBuildPodRejectsAppMountOfOperatorVolume`, `TestOperatorVolumesListsEveryOperatorVolume`.
   - Nor set `hostPID`/`shareProcessNamespace` (`validateAppConfinement`, XERK-1781): a root App
     reads the sidecars' mounts through `/proc/<pid>/root`. Tests: `TestBuildPodRejectsAppHostDevices`.
+  - Nor declare any hostPath volume (XERK-1921): `/proc`, `/var/lib/kubelet` and more expose the
+    token; a denylist always misses one. Live Apps use none; a game library goes in a local PV.
   - wolf-agent re-reads its token and its cert on every request/handshake: the operator may
     regenerate the Secret under a running pod and uses the new token and cert at once.
   - `Agent.Run` resubscribes to Wolf's `/api/v1/events` itself; `SubscribeToEvents` is one

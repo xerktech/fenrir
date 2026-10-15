@@ -26,7 +26,7 @@ paths:
   - containerd prefixes `CAP_` itself: a listed `CAP_MKNOD` drop is a no-op (`CAP_CAP_MKNOD`), so
     only a bare `MKNOD` counts as dropped. Tests: `TestDropMknod`.
   - NRI can't narrow the grant per minor: device rules are set only at container create.
-  - A privileged App container, or one mounting a hostPath at or above `/dev`, is refused
+  - A privileged App container, or any App hostPath volume, is refused
     (`validateAppConfinement`, XERK-1915). Tests: `TestBuildPodRejectsAppHostDevices`.
   - Not covered: an App adding SYS_ADMIN mounts a devtmpfs and opens every `13:*`/`241:*` node,
     host keyboards included. The Steam/Heroic Apps add SYS_ADMIN with seccomp Unconfined.
