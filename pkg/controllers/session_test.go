@@ -956,6 +956,56 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 	}
 }
 
+// The User picks a host path and the App mounts it by name: the route around
+// the App-template hostPath ban (XERK-1950). examples/user.yaml declares the
+// host's /dev/input as dev-input.
+func TestBuildPodRejectsAppMountOfUserHostPath(t *testing.T) {
+	for _, initCtr := range []bool{false, true} {
+		for _, device := range []bool{false, true} {
+			sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+			app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The informer's copy: buildPod reads it back below.
+			ctr := corev1.Container{Name: "steal", Image: "busybox"}
+			if device {
+				ctr.VolumeDevices = []corev1.VolumeDevice{{Name: "dev-input", DevicePath: "/dev/xvda"}}
+			} else {
+				ctr.VolumeMounts = []corev1.VolumeMount{{Name: "dev-input", MountPath: "/hostinput"}}
+			}
+			spec := &app.Spec.Template.Spec
+			if initCtr {
+				spec.InitContainers = append(spec.InitContainers, ctr)
+			} else {
+				spec.Containers = append(spec.Containers, ctr)
+			}
+			if _, err := sc.buildPod(sess); !errors.Is(err, errInvalidSpec) || !strings.Contains(err.Error(), "hostPath volume \"dev-input\"") {
+				t.Errorf("init container %v, device %v: buildPod err = %v, want the User's hostPath mount rejected", initCtr, device, err)
+			}
+		}
+	}
+
+	// A User volume that is not a hostPath stays mountable by the game.
+	sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+	user, err := sc.UserInformer.Namespaced(sess.Namespace).Get(sess.Spec.UserReference.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user.Spec.Volumes = append(user.Spec.Volumes, corev1.Volume{Name: "saves", VolumeSource: corev1.VolumeSource{
+		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "saves"},
+	}})
+	app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.Spec.Template.Spec.Containers[0].VolumeMounts = append(app.Spec.Template.Spec.Containers[0].VolumeMounts,
+		corev1.VolumeMount{Name: "saves", MountPath: "/saves"})
+	if _, err := sc.buildPod(sess); err != nil {
+		t.Errorf("buildPod err = %v, want a User PVC mount allowed", err)
+	}
+}
+
 // Keeps operatorVolumes in step with buildPod: a volume added there and not
 // listed would be mountable by the App.
 func TestOperatorVolumesListsEveryOperatorVolume(t *testing.T) {

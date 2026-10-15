@@ -1049,6 +1049,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	if err := validateAppConfinement(&podToCreate.Spec); err != nil {
 		return nil, invalidSpec(err)
 	}
+	if err := validateNoUserHostPathMounts(&podToCreate.Spec, user.Spec.Volumes); err != nil {
+		return nil, invalidSpec(err)
+	}
 
 	if podToCreate.Labels == nil {
 		podToCreate.Labels = map[string]string{}
@@ -1949,19 +1952,45 @@ var operatorVolumes = []string{
 // mounts and containers. The App's game code is untrusted and the catalogue
 // generates Apps, so this is a security boundary, not a misconfiguration check.
 func validateNoOperatorVolumeMounts(spec *corev1.PodSpec) error {
+	return forEachAppVolumeRef(spec, func(ctr, name string) error {
+		if slices.Contains(operatorVolumes, name) {
+			return fmt.Errorf("validation failed: container %q in the App template mounts volume %q, which is reserved for the operator", ctr, name)
+		}
+		return nil
+	})
+}
+
+// validateNoUserHostPathMounts rejects App template containers (init too)
+// that mount a hostPath volume the User declares. buildPod appends the User's
+// volumes after validateAppConfinement has checked the App's own, so without
+// this the User would pick the host path and the App would reach it: the
+// host's input nodes, /proc, the kubelet's Secrets (XERK-1950). User hostPaths
+// are for the sidecars; the User's other volumes stay mountable by the game.
+func validateNoUserHostPathMounts(spec *corev1.PodSpec, userVolumes []corev1.Volume) error {
+	return forEachAppVolumeRef(spec, func(ctr, name string) error {
+		for _, v := range userVolumes {
+			if v.Name == name && v.HostPath != nil {
+				return fmt.Errorf("validation failed: container %q in the App template mounts the User's hostPath volume %q", ctr, name)
+			}
+		}
+		return nil
+	})
+}
+
+// forEachAppVolumeRef calls fn with the name of every volume an App template
+// container (init too) mounts or attaches, stopping at the first error.
+func forEachAppVolumeRef(spec *corev1.PodSpec, fn func(ctr, volume string) error) error {
 	for _, ctrs := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
 		for _, ctr := range ctrs {
-			names := make([]string, 0, len(ctr.VolumeMounts)+len(ctr.VolumeDevices))
 			for _, m := range ctr.VolumeMounts {
-				names = append(names, m.Name)
+				if err := fn(ctr.Name, m.Name); err != nil {
+					return err
+				}
 			}
 			// A block-mode claim is attached as a device, not mounted.
 			for _, d := range ctr.VolumeDevices {
-				names = append(names, d.Name)
-			}
-			for _, name := range names {
-				if slices.Contains(operatorVolumes, name) {
-					return fmt.Errorf("validation failed: container %q in the App template mounts volume %q, which is reserved for the operator", ctr.Name, name)
+				if err := fn(ctr.Name, d.Name); err != nil {
+					return err
 				}
 			}
 		}
