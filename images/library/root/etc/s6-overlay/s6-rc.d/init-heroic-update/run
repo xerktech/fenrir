@@ -28,8 +28,8 @@ installed="$(dpkg-query -W -f='${Version}' heroic 2>/dev/null)" || give_up "Hero
 [[ -n "${installed}" ]] || give_up "Heroic is not installed"
 
 release="$(curl -fsSL --max-time 30 "${release_url}")" || give_up "cannot read the latest release"
-# The amd64 .deb's name, version, URL and SHA256, tab-separated. Anything
-# unexpected (no such asset, no digest, odd version) fails here.
+# The amd64 .deb's name, version, URL, size and SHA256, tab-separated.
+# Anything unexpected (no such asset, no digest, odd version) fails here.
 fields="$(python3 -I -c '
 import json, re, sys
 r = json.load(sys.stdin)
@@ -38,12 +38,14 @@ if not re.fullmatch(r"[0-9][0-9A-Za-z.+~-]*", version):
     sys.exit(1)
 name = f"Heroic-{version}-linux-amd64.deb"
 asset = next(a for a in r["assets"] if a["name"] == name)
-url, digest = asset["browser_download_url"], asset["digest"] or ""
+url, size, digest = asset["browser_download_url"], asset["size"], asset["digest"] or ""
 if not url.startswith("https://github.com/") or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
     sys.exit(1)
-print(name, version, url, digest.removeprefix("sha256:"), sep="\t")
+if type(size) is not int or not 0 < size < 1 << 30:
+    sys.exit(1)
+print(name, version, url, size, digest.removeprefix("sha256:"), sep="\t")
 ' <<<"${release}" 2>/dev/null)" || give_up "cannot find a verifiable .deb in the latest release"
-IFS=$'\t' read -r name latest url sha <<<"${fields}"
+IFS=$'\t' read -r name latest url size sha <<<"${fields}"
 
 if ! dpkg --compare-versions "${latest}" gt "${installed}"; then
   echo "init-heroic-update: Heroic ${installed} is up to date (latest ${latest})"
@@ -65,27 +67,41 @@ verified() {
 }
 
 # Copied out before the check, so the file installed is the file checked.
-# Bounded: a planted FIFO would otherwise block the desktop from starting.
-if timeout 300 s6-setuidgid abc cat -- "${cache}/${name}" >"${deb}" 2>/dev/null && verified "${deb}"; then
+# Only a regular file, and no more than the asset's size: a planted FIFO would
+# block the desktop from starting, and /dev/zero or a sparse file would fill
+# the node's disk. Nothing else runs as the user yet, so the test can't race.
+# shellcheck disable=SC2016 # expanded by the inner sh
+if timeout 60 s6-setuidgid abc sh -c '[ -f "$1" ] && exec head -c "$2" -- "$1"' sh "${cache}/${name}" "$((size + 1))" >"${deb}" 2>/dev/null &&
+  verified "${deb}"; then
   echo "init-heroic-update: using the cached ${name}"
 else
   echo "init-heroic-update: downloading ${name}"
-  curl -fsSL --max-time 600 -o "${deb}" "${url}" || give_up "cannot download ${name}"
+  curl -fsSL --max-time 600 --max-filesize "${size}" -o "${deb}" "${url}" || give_up "cannot download ${name}"
   verified "${deb}" || give_up "${name} does not match its published SHA256"
   chmod 0644 "${deb}"
-  # Only the latest is kept.
-  # shellcheck disable=SC2016 # expanded by the inner sh A failure here just means the next start downloads again.
-  timeout 300 s6-setuidgid abc sh -c 'rm -rf -- "$1" && mkdir -p -- "$1" && cp -- "$2" "$1/"' sh "${cache}" "${deb}" ||
+  # Only the latest is kept. A failure here just means the next start downloads again.
+  # shellcheck disable=SC2016 # expanded by the inner sh
+  timeout 60 s6-setuidgid abc sh -c 'rm -rf -- "$1" && mkdir -p -- "$1" && cp -- "$2" "$1/"' sh "${cache}" "${deb}" ||
     echo "init-heroic-update: cannot cache ${name}; the next start downloads it again" >&2
 fi
 
+# apt, not dpkg -i: it resolves dependencies before unpacking anything, so a
+# release needing one it can't get is refused and the installed Heroic stays.
+# --no-remove: never let it make room by removing packages (Heroic included).
+# The image ships no package lists; they are fetched only for a new dependency.
 export DEBIAN_FRONTEND=noninteractive
-if ! dpkg -i "${deb}"; then
-  # Most likely a dependency the image lacks: fetch it and finish the install.
-  if ! { apt-get update -qq && apt-get install -f -y --no-install-recommends; }; then
-    echo "init-heroic-update: installing ${name} failed; Heroic may not start until the next pod" >&2
-    exit 0
-  fi
+install_deb() {
+  timeout 300 apt-get install -y --no-install-recommends --no-remove "${deb}"
+}
+if ! install_deb; then
+  timeout 300 apt-get update -qq
+  install_deb
 fi
+now="$(dpkg-query -W -f='${Status} ${Version}' heroic 2>/dev/null)"
+# Runs either way: a partial install may have reset what it fixes.
 heroic-postinstall || echo "init-heroic-update: heroic-postinstall failed; Heroic may bypass wrapped-heroic" >&2
+if [[ "${now}" != "install ok installed ${latest}" ]]; then
+  echo "init-heroic-update: installing ${name} failed (heroic: ${now:-not installed})" >&2
+  exit 0
+fi
 echo "init-heroic-update: updated Heroic ${installed} -> ${latest}"

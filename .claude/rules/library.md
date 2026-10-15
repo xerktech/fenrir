@@ -48,6 +48,10 @@ paths:
   - The .deb is cached in the Steam home (`~/.cache/direwolf-heroic`), which user code can
     write: it is copied out, then installed only if it matches the SHA256 GitHub publishes for
     the asset. Root never touches the home directly (`s6-setuidgid abc`): planted links.
+  - The cache read takes only a regular file, capped at the asset's size: a planted FIFO,
+    `/dev/zero` or sparse file would stall the start or fill the node's disk.
+  - Install with `apt-get install --no-remove <deb>`, never `dpkg -i` + `apt-get install -f`:
+    `-f` resolves a dependency it can't fetch by removing Heroic.
   - Never exits non-zero, like `init-steam-home`; offline or any mismatch keeps the image's copy.
   - `heroic-postinstall` runs after every install (build and update): the package resets the
     launchers and chrome-sandbox that `wrapped-heroic` replaces.
