@@ -766,6 +766,32 @@ func TestSessionPodRelinksSharedSteamHome(t *testing.T) {
 	}
 }
 
+func TestSteamRelinkContainerKeepsAppMount(t *testing.T) {
+	env := []corev1.EnvVar{{Name: "UNAME", Value: "retro"}}
+	mount := corev1.VolumeMount{Name: "steam-home", MountPath: "home/retro/", SubPathExpr: "homes/$(UNAME)", ReadOnly: true}
+	relink := steamRelinkContainer([]corev1.Container{
+		{Name: "other", VolumeMounts: []corev1.VolumeMount{{Name: "wolf-data", MountPath: AppHomePath}}},
+		{Name: "app", Env: env, VolumeMounts: []corev1.VolumeMount{mount}},
+	}, "img")
+	if relink == nil {
+		t.Fatal("no relink container")
+	}
+	want := mount
+	want.MountPath = AppHomePath
+	if len(relink.VolumeMounts) != 1 || !reflect.DeepEqual(relink.VolumeMounts[0], want) {
+		t.Errorf("mounts %+v, want %+v", relink.VolumeMounts, want)
+	}
+	// kubelet expands subPathExpr from the mounting container's own env.
+	if !reflect.DeepEqual(relink.Env, env) {
+		t.Errorf("env %v, want the App container's %v", relink.Env, env)
+	}
+	sc := relink.SecurityContext
+	if sc == nil || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation ||
+		sc.Capabilities == nil || !slices.Equal(sc.Capabilities.Drop, []corev1.Capability{"ALL"}) {
+		t.Errorf("steam-relink not confined: %+v", sc)
+	}
+}
+
 func TestSessionPodSkipsRelinkForOwnHome(t *testing.T) {
 	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
 	for _, c := range pod.Spec.InitContainers {

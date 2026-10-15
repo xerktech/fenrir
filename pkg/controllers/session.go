@@ -2182,7 +2182,9 @@ func withMountUnlessTaken(mounts []corev1.VolumeMount, add ...corev1.VolumeMount
 // /config links only when stop() runs on a Ready pod; one that failed, was
 // evicted or deleted leaves ~/.steam/steam dangling here (XERK-1951). A failed
 // relink is only logged: the link may well not dangle, and if it does the
-// game's own cont-init reports it.
+// game's own cont-init reports it. The mount is copied whole, with the
+// container's env: kubelet expands a subPathExpr from the mounting
+// container's own env, and a variable it lacks fails the container's create.
 func steamRelinkContainer(containers []corev1.Container, image string) *corev1.Container {
 	for i := range containers {
 		for _, m := range containers[i].VolumeMounts {
@@ -2191,6 +2193,8 @@ func steamRelinkContainer(containers []corev1.Container, image string) *corev1.C
 			}
 			// GoW's retro owns the home; root would follow links planted in it.
 			uid := int64(1000)
+			home := m
+			home.MountPath = AppHomePath
 			return &corev1.Container{
 				Name:            v1alpha1types.SteamRelinkContainerName,
 				Image:           image,
@@ -2204,12 +2208,9 @@ func steamRelinkContainer(containers []corev1.Container, image string) *corev1.C
 					AllowPrivilegeEscalation: new(false),
 					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 				},
-				VolumeMounts: []corev1.VolumeMount{{
-					Name:        m.Name,
-					MountPath:   AppHomePath,
-					SubPath:     m.SubPath,
-					SubPathExpr: m.SubPathExpr,
-				}},
+				Env:          containers[i].Env,
+				EnvFrom:      containers[i].EnvFrom,
+				VolumeMounts: []corev1.VolumeMount{home},
 			}
 		}
 	}
