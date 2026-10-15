@@ -33,10 +33,10 @@ RUN set -eu; \
 # Vulkan ICD manifest names) and the cache entry pressure-vessel resolves from.
 FROM ghcr.io/games-on-whales/steam:edge@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632 AS steam
 COPY --from=driver /out/ /
-COPY root/ /
+COPY --chmod=755 root/etc/cont-init.d/05-nvidia-lib32.sh /etc/cont-init.d/
 RUN ldconfig && ldconfig -p | grep -q 'libGLX_nvidia.so.0 (libc6)'
 
 FROM ghcr.io/games-on-whales/heroic-games-launcher:edge@sha256:a207a39367801a8a8bf24b68dac2c9945052d3117cb03b061b27bd6672aab62f AS heroic
 COPY --from=driver /out/ /
-COPY root/ /
+COPY --chmod=755 root/etc/cont-init.d/05-nvidia-lib32.sh /etc/cont-init.d/
 RUN ldconfig && ldconfig -p | grep -q 'libGLX_nvidia.so.0 (libc6)'
