@@ -745,6 +745,122 @@ func TestSessionPodKeepsAppsOwnHome(t *testing.T) {
 	}
 }
 
+// A Library pod that ended without stop() leaves ~/.steam/steam pointing at
+// /config, which dangles here; the session pod repoints it itself (XERK-1951).
+func TestSessionPodRelinksSharedSteamHome(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "testdata/app-own-home.yaml") //nolint:dogsled // only the Pod matters here
+	var relink *corev1.Container
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].Name == v1alpha1types.SteamRelinkContainerName {
+			relink = &pod.Spec.InitContainers[i]
+		}
+	}
+	if relink == nil {
+		t.Fatal("no steam-relink init container for an App sharing the Steam home")
+	}
+	if len(relink.VolumeMounts) != 1 || relink.VolumeMounts[0].Name != "steam-home" || relink.VolumeMounts[0].MountPath != AppHomePath {
+		t.Errorf("steam-relink mounts %v, want only steam-home at %s", relink.VolumeMounts, AppHomePath)
+	}
+	if sc := relink.SecurityContext; sc == nil || sc.RunAsUser == nil || *sc.RunAsUser == 0 || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+		t.Errorf("steam-relink must not run as root: %+v", sc)
+	}
+}
+
+func TestSteamRelinkContainerKeepsAppMount(t *testing.T) {
+	mount := corev1.VolumeMount{Name: "steam-home", MountPath: "home/retro/", SubPath: "homes/retro", ReadOnly: true}
+	relink := steamRelinkContainer([]corev1.Container{
+		{Name: "other", VolumeMounts: []corev1.VolumeMount{{Name: "wolf-data", MountPath: AppHomePath}}},
+		{
+			Name:         "app",
+			Env:          []corev1.EnvVar{{Name: "PATH", Value: "/opt/game/bin"}},
+			EnvFrom:      []corev1.EnvFromSource{{Prefix: "P_"}},
+			VolumeMounts: []corev1.VolumeMount{mount},
+		},
+	}, "img")
+	if relink == nil {
+		t.Fatal("no relink container")
+	}
+	want := mount
+	want.MountPath = AppHomePath
+	if len(relink.VolumeMounts) != 1 || !reflect.DeepEqual(relink.VolumeMounts[0], want) {
+		t.Errorf("mounts %+v, want %+v", relink.VolumeMounts, want)
+	}
+	// An App PATH would hide the image's sh, and a failed start ends the Session.
+	if relink.Env != nil || relink.EnvFrom != nil {
+		t.Errorf("steam-relink took the App's env: %v %v", relink.Env, relink.EnvFrom)
+	}
+	// kubelet expands subPathExpr from the mounting container's own env,
+	// which steam-relink doesn't take (an App PATH could hide sh).
+	mount.SubPath, mount.SubPathExpr = "", "homes/$(UNAME)"
+	if c := steamRelinkContainer([]corev1.Container{{VolumeMounts: []corev1.VolumeMount{mount}}}, "img"); c != nil {
+		t.Errorf("steam-relink added for a subPathExpr home: %+v", c.VolumeMounts)
+	}
+	sc := relink.SecurityContext
+	if sc == nil || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation ||
+		sc.Capabilities == nil || !slices.Equal(sc.Capabilities.Drop, []corev1.Capability{"ALL"}) {
+		t.Errorf("steam-relink not confined: %+v", sc)
+	}
+}
+
+func TestSessionPodSkipsRelinkForOwnHome(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	for _, c := range pod.Spec.InitContainers {
+		if c.Name == v1alpha1types.SteamRelinkContainerName {
+			t.Error("steam-relink added to a pod with the per-App home")
+		}
+	}
+}
+
+// Runs the session side's real command against a home mounted where the
+// session sees it, with nothing at the Library's path.
+func TestSteamRelinkContainerCommand(t *testing.T) {
+	root := t.TempDir()
+	home, libHome := filepath.Join(root, "home-retro"), filepath.Join(root, "config")
+	steamDir := filepath.Join(home, ".steam")
+	if err := os.MkdirAll(filepath.Join(steamDir, "debian-installation"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(libHome+"/.steam/debian-installation", filepath.Join(steamDir, "steam")); err != nil {
+		t.Fatal(err)
+	}
+	relink := steamRelinkContainer([]corev1.Container{{VolumeMounts: []corev1.VolumeMount{{Name: "steam-home", MountPath: AppHomePath}}}}, "img")
+	if relink == nil {
+		t.Fatal("no relink container")
+	}
+	if want := []string{AppHomePath, libraryHome, AppHomePath}; !slices.Equal(relink.Command[len(relink.Command)-3:], want) {
+		t.Fatalf("relink args %q, want %q", relink.Command[len(relink.Command)-3:], want)
+	}
+	command := append(slices.Clone(relink.Command[:len(relink.Command)-3]), home, libHome, home)
+	if out, err := exec.CommandContext(context.Background(), command[0], command[1:]...).CombinedOutput(); err != nil { //nolint:gosec // the code's own script
+		t.Fatalf("%v: %s", err, out)
+	}
+	if fi, err := os.Stat(filepath.Join(steamDir, "steam")); err != nil || !fi.IsDir() {
+		t.Errorf("~/.steam/steam does not resolve to a directory: %v", err)
+	}
+
+	// A failure is logged, never fatal: a failed init container ends the Session.
+	if err := os.Remove(filepath.Join(steamDir, "steam")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(libHome+"/.steam/debian-installation", filepath.Join(steamDir, "steam")); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "ln"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil { //nolint:gosec // test stub must be executable
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(context.Background(), command[0], command[1:]...) //nolint:gosec // the code's own script
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("relink exited non-zero on failure: %v: %s", err, out)
+	} else if !strings.Contains(string(out), "failed") {
+		t.Errorf("relink failure not logged: %q", out)
+	}
+}
+
 func TestSessionPodMountsAppHomeByDefault(t *testing.T) {
 	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
 	if got := mountsAt(t, &pod.Spec, "app")[AppHomePath]; got != "wolf-data" {

@@ -459,7 +459,7 @@ func TestSteamRelinkCommand(t *testing.T) {
 		t.Fatalf("relink runs as %q, want %q", steamRelinkCommand[:2], want)
 	}
 	// Drop s6-setuidgid (not on the test host) and the real homes.
-	command := append(slices.Clone(steamRelinkCommand[2:len(steamRelinkCommand)-2]), home, sessionHome)
+	command := append(slices.Clone(steamRelinkCommand[2:len(steamRelinkCommand)-3]), home, home, sessionHome)
 	for range 2 { // idempotent
 		if out, err := exec.CommandContext(context.Background(), command[0], command[1:]...).CombinedOutput(); err != nil { //nolint:gosec // the code's own script
 			t.Fatalf("%v: %s", err, out)
@@ -495,7 +495,7 @@ func TestSteamRelinkCommandFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "ln"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil { //nolint:gosec // test stub must be executable
 		t.Fatal(err)
 	}
-	command := append(slices.Clone(steamRelinkCommand[2:len(steamRelinkCommand)-2]), home, filepath.Join(root, "home-retro"))
+	command := append(slices.Clone(steamRelinkCommand[2:len(steamRelinkCommand)-3]), home, home, filepath.Join(root, "home-retro"))
 	cmd := exec.CommandContext(context.Background(), command[0], command[1:]...) //nolint:gosec // the code's own script
 	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := cmd.Run(); err == nil {

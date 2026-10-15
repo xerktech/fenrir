@@ -428,21 +428,26 @@ while running; do
 done
 `}
 
-// steamRelinkCommand repoints every link in ~/.steam that Steam made absolute
-// under the Library's home ($1, /config) at the same path under the sessions'
-// home ($2, /home/retro), which the Library image links to /config. Valve's
-// launcher leaves ~/.steam/steam -> /config/.steam/debian-installation, which
-// dangles in session pods, and GoW's cont-init dies on that dangling link
-// (`mkdir -p ~/.steam/steam/`) while ~/homebrew/services/PluginLoader is
-// missing (XERK-1916). Runs as the desktop user, like init-steam-home: root
-// would follow links planted in the home. Idempotent, so safe to retry.
-var steamRelinkCommand = []string{"s6-setuidgid", "abc", "sh", "-c", `
+// steamRelinkScript repoints every link in $1/.steam that Steam made
+// absolute under the Library's home ($2, /config) at the same path under the
+// sessions' home ($3, /home/retro), which the Library image links to /config.
+// Valve's launcher leaves ~/.steam/steam -> /config/.steam/debian-installation,
+// which dangles in session pods, and GoW's cont-init dies on that dangling
+// link (`mkdir -p ~/.steam/steam/`) while ~/homebrew/services/PluginLoader is
+// missing (XERK-1916). Run it as the desktop user: root would follow links
+// planted in the home. Idempotent, so safe to retry.
+const steamRelinkScript = `
 for l in "$1"/.steam/*; do
   [ -L "$l" ] || continue
   t=$(readlink "$l")
-  case "$t" in "$1"/*) ln -sfn "$2/${t#"$1"/}" "$l" || exit 1 ;; esac
+  case "$t" in "$2"/*) ln -sfn "$3/${t#"$2"/}" "$l" || exit 1 ;; esac
 done
-`, "sh", libraryHome, AppHomePath}
+`
+
+// steamRelinkCommand runs steamRelinkScript in the Library pod as it stops.
+// Session pods run it too (steamRelinkContainer), as a Library pod that ends
+// without stop() never gets here (XERK-1951).
+var steamRelinkCommand = []string{"s6-setuidgid", "abc", "sh", "-c", steamRelinkScript, "sh", libraryHome, libraryHome, AppHomePath}
 
 // downloadsInProgress returns what is still downloading, or "" when nothing
 // is: any entry in a Steam library's steamapps/downloading, or anything in
