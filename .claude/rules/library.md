@@ -35,8 +35,12 @@ paths:
     is missing (`mkdir -p ~/.steam/steam/`), i.e. a fresh home where the Library ran first.
     So `stop()` repoints every absolute `/config/...` link in `~/.steam` to `/home/retro/...`
     after `steam -shutdown` (`steamRelinkCommand`, XERK-1916); that path resolves in both pods.
-    A Library pod that dies without `stop()` (not Ready, node loss) leaves the link dangling.
     Tests: `TestSteamRelinkCommand*`, `TestLibraryStopRelinksSteamForSessions`.
+  - A Library pod that ends without `stop()` (Failed, not Ready, node loss, a manual delete)
+    skips that, so a session pod whose App mounts its own home at `/home/retro` runs the same
+    script in the `steam-relink` init container (`steamRelinkContainer`, XERK-1951).
+    - It runs as uid 1000, never root, and only logs a failure: a failed init container ends
+      the Session. Tests: `TestSessionPodRelinksSharedSteamHome`, `TestSteamRelinkContainerCommand`.
 - Idle rule: (no browser traffic for `--library-idle-timeout` OR no user-opened page load for
   `--library-max-runtime`) AND nothing downloading.
   - An open Selkies tab sends WebSocket traffic every few seconds with nobody there, so traffic

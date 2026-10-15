@@ -1201,6 +1201,10 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		},
 	)
 
+	if relink := steamRelinkContainer(podToCreate.Spec.Containers, c.WolfAgentImage); relink != nil {
+		podToCreate.Spec.InitContainers = append(podToCreate.Spec.InitContainers, *relink)
+	}
+
 	// Define default resources for sidecars
 	wolfAgentDefaultResources := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
@@ -2170,6 +2174,46 @@ func withMountUnlessTaken(mounts []corev1.VolumeMount, add ...corev1.VolumeMount
 		}
 	}
 	return mounts
+}
+
+// steamRelinkContainer returns an init container that runs steamRelinkScript
+// on the home an App container mounts itself at AppHomePath (the Steam home it
+// shares with the Library), or nil if none does. The Library repoints its
+// /config links only when stop() runs on a Ready pod; one that failed, was
+// evicted or deleted leaves ~/.steam/steam dangling here (XERK-1951). A failed
+// relink is only logged: the link may well not dangle, and if it does the
+// game's own cont-init reports it.
+func steamRelinkContainer(containers []corev1.Container, image string) *corev1.Container {
+	for i := range containers {
+		for _, m := range containers[i].VolumeMounts {
+			if mountTarget(&m) != AppHomePath || m.Name == "wolf-data" {
+				continue
+			}
+			// GoW's retro owns the home; root would follow links planted in it.
+			uid := int64(1000)
+			return &corev1.Container{
+				Name:            v1alpha1types.SteamRelinkContainerName,
+				Image:           image,
+				ImagePullPolicy: corev1.PullAlways,
+				Command: []string{"sh", "-c", "(" + steamRelinkScript + ") || echo 'steam-relink: failed to repoint ~/.steam links' >&2",
+					"sh", AppHomePath, libraryHome, AppHomePath},
+				SecurityContext: &corev1.SecurityContext{
+					RunAsUser:                &uid,
+					RunAsGroup:               &uid,
+					RunAsNonRoot:             new(true),
+					AllowPrivilegeEscalation: new(false),
+					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				},
+				VolumeMounts: []corev1.VolumeMount{{
+					Name:        m.Name,
+					MountPath:   AppHomePath,
+					SubPath:     m.SubPath,
+					SubPathExpr: m.SubPathExpr,
+				}},
+			}
+		}
+	}
+	return nil
 }
 
 func (c *SessionController) podName(session *v1alpha1types.Session) string {
