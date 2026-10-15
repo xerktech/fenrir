@@ -14,12 +14,5 @@
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+ARG \\S+=(?<currentValue>\\S+)"
       ]
     }
-  ],
-  "packageRules": [
-    {
-      "description": "images/wolf pairs its builder GStreamer and fix commit with the base Wolf's own pins (XERK-1740); bump them together by hand, never one at a time.",
-      "matchFileNames": ["images/wolf/Dockerfile"],
-      "enabled": false
-    }
   ]
 }
