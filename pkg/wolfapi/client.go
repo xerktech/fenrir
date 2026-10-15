@@ -27,12 +27,30 @@ type Session struct {
 
 	RTSPFakeIP string `json:"rtsp_fake_ip,omitempty"`
 
+	// State is what the stream is doing, as Wolf lists it (one of the
+	// SessionState values). Read only: Wolf ignores it on add.
+	State SessionState `json:"state,omitempty"`
+
 	// overrides
 	H264GSTPipeline string `json:"h264_gst_pipeline,omitempty"`
 	HEVCGSTPipeline string `json:"hevc_gst_pipeline,omitempty"`
 	AV1GSTPipeline  string `json:"av1_gst_pipeline,omitempty"`
 	OpusGSTPipeline string `json:"opus_gst_pipeline,omitempty"`
 }
+
+// SessionState is a listed stream's state (xerktech/wolf, XERK-1947). A
+// stopped stream is no longer listed.
+type SessionState string
+
+const (
+	// SessionSetup: waiting for the client to set up and ping both its video
+	// and audio streams.
+	SessionSetup SessionState = "setup"
+	// SessionStreaming: both the video and audio pipelines are running.
+	SessionStreaming SessionState = "streaming"
+	// SessionPaused: the client paused or dropped the stream.
+	SessionPaused SessionState = "paused"
+)
 
 type Runner struct {
 	Type   string `json:"type"`

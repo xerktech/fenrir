@@ -72,8 +72,7 @@ func (a *Agent) Run(ctx context.Context) {
 			utilruntime.HandleError(fmt.Errorf("failed to subscribe to Wolf events: %w", err))
 		} else {
 			klog.Infof("Subscribed to Wolf events")
-			a.catchUpMissedEnd(ctx)
-			a.catchUpMissedStart(ctx)
+			a.catchUp(ctx)
 			a.handleEvents(ctx, ch)
 			if time.Since(start) >= a.maxResubscribeDelay {
 				delay = a.minResubscribeDelay
@@ -92,82 +91,64 @@ func (a *Agent) Run(ctx context.Context) {
 	}
 }
 
-// catchUpMissedEnd ends the joined stream if Wolf paused or stopped it while
-// no event stream was connected: Wolf neither replays events nor honours
-// Last-Event-ID, and its session list has no paused state (XERK-1378). But a
-// pause or stop takes the stream out of the lobby, so a joined stream missing
-// from every lobby's connected sessions has ended. Missed, Wolf's session
-// would stay listed, and the operator would never start the disconnect grace
-// period. Runs before the new stream's events are handled, so the joiner's
-// state is still that of before the outage.
+// catchUp acts on the stream events Wolf sent while no event stream was
+// connected: Wolf replays none, but lists each stream's state (XERK-1947).
+// Runs before the new stream's events are handled, so the joiner's state is
+// still that of before the outage.
 //
-// A stream that ended before it joined is not caught: nothing tells it from
-// one still waiting for its pings.
-func (a *Agent) catchUpMissedEnd(ctx context.Context) {
-	stream, key := a.lobby.joinedStream()
-	if stream == "" {
-		return
-	}
+// A paused stream is stopped, as its pause event would have (XERK-1378):
+// missed, Wolf's session would stay listed, and the operator would never
+// start the disconnect grace period. A joined stream Wolf no longer lists
+// was stopped meanwhile. A live stream the joiner doesn't know started
+// meanwhile (XERK-1797): its setup events are lost, and without them the
+// joiner ignores its pings, so it is seeded as if they were seen.
+func (a *Agent) catchUp(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, lobbyCallTimeout)
 	defer cancel()
-	lobbies, err := a.WolfClient.ListLobbies(ctx)
-	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("checking stream %s is still in the lobby: %w", stream, err))
-		return
-	}
-	for _, l := range lobbies {
-		if slices.Contains(l.ConnectedSessions, stream) {
-			return
-		}
-	}
 	sessions, err := a.WolfClient.ListSessions(ctx)
 	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("checking whether Wolf still lists stream %s: %w", stream, err))
+		utilruntime.HandleError(fmt.Errorf("listing Wolf's streams for events missed while the event stream was down: %w", err))
 		return
 	}
-	klog.Infof("Session %s left the lobby while the event stream was down: ending it", stream)
-	// Wolf lists a stream's session ID as client_id. IDs repeat across
-	// streams (wolf_clients.go), so a listed stream with the ID but another
-	// key is a resume Wolf started since: ours was stopped, and the new one
-	// must be left alone.
-	paused := slices.ContainsFunc(sessions, func(s wolfapi.Session) bool {
-		return s.ClientID == stream && (key == "" || s.AESKey == key)
-	})
-	if paused {
-		// Stop it as a pause event would have. Failed, the stream stays
-		// joined, so the next subscribe tries again.
-		if err := a.WolfClient.StopSession(ctx, stream); err != nil {
-			utilruntime.HandleError(err)
-			return
-		}
-	}
-	a.lobby.ended(stream)
-	a.clearDevices()
-}
 
-// catchUpMissedStart readies the joiner for a stream Wolf started while no
-// event stream was connected (XERK-1797). Its VideoSession and AudioSession
-// events are lost, and without them the joiner ignores its pings: it would
-// never join the lobby, and the client would see the stream's own empty
-// display. Seeded as if they were seen, the stream joins on its next pings,
-// which Wolf sends for as long as it streams. Runs after catchUpMissedEnd,
-// which ends a stream the joiner knew that left the lobby meanwhile.
-//
-// The pod streams to one client at a time, so a stream in a lobby is the
-// live one, and the start of no other was missed. Otherwise the missed one
-// is the single stream Wolf lists that the joiner does not know; several
-// can't be told apart, and are left alone.
-func (a *Agent) catchUpMissedStart(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, lobbyCallTimeout)
-	defer cancel()
-	sessions, err := a.WolfClient.ListSessions(ctx)
-	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("listing Wolf's streams for one started while the event stream was down: %w", err))
+	// Wolf lists a stream's session ID as client_id. IDs repeat across
+	// streams (wolf_clients.go), so streams are told apart by AES key.
+	var live []wolfapi.Session
+	for _, s := range sessions {
+		if s.State != wolfapi.SessionPaused {
+			live = append(live, s)
+			continue
+		}
+		klog.Infof("Session %s paused while the event stream was down: stopping it", s.ClientID)
+		a.lobby.ended(s.ClientID)
+		// Failed, Wolf keeps listing it paused, so the next subscribe tries
+		// again.
+		if err := a.WolfClient.StopSession(ctx, s.ClientID); err != nil {
+			utilruntime.HandleError(err)
+			continue
+		}
+		a.clearDevices()
+	}
+
+	if stream, key := a.lobby.joinedStream(); stream != "" && !slices.ContainsFunc(live, func(s wolfapi.Session) bool {
+		return s.ClientID == stream && (key == "" || s.AESKey == key)
+	}) {
+		klog.Infof("Session %s was stopped while the event stream was down", stream)
+		a.lobby.ended(stream)
+		a.clearDevices()
+	}
+
+	var missed []wolfapi.Session
+	for _, s := range live {
+		if !a.lobby.knows(s.ClientID, s.AESKey) {
+			missed = append(missed, s)
+		}
+	}
+	if len(missed) == 0 {
 		return
 	}
-	if len(sessions) == 0 {
-		return
-	}
+	// The pod streams to one client at a time, so a stream in a lobby is the
+	// live one (e.g. the agent restarted after joining it): nothing to seed.
 	lobbies, err := a.WolfClient.ListLobbies(ctx)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("listing lobbies for a stream started while the event stream was down: %w", err))
@@ -178,22 +159,12 @@ func (a *Agent) catchUpMissedStart(ctx context.Context) {
 			return
 		}
 	}
-	// Wolf lists a stream's session ID as client_id. IDs repeat across
-	// streams (wolf_clients.go), so the joiner's stream is matched by key.
-	var missed []wolfapi.Session
-	for _, s := range sessions {
-		if !a.lobby.knows(s.ClientID, s.AESKey) {
-			missed = append(missed, s)
-		}
+	if len(missed) > 1 {
+		klog.Warningf("%d live streams started while the event stream was down; joining none to the lobby", len(missed))
+		return
 	}
-	switch len(missed) {
-	case 0:
-	case 1:
-		klog.Infof("Session %s started while the event stream was down: joining it to the lobby on its next pings", missed[0].ClientID)
-		a.lobby.seed(missed[0].ClientID, missed[0].AESKey)
-	default:
-		klog.Warningf("%d streams started while the event stream was down; joining none to the lobby", len(missed))
-	}
+	klog.Infof("Session %s (%s) started while the event stream was down: joining it to the lobby on its next pings", missed[0].ClientID, missed[0].State)
+	a.lobby.seed(missed[0].ClientID, missed[0].AESKey)
 }
 
 // handleEvents handles ch's events until it is closed or ctx ends.
