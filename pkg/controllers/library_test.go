@@ -47,6 +47,7 @@ type fakeLibraryExec struct {
 	heroic    string // download-manager.json contents
 	err       error
 	shutdowns int
+	relinks   int
 }
 
 func (e *fakeLibraryExec) exec(_ context.Context, _, pod, container string, command []string) (string, error) {
@@ -59,6 +60,9 @@ func (e *fakeLibraryExec) exec(_ context.Context, _, pod, container string, comm
 	switch {
 	case strings.Contains(script, "-shutdown"):
 		e.shutdowns++
+		return "", nil
+	case strings.Contains(script, "readlink"):
+		e.relinks++
 		return "", nil
 	case e.err != nil:
 		return "", e.err
@@ -413,6 +417,104 @@ func TestLibraryStopDeletesEvenIfShutdownFails(t *testing.T) {
 	}
 	if f.podExists(t) {
 		t.Error("Library pod kept after a failed Steam shutdown")
+	}
+}
+
+// The Library's Valve launcher leaves absolute /config links in ~/.steam;
+// session pods mount the home at /home/retro, where they dangle and GoW's
+// cont-init dies (XERK-1916). Runs the real script against a temp home.
+func TestSteamRelinkCommand(t *testing.T) {
+	root := t.TempDir()
+	home, sessionHome := filepath.Join(root, "config"), filepath.Join(root, "home-retro")
+	steamDir := filepath.Join(home, ".steam")
+	if err := os.MkdirAll(filepath.Join(steamDir, "debian-installation", "ubuntu12_32"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(home, sessionHome); err != nil {
+		t.Fatal(err)
+	}
+	links := map[string]string{
+		"steam": home + "/.steam/debian-installation",
+		"root":  home + "/.steam/debian-installation",
+		"sdk32": home + "/.steam/debian-installation/ubuntu12_32",
+		"other": "/elsewhere/x",                    // not under the home: kept
+		"rel":   "debian-installation/ubuntu12_32", // relative: kept
+		"pfx":   home + "x/y",                      // shares the prefix only: kept
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(steamDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := map[string]string{
+		"steam": sessionHome + "/.steam/debian-installation",
+		"root":  sessionHome + "/.steam/debian-installation",
+		"sdk32": sessionHome + "/.steam/debian-installation/ubuntu12_32",
+		"other": links["other"],
+		"rel":   links["rel"],
+		"pfx":   links["pfx"],
+	}
+	// Root would follow links planted in the home.
+	if want := []string{"s6-setuidgid", "abc"}; !slices.Equal(steamRelinkCommand[:2], want) {
+		t.Fatalf("relink runs as %q, want %q", steamRelinkCommand[:2], want)
+	}
+	// Drop s6-setuidgid (not on the test host) and the real homes.
+	command := append(slices.Clone(steamRelinkCommand[2:len(steamRelinkCommand)-2]), home, sessionHome)
+	for range 2 { // idempotent
+		if out, err := exec.CommandContext(context.Background(), command[0], command[1:]...).CombinedOutput(); err != nil { //nolint:gosec // the code's own script
+			t.Fatalf("%v: %s", err, out)
+		}
+		for name, target := range want {
+			if got, err := os.Readlink(filepath.Join(steamDir, name)); err != nil || got != target {
+				t.Errorf("%s -> %q (%v), want %q", name, got, err, target)
+			}
+		}
+	}
+	if fi, err := os.Stat(filepath.Join(steamDir, "steam")); err != nil || !fi.IsDir() {
+		t.Errorf("~/.steam/steam does not resolve to a directory: %v", err)
+	}
+}
+
+// A failed relink must exit non-zero so stop() logs it.
+func TestSteamRelinkCommandFails(t *testing.T) {
+	root := t.TempDir()
+	home, bin := filepath.Join(root, "config"), filepath.Join(root, "bin")
+	steamDir := filepath.Join(home, ".steam")
+	for _, dir := range []string{steamDir, bin} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(home+"/.steam/debian-installation", filepath.Join(steamDir, "steam")); err != nil {
+		t.Fatal(err)
+	}
+	// A later non-link, so the loop's own status doesn't carry ln's failure.
+	if err := os.WriteFile(filepath.Join(steamDir, "zz"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "ln"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil { //nolint:gosec // test stub must be executable
+		t.Fatal(err)
+	}
+	command := append(slices.Clone(steamRelinkCommand[2:len(steamRelinkCommand)-2]), home, filepath.Join(root, "home-retro"))
+	cmd := exec.CommandContext(context.Background(), command[0], command[1:]...) //nolint:gosec // the code's own script
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := cmd.Run(); err == nil {
+		t.Error("relink exited 0 although ln failed")
+	}
+}
+
+func TestLibraryStopRelinksSteamForSessions(t *testing.T) {
+	pod := libraryPod(time.Hour, true)
+	f := newLibraryFixture(t, []runtime.Object{pod})
+
+	if _, err := f.library.reconcileIdle(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	if f.exec.shutdowns != 1 || f.exec.relinks != 1 {
+		t.Errorf("shutdowns, relinks = %d, %d; want 1, 1", f.exec.shutdowns, f.exec.relinks)
+	}
+	if f.podExists(t) {
+		t.Error("Library pod kept")
 	}
 }
 
