@@ -454,7 +454,8 @@ func TestSteamRelinkCommand(t *testing.T) {
 		"rel":   links["rel"],
 		"pfx":   links["pfx"],
 	}
-	command := append(slices.Clone(steamRelinkCommand[:len(steamRelinkCommand)-2]), home, sessionHome)
+	// Drop s6-setuidgid (not on the test host) and the real homes.
+	command := append(slices.Clone(steamRelinkCommand[2:len(steamRelinkCommand)-2]), home, sessionHome)
 	for range 2 { // idempotent
 		if out, err := exec.CommandContext(context.Background(), command[0], command[1:]...).CombinedOutput(); err != nil { //nolint:gosec // the code's own script
 			t.Fatalf("%v: %s", err, out)
@@ -467,6 +468,34 @@ func TestSteamRelinkCommand(t *testing.T) {
 	}
 	if fi, err := os.Stat(filepath.Join(steamDir, "steam")); err != nil || !fi.IsDir() {
 		t.Errorf("~/.steam/steam does not resolve to a directory: %v", err)
+	}
+}
+
+// A failed relink must exit non-zero so stop() logs it.
+func TestSteamRelinkCommandFails(t *testing.T) {
+	root := t.TempDir()
+	home, bin := filepath.Join(root, "config"), filepath.Join(root, "bin")
+	steamDir := filepath.Join(home, ".steam")
+	for _, dir := range []string{steamDir, bin} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(home+"/.steam/debian-installation", filepath.Join(steamDir, "steam")); err != nil {
+		t.Fatal(err)
+	}
+	// A later non-link, so the loop's own status doesn't carry ln's failure.
+	if err := os.WriteFile(filepath.Join(steamDir, "zz"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "ln"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil { //nolint:gosec // test stub must be executable
+		t.Fatal(err)
+	}
+	command := append(slices.Clone(steamRelinkCommand[2:len(steamRelinkCommand)-2]), home, filepath.Join(root, "home-retro"))
+	cmd := exec.CommandContext(context.Background(), command[0], command[1:]...) //nolint:gosec // the code's own script
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := cmd.Run(); err == nil {
+		t.Error("relink exited 0 although ln failed")
 	}
 }
 

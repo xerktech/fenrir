@@ -434,8 +434,9 @@ done
 // launcher leaves ~/.steam/steam -> /config/.steam/debian-installation, which
 // dangles in session pods, and GoW's cont-init dies on that dangling link
 // (`mkdir -p ~/.steam/steam/`) while ~/homebrew/services/PluginLoader is
-// missing (XERK-1916). Idempotent, so safe to retry.
-var steamRelinkCommand = []string{"sh", "-c", `
+// missing (XERK-1916). Runs as the desktop user, like init-steam-home: root
+// would follow links planted in the home. Idempotent, so safe to retry.
+var steamRelinkCommand = []string{"s6-setuidgid", "abc", "sh", "-c", `
 for l in "$1"/.steam/*; do
   [ -L "$l" ] || continue
   t=$(readlink "$l")
