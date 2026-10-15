@@ -259,12 +259,12 @@ type hungLibrary struct{}
 
 func (hungLibrary) Open(ctx context.Context) (bool, error) {
 	<-ctx.Done()
-	return false, ctx.Err()
+	return false, context.Cause(ctx) //nolint:wrapcheck // stands in for a client-go error
 }
 
 func (hungLibrary) Close(ctx context.Context) (bool, error) {
 	<-ctx.Done()
-	return false, ctx.Err()
+	return false, context.Cause(ctx) //nolint:wrapcheck // stands in for a client-go error
 }
 
 // A hung API server costs /applist and the tile at most libraryCallTimeout.
