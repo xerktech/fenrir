@@ -770,7 +770,12 @@ func TestSteamRelinkContainerKeepsAppMount(t *testing.T) {
 	mount := corev1.VolumeMount{Name: "steam-home", MountPath: "home/retro/", SubPath: "homes/retro", ReadOnly: true}
 	relink := steamRelinkContainer([]corev1.Container{
 		{Name: "other", VolumeMounts: []corev1.VolumeMount{{Name: "wolf-data", MountPath: AppHomePath}}},
-		{Name: "app", VolumeMounts: []corev1.VolumeMount{mount}},
+		{
+			Name:         "app",
+			Env:          []corev1.EnvVar{{Name: "PATH", Value: "/opt/game/bin"}},
+			EnvFrom:      []corev1.EnvFromSource{{Prefix: "P_"}},
+			VolumeMounts: []corev1.VolumeMount{mount},
+		},
 	}, "img")
 	if relink == nil {
 		t.Fatal("no relink container")
@@ -779,6 +784,10 @@ func TestSteamRelinkContainerKeepsAppMount(t *testing.T) {
 	want.MountPath = AppHomePath
 	if len(relink.VolumeMounts) != 1 || !reflect.DeepEqual(relink.VolumeMounts[0], want) {
 		t.Errorf("mounts %+v, want %+v", relink.VolumeMounts, want)
+	}
+	// An App PATH would hide the image's sh, and a failed start ends the Session.
+	if relink.Env != nil || relink.EnvFrom != nil {
+		t.Errorf("steam-relink took the App's env: %v %v", relink.Env, relink.EnvFrom)
 	}
 	// kubelet expands subPathExpr from the mounting container's own env,
 	// which steam-relink doesn't take (an App PATH could hide sh).
