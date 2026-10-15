@@ -65,6 +65,10 @@ type RESTServerOptions struct {
 	// that reason (e.g. the Library pod holds Steam's single-writer lock).
 	BusyCheck BusyCheck
 
+	// Library, if set, adds the "Close Library" tile (CloseLibraryAppID) to
+	// the app list while the Library is open; launching it stops the Library.
+	Library Library
+
 	// PinPage serves the pairing page on its own listener. Disabled when
 	// PinPage.Port is 0; there is deliberately no fallback onto Port, which
 	// Moonlight clients reach directly.
@@ -454,6 +458,22 @@ func (s *RESTServer) appListHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	if s.closeLibraryOffered() {
+		ctx, cancel := context.WithTimeout(r.Context(), libraryCallTimeout)
+		open, err := s.Library.Open(ctx)
+		cancel()
+		if err != nil {
+			// The games still list; only the tile is missing.
+			klog.Errorf("Failed to check whether the Library is open: %v", err)
+		}
+		if open {
+			appsList = append(appsList, App{AppSpec: v1alpha1types.AppSpec{
+				Title: closeLibraryTitle,
+				ID:    CloseLibraryAppID,
+			}})
+		}
+	}
+
 	sendXML(w, AppListResponse{
 		Response: Response{
 			StatusCode: 200,
@@ -494,6 +514,11 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 
 	if appID == "" {
 		writeErrorResponse(w, 400, fmt.Errorf("appid required"))
+		return
+	}
+
+	if appID == strconv.Itoa(CloseLibraryAppID) && s.closeLibraryOffered() {
+		s.closeLibrary(w, r)
 		return
 	}
 
@@ -866,6 +891,39 @@ func streamRefusal(session *v1alpha1types.Session) *streamRefusedError {
 		return nil
 	}
 	return &streamRefusedError{message: cond.Message, generation: cond.ObservedGeneration}
+}
+
+// closeLibrary answers a launch of the "Close Library" tile. Any paired user
+// may close it: the Library is one shared desktop, and while it runs nobody
+// can play. Nothing streams, so the answer is always a message.
+func (s *RESTServer) closeLibrary(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), libraryCallTimeout)
+	defer cancel()
+	closing, err := s.Library.Close(ctx)
+	message := libraryNotOpenMessage
+	switch {
+	case err != nil:
+		// The API error names the namespace and ServiceAccount; the user
+		// gets a plain message, the log the detail.
+		klog.Errorf("Failed to close the Library: %v", err)
+		message = libraryCloseFailedMessage
+	case closing:
+		if user, ok := r.Context().Value(userContextKey{}).(*v1alpha1types.User); ok {
+			klog.Infof("User %s closed the Library from Moonlight", user.Name)
+		}
+		message = libraryClosingMessage
+	}
+	sendXMLWithHTTPStatus(w, http.StatusOK, Response{StatusCode: libraryClosingStatusCode, StatusMessage: message})
+}
+
+// closeLibraryOffered reports whether the "Close Library" tile exists: a
+// Library is configured, and no App claims its ID.
+func (s *RESTServer) closeLibraryOffered() bool {
+	if s.Library == nil {
+		return false
+	}
+	_, err := s.getAppByID(strconv.Itoa(CloseLibraryAppID))
+	return err != nil
 }
 
 func busyResponse(reason string) Response {

@@ -32,9 +32,8 @@ import (
 )
 
 const (
-	// LibraryPodName is the one Library pod per namespace. A fixed name makes
-	// concurrent visits converge on one Create (the rest get AlreadyExists).
-	LibraryPodName = "direwolf-library"
+	// LibraryPodName is the one Library pod per namespace.
+	LibraryPodName = v1alpha1types.LibraryPodName
 
 	libraryContainer = "library"
 	// libraryAuthSecret holds the password Selkies' nginx demands (basic
@@ -417,7 +416,9 @@ func (c *LibraryController) scanCatalogue(ctx context.Context, pod *corev1.Pod, 
 // steamShutdownCommand runs `steam -shutdown` as the desktop user (only if
 // Steam is running: on a stopped Steam it would start one) and waits for the
 // Steam process to exit. Plain sh and /proc only, so it needs no extra tools.
-var steamShutdownCommand = []string{"sh", "-c", `
+var steamShutdownCommand = []string{"sh", "-c", steamShutdownScript}
+
+const steamShutdownScript = `
 running() { grep -qx steam /proc/[0-9]*/comm 2>/dev/null; }
 running || exit 0
 HOME=` + libraryHome + ` s6-setuidgid abc /usr/bin/steam -shutdown >/dev/null 2>&1 &
@@ -426,7 +427,7 @@ while running; do
   i=$((i+1)); [ "$i" -ge 60 ] && { echo "steam still running after 60s" >&2; exit 1; }
   sleep 1
 done
-`}
+`
 
 // steamRelinkScript repoints every link in $1/.steam that Steam made
 // absolute under the Library's home ($2, /config) at the same path under the
@@ -448,6 +449,18 @@ done
 // Session pods run it too (steamRelinkContainer), as a Library pod that ends
 // without stop() never gets here (XERK-1951).
 var steamRelinkCommand = []string{"s6-setuidgid", "abc", "sh", "-c", steamRelinkScript, "sh", libraryHome, libraryHome, AppHomePath}
+
+// libraryPreStopCommand runs stop()'s shutdown and relink on any delete that
+// skips stop(): moonlight-proxy's "Close Library" tile deletes the pod (it may
+// not exec into it), as does a manual delete. After stop() both are no-ops.
+var libraryPreStopCommand = []string{"sh", "-c",
+	"(" + steamShutdownScript + "); s6-setuidgid abc sh -c \"$1\" sh " + libraryHome + " " + libraryHome + " " + AppHomePath,
+	"sh", steamRelinkScript,
+}
+
+// libraryTerminationGracePeriod covers the preStop hook: Steam's 60s shutdown
+// wait plus the relink, with room to spare before the kubelet's SIGKILL.
+const libraryTerminationGracePeriod = int64(120)
 
 // downloadsInProgress returns what is still downloading, or "" when nothing
 // is: any entry in a Steam library's steamapps/downloading, or anything in
@@ -742,11 +755,12 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 		},
 		Spec: corev1.PodSpec{
 			// The desktop has no business talking to the Kubernetes API.
-			AutomountServiceAccountToken: new(false),
-			EnableServiceLinks:           new(false),
-			NodeSelector:                 c.NodeSelector,
-			Tolerations:                  c.Tolerations,
-			Volumes:                      volumes,
+			AutomountServiceAccountToken:  new(false),
+			EnableServiceLinks:            new(false),
+			TerminationGracePeriodSeconds: new(libraryTerminationGracePeriod),
+			NodeSelector:                  c.NodeSelector,
+			Tolerations:                   c.Tolerations,
+			Volumes:                       volumes,
 			Containers: []corev1.Container{{
 				Name:  libraryContainer,
 				Image: c.Image,
@@ -765,6 +779,9 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 						LocalObjectReference: corev1.LocalObjectReference{Name: libraryAuthSecret},
 						Key:                  libraryAuthKey,
 					}}},
+				},
+				Lifecycle: &corev1.Lifecycle{
+					PreStop: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: libraryPreStopCommand}},
 				},
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{

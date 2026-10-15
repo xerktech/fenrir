@@ -76,6 +76,17 @@ paths:
     operator replica serves the page, only the leader runs the idle check.
   - Any doubt (exec failure, unparseable Heroic store) keeps the Library up.
   - Shutdown deletes the pod even if `steam -shutdown` fails: a stuck pod would hold the lock.
+- Moonlight's "Close Library" tile (`CloseLibraryAppID`, listed only while the Library is open)
+  lets any paired user stop it, downloads or not: a tab left open elsewhere keeps it up for hours.
+  - moonlight-proxy is internet-facing, so it may only delete that one pod (chart RBAC
+    `resourceNames`); never grant it exec, or patch (a pod's image is mutable).
+  - So the pod's own preStop hook runs the Steam shutdown and relink `stop()` would; keep
+    `libraryTerminationGracePeriod` above the shutdown wait. After `stop()` both are no-ops.
+  - A delete skips `stop()`'s last catalogue scan; the next Library run picks those installs up.
+  - Its API calls are bounded (`libraryCallTimeout`): /applist is otherwise informer-only, and a
+    hung API server must cost only the tile. An App holding `CloseLibraryAppID` wins over the tile.
+  - Tests: `TestLibraryPodShutsSteamDownOnAnyDelete`; `TestPodLibrary*`, `TestCloseLibraryTile*`,
+    `TestAppWithCloseLibraryIDShadowsTile` in `pkg/moonlight/library_test.go`.
 - Only a user-activated page load (`Sec-Fetch-User: ?1`) or the stopped page's Start button
   (POST `libraryStartPath`) starts the Library.
   - Selkies calls `location.reload()` when its stream drops, so a tab left open across an idle

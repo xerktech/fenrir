@@ -221,6 +221,12 @@ rbac:
       - apiGroups: [""]
         resources: ["pods"]
         verbs: ["get", "list", "watch"]
+      # The "Close Library" tile deletes the Library pod, and only it: the
+      # proxy is internet-facing, so no patch (a pod's image is mutable).
+      - apiGroups: [""]
+        resources: ["pods"]
+        resourceNames: ["direwolf-library"]
+        verbs: ["delete"]
       - apiGroups: ["direwolf.games-on-whales.github.io"]
         resources: ["pairings", "sessions"]
         verbs: ["create", "delete", "patch", "update", "get", "list", "watch"]

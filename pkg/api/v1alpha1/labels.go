@@ -21,6 +21,11 @@ const LibraryPodLabel = "direwolf/library"
 // LibraryPodLabelValue is the value the operator sets for LibraryPodLabel.
 const LibraryPodLabelValue = "true"
 
+// LibraryPodName is the one Library pod per namespace. A fixed name makes
+// concurrent visits converge on one Create (the rest get AlreadyExists), and
+// lets the chart grant moonlight-proxy delete on this pod alone.
+const LibraryPodName = "direwolf-library"
+
 // CatalogueLabel marks an App the operator's catalogue scanner created from
 // an installed game; its value is the store (CatalogueStoreSteam, ...). The
 // scanner only ever updates or deletes Apps carrying it.
