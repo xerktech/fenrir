@@ -43,6 +43,15 @@ paths:
       hide `sh`), so a `subPathExpr` home, which kubelet expands from that env, is skipped.
     - It runs as uid 1000, never root, and only logs a failure: a failed init container ends
       the Session. Tests: `TestSessionPodRelinksSharedSteamHome`, `TestSteamRelinkContainerCommand`.
+- Heroic updates at pod start: `init-heroic-update` installs the latest GitHub release when it
+  is newer than the image's (`HEROIC_VERSION` is only the baseline); a .deb can't self-update.
+  - The .deb is cached in the Steam home (`~/.cache/direwolf-heroic`), which user code can
+    write: it is copied out, then installed only if it matches the SHA256 GitHub publishes for
+    the asset. Root never touches the home directly (`s6-setuidgid abc`): planted links.
+  - Never exits non-zero, like `init-steam-home`; offline or any mismatch keeps the image's copy.
+  - `heroic-postinstall` runs after every install (build and update): the package resets the
+    launchers and chrome-sandbox that `wrapped-heroic` replaces.
+  - Tests: `images/library/init_heroic_update_test.go` (real script, stubbed curl/dpkg).
 - Idle rule: (no browser traffic for `--library-idle-timeout` OR no user-opened page load for
   `--library-max-runtime`) AND nothing downloading.
   - An open Selkies tab sends WebSocket traffic every few seconds with nobody there, so traffic

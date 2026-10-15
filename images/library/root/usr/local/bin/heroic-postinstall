@@ -1,0 +1,17 @@
+#!/bin/bash
+# Run after every Heroic .deb install: at image build and by
+# init-heroic-update. The package's own launchers and postinst undo what
+# wrapped-heroic relies on.
+set -e
+
+# postinst makes it setuid root or not depending on the build host; it is
+# never needed, as wrapped-heroic uses user namespaces or --no-sandbox.
+chmod 0755 /opt/Heroic/chrome-sandbox
+
+# Route every heroic launcher through wrapped-heroic.
+update-alternatives --install /usr/bin/heroic heroic /usr/bin/wrapped-heroic 1000
+sed -i 's|^Exec=/opt/Heroic/heroic|Exec=/usr/bin/wrapped-heroic|' /usr/share/applications/heroic.desktop
+if grep -q '^Exec=/opt/Heroic' /usr/share/applications/heroic.desktop; then
+  echo "heroic-postinstall: heroic.desktop still launches /opt/Heroic directly" >&2
+  exit 1
+fi

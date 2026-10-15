@@ -1,0 +1,91 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Updates Heroic at Library start to its latest GitHub release, but only when
+# that is newer than the installed version. A .deb install can't update itself
+# ("not supported for your packaging format"), and the image's own copy only
+# moves when its HEROIC_VERSION is bumped.
+#
+# The root filesystem resets with every pod, so the downloaded .deb is kept in
+# the Steam home and reused while it is still the latest release. The home is
+# user-writable (and the desktop runs user code), so a cached copy is trusted
+# only once its SHA256 matches the digest GitHub publishes for the asset, and
+# only the desktop user reads or writes there: root would follow links planted
+# in it.
+#
+# Never exits non-zero: a failed oneshot stops s6 starting the desktop and
+# leaves the pod Running but never Ready, which would hold the Steam lock.
+# Any failure keeps the installed Heroic.
+
+release_url="https://api.github.com/repos/Heroic-Games-Launcher/HeroicGamesLauncher/releases/latest"
+
+give_up() {
+  echo "init-heroic-update: $*; keeping Heroic ${installed:-as installed}" >&2
+  exit 0
+}
+
+installed="$(dpkg-query -W -f='${Version}' heroic 2>/dev/null)" || give_up "Heroic is not installed"
+[[ -n "${installed}" ]] || give_up "Heroic is not installed"
+
+release="$(curl -fsSL --max-time 30 "${release_url}")" || give_up "cannot read the latest release"
+# The amd64 .deb's name, version, URL and SHA256, tab-separated. Anything
+# unexpected (no such asset, no digest, odd version) fails here.
+fields="$(python3 -I -c '
+import json, re, sys
+r = json.load(sys.stdin)
+version = r["tag_name"].removeprefix("v")
+if not re.fullmatch(r"[0-9][0-9A-Za-z.+~-]*", version):
+    sys.exit(1)
+name = f"Heroic-{version}-linux-amd64.deb"
+asset = next(a for a in r["assets"] if a["name"] == name)
+url, digest = asset["browser_download_url"], asset["digest"] or ""
+if not url.startswith("https://github.com/") or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+    sys.exit(1)
+print(name, version, url, digest.removeprefix("sha256:"), sep="\t")
+' <<<"${release}" 2>/dev/null)" || give_up "cannot find a verifiable .deb in the latest release"
+IFS=$'\t' read -r name latest url sha <<<"${fields}"
+
+if ! dpkg --compare-versions "${latest}" gt "${installed}"; then
+  echo "init-heroic-update: Heroic ${installed} is up to date (latest ${latest})"
+  exit 0
+fi
+
+home="$(getent passwd abc | cut -d: -f6)"
+[[ -n "${home}" ]] || give_up "cannot find the desktop user's home"
+cache="${home}/.cache/direwolf-heroic"
+
+tmp="$(mktemp -d)" || give_up "cannot make a temporary directory"
+trap 'rm -rf "${tmp}"' EXIT
+# The desktop user copies the .deb into the cache from here.
+chmod 0755 "${tmp}"
+deb="${tmp}/${name}"
+
+verified() {
+  echo "${sha}  $1" | sha256sum -c --status -
+}
+
+# Copied out before the check, so the file installed is the file checked.
+# Bounded: a planted FIFO would otherwise block the desktop from starting.
+if timeout 300 s6-setuidgid abc cat -- "${cache}/${name}" >"${deb}" 2>/dev/null && verified "${deb}"; then
+  echo "init-heroic-update: using the cached ${name}"
+else
+  echo "init-heroic-update: downloading ${name}"
+  curl -fsSL --max-time 600 -o "${deb}" "${url}" || give_up "cannot download ${name}"
+  verified "${deb}" || give_up "${name} does not match its published SHA256"
+  chmod 0644 "${deb}"
+  # Only the latest is kept.
+  # shellcheck disable=SC2016 # expanded by the inner sh A failure here just means the next start downloads again.
+  timeout 300 s6-setuidgid abc sh -c 'rm -rf -- "$1" && mkdir -p -- "$1" && cp -- "$2" "$1/"' sh "${cache}" "${deb}" ||
+    echo "init-heroic-update: cannot cache ${name}; the next start downloads it again" >&2
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+if ! dpkg -i "${deb}"; then
+  # Most likely a dependency the image lacks: fetch it and finish the install.
+  if ! { apt-get update -qq && apt-get install -f -y --no-install-recommends; }; then
+    echo "init-heroic-update: installing ${name} failed; Heroic may not start until the next pod" >&2
+    exit 0
+  fi
+fi
+heroic-postinstall || echo "init-heroic-update: heroic-postinstall failed; Heroic may bypass wrapped-heroic" >&2
+echo "init-heroic-update: updated Heroic ${installed} -> ${latest}"
