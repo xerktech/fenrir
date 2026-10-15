@@ -42,6 +42,13 @@ jobs:
           # Wolf with a patched waylanddisplaysrc (XERK-1740).
           - app: wolf
             context: images/wolf
+          # GOW Steam/Heroic plus NVIDIA's 32-bit driver libraries (XERK-1930).
+          - app: steam
+            context: images/gow-nvidia32
+            target: steam
+          - app: heroic
+            context: images/gow-nvidia32
+            target: heroic
           # Go binary plus a C shim: repo-root context, own Dockerfile.
           - app: nri-nvenc-fix
             file: cmd/nri-nvenc-fix/Dockerfile
@@ -83,6 +90,7 @@ jobs:
         with:
           context: ${{ matrix.context || '{{defaultContext}}' }}
           file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
           platforms: linux/amd64
           push: ${{ !github.event.pull_request.head.repo.fork }}
           cache-from: type=gha,scope=${{ matrix.app }}

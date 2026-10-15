@@ -21,6 +21,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Non-Go images live in `images/<name>/` (own Dockerfile + context), e.g. `images/library`
   (linuxserver/steam + Heroic), `images/retroarch` (GoW RetroArch + pinned cores).
   CI builds them via matrix `include:` entries carrying `context:`.
+  - `images/gow-nvidia32` (targets `steam`, `heroic`) adds NVIDIA's i386 GL/EGL/Vulkan libs to
+    the GoW images: Talos' toolkit extension has no lib32, so a GPU claim injects 64-bit only and
+    32-bit games render on lavapipe (XERK-1930). Bump `NVIDIA_VERSION` with the Talos driver; on
+    a mismatch its cont-init hook deletes them (CPU fallback, not a crash).
   - `images/wolf` is the chart's `WOLF_IMAGE` (xerktech's ArgoCD `apps/direwolf.yaml` overrides
     it by digest; point that at this image too): wolf:stable with
     waylanddisplaysrc rebuilt from a gst-wayland-display fix. Unfixed, each stream drops a ref
