@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -202,6 +203,20 @@ func TestAppWithCloseLibraryIDShadowsTile(t *testing.T) {
 	if s.closeLibraryOffered() {
 		t.Error("tile still offered for launch")
 	}
+
+	// Launching that ID starts the App and leaves the Library alone.
+	f := newLaunchFixture(t, &RESTServerOptions{Library: lib})
+	f.server.AppLister = s.AppLister
+	f.appID = strconv.Itoa(CloseLibraryAppID)
+	if code, resp := f.launch(t, "bob"); code != http.StatusOK || resp.StatusCode != http.StatusOK {
+		t.Errorf("launch = HTTP %d, %d %q; want the App started", code, resp.StatusCode, resp.StatusMessage)
+	}
+	if n := f.sessionCount(t); n != 1 {
+		t.Errorf("%d Sessions, want the App's one", n)
+	}
+	if lib.closed.Load() != 0 {
+		t.Error("launching the App closed the Library")
+	}
 }
 
 // The tile is listed only while the Library is open, and launching it closes
@@ -235,5 +250,39 @@ func TestCloseLibraryTile(t *testing.T) {
 				t.Errorf("%d Sessions created, want none", n)
 			}
 		})
+	}
+}
+
+// hungLibrary answers only when its caller's context ends, like a hung API
+// server.
+type hungLibrary struct{}
+
+func (hungLibrary) Open(ctx context.Context) (bool, error) {
+	<-ctx.Done()
+	return false, ctx.Err()
+}
+
+func (hungLibrary) Close(ctx context.Context) (bool, error) {
+	<-ctx.Done()
+	return false, ctx.Err()
+}
+
+// A hung API server costs /applist and the tile at most libraryCallTimeout.
+func TestCloseLibraryTileBoundsHungAPIServer(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{Library: hungLibrary{}})
+	f.appID = strconv.Itoa(CloseLibraryAppID)
+	for name, call := range map[string]func(){
+		"applist": func() {
+			f.server.appListHandler(httptest.NewRecorder(), httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/applist", http.NoBody))
+		},
+		"tile launch": func() { f.launch(t, "bob") },
+	} {
+		done := make(chan struct{})
+		go func() { call(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(libraryCallTimeout + 3*time.Second):
+			t.Fatalf("%s still waiting on a hung API server", name)
+		}
 	}
 }
