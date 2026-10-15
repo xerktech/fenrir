@@ -961,6 +961,58 @@ func TestAgentCatchUpSparesLiveStreamSharingPausedID(t *testing.T) {
 	}
 }
 
+// A joined stream paused and resumed under its ID during the outage: the
+// paused entry is spared (the resume shares its ID), but the joined stream
+// is over, so its devices go.
+func TestAgentCatchUpEndsJoinedStreamResumedUnderItsID(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a, _, entry := joinedOnFreshSubscription(t, client, func() {
+		client.leave(false)
+		client.mu.Lock()
+		client.listed = []wolfapi.Session{
+			{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionPaused},
+			{ClientID: wolfStreamID, AESKey: "resumed", State: wolfapi.SessionSetup},
+		}
+		client.mu.Unlock()
+	})
+	if got := client.stopCalls(); len(got) != 0 {
+		t.Errorf("StopSession calls %v: stopped the resumed stream's ID", got)
+	}
+	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("device of the ended stream kept: %v", err)
+	}
+	if s, k := a.lobby.joinedStream(); s != "" {
+		t.Errorf("joined stream %q key %q after catching up its end, want none", s, k)
+	}
+}
+
+// A spared paused entry doesn't make the agent forget the live joined stream
+// sharing its ID: its end in a later outage is still caught.
+func TestAgentCatchUpKeepsJoinedStreamSharingPausedID(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a, ch, entry := joinedOnFreshSubscription(t, client, func() {
+		client.mu.Lock()
+		client.listed = []wolfapi.Session{
+			{ClientID: wolfStreamID, AESKey: "k-old", State: wolfapi.SessionPaused},
+			{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionStreaming},
+		}
+		client.mu.Unlock()
+	})
+	if s, _ := a.lobby.joinedStream(); s != wolfStreamID {
+		t.Fatalf("joined stream %q after the first catch-up, want %s", s, wolfStreamID)
+	}
+	if _, err := os.Stat(entry); err != nil {
+		t.Fatalf("device of the live stream dropped: %v", err)
+	}
+	client.leave(false)
+	close(ch)
+	ch = <-client.subs
+	sendOn(ch, "Done", "")
+	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("device of the stream stopped in the second outage kept: %v", err)
+	}
+}
+
 // A resume reusing the ID of a stream whose joins all failed starts afresh:
 // the old stream's spent attempts must not stop it joining.
 func TestAgentJoinsStreamStartedAfterExhaustedJoins(t *testing.T) {
