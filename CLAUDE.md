@@ -169,6 +169,9 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     reads the sidecars' mounts through `/proc/<pid>/root`. Tests: `TestBuildPodRejectsAppHostDevices`.
   - Nor declare any hostPath volume (XERK-1921): `/proc`, `/var/lib/kubelet` and more expose the
     token; a denylist always misses one. Live Apps use none; a game library goes in a local PV.
+  - Nor mount a User's hostPath volume by name (`validateNoUserHostPathMounts`, XERK-1950): User
+    volumes join the pod after the App checks. Other User volumes stay mountable by the game.
+    Tests: `TestBuildPodRejectsAppMountOfUserHostPath`.
   - wolf-agent re-reads its token and its cert on every request/handshake: the operator may
     regenerate the Secret under a running pod and uses the new token and cert at once.
   - `Agent.Run` resubscribes to Wolf's `/api/v1/events` itself; `SubscribeToEvents` is one
