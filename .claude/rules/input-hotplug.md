@@ -88,5 +88,16 @@ paths:
   - The App also sees every other uevent on the node (host netns); it can open only its own nodes.
   - `SDL_JOYSTICK_DISABLE_UDEV=1` (inotify on /dev/input) also works, but only for SDL.
   - talos04 has no `joydev`: pads get `eventN` only, no `jsN`.
+- Steam Input can't work in an App: Steam builds its virtual pad on `/dev/uinput`, which only `wolf`
+  gets, and a uinput node would land in host devtmpfs, not the agent's `/dev/input` (XERK-1931).
+  - With Steam Input on for a game, Steam still lists Wolf's pad (`0x045e/0x02ea`) in the game's
+    `SDL_GAMECONTROLLER_IGNORE_DEVICES`; Proton's winebus drops it and the game sees no pad, while
+    Big Picture works. Steam logs `Couldn't initialize virtual gamepad: Couldn't open /dev/uinput`.
+  - Fix per game: Steam Input "Disabled" (`localconfig.vdf` `UseSteamControllerConfig` "0"); Steam
+    then drops the ID from the list. `SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT` in the App env
+    does not help. A fix for all games needs a design decision (XERK-1953).
+  - Repro without Moonlight: privileged pod with the App image and Steam home, a uinput Xbox pad
+    (045e:02ea v0408) mknod'ed into a tmpfs `/dev/input`, sway headless, `PROTON_LOG=1
+    WINEDEBUG=+hid,+xinput`; grep the log for `bus_create_hid_device desc {vid 045e`.
 - Pod-spec tests: `TestSessionPodSharesHotplugVolumes`, `TestSessionPodKeepsAppsOwnInputMount`
   (`pkg/controllers/session_test.go`); `TestCreateAndRemoveDeviceNode` (`pkg/fakeudev`).
