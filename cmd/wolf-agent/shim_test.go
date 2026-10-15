@@ -123,11 +123,20 @@ for name in sys.argv[1:]:
         try:
             kept.append(s.accept())
         except OSError:
-            pass  # s.close() below; an unhandled EBADF would race the output
-    threading.Thread(target=accept_forever, daemon=True).start()
+            pass  # s.shutdown() below ends the accept
+    t = threading.Thread(target=accept_forever, daemon=True)
+    t.start()
     c = connect(port)
-    print(port, "blocking", closed(c))
+    # A Wolf port's accept is still looping in the shim; another port's returned.
+    print(port, "blocking", closed(c), "looping" if t.is_alive() else "returned")
     c.close()
+    # End the accept before closing: a thread still looping in the shim would
+    # re-enter accept on the reused fd number and take the next listener's
+    # connection, which it then closes (the flake).
+    s.shutdown(socket.SHUT_RDWR)
+    t.join(5)
+    if t.is_alive():
+        sys.exit("blocking accept did not end")
     s.close()
 `
 	http, https, other := freePort(t), freePort(t), freePort(t)
@@ -142,15 +151,15 @@ for name in sys.argv[1:]:
 		http + " accept4 EAGAIN True",
 		http + " plain EAGAIN True",
 		http + " ipv6 EAGAIN True",
-		http + " blocking True",
+		http + " blocking True looping",
 		https + " accept4 EAGAIN True",
 		https + " plain EAGAIN True",
 		https + " ipv6 EAGAIN True",
-		https + " blocking True",
+		https + " blocking True looping",
 		other + " accept4 accepted ",
 		other + " plain accepted ",
 		other + " ipv6 accepted ",
-		other + " blocking False",
+		other + " blocking False returned",
 	}, "\n")
 	if got != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
