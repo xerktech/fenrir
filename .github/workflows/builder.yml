@@ -285,6 +285,8 @@ jobs:
 
       # Tagged before the push, so a version is never published twice: if the
       # push then fails, the next run skips this version rather than reusing it.
+      # A re-run then refuses (already tagged); ship the commit with the next
+      # merge or a minor dispatch.
       - name: Tag the release
         env:
           VERSION: ${{ steps.get_version.outputs.version }}
