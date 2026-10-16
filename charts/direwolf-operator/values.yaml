@@ -79,9 +79,10 @@ controllers:
           # wolf-agent's catch-up reads (XERK-1947), and stops closing a stray fd on
           # every runner start, which wedged launch and RTSP (XERK-1929), and keeps
           # config.toml intact under concurrent API writes (XERK-1962), and a frozen
-          # stream's stop no longer hangs every launch and RTSP (XERK-1966).
+          # stream's stop no longer hangs every launch and RTSP (XERK-1966), and failed
+          # OpenSSL calls stop pairing/control instead of carrying on (XERK-2015).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-0d75d89@sha256:99eb368a1187ea7e4c63f86aa3fd4fd44a2464f1ab8e2c57c587087b3d105376
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-4425be4@sha256:2a5546ecca2eadaefc49f981e98384161882dc631632662a2705dba30558dc56
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
