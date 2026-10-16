@@ -42,6 +42,11 @@ paths:
   - The base should be `hidden: true`; copies reset `hidden` to false on create.
   - `hidden` and `gpu` are per-game settings: set from the base on create, then the user's.
     Everything else (template, wolfConfig, volumes) follows the base on every scan.
+  - A base App change also reaches existing copies without a scan (XERK-1963): `RunRefresh`
+    (leader, on `BaseAppChanges` and every `catalogueRefreshInterval`) re-copies the base.
+    It reads each game back from its App; the ID annotation goes into a shell line, so it is
+    checked as a scan would and must still give the App's name. It creates/deletes nothing.
+    Tests: `catalogue_refresh_test.go`.
 - The Library's files are user-writable, so treat them as untrusted:
   - Heroic appNames must match `heroicAppName` (they go into a shell line and a URL).
   - Box art is fetched only over https from `artHosts`, every redirect re-checked, at most

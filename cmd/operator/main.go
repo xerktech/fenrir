@@ -217,6 +217,7 @@ func main() {
 	)
 
 	var libraryController *controllers.LibraryController
+	var catalogueBaseChanged <-chan struct{}
 	if *libraryPort != 0 {
 		libraryController = controllers.NewLibraryController(
 			*namespace,
@@ -242,6 +243,10 @@ func main() {
 				*libraryGamesPath,
 				controllers.CatalogueOptions{SteamBaseApp: *catalogueSteamApp, HeroicBaseApp: *catalogueHeroicApp},
 			)
+			catalogueBaseChanged, err = controllers.BaseAppChanges(appInformer, *catalogueSteamApp, *catalogueHeroicApp)
+			if err != nil {
+				klog.Fatalf("Catalogue: %v", err)
+			}
 		}
 		// Every replica serves the page (activity is recorded on the pod);
 		// only the leader runs the idle check.
@@ -284,6 +289,10 @@ func main() {
 							appCancel()
 						}
 					}()
+				}
+				if catalogueBaseChanged != nil {
+					// A base App change reaches its games without a Library scan.
+					go libraryController.Catalogue.RunRefresh(appContext, catalogueBaseChanged)
 				}
 				if romm != nil {
 					go func() {

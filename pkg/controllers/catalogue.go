@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -34,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -45,6 +47,10 @@ const (
 	// Games are only installed or uninstalled from the Library, so its pod is
 	// the only place the catalogue can change (plus one last scan as it stops).
 	catalogueScanInterval = 2 * time.Minute
+	// catalogueRefreshInterval is how often the catalogue Apps are re-copied
+	// from their base Apps with no base App change seen: it heals a missed
+	// event or a refresh that lost a write conflict.
+	catalogueRefreshInterval = 10 * time.Minute
 
 	// catalogueIDAnnotation is the store's own ID of the game (Steam appid,
 	// Heroic appName); App names are derived from it and may be lossy.
@@ -144,8 +150,8 @@ type catalogueGame struct {
 }
 
 // Catalogue keeps one App per installed game in sync with the Library's Steam
-// and Heroic installs. It is driven by the LibraryController (one worker), so
-// it is not safe for concurrent use.
+// and Heroic installs. Scan is driven by the LibraryController (one worker);
+// Sync and Refresh may run concurrently with it.
 type Catalogue struct {
 	Apps      v1alpha1client.AppInterface
 	Exec      PodExecutor
@@ -157,6 +163,8 @@ type Catalogue struct {
 	now       func() time.Time
 	lastScan  time.Time
 	artFailed map[string]time.Time
+	// mu serialises Sync and Refresh (artFailed, and their App writes).
+	mu sync.Mutex
 }
 
 func NewCatalogue(apps v1alpha1client.AppInterface, exec PodExecutor, gamesPath string, options CatalogueOptions) *Catalogue {
@@ -705,53 +713,15 @@ func truncateTitle(s string) string {
 // the changed and deletes those whose game is gone, for each launcher whose
 // base App is set and readable. Box art is fetched for at most artBudget.
 func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame, artBudget time.Duration) error {
-	bases := map[string]*v1alpha1types.App{}
-	var errs []error
-	for _, b := range []struct {
-		name   string
-		stores []string
-	}{
-		{c.SteamBaseApp, []string{v1alpha1types.CatalogueStoreSteam}},
-		{c.HeroicBaseApp, []string{v1alpha1types.CatalogueStoreEpic, v1alpha1types.CatalogueStoreGOG}},
-		{c.RomMBaseApp, []string{v1alpha1types.CatalogueStoreRomM}},
-	} {
-		if b.name == "" {
-			continue
-		}
-		base, err := c.Apps.Get(ctx, b.name, metav1.GetOptions{})
-		if err == nil && (base.Spec.Template == nil || len(base.Spec.Template.Spec.Containers) == 0) {
-			err = errors.New("it has no pod template containers to launch the game in")
-		}
-		if err != nil {
-			// Its launcher's Apps are left as they are, not deleted.
-			errs = append(errs, fmt.Errorf("base App %s: %w", b.name, err))
-			continue
-		}
-		for _, s := range b.stores {
-			bases[s] = base
-		}
-	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	bases, errs := c.bases(ctx)
 	if len(bases) == 0 {
 		return errors.Join(errs...)
 	}
-
-	stores := make([]string, 0, len(bases))
-	for s := range bases {
-		stores = append(stores, s)
-	}
-	req, err := labels.NewRequirement(v1alpha1types.CatalogueLabel, selection.In, stores)
+	existing, err := c.catalogueApps(ctx, bases)
 	if err != nil {
-		return fmt.Errorf("building catalogue selector: %w", err)
-	}
-	// From the API server, not a cache: a stale list would recreate or keep
-	// Apps the last scan already handled.
-	list, err := c.Apps.List(ctx, metav1.ListOptions{LabelSelector: labels.NewSelector().Add(*req).String()})
-	if err != nil {
-		return errors.Join(append(errs, fmt.Errorf("listing catalogue Apps: %w", err))...)
-	}
-	existing := make(map[string]*v1alpha1types.App, len(list.Items))
-	for i := range list.Items {
-		existing[list.Items[i].Name] = &list.Items[i]
+		return errors.Join(append(errs, err)...)
 	}
 
 	artCtx, cancel := context.WithTimeout(ctx, artBudget)
@@ -790,6 +760,176 @@ func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame, artBudget t
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// bases reads each configured launcher's base App, by store. A launcher whose
+// base App is missing or unusable is left out, with an error.
+func (c *Catalogue) bases(ctx context.Context) (map[string]*v1alpha1types.App, []error) {
+	bases := map[string]*v1alpha1types.App{}
+	var errs []error
+	for _, b := range []struct {
+		name   string
+		stores []string
+	}{
+		{c.SteamBaseApp, []string{v1alpha1types.CatalogueStoreSteam}},
+		{c.HeroicBaseApp, []string{v1alpha1types.CatalogueStoreEpic, v1alpha1types.CatalogueStoreGOG}},
+		{c.RomMBaseApp, []string{v1alpha1types.CatalogueStoreRomM}},
+	} {
+		if b.name == "" {
+			continue
+		}
+		base, err := c.Apps.Get(ctx, b.name, metav1.GetOptions{})
+		if err == nil && (base.Spec.Template == nil || len(base.Spec.Template.Spec.Containers) == 0) {
+			err = errors.New("it has no pod template containers to launch the game in")
+		}
+		if err != nil {
+			// Its launcher's Apps are left as they are, not deleted.
+			errs = append(errs, fmt.Errorf("base App %s: %w", b.name, err))
+			continue
+		}
+		for _, s := range b.stores {
+			bases[s] = base
+		}
+	}
+	return bases, errs
+}
+
+// catalogueApps lists, by name, the catalogue Apps of the stores in bases.
+func (c *Catalogue) catalogueApps(ctx context.Context, bases map[string]*v1alpha1types.App) (map[string]*v1alpha1types.App, error) {
+	stores := make([]string, 0, len(bases))
+	for s := range bases {
+		stores = append(stores, s)
+	}
+	req, err := labels.NewRequirement(v1alpha1types.CatalogueLabel, selection.In, stores)
+	if err != nil {
+		return nil, fmt.Errorf("building catalogue selector: %w", err)
+	}
+	// From the API server, not a cache: a stale list would recreate or keep
+	// Apps the last scan already handled.
+	list, err := c.Apps.List(ctx, metav1.ListOptions{LabelSelector: labels.NewSelector().Add(*req).String()})
+	if err != nil {
+		return nil, fmt.Errorf("listing catalogue Apps: %w", err)
+	}
+	existing := make(map[string]*v1alpha1types.App, len(list.Items))
+	for i := range list.Items {
+		existing[list.Items[i].Name] = &list.Items[i]
+	}
+	return existing, nil
+}
+
+// Refresh re-copies each base App onto the catalogue Apps made from it,
+// without a scan, so a base App change reaches the games before the Library
+// next runs (XERK-1963). Each App's game is read back from the App itself
+// (store label, ID annotation, title, launch command); it creates and
+// deletes nothing and fetches no art.
+func (c *Catalogue) Refresh(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	bases, errs := c.bases(ctx)
+	if len(bases) == 0 {
+		return errors.Join(errs...)
+	}
+	existing, err := c.catalogueApps(ctx, bases)
+	if err != nil {
+		return errors.Join(append(errs, err)...)
+	}
+	for name, app := range existing {
+		game, err := catalogueGameOf(app)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("catalogue App %s: %w", name, err))
+			continue
+		}
+		// No ArtURL: art() fetches nothing and the App keeps its cover.
+		if err := c.syncApp(ctx, ctx, bases[game.Store], game, name, app); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// catalogueGameOf is the game a catalogue App was made for, as a scan would
+// have found it. The ID annotation goes into a shell line, so it is checked
+// as a scan checks an ID, and must still give the App's name.
+func catalogueGameOf(app *v1alpha1types.App) (catalogueGame, error) {
+	game := catalogueGame{
+		Store: app.Labels[v1alpha1types.CatalogueLabel],
+		ID:    app.Annotations[catalogueIDAnnotation],
+		Title: app.Spec.Title,
+	}
+	switch game.Store {
+	case v1alpha1types.CatalogueStoreSteam, v1alpha1types.CatalogueStoreRomM:
+		if n, err := strconv.ParseUint(game.ID, 10, 32); err != nil || n == 0 || strconv.FormatUint(n, 10) != game.ID {
+			return game, errors.New("its catalogue ID is not a canonical non-zero number")
+		}
+	default:
+		if !heroicAppName.MatchString(game.ID) {
+			return game, errors.New("its catalogue ID is not a valid Heroic appName")
+		}
+	}
+	if catalogueAppName(game.Store, game.ID) != app.Name {
+		return game, errors.New("its catalogue ID does not match its name")
+	}
+	if game.Store == v1alpha1types.CatalogueStoreRomM {
+		// A ROM's launch line (core and ROM path) comes from RomM, not its ID.
+		if app.Spec.Template != nil {
+			for _, ctr := range app.Spec.Template.Spec.Containers {
+				for _, e := range ctr.Env {
+					if e.Name == LaunchCommandEnv && e.Value != "" {
+						game.Launch = e.Value
+					}
+				}
+			}
+		}
+		if game.Launch == "" {
+			return game, errors.New("it has no launch command")
+		}
+	}
+	return game, nil
+}
+
+// RunRefresh calls Refresh now, on every signal from changed, and every
+// catalogueRefreshInterval, until ctx is done. A failed refresh is logged.
+func (c *Catalogue) RunRefresh(ctx context.Context, changed <-chan struct{}) {
+	for {
+		if err := c.Refresh(ctx); err != nil && ctx.Err() == nil {
+			klog.Errorf("Catalogue refresh: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+		case <-time.After(catalogueRefreshInterval):
+		}
+	}
+}
+
+// BaseAppChanges signals (coalesced, never blocking the informer) when one of
+// the named Apps is added or its spec changes.
+func BaseAppChanges(informer cache.SharedIndexInformer, names ...string) (<-chan struct{}, error) {
+	changed := make(chan struct{}, 1)
+	signal := func(obj any) {
+		if app, ok := obj.(*v1alpha1types.App); ok && slices.Contains(names, app.Name) {
+			select {
+			case changed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: signal,
+		UpdateFunc: func(oldObj, newObj any) {
+			// Not on a resync: only a spec change needs re-copying.
+			o, ok1 := oldObj.(*v1alpha1types.App)
+			n, ok2 := newObj.(*v1alpha1types.App)
+			if ok1 && ok2 && !reflect.DeepEqual(o.Spec, n.Spec) {
+				signal(n)
+			}
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("watching base Apps: %w", err)
+	}
+	return changed, nil
 }
 
 // syncApp creates or updates one game's App from its launcher's base App.
