@@ -104,10 +104,12 @@ Three binaries in `cmd/`, all sharing `pkg/`:
         then RTP pings): Wolf switches only running pipelines to the lobby's producers.
       - Wolf runs with `WOLF_USE_ZERO_COPY=FALSE` so a stream's own producer has the lobby's caps
         (`video/x-raw`); mismatched caps break every second producer switch on VA.
-      - A stream's Wolf session ID is its paired client's cert hash, and a dead client's ENet peer
-        pauses that ID seconds after a /resume. So the init container seeds Wolf's config (on
-        the PVC) with a few paired clients and consecutive attaches use different ones
-        (`wolf_clients.go`, XERK-1380). IDs still repeat: tell streams apart by events, not ID.
+      - A stream's Wolf session ID is its paired client's cert hash. The init container seeds
+        Wolf's config (on the PVC) with one paired client every attach uses (`wolf_clients.go`).
+        IDs repeat across resumes: tell streams apart by events, not ID.
+      - A dead client's ENet peer times out seconds after a /resume reused its ID. The fork
+        (XERK-1948) then fires `EndSupersededStreamEvent`, not a pause, and ends only the old
+        stream; wolf-agent ignores it. Older Wolf paused the resumed stream (XERK-1380, XERK-1964).
       - Tests: `TestFirstAttachCreatesLobbyBeforeStream`, `agent_lobby_test.go`.
   - Every pod listener (Wolf HTTP/HTTPS too, wolf-agent) must come from the session's port block
     (`pkg/controllers/ports.go`, `--session-port-range`), or pods on the node collide.

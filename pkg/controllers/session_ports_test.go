@@ -190,7 +190,7 @@ type fakeAgent struct {
 func newFakeAgent(t *testing.T) *fakeAgent {
 	t.Helper()
 	a := &fakeAgent{sessions: "[]", lobbies: `[{"id":"lobby-1","name":"alex-1","connected_sessions":[]}]`,
-		// The seeded stream clients, out of order, and one paired otherwise.
+		// The old rotation's four stream clients, out of order, and one paired otherwise.
 		clients: `[{"client_id":"13","app_state_folder":"direwolf-stream-3"},{"client_id":"99","app_state_folder":"someone"},` +
 			`{"client_id":"10","app_state_folder":"direwolf-stream-0"},{"client_id":"11","app_state_folder":"direwolf-stream-1"},` +
 			`{"client_id":"12","app_state_folder":"direwolf-stream-2"}]`}

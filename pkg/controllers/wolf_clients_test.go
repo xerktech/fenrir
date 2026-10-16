@@ -49,7 +49,8 @@ func TestWolfConfigSeed(t *testing.T) {
 }
 
 // The init container seeds a volume once: a config without the stream
-// clients is kept beside the seed, one with them is left alone.
+// client is kept beside the seed, one with it (or the old rotation's four
+// clients) is left alone.
 func TestWolfConfigSeedScript(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -75,26 +76,35 @@ func TestWolfConfigSeedScript(t *testing.T) {
 		return string(b)
 	}
 
-	run("seed 1 direwolf-stream-3\n")
-	if got := read(cfg); got != "seed 1 direwolf-stream-3\n" {
+	run("seed 1 direwolf-stream-0\n")
+	if got := read(cfg); got != "seed 1 direwolf-stream-0\n" {
 		t.Errorf("fresh volume: config %q, want the seed", got)
 	}
 
 	// Wolf migrated it (single-quoted strings); later pods keep it.
-	migrated := "app_state_folder = 'direwolf-stream-3'\n"
+	migrated := "app_state_folder = 'direwolf-stream-0'\n"
 	if err := os.WriteFile(cfg, []byte(migrated), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	run("seed 2 direwolf-stream-3\n")
+	run("seed 2 direwolf-stream-0\n")
 	if got := read(cfg); got != migrated {
 		t.Errorf("seeded volume: config %q, want it untouched", got)
+	}
+
+	rotated := "app_state_folder = 'direwolf-stream-0'\napp_state_folder = 'direwolf-stream-3'\n"
+	if err := os.WriteFile(cfg, []byte(rotated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("seed 3 direwolf-stream-0\n")
+	if got := read(cfg); got != rotated {
+		t.Errorf("volume seeded by the rotation: config %q, want it untouched", got)
 	}
 
 	if err := os.WriteFile(cfg, []byte("paired_clients = []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	run("seed 3 direwolf-stream-3\n")
-	if got := read(cfg); got != "seed 3 direwolf-stream-3\n" {
+	run("seed 4 direwolf-stream-0\n")
+	if got := read(cfg); got != "seed 4 direwolf-stream-0\n" {
 		t.Errorf("old config: config %q, want the seed", got)
 	}
 	if got := read(cfg + ".pre-direwolf"); got != "paired_clients = []\n" {

@@ -874,11 +874,11 @@ func TestResumeWithoutLobbyEndsSession(t *testing.T) {
 	}
 }
 
-// A resume's stream must not share the session ID of the stream it
-// supersedes: that stream's dead client is timed out by Wolf later, and its
-// pause would end every stream with the ID (XERK-1380). The IDs are the
-// seeded stream clients', picked by generation.
-func TestResumeUsesAnotherWolfClient(t *testing.T) {
+// Every attach streams with the first seeded stream client, also on a
+// volume seeded with the old rotation's four: the xerktech/wolf fork keeps a
+// dead client's late timeout from ending a resume that reuses its ID
+// (XERK-1948, XERK-1964).
+func TestResumeKeepsOneWolfClient(t *testing.T) {
 	agent := newFakeAgent(t)
 	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
 		s := f.session("alex-1", f.user)
@@ -888,7 +888,7 @@ func TestResumeUsesAnotherWolfClient(t *testing.T) {
 	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
 
 	var used []string
-	for gen := int64(1); gen <= 5; gen++ {
+	for gen := int64(1); gen <= 3; gen++ {
 		sess.Generation = gen
 		sess.Spec.Config.AESKey = fmt.Sprintf("key-%d", gen)
 		if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
@@ -896,7 +896,7 @@ func TestResumeUsesAnotherWolfClient(t *testing.T) {
 		}
 		used = append(used, agent.last.ClientID)
 	}
-	if want := []string{"11", "12", "13", "10", "11"}; !slices.Equal(used, want) {
+	if want := []string{"10", "10", "10"}; !slices.Equal(used, want) {
 		t.Errorf("attaches used Wolf clients %v, want %v", used, want)
 	}
 }

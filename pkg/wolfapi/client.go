@@ -275,6 +275,10 @@ const (
 	StopStreamEventType   WolfEventType = "wolf::core::events::StopStreamEvent"
 	PlugDeviceEventType   WolfEventType = "wolf::core::events::PlugDeviceEvent"
 	UnplugDeviceEventType WolfEventType = "wolf::core::events::UnplugDeviceEvent"
+	// EndSupersededStreamEventType fires (xerktech/wolf, XERK-1948) in place
+	// of a pause when the ENet peer of a stream a newer one replaced under the
+	// same session ID disconnects: Wolf ends only that old stream's pipelines.
+	EndSupersededStreamEventType WolfEventType = "wolf::core::events::EndSupersededStreamEvent"
 	// VideoSessionEventType and AudioSessionEventType fire when the client's
 	// RTSP setup asks for the video/audio stream; the pipeline itself starts
 	// on the stream's first RTP ping.
@@ -289,9 +293,9 @@ const (
 
 // PauseStreamEvent also decodes StopStreamEvent.
 //
-// A stream's session ID is a hash of its paired client's cert. The operator
-// rotates a pod's attaches over a few clients (wolfStreamClientID), so IDs
-// repeat across a pod's streams: tell streams apart by events, not ID.
+// A stream's session ID is a hash of its paired client's cert. Every attach
+// of a pod uses the same client (wolfStreamClientID), so IDs repeat across a
+// pod's streams: tell streams apart by events, not ID.
 type PauseStreamEvent struct {
 	SessionID string `json:"session_id"`
 }
