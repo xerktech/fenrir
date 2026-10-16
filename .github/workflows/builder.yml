@@ -1,21 +1,30 @@
 name: Build and Push Docker Images
 
+# Every run on main publishes the chart as the next MAJOR.MINOR.PATCH and tags
+# the commit v<version> (hack/release/next-chart-version.sh reads those tags).
 on:
   push:
     branches: [main]
 
-  release:
-    types: [released]
-
-  # Re-runs a build a push failed to trigger (e.g. an Actions outage).
+  # A manual minor/major release, or a patch re-run of a build a push failed
+  # to trigger (e.g. an Actions outage).
   workflow_dispatch:
+    inputs:
+      release_type:
+        description: "patch (as every main merge), or a manual minor/major bump"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
 
+# Queued, never cancelled: a run cancelled between its tag and its chart push
+# would leave a version whose chart never shipped.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 permissions:
   packages: write
+  contents: write # the v<version> release tag
 
 env:
   # build-push-action uploads a .dockerbuild build-record artifact per build, and it
@@ -121,6 +130,8 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          # next-chart-version.sh counts from the v* tags.
+          fetch-tags: true
 
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -129,39 +140,23 @@ jobs:
 
       - name: Get chart version
         id: get_version
-        uses: mikefarah/yq@1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d # v4.53.3
-        # Refs reach the script as environment variables, never as ${{ }}
-        # splices: a tag name is attacker-shaped text (it may contain $(...)).
+        # Inputs and refs reach the script as environment variables, never as
+        # ${{ }} splices.
         env:
           REF: ${{ github.ref }}
-          REF_NAME: ${{ github.ref_name }}
-          RUN_ID: ${{ github.run_id }}
-        with:
-          cmd: |
-            set -euo pipefail
-                        
-            CHART_PATH="charts/direwolf-operator"
-
-            if [[ "$REF" == refs/tags/* ]]; then
-              FULL_VERSION="${REF_NAME}"
-            else
-              if [ ! -f "$CHART_PATH/Chart.yaml" ]; then
-                echo "Chart.yaml not found at $CHART_PATH" >&2
-                exit 1
-              fi
-            
-              BASE_VERSION="$(yq e '.version' "${CHART_PATH}/Chart.yaml")"
-              if [ -z "$BASE_VERSION" ]; then
-                echo "Could not determine chart version" >&2
-                exit 1
-              fi
-              FULL_VERSION="${BASE_VERSION}-${RUN_ID}-SNAPSHOT"
-              #FULL_VERSION="${BASE_VERSION}-SNAPSHOT"
-            fi
-            
-            echo "Full Version: $FULL_VERSION"          
-            yq e -i ".version = \\"$FULL_VERSION\\"" "${CHART_PATH}/Chart.yaml"
-            echo "version=$FULL_VERSION" >> "$GITHUB_OUTPUT"
+          RELEASE_TYPE: ${{ inputs.release_type || 'patch' }}
+        run: |
+          set -euo pipefail
+          # Versions are cut from main only: a dispatch on a branch would
+          # publish and tag an unreviewed build.
+          if [ "$REF" != refs/heads/main ]; then
+            echo "Releases run on main only, not $REF" >&2
+            exit 1
+          fi
+          VERSION="$(hack/release/next-chart-version.sh "$RELEASE_TYPE")"
+          echo "Chart version: $VERSION ($RELEASE_TYPE)"
+          yq e -i ".version = \"$VERSION\" | .appVersion = \"$VERSION\"" charts/direwolf-operator/Chart.yaml
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Copy CRDs into chart
         run: |
@@ -239,6 +234,16 @@ jobs:
           set -euo pipefail
           echo "Logging in to ghcr.io with helm registry login"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
+      # Tagged before the push, so a version is never published twice: if the
+      # push then fails, the next run skips this version rather than reusing it.
+      - name: Tag the release
+        env:
+          VERSION: ${{ steps.get_version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git tag "v$VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/v$VERSION"
 
       - name: Push packaged chart with Helm (OCI)
         env:

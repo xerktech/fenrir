@@ -13,7 +13,9 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
 
 ### Deploy
 
-- Each merge to `main` publishes chart `0.0.1-<run id>-SNAPSHOT` (images pinned by digest).
+- Each merge to `main` publishes chart `MAJOR.MINOR.PATCH` with PATCH + 1 (images pinned by
+  digest) and tags the commit `v<version>`. A minor or major release is a manual run of
+  "Build and Push Docker Images" with `release_type`.
   Nothing follows `main`: bump `targetRevision` in `apps/direwolf.yaml` to deploy it.
 - A change that adds operator/proxy flags or a new kind lands in ArgoCD in the same bump.
 
