@@ -1,9 +1,11 @@
 ---
 apiVersion: v2
-appVersion: 0.0.1
+# version and appVersion are set at release by .github/workflows/builder.yml
+# (next v<MAJOR>.<MINOR>.<PATCH> tag); these are placeholders.
+appVersion: 0.0.0
 description: Streams graphic applications/games (retroarch, firefox, steam) running on Kubernetes
 name: direwolf-operator
-version: 0.0.1
+version: 0.0.0
 kubeVersion: ">=1.28.0-0"
 keywords:
   - games-on-whales

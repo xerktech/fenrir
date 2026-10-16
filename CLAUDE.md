@@ -202,3 +202,10 @@ Three binaries in `cmd/`, all sharing `pkg/`:
   is named `direwolf-operator`), then rewrites chart `values.yaml` image refs to digests and pushes
   the chart as OCI.
   - Pass `github.ref*` into scripts via `env:`, never `${{ }}` splices — tag names are untrusted.
+  - Chart version = next `v*` tag (`hack/release/next-chart-version.sh`): PATCH + 1 per merge,
+    minor/major by `workflow_dispatch`. The tag is the only record (nothing committed); it is
+    pushed before the chart, so a failed push skips a version rather than republishing one.
+  - ArgoCD auto-deploys every published chart (tracks `0.*`), so builder.yml is a deploy path:
+    keep `permissions: {}` with per-job grants, the `tests` gate, `plan`'s main-tip check, and the
+    script's refusal of a commit older than the latest tag (a re-run would roll production back).
+    Never add a deploy credential here (public repo); the cluster pulls.
