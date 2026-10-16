@@ -158,7 +158,7 @@ func TestHeroicUpdateInstallsNewerRelease(t *testing.T) {
 }
 
 func TestHeroicUpdateSkipsCurrentOrOlderRelease(t *testing.T) {
-	for _, installed := range []string{"2.22.4", "2.23.0"} {
+	for _, installed := range []string{"2.22.4", "2.23.0", "2.100.0"} {
 		p := newHeroicPod(t)
 		const deb = "heroic 2.22.4"
 		if calls := p.run(installed, deb, "sha256:"+sha256Hex(deb)); calls != "" {
