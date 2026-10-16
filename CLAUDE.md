@@ -206,5 +206,6 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     minor/major by `workflow_dispatch`. The tag is the only record (nothing committed); it is
     pushed before the chart, so a failed push skips a version rather than republishing one.
   - ArgoCD auto-deploys every published chart (tracks `0.*`), so builder.yml is a deploy path:
-    keep `permissions: {}` with per-job grants, the `tests` gate, and the main-only check.
+    keep `permissions: {}` with per-job grants, the `tests` gate, `plan`'s main-tip check, and the
+    script's refusal of a commit older than the latest tag (a re-run would roll production back).
     Never add a deploy credential here (public repo); the cluster pulls.

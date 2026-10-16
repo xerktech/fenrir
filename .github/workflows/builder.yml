@@ -16,8 +16,10 @@ on:
         options: [patch, minor, major]
         default: patch
 
-# Queued, never cancelled: a run cancelled between its tag and its chart push
-# would leave a version whose chart never shipped.
+# A running release is never cancelled: cancelled between its tag and its chart
+# push, it would leave a version whose chart never shipped. GitHub keeps one run
+# waiting and a newer one replaces it; a replaced merge still ships in the next
+# release, but a replaced minor/major dispatch must be run again.
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
@@ -34,15 +36,50 @@ env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
+  # Only main's current tip is released. A branch dispatch would publish an
+  # unreviewed build, and a run main has moved past (a re-run, or a merge that
+  # waited behind another release) is shipped by the newer run instead.
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.tip.outputs.release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Check this is main's tip
+        id: tip
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != refs/heads/main ]; then
+            echo "::error::Releases run on main only, not $REF"
+            exit 1
+          fi
+          tip="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::notice::main is at $tip, past $GITHUB_SHA; its own run releases it"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
   # A red main publishes nothing, so deploys nothing.
   tests:
+    needs: plan
+    if: ${{ needs.plan.outputs.release == 'true' }}
     uses: ./.github/workflows/test.yml
     permissions:
       contents: read
 
   build_and_push_containers:
     runs-on: ubuntu-latest
-    needs: tests
+    needs: [plan, tests]
+    if: ${{ needs.plan.outputs.release == 'true' }}
     permissions:
       contents: read
       packages: write
@@ -133,11 +170,11 @@ jobs:
 
   build_and_push_chart:
     runs-on: ubuntu-latest
-    needs: [tests, build_and_push_containers]
+    needs: [plan, tests, build_and_push_containers]
     # Runs even if a matrix leg failed: the chart only needs the Go image
     # digests, and a missing one fails its download step below. Never past
     # failed tests.
-    if: ${{ !cancelled() && needs.tests.result == 'success' }}
+    if: ${{ !cancelled() && needs.plan.outputs.release == 'true' && needs.tests.result == 'success' }}
     permissions:
       contents: write # the v<version> release tag
       packages: write
@@ -159,17 +196,12 @@ jobs:
         # Inputs and refs reach the script as environment variables, never as
         # ${{ }} splices.
         env:
-          REF: ${{ github.ref }}
           RELEASE_TYPE: ${{ inputs.release_type || 'patch' }}
         run: |
           set -euo pipefail
-          # Versions are cut from main only: a dispatch on a branch would
-          # publish and tag an unreviewed build.
-          if [ "$REF" != refs/heads/main ]; then
-            echo "Releases run on main only, not $REF" >&2
-            exit 1
-          fi
-          VERSION="$(hack/release/next-chart-version.sh "$RELEASE_TYPE")"
+          # Given the commit, the script refuses one older than the latest
+          # release, should main's tip have been a re-run (see plan).
+          VERSION="$(hack/release/next-chart-version.sh "$RELEASE_TYPE" "$GITHUB_SHA")"
           echo "Chart version: $VERSION ($RELEASE_TYPE)"
           yq e -i ".version = \"$VERSION\" | .appVersion = \"$VERSION\"" charts/direwolf-operator/Chart.yaml
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
