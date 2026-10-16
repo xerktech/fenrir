@@ -14,10 +14,12 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
 ### Deploy
 
 - Each merge to `main` publishes chart `MAJOR.MINOR.PATCH` with PATCH + 1 (images pinned by
-  digest) and tags the commit `v<version>`. A minor or major release is a manual run of
-  "Build and Push Docker Images" with `release_type`.
-  Nothing follows `main`: bump `targetRevision` in `apps/direwolf.yaml` to deploy it.
-- A change that adds operator/proxy flags or a new kind lands in ArgoCD in the same bump.
+  digest) and tags the commit `v<version>`, once the test suite passes on it. A minor or major
+  release is a manual run of "Build and Push Docker Images" with `release_type`.
+- ArgoCD deploys it on its own: `apps/direwolf.yaml` tracks chart `0.*`. A major (1.0.0) is
+  not picked up until that range is edited, so a breaking release is a deliberate step.
+- A change that adds operator/proxy flags deploys before ArgoCD's values can use them: merge
+  it, let it deploy, then add the flags in ArgoCD (an unknown flag stops the binary).
 
 ### Use
 

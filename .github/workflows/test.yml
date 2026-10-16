@@ -3,6 +3,9 @@ name: Run Test
 on:
   pull_request:
     branches: [main]
+  # builder.yml reruns it on the commit it releases: main auto-deploys, and a
+  # PR is tested against the main it branched from, not the one it lands on.
+  workflow_call:
 
 permissions:
   contents: read
