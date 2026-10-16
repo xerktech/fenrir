@@ -29,7 +29,14 @@ cp "$FAKE_DEB" "$out"`,
 	// Reports $FAKE_INSTALLED until apt-get installs a version.
 	"dpkg-query": `v=$FAKE_INSTALLED; [ -f "$LOG.installed" ] && v=$(cat "$LOG.installed")
 case "$2" in *Status*) printf 'install ok installed %s' "$v";; *) printf %s "$v";; esac`,
-	"dpkg":   `[ "$1" = --compare-versions ] && exec "$REAL_DPKG" "$@"; echo "dpkg $*" >>"$LOG"`,
+	// Compares versions itself: a host's dpkg may be missing or, as on
+	// TrueNAS, a wrapper that refuses to run (XERK-2008). The script only
+	// asks "gt", and every version here is plain dotted numbers.
+	"dpkg": `if [ "$1" = --compare-versions ]; then
+  [ "$3" = gt ] || exit 2
+  [ "$2" != "$4" ] && [ "$(printf '%s\n' "$2" "$4" | sort -V | tail -n1)" = "$2" ]; exit
+fi
+echo "dpkg $*" >>"$LOG"`,
 	"getent": `echo "abc:x:1000:1000::$FAKE_HOME:/bin/bash"`,
 	// Logs that the home was touched as the desktop user, never as root.
 	"s6-setuidgid":       `[ "$1" = abc ] || exit 111; shift; echo "as-abc $1" >>"$LOG"; exec "$@"`,
@@ -49,16 +56,12 @@ else echo "apt-get $*" >>"$LOG"; fi`,
 // heroicPod is one Library pod's view: a stubbed host and a desktop home
 // that outlives runs, as the Steam home PVC outlives pods.
 type heroicPod struct {
-	t                         *testing.T
-	dir, home, log, dpkg, out string
+	t                   *testing.T
+	dir, home, log, out string
 }
 
 func newHeroicPod(t *testing.T) *heroicPod {
 	t.Helper()
-	realDpkg, err := exec.LookPath("dpkg")
-	if err != nil {
-		t.Skip("needs dpkg for --compare-versions")
-	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bin")
 	if err := os.Mkdir(bin, 0o755); err != nil {
@@ -67,7 +70,7 @@ func newHeroicPod(t *testing.T) *heroicPod {
 	for name, body := range heroicStubs {
 		writeStub(t, filepath.Join(bin, name), body)
 	}
-	return &heroicPod{t: t, dir: dir, home: filepath.Join(dir, "home"), log: filepath.Join(dir, "log"), dpkg: realDpkg}
+	return &heroicPod{t: t, dir: dir, home: filepath.Join(dir, "home"), log: filepath.Join(dir, "log")}
 }
 
 // writeStub writes an executable sh script.
@@ -117,7 +120,7 @@ func (p *heroicPod) runSized(installed, deb, digest string, size int, env ...str
 	cmd := exec.CommandContext(t.Context(), "bash", initHeroicUpdate)
 	cmd.Env = append(os.Environ(),
 		"PATH="+filepath.Join(p.dir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"REAL_DPKG="+p.dpkg, "LOG="+p.log, "FAKE_HOME="+p.home, "FAKE_INSTALLED="+installed,
+		"LOG="+p.log, "FAKE_HOME="+p.home, "FAKE_INSTALLED="+installed,
 		"FAKE_RELEASE="+filepath.Join(p.dir, "release.json"), "FAKE_DEB="+filepath.Join(p.dir, "deb"))
 	cmd.Env = append(cmd.Env, env...)
 	_ = os.Remove(p.log + ".installed")

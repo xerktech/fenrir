@@ -56,6 +56,8 @@ paths:
   - `heroic-postinstall` runs after every install (build and update): the package resets the
     launchers and chrome-sandbox that `wrapped-heroic` replaces.
   - Tests: `images/library/init_heroic_update_test.go` (real script, stubbed curl/dpkg).
+    Stubs never reach a host package tool: TrueNAS's dpkg is a wrapper that refuses to run,
+    so the dpkg stub compares versions itself (XERK-2008).
 - Idle rule: (no browser traffic for `--library-idle-timeout` OR no user-opened page load for
   `--library-max-runtime`) AND nothing downloading.
   - An open Selkies tab sends WebSocket traffic every few seconds with nobody there, so traffic
