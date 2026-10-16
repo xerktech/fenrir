@@ -3,11 +3,14 @@ package controllers
 import (
 	"bytes"
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -171,21 +174,52 @@ func TestBaseAppChanges(t *testing.T) {
 func TestCatalogueRunRefreshOnSignal(t *testing.T) {
 	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil))
 	f.scan(t)
+	// Each refresh lists the catalogue Apps after reading the bases.
+	var lists atomic.Int32
+	f.dw.PrependReactor("list", "apps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		lists.Add(1)
+		return false, nil, nil
+	})
+	setImage := func(image string) {
+		t.Helper()
+		base := f.app(t, "steam-base")
+		base.Spec.Template.Spec.Containers[0].Image = image
+		f.update(t, base)
+	}
+	waitFor := func(what string, done func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); !done(); time.Sleep(10 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+		}
+	}
+	imageIs := func(image string) func() bool {
+		return func() bool { return f.app(t, "steam-570").Spec.Template.Spec.Containers[0].Image == image }
+	}
+
+	setImage("steam:2") // changed while no refresh ran
 	changed := make(chan struct{})
 	done := make(chan struct{})
 	ctx, cancel := context.WithCancel(t.Context())
 	go func() { f.catalogue.RunRefresh(ctx, changed); close(done) }()
-	defer func() { cancel(); <-done }()
-
-	base := f.app(t, "steam-base")
-	base.Spec.Template.Spec.Containers[0].Image = "steam:2"
-	f.update(t, base)
-	changed <- struct{}{} // received only once the start-up refresh is done
-	deadline := time.Now().Add(5 * time.Second)
-	for f.app(t, "steam-570").Spec.Template.Spec.Containers[0].Image != "steam:2" {
-		if time.Now().After(deadline) {
-			t.Fatal("steam-570 not refreshed after a base App change signal")
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("RunRefresh did not return when its context ended")
 		}
-		time.Sleep(10 * time.Millisecond)
+	}()
+	waitFor("the start-up refresh", imageIs("steam:2"))
+	waitFor("the start-up refresh's list", func() bool { return lists.Load() == 1 })
+
+	// The start-up refresh has read the bases, so only a signal brings steam:3.
+	setImage("steam:3")
+	select {
+	case changed <- struct{}{}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunRefresh did not take the change signal")
 	}
+	waitFor("a refresh on the change signal", imageIs("steam:3"))
 }
