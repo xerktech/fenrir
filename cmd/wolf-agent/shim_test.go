@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -48,7 +49,7 @@ for addr in ("::", "::ffff:0.0.0.0"):
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			if addrInUse(out) {
-				return nil, errAddrInUse
+				return nil, fmt.Errorf("%w: bind on %s\n%s", errAddrInUse, port, out)
 			}
 			t.Fatalf("bind on %s: %v\n%s", port, err, out)
 		}
@@ -183,7 +184,7 @@ for name in sys.argv[1:]:
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			if addrInUse(out) {
-				return errAddrInUse
+				return fmt.Errorf("%w\n%s", errAddrInUse, out)
 			}
 			t.Fatalf("%v\n%s", err, out)
 		}
@@ -239,14 +240,23 @@ func addrInUse(out []byte) bool {
 // so any process's outgoing connection may take it as its source port before
 // the test binds it (XERK-1978). The shim reads the Wolf ports at load, so
 // they must be picked before Python starts and cannot come from binding port 0.
+// Each retry is logged with its output, so a shim that leaks a listener still
+// shows up.
 func withFreePorts(t *testing.T, try func(http, https, other string) error) {
 	t.Helper()
+	var err error
 	for range 5 {
-		if !errors.Is(try(freePort(t), freePort(t), freePort(t)), errAddrInUse) {
+		// Released ports can be picked again; the three must differ.
+		http, https, other := freePort(t), freePort(t), freePort(t)
+		if http == https || http == other || https == other {
+			continue
+		}
+		if err = try(http, https, other); !errors.Is(err, errAddrInUse) {
 			return
 		}
+		t.Logf("retrying with fresh ports: %v", err)
 	}
-	t.Fatal("every port picked was taken before the test could bind it")
+	t.Fatalf("no attempt had three free ports; last: %v", err)
 }
 
 // freePort asks the kernel for a free port (binding port 0 picks one).
