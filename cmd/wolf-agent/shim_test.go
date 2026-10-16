@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -39,39 +41,56 @@ for addr in ("::", "::ffff:0.0.0.0"):
     print(s.getsockname()[0])
     s.close()
 `
-	bound := func(port string, env ...string) []string {
+	bound := func(port string, env ...string) ([]string, error) {
 		t.Helper()
 		cmd := exec.CommandContext(t.Context(), "python3", "-c", script, port)
 		cmd.Env = append([]string{"LD_PRELOAD=" + so}, env...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
+			if addrInUse(out) {
+				return nil, errAddrInUse
+			}
 			t.Fatalf("bind on %s: %v\n%s", port, err, out)
 		}
-		return strings.Fields(string(out))
+		return strings.Fields(string(out)), nil
 	}
-	http, https, other := freePort(t), freePort(t), freePort(t)
-	env := []string{"WOLF_HTTP_PORT=" + http, "WOLF_HTTPS_PORT=" + https}
 	// Wildcards move to loopback; the specific addresses stay put.
 	narrowed := []string{"127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:127.0.0.2", "2001:db8::",
 		"::1", "::ffff:127.0.0.1"}
-	for _, port := range []string{http, https} {
-		if got := bound(port, env...); !slices.Equal(got, narrowed) {
-			t.Errorf("Wolf port %s bound to %v, want %v", port, got, narrowed)
-		}
-	}
-	// Wolf keeps the port as an unsigned short: 65536 more is the same port.
-	wrapped, err := strconv.Atoi(https)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := bound(https, "WOLF_HTTPS_PORT="+strconv.Itoa(wrapped+65536)); !slices.Equal(got, narrowed) {
-		t.Errorf("Wolf port %s given as %d bound to %v, want %v", https, wrapped+65536, got, narrowed)
-	}
 	untouched := []string{"0.0.0.0", "::", "::ffff:0.0.0.0", "::ffff:127.0.0.2", "2001:db8::",
 		"::", "::ffff:0.0.0.0"}
-	if got, want := bound(other, env...), untouched; !slices.Equal(got, want) {
-		t.Errorf("other port %s bound to %v, want %v", other, got, want)
-	}
+	withFreePorts(t, func(http, https, other string) error {
+		env := []string{"WOLF_HTTP_PORT=" + http, "WOLF_HTTPS_PORT=" + https}
+		// Wolf keeps the port as an unsigned short: 65536 more is the same port.
+		wrapped, err := strconv.Atoi(https)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Bind everything before comparing, so a retry never follows a failure.
+		got := map[string][]string{}
+		for name, args := range map[string][]string{
+			"http":    append([]string{http}, env...),
+			"https":   append([]string{https}, env...),
+			"wrapped": {https, "WOLF_HTTPS_PORT=" + strconv.Itoa(wrapped+65536)},
+			"other":   append([]string{other}, env...),
+		} {
+			if got[name], err = bound(args[0], args[1:]...); err != nil {
+				return err
+			}
+		}
+		for _, name := range []string{"http", "https"} {
+			if !slices.Equal(got[name], narrowed) {
+				t.Errorf("Wolf %s port bound to %v, want %v", name, got[name], narrowed)
+			}
+		}
+		if !slices.Equal(got["wrapped"], narrowed) {
+			t.Errorf("Wolf port %s given as %d bound to %v, want %v", https, wrapped+65536, got["wrapped"], narrowed)
+		}
+		if !slices.Equal(got["other"], untouched) {
+			t.Errorf("other port %s bound to %v, want %v", other, got["other"], untouched)
+		}
+		return nil
+	})
 }
 
 // TestLoopbackShimDropsWolfConnections checks the shim closes every connection
@@ -158,31 +177,36 @@ for name in sys.argv[1:]:
         sys.exit("blocking accept did not end")
     s.close()
 `
-	http, https, other := freePort(t), freePort(t), freePort(t)
-	cmd := exec.CommandContext(t.Context(), "python3", "-c", script, http, https, other)
-	cmd.Env = []string{"LD_PRELOAD=" + so, "WOLF_HTTP_PORT=" + http, "WOLF_HTTPS_PORT=" + https}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%v\n%s", err, out)
-	}
-	got := strings.TrimSpace(string(out))
-	want := strings.Join([]string{
-		http + " accept4 EAGAIN True",
-		http + " plain EAGAIN True",
-		http + " ipv6 EAGAIN True",
-		http + " blocking True looping",
-		https + " accept4 EAGAIN True",
-		https + " plain EAGAIN True",
-		https + " ipv6 EAGAIN True",
-		https + " blocking True looping",
-		other + " accept4 accepted ",
-		other + " plain accepted ",
-		other + " ipv6 accepted ",
-		other + " blocking False returned",
-	}, "\n")
-	if got != want {
-		t.Errorf("got:\n%s\nwant:\n%s", got, want)
-	}
+	withFreePorts(t, func(http, https, other string) error {
+		cmd := exec.CommandContext(t.Context(), "python3", "-c", script, http, https, other)
+		cmd.Env = []string{"LD_PRELOAD=" + so, "WOLF_HTTP_PORT=" + http, "WOLF_HTTPS_PORT=" + https}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			if addrInUse(out) {
+				return errAddrInUse
+			}
+			t.Fatalf("%v\n%s", err, out)
+		}
+		got := strings.TrimSpace(string(out))
+		want := strings.Join([]string{
+			http + " accept4 EAGAIN True",
+			http + " plain EAGAIN True",
+			http + " ipv6 EAGAIN True",
+			http + " blocking True looping",
+			https + " accept4 EAGAIN True",
+			https + " plain EAGAIN True",
+			https + " ipv6 EAGAIN True",
+			https + " blocking True looping",
+			other + " accept4 accepted ",
+			other + " plain accepted ",
+			other + " ipv6 accepted ",
+			other + " blocking False returned",
+		}, "\n")
+		if got != want {
+			t.Errorf("got:\n%s\nwant:\n%s", got, want)
+		}
+		return nil
+	})
 }
 
 // buildLoopbackShim compiles shim/wolf_loopback.c the way cmd/wolf-agent's
@@ -201,6 +225,28 @@ func buildLoopbackShim(t *testing.T) string {
 		t.Fatalf("building shim: %v\n%s", err, out)
 	}
 	return so
+}
+
+var errAddrInUse = errors.New("address already in use")
+
+// addrInUse reports whether a Python script failed binding a taken port.
+func addrInUse(out []byte) bool {
+	return bytes.Contains(out, []byte("Address already in use"))
+}
+
+// withFreePorts runs try with three free ports, and again with fresh ones while
+// it returns errAddrInUse. A port freePort released is in the ephemeral range,
+// so any process's outgoing connection may take it as its source port before
+// the test binds it (XERK-1978). The shim reads the Wolf ports at load, so
+// they must be picked before Python starts and cannot come from binding port 0.
+func withFreePorts(t *testing.T, try func(http, https, other string) error) {
+	t.Helper()
+	for range 5 {
+		if !errors.Is(try(freePort(t), freePort(t), freePort(t)), errAddrInUse) {
+			return
+		}
+	}
+	t.Fatal("every port picked was taken before the test could bind it")
 }
 
 // freePort asks the kernel for a free port (binding port 0 picks one).
