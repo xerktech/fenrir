@@ -9,8 +9,9 @@
  * Moonlight clients talk to moonlight-proxy, and the operator drives Wolf
  * through wolf-agent and Wolf's unix socket.
  *
- * So a wildcard bind() to WOLF_HTTP_PORT or WOLF_HTTPS_PORT (Wolf's own
- * defaults when unset) is narrowed to loopback. Every other bind is untouched.
+ * So a wildcard bind() (0.0.0.0, ::, or ::ffff:0.0.0.0) to WOLF_HTTP_PORT or
+ * WOLF_HTTPS_PORT (Wolf's own defaults when unset) is narrowed to loopback.
+ * Every other bind is untouched.
  *
  * Loopback alone is not enough (XERK-1737): every host-networked pod on the
  * node shares 127.0.0.1, including other tenants' game containers. So every
@@ -26,6 +27,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -81,12 +83,22 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len) {
       in4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
       return real_bind(fd, (const struct sockaddr *)&in4, sizeof(in4));
     }
-  } else if (addr != NULL && addr->sa_family == AF_INET6 && len >= sizeof(struct sockaddr_in6)) {
+  } else if (addr != NULL && addr->sa_family == AF_INET6 && len >= offsetof(struct sockaddr_in6, sin6_scope_id)) {
+    /* Linux also takes the RFC 2133 length (no sin6_scope_id). */
     struct sockaddr_in6 in6;
-    memcpy(&in6, addr, sizeof(in6));
-    if (IN6_IS_ADDR_UNSPECIFIED(&in6.sin6_addr) && is_wolf_rest_port(in6.sin6_port)) {
-      in6.sin6_addr = in6addr_loopback;
-      return real_bind(fd, (const struct sockaddr *)&in6, sizeof(in6));
+    memset(&in6, 0, sizeof(in6));
+    memcpy(&in6, addr, len < sizeof(in6) ? len : sizeof(in6));
+    if (is_wolf_rest_port(in6.sin6_port)) {
+      if (IN6_IS_ADDR_UNSPECIFIED(&in6.sin6_addr)) {
+        in6.sin6_addr = in6addr_loopback;
+        return real_bind(fd, (const struct sockaddr *)&in6, sizeof(in6));
+      }
+      /* ::ffff:0.0.0.0 is the IPv4 wildcard on a dual-stack socket
+       * (XERK-1972): narrow it to ::ffff:127.0.0.1. */
+      if (IN6_IS_ADDR_V4MAPPED(&in6.sin6_addr) && in6.sin6_addr.s6_addr32[3] == htonl(INADDR_ANY)) {
+        in6.sin6_addr.s6_addr32[3] = htonl(INADDR_LOOPBACK);
+        return real_bind(fd, (const struct sockaddr *)&in6, sizeof(in6));
+      }
     }
   }
   return real_bind(fd, addr, len);

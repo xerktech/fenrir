@@ -12,15 +12,30 @@ import (
 // TestLoopbackShim preloads shim/wolf_loopback.c into a process that binds the
 // way Wolf does (0.0.0.0) and checks only Wolf's HTTP/HTTPS ports move to
 // loopback. Python stands in for Wolf: like it, Python binds through libc.
+// The IPv4-mapped any address (::ffff:0.0.0.0) is a wildcard too (XERK-1972);
+// specific addresses, mapped or not, are left alone.
 func TestLoopbackShim(t *testing.T) {
 	so := buildLoopbackShim(t)
 
 	// Port 0 picks a free port, so ask the kernel for one first and bind that.
 	const script = `
-import socket, sys
-for family, any_addr in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+import ctypes, os, socket, struct, sys
+IP_FREEBIND = 15  # lets the documentation address below be bound
+for family, addr in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::"), (socket.AF_INET6, "::ffff:0.0.0.0"),
+                     (socket.AF_INET6, "::ffff:127.0.0.2"), (socket.AF_INET6, "2001:db8::")):
     s = socket.socket(family)
-    s.bind((any_addr, int(sys.argv[1])))
+    s.setsockopt(socket.SOL_IP, IP_FREEBIND, 1)
+    s.bind((addr, int(sys.argv[1])))
+    print(s.getsockname()[0])
+    s.close()
+# Python always binds with the full sockaddr_in6; Linux also takes the RFC 2133
+# length (24, no sin6_scope_id).
+libc = ctypes.CDLL(None, use_errno=True)
+for addr in ("::", "::ffff:0.0.0.0"):
+    s = socket.socket(socket.AF_INET6)
+    sa = struct.pack("=HHI16s", socket.AF_INET6, socket.htons(int(sys.argv[1])), 0, socket.inet_pton(socket.AF_INET6, addr))
+    if libc.bind(s.fileno(), sa, len(sa)) != 0:
+        sys.exit("bind: " + os.strerror(ctypes.get_errno()))
     print(s.getsockname()[0])
     s.close()
 `
@@ -36,10 +51,12 @@ for family, any_addr in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
 	}
 	http, https, other := freePort(t), freePort(t), freePort(t)
 	env := []string{"WOLF_HTTP_PORT=" + http, "WOLF_HTTPS_PORT=" + https}
-	loopback := []string{"127.0.0.1", "::1"}
+	// Wildcards move to loopback; the specific addresses stay put.
+	narrowed := []string{"127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:127.0.0.2", "2001:db8::",
+		"::1", "::ffff:127.0.0.1"}
 	for _, port := range []string{http, https} {
-		if got := bound(port, env...); !slices.Equal(got, loopback) {
-			t.Errorf("Wolf port %s bound to %v, want %v", port, got, loopback)
+		if got := bound(port, env...); !slices.Equal(got, narrowed) {
+			t.Errorf("Wolf port %s bound to %v, want %v", port, got, narrowed)
 		}
 	}
 	// Wolf keeps the port as an unsigned short: 65536 more is the same port.
@@ -47,10 +64,12 @@ for family, any_addr in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := bound(https, "WOLF_HTTPS_PORT="+strconv.Itoa(wrapped+65536)); !slices.Equal(got, loopback) {
-		t.Errorf("Wolf port %s given as %d bound to %v, want %v", https, wrapped+65536, got, loopback)
+	if got := bound(https, "WOLF_HTTPS_PORT="+strconv.Itoa(wrapped+65536)); !slices.Equal(got, narrowed) {
+		t.Errorf("Wolf port %s given as %d bound to %v, want %v", https, wrapped+65536, got, narrowed)
 	}
-	if got, want := bound(other, env...), []string{"0.0.0.0", "::"}; !slices.Equal(got, want) {
+	untouched := []string{"0.0.0.0", "::", "::ffff:0.0.0.0", "::ffff:127.0.0.2", "2001:db8::",
+		"::", "::ffff:0.0.0.0"}
+	if got, want := bound(other, env...), untouched; !slices.Equal(got, want) {
 		t.Errorf("other port %s bound to %v, want %v", other, got, want)
 	}
 }
