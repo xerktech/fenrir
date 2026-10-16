@@ -4,7 +4,8 @@
 #   patch (every main merge): latest tag's PATCH + 1
 #   minor / major (manual workflow_dispatch): bump it, lower parts reset to 0
 # The tags are the only record, so nothing is committed and a release can't
-# retrigger itself. The first release is 0.1.0 (1.0.0 for major).
+# retrigger itself. The first release is 0.1.0 (1.0.0 for major), and nothing
+# is ever released below it: 0.0.x is the old 0.0.1-<run id>-SNAPSHOT line.
 #
 # Given the commit to release, it also refuses one the latest release is not an
 # ancestor of: ArgoCD deploys the highest version, so re-running an old build
@@ -29,6 +30,11 @@ tags="$(git tag -l 'v*')"
 part='(0|[1-9][0-9]{0,8})'
 latest="$({ grep -E "^v$part\.$part\.$part\$" <<<"$tags" || [ $? -eq 1 ]; } |
   sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)"
+
+# A stray v0.0.x tag counts as no release.
+if [ "${latest%%.*}" = 0 ] && [ "$(cut -d. -f2 <<<"$latest")" = 0 ]; then
+  latest=""
+fi
 
 if [ -z "$latest" ]; then
   if [ "$kind" = major ]; then echo 1.0.0; else echo 0.1.0; fi

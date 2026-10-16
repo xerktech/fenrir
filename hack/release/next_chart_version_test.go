@@ -64,6 +64,8 @@ func TestNextChartVersion(t *testing.T) {
 		{"first release", "patch", nil, "0.1.0"},
 		{"first minor", "minor", nil, "0.1.0"},
 		{"first major", "major", nil, "1.0.0"},
+		// 0.0.x is the old SNAPSHOT line: never released into.
+		{"floor past a stray 0.0.x tag", "patch", []string{"v0.0.1", "v0.0.7"}, "0.1.0"},
 		{"patch", "patch", []string{"v0.1.0", "v0.1.1"}, "0.1.2"},
 		// Numeric, not lexical: v0.1.10 is newer than v0.1.9.
 		{"patch past nine", "patch", []string{"v0.1.9", "v0.1.10", "v0.1.2"}, "0.1.11"},
