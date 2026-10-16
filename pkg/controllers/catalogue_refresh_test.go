@@ -78,11 +78,15 @@ func TestCatalogueRefreshRejectsForgedID(t *testing.T) {
 		forged("steam-570", "steam", "570; reboot"),
 		forged("steam-1", "steam", "570"),
 		forged("epic-x", "epic", "x'"),
+		// Named as a scan would name them, so only the ID checks catch these.
+		forged(catalogueAppName("steam", "1;reboot"), "steam", "1;reboot"),
+		forged(catalogueAppName("epic", "x'$(id)"), "epic", "x'$(id)"),
 		forged("steam-2", "steam", "2"))
 	if err := f.catalogue.Refresh(context.Background()); err == nil {
 		t.Error("Refresh reported no error for forged catalogue IDs")
 	}
-	for _, name := range []string{"steam-570", "steam-1", "epic-x"} {
+	for _, name := range []string{"steam-570", "steam-1", "epic-x",
+		catalogueAppName("steam", "1;reboot"), catalogueAppName("epic", "x'$(id)")} {
 		if env := f.app(t, name).Spec.Template.Spec.Containers[0].Env; env[0].Value != "stale" {
 			t.Errorf("%s was refreshed: env %+v", name, env)
 		}
@@ -161,4 +165,27 @@ func TestBaseAppChanges(t *testing.T) {
 	expect(false, "a metadata-only change")
 	edit("steam-base", func(a *v1alpha1types.App) { a.Spec.Template.Spec.Containers[0].Image = "steam:2" })
 	expect(true, "the base App's spec change")
+}
+
+// RunRefresh refreshes at start and again on each signal.
+func TestCatalogueRunRefreshOnSignal(t *testing.T) {
+	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil))
+	f.scan(t)
+	changed := make(chan struct{})
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() { f.catalogue.RunRefresh(ctx, changed); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	base := f.app(t, "steam-base")
+	base.Spec.Template.Spec.Containers[0].Image = "steam:2"
+	f.update(t, base)
+	changed <- struct{}{} // received only once the start-up refresh is done
+	deadline := time.Now().Add(5 * time.Second)
+	for f.app(t, "steam-570").Spec.Template.Spec.Containers[0].Image != "steam:2" {
+		if time.Now().After(deadline) {
+			t.Fatal("steam-570 not refreshed after a base App change signal")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
