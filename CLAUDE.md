@@ -107,9 +107,11 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       - A stream's Wolf session ID is its paired client's cert hash. The init container seeds
         Wolf's config (on the PVC) with one paired client every attach uses (`wolf_clients.go`).
         IDs repeat across resumes: tell streams apart by events, not ID.
-      - A dead client's ENet peer times out seconds after a /resume reused its ID. The fork
-        (XERK-1948) then fires `EndSupersededStreamEvent`, not a pause, and ends only the old
-        stream; wolf-agent ignores it. Older Wolf paused the resumed stream (XERK-1380, XERK-1964).
+      - One client is safe only on xerktech/wolf >= 1f15679 (XERK-1948, XERK-1964). Older Wolf
+        mixes up a stop + add under one ID: a late runner-exit stop, shared interpipe producer
+        names, a dead peer's pause. Rotating clients (XERK-1380) is the fallback for older images.
+      - A dead peer timing out after a /resume reused its ID fires `EndSupersededStreamEvent`, not
+        a pause, and ends only the old stream; wolf-agent ignores it.
       - Tests: `TestFirstAttachCreatesLobbyBeforeStream`, `agent_lobby_test.go`.
   - Every pod listener (Wolf HTTP/HTTPS too, wolf-agent) must come from the session's port block
     (`pkg/controllers/ports.go`, `--session-port-range`), or pods on the node collide.

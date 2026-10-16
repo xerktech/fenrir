@@ -20,13 +20,13 @@ import (
 )
 
 // Wolf gives every stream its paired client's ID (a hash of the client's
-// cert) as session ID, so all of a pod's streams share one ID. A dead
-// client's ENet peer outlives its stream until Wolf times it out (seconds);
-// the xerktech/wolf fork (XERK-1948) makes the newest peer own the ID, so
-// that late timeout ends only the superseded stream, not a /resume's
-// (EndSupersededStreamEvent). Earlier Wolf images paused every stream with
-// the ID, which is why pods once rotated attaches over several clients
-// (XERK-1380); one client is enough now (XERK-1964).
+// cert) as session ID, so all of a pod's streams share one ID, and an attach
+// adds its stream ~15 ms after stopping the last one under that ID. The
+// xerktech/wolf fork (>= 1f15679: XERK-1948, XERK-1964) keeps the two
+// apart: a dead client's late ENet timeout ends only the superseded stream
+// (EndSupersededStreamEvent), and the stopped stream's runner exit and
+// interpipe producers no longer touch the new one. Older Wolf images need
+// attaches rotated over several clients (XERK-1380); one is enough now.
 const (
 	wolfStreamClients = 1
 	// The clients' app_state_folder, plus their index; how the operator
