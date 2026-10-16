@@ -245,16 +245,19 @@ func addrInUse(out []byte) bool {
 func withFreePorts(t *testing.T, try func(http, https, other string) error) {
 	t.Helper()
 	var err error
-	for range 5 {
+	for attempt := range 5 {
+		if attempt > 0 {
+			t.Logf("retrying with fresh ports: %v", err)
+		}
 		// Released ports can be picked again; the three must differ.
 		http, https, other := freePort(t), freePort(t), freePort(t)
 		if http == https || http == other || https == other {
+			err = fmt.Errorf("picked a port twice: %s, %s, %s", http, https, other)
 			continue
 		}
 		if err = try(http, https, other); !errors.Is(err, errAddrInUse) {
 			return
 		}
-		t.Logf("retrying with fresh ports: %v", err)
 	}
 	t.Fatalf("no attempt had three free ports; last: %v", err)
 }
