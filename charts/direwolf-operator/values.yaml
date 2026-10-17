@@ -82,9 +82,10 @@ controllers:
           # stream's stop no longer hangs every launch and RTSP (XERK-1966), and failed
           # OpenSSL calls stop pairing/control instead of carrying on (XERK-2015), and a
           # stream added right after a stop under the same client no longer collides
-          # with the stopped one, so every attach can use one paired client (XERK-1964).
+          # with the stopped one, so every attach can use one paired client (XERK-1964),
+          # and API replies over 64 KiB (e.g. a long app list) arrive intact (XERK-1959).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-1f15679@sha256:6b014f6cd19090ef0ad3cf6977433226c612058f0283202d05ef56dd4569a3d2
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-34c8435@sha256:6a0eac09b246d728d0e384398fb1c17bc4f494dac55e8f2dd5ba5ac6ac93bf77
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
