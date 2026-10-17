@@ -85,7 +85,7 @@ controllers:
           # with the stopped one, so every attach can use one paired client (XERK-1964),
           # and API replies over 64 KiB (e.g. a long app list) arrive intact (XERK-1959).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-34c8435@sha256:6a0eac09b246d728d0e384398fb1c17bc4f494dac55e8f2dd5ba5ac6ac93bf77
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-fe54b94@sha256:9e12fd180cc41f6b18c197c16151127267870ade43dc1f8365fd0a87d56ad6be
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
