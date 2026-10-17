@@ -88,8 +88,9 @@ controllers:
           # Session shutdown and concurrent runner exits no longer crash Wolf (XERK-2022,
           # XERK-2023), streams started after a lobby join show the lobby (XERK-2045),
           # and no-GPU hosts stream with an older config.toml (XERK-2043).
+          # A quick API pause-then-start no longer loses its video and audio (XERK-2046).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-b507f9e@sha256:8f450ad98079fd932e683b6904fa1a20ad5db74a397e99629b0c35aaaf0b120f
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-c5d125f@sha256:3007e9a69038515a331ed3503433ce17390e59ff34866b85ce3454445e98cd12
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
