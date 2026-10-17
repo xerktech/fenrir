@@ -495,6 +495,33 @@ func remoteIP(r *http.Request) (string, error) {
 	return peer.Addr().Unmap().WithZone("").String(), nil
 }
 
+// Display mode bounds, the same as Wolf's own /launch checks. Wolf's
+// AddSession enforces them too from XERK-2042; a Session outside them would
+// then never start, and before it Wolf hands the mode to its encoder as is
+// (XERK-2044).
+const (
+	maxModeDimension   = 16384
+	maxModeRefreshRate = 1000
+)
+
+// parseMode parses a Moonlight launch mode, "<width>x<height>x<fps>".
+func parseMode(mode string) (width, height, refreshRate int, err error) {
+	invalid := fmt.Errorf("invalid mode: %s", mode)
+	splitMode := strings.Split(mode, "x")
+	if len(splitMode) != 3 {
+		return 0, 0, 0, invalid
+	}
+	var values [3]int
+	for i, limit := range [3]int{maxModeDimension, maxModeDimension, maxModeRefreshRate} {
+		v, convErr := strconv.Atoi(splitMode[i])
+		if convErr != nil || v < 1 || v > limit {
+			return 0, 0, 0, invalid
+		}
+		values[i] = v
+	}
+	return values[0], values[1], values[2], nil
+}
+
 func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 	clientIP, err := remoteIP(r)
 	if err != nil {
@@ -536,26 +563,10 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		mode = "1920x1080x60"
 	}
 
-	splitMode := strings.Split(mode, "x")
-	if len(splitMode) != 3 {
-		writeErrorResponse(w, 400, fmt.Errorf("invalid mode: %s", mode))
+	width, height, refreshRate, err := parseMode(mode)
+	if err != nil {
+		writeErrorResponse(w, 400, err)
 		return
-	}
-
-	width, err := strconv.Atoi(splitMode[0])
-	if err != nil {
-		writeErrorResponse(w, 400, fmt.Errorf("invalid mode: %s", mode))
-		return
-	}
-
-	height, err := strconv.Atoi(splitMode[1])
-	if err != nil {
-		writeErrorResponse(w, 400, fmt.Errorf("invalid mode: %s", mode))
-	}
-
-	refreshRate, err := strconv.Atoi(splitMode[2])
-	if err != nil {
-		writeErrorResponse(w, 400, fmt.Errorf("invalid mode: %s", mode))
 	}
 
 	if surroundAudioInfo == "" {
