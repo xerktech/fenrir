@@ -84,8 +84,9 @@ controllers:
           # stream added right after a stop under the same client no longer collides
           # with the stopped one, so every attach can use one paired client (XERK-1964),
           # and API replies over 64 KiB (e.g. a long app list) arrive intact (XERK-1959).
+          # The API rejects zero or out-of-range display modes (XERK-2042, XERK-2047).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-fe54b94@sha256:9e12fd180cc41f6b18c197c16151127267870ade43dc1f8365fd0a87d56ad6be
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-8de1f30@sha256:b80781722c342d9d91f8d32aa37fa09c39324704d440821a9b342bc02aa6ccfe
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
