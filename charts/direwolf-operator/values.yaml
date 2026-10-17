@@ -85,8 +85,11 @@ controllers:
           # with the stopped one, so every attach can use one paired client (XERK-1964),
           # and API replies over 64 KiB (e.g. a long app list) arrive intact (XERK-1959).
           # The API rejects zero or out-of-range display modes (XERK-2042, XERK-2047).
+          # Session shutdown and concurrent runner exits no longer crash Wolf (XERK-2022,
+          # XERK-2023), streams started after a lobby join show the lobby (XERK-2045),
+          # and no-GPU hosts stream with an older config.toml (XERK-2043).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-8de1f30@sha256:b80781722c342d9d91f8d32aa37fa09c39324704d440821a9b342bc02aa6ccfe
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-b507f9e@sha256:8f450ad98079fd932e683b6904fa1a20ad5db74a397e99629b0c35aaaf0b120f
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
