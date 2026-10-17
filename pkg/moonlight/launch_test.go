@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -36,6 +37,8 @@ type launchFixture struct {
 	remoteAddr string
 	// appID is the app launched, if not the seeded App's "1".
 	appID string
+	// mode is the launch mode; empty sends none, so the proxy's default applies.
+	mode string
 }
 
 // newLaunchFixture builds a RESTServer over a fake clientset seeded with one
@@ -118,7 +121,11 @@ func (f *launchFixture) launch(t *testing.T, user string) (int, Response) {
 		ObjectMeta: metav1.ObjectMeta{Name: user + "-pairing", Namespace: testNamespace},
 	})
 	appID := cmp.Or(f.appID, "1")
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/launch?appid="+appID+"&rikey=00&rikeyid=1&mode=1920x1080x60", http.NoBody)
+	target := "/launch?appid=" + appID + "&rikey=00&rikeyid=1"
+	if f.mode != "" {
+		target += "&mode=" + url.QueryEscape(f.mode)
+	}
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
 	if f.remoteAddr != "" {
 		req.RemoteAddr = f.remoteAddr
 	}
@@ -256,6 +263,54 @@ func TestLaunchFreeHostSucceeds(t *testing.T) {
 	}
 	if f.created.Load() != 1 {
 		t.Errorf("created %d sessions, want 1", f.created.Load())
+	}
+}
+
+// A mode outside Wolf's bounds is answered with one 400 and creates no
+// Session: a Wolf whose AddSession rejects it (XERK-2042) would leave the
+// operator requeueing while the client was told the launch succeeded
+// (XERK-2044).
+func TestLaunchRejectsInvalidMode(t *testing.T) {
+	for _, mode := range []string{
+		"1920xabcx60", "1920x1080xabc", "abcx1080x60", "1920x1080", "1920x1080x60x60",
+		"0x0x0", "-1920x1080x60", "1920x1080x0", "16385x1080x60",
+		"1920x16385x60", "1920x1080x1001", "2147483647x2147483647x2147483647",
+	} {
+		f := newLaunchFixture(t, &RESTServerOptions{})
+		f.mode = mode
+
+		code, _ := f.launch(t, "alice")
+
+		if code != http.StatusBadRequest {
+			t.Errorf("mode %q: HTTP %d, want 400", mode, code)
+		}
+		if n := f.created.Load(); n != 0 {
+			t.Errorf("mode %q: created %d sessions, want 0", mode, n)
+		}
+	}
+}
+
+func TestLaunchAcceptsModeBounds(t *testing.T) {
+	for mode, want := range map[string][3]int{
+		"1x1x1":            {1, 1, 1},
+		"16384x16384x1000": {16384, 16384, 1000},
+		"2560x1440x120":    {2560, 1440, 120},
+		"":                 {1920, 1080, 60}, // no mode: the default
+	} {
+		f := newLaunchFixture(t, &RESTServerOptions{})
+		f.mode = mode
+
+		if code, resp := f.launch(t, "alice"); code != http.StatusOK || resp.StatusCode != http.StatusOK {
+			t.Fatalf("mode %q: HTTP %d / %d %q, want success", mode, code, resp.StatusCode, resp.StatusMessage)
+		}
+		sessions, err := f.client.DirewolfV1alpha1().Sessions(testNamespace).List(context.Background(), metav1.ListOptions{})
+		if err != nil || len(sessions.Items) != 1 {
+			t.Fatalf("mode %q: sessions = %v, %v; want one", mode, sessions, err)
+		}
+		c := sessions.Items[0].Spec.Config
+		if got := [3]int{c.VideoWidth, c.VideoHeight, c.VideoRefreshRate}; got != want {
+			t.Errorf("mode %q: stored %v, want %v", mode, got, want)
+		}
 	}
 }
 

@@ -53,3 +53,7 @@ paths:
   - An empty `ProxySecret` refuses every request; `--pin-port` without the secret file is fatal.
   - Tests: `TestPinPageRejects`, `TestPinPageWithoutProxySecretRefusesEverything` in
     `pkg/moonlight/pinpage_test.go`.
+- `/launch` rejects a mode outside 1..16384 (width/height) / 1..1000 (fps) with 400 before any
+  Session exists (`parseMode`): Wolf's AddSession refuses it from XERK-2042, so the Session would
+  never start while the client was told it had. Keep the bounds equal to Wolf's.
+  Tests: `TestLaunchRejectsInvalidMode`, `TestLaunchAcceptsModeBounds`.
