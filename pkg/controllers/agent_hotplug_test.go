@@ -43,6 +43,34 @@ func TestAgentFailedPauseKeepsDevices(t *testing.T) {
 	testAgentPause(t, errors.New("wolf refused"))
 }
 
+// A superseded stream's end names the resumed stream's ID: it must neither
+// stop that stream nor drop its devices (XERK-1964).
+func TestAgentIgnoresSupersededStreamEnd(t *testing.T) {
+	client := &stoppingClient{
+		fakeEventsClient: fakeEventsClient{events: make(chan *sse.Event)},
+		stopped:          make(chan string, 1),
+	}
+	a := hotplugAgent(t, client)
+	node := filepath.Join(a.inputDevPath, "event5")
+	if err := os.WriteFile(node, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go a.Run(ctx)
+	client.events <- &sse.Event{Event: []byte(wolfapi.EndSupersededStreamEventType), Data: []byte(`{"session_id":"42","rtp_secret_payload":"x"}`)}
+	// The loop is unbuffered: once this is taken, the event is handled.
+	client.events <- &sse.Event{Event: []byte("Done")}
+	select {
+	case id := <-client.stopped:
+		t.Errorf("stopped Wolf session %q on a superseded stream's end", id)
+	default:
+	}
+	if _, err := os.Stat(node); err != nil {
+		t.Errorf("device node dropped: %v", err)
+	}
+}
+
 func testAgentPause(t *testing.T, stopErr error) {
 	t.Helper()
 	client := &stoppingClient{

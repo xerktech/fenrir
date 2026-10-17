@@ -2530,7 +2530,7 @@ func (c *SessionController) reconcileActiveStreams(
 		if lobbyErr := c.ensureLobby(ctx, wolfclient, session); lobbyErr != nil {
 			return lobbyErr
 		}
-		wolfSession.ClientID, err = wolfStreamClientID(ctx, wolfclient, session.Generation)
+		wolfSession.ClientID, err = wolfStreamClientID(ctx, wolfclient)
 		if err != nil {
 			return err
 		}

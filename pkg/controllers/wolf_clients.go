@@ -20,15 +20,15 @@ import (
 )
 
 // Wolf gives every stream its paired client's ID (a hash of the client's
-// cert) as session ID, and a stream added without a client gets a certless
-// dummy, so all of a pod's streams would share one ID. A dead client's ENet
-// peer outlives its stream until Wolf times it out (seconds), then fires a
-// pause with that ID, and Wolf ends every stream with it: a /resume in that
-// window would be killed (XERK-1380). So the pod's Wolf config carries
-// wolfStreamClients paired clients, and consecutive attaches use different
-// ones.
+// cert) as session ID, so all of a pod's streams share one ID, and an attach
+// adds its stream ~15 ms after stopping the last one under that ID. The
+// xerktech/wolf fork (>= 1f15679: XERK-1948, XERK-1964) keeps the two
+// apart: a dead client's late ENet timeout ends only the superseded stream
+// (EndSupersededStreamEvent), and the stopped stream's runner exit and
+// interpipe producers no longer touch the new one. Older Wolf images need
+// attaches rotated over several clients (XERK-1380); one is enough now.
 const (
-	wolfStreamClients = 4
+	wolfStreamClients = 1
 	// The clients' app_state_folder, plus their index; how the operator
 	// finds their IDs, which Wolf computes.
 	wolfStreamClientPrefix = "direwolf-stream-"
@@ -39,7 +39,8 @@ const (
 )
 
 // wolfConfigSeedScript installs the seed unless Wolf's config already has
-// the stream clients. The config lives on the per user and App PVC, so this
+// the stream client. Volumes seeded with the old rotation's four clients
+// also have direwolf-stream-0 and are kept. The config lives on the per user and App PVC, so this
 // happens once per volume; a config without them is kept beside it.
 var wolfConfigSeedScript = fmt.Sprintf(`
 				cfg=%[1]s
@@ -49,7 +50,7 @@ var wolfConfigSeedScript = fmt.Sprintf(`
 				fi
 `, wolfConfigPath, wolfStreamClientPrefix, wolfStreamClients-1, wolfConfigSeedEnv)
 
-// wolfConfigSeed returns a config.toml holding only the stream clients.
+// wolfConfigSeed returns a config.toml holding only the stream client.
 // Wolf can't start from a partial current config (it needs its encoder
 // lists), so the seed is a version 6 config: Wolf migrates it, writing its
 // full default config with the seed's hostname, uuid and paired_clients.
@@ -98,11 +99,11 @@ func generateStreamClientCert() ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }
 
-// wolfStreamClientID picks the paired client for the attach of session
-// generation generation: each /resume bumps it, so consecutive attaches get
-// different clients and so different Wolf session IDs. "" (Wolf's certless
-// dummy) when Wolf has none, e.g. a pod from before the config was seeded.
-func wolfStreamClientID(ctx context.Context, wolfclient wolfapi.Client, generation int64) (string, error) {
+// wolfStreamClientID picks the paired client every attach streams with: the
+// first stream client, so a volume seeded with the old rotation's clients
+// uses direwolf-stream-0. "" (Wolf's certless dummy) when Wolf has none,
+// e.g. a pod from before the config was seeded.
+func wolfStreamClientID(ctx context.Context, wolfclient wolfapi.Client) (string, error) {
 	clients, err := wolfclient.ListClients(ctx)
 	if err != nil {
 		return "", fmt.Errorf("listing Wolf's paired clients: %w", err)
@@ -113,6 +114,5 @@ func wolfStreamClientID(ctx context.Context, wolfclient wolfapi.Client, generati
 	if len(clients) == 0 {
 		return "", nil
 	}
-	slices.SortFunc(clients, func(a, b wolfapi.PairedClient) int { return strings.Compare(a.AppStateFolder, b.AppStateFolder) })
-	return clients[generation%int64(len(clients))].ClientID, nil
+	return slices.MinFunc(clients, func(a, b wolfapi.PairedClient) int { return strings.Compare(a.AppStateFolder, b.AppStateFolder) }).ClientID, nil
 }

@@ -238,6 +238,11 @@ func (a *Agent) handleEvents(ctx context.Context, ch <-chan *sse.Event) {
 					continue
 				}
 				a.lobby.ended(stopEvent.SessionID)
+			// A stream a /resume replaced under the same session ID lost its
+			// client; Wolf ends that stream alone. The ID now names the
+			// resumed stream, so neither stop it nor end its lobby join.
+			case wolfapi.EndSupersededStreamEventType:
+				continue
 			case wolfapi.VideoSessionEventType, wolfapi.AudioSessionEventType:
 				var setup wolfapi.StreamSetupEvent
 				if err := json.Unmarshal(ev.Data, &setup); err != nil {
