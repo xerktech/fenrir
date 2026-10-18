@@ -89,8 +89,10 @@ controllers:
           # XERK-2023), streams started after a lobby join show the lobby (XERK-2045),
           # and no-GPU hosts stream with an older config.toml (XERK-2043).
           # A quick API pause-then-start no longer loses its video and audio (XERK-2046).
+          # Lobby creation rejects invalid screen modes (XERK-2048), and apps started by
+          # Wolf's process runner no longer keep its ports bound after it dies (XERK-2049).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-c5d125f@sha256:3007e9a69038515a331ed3503433ce17390e59ff34866b85ce3454445e98cd12
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-83cb169@sha256:e2a58a5f54ef67762eb1f24057f341e9a6d086cfe9d6d953dc734ebda0ceb130
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
