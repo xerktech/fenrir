@@ -25,6 +25,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     the GoW images: Talos' toolkit extension has no lib32, so a GPU claim injects 64-bit only and
     32-bit games render on lavapipe (XERK-1930). Bump `NVIDIA_VERSION` with the Talos driver; on
     a mismatch its cont-init hook deletes them (CPU fallback, not a crash).
+  - It also ships NVIDIA's NGX Wine DLLs in `/usr/lib/nvidia/wine` (XERK-2073): Proton enables
+    DLSS only if `nvngx.dll` sits in `<dir of libGLX_nvidia.so.0>/nvidia/wine`; CDI injects none.
 - The chart's `WOLF_IMAGE` is `ghcr.io/xerktech/wolf` (fork xerktech/wolf, branch `xerktech`;
   XERK-1944), pinned by digest in `charts/direwolf-operator/values.yaml`; CI does not rebuild it.
   - Bump it by hand to a digest the fork's Docker build printed for the `xerktech` branch.

@@ -11,6 +11,11 @@
 # nvidia-open-gpu-kernel-modules extension; until then the cont-init hook
 # removes the libraries on a mismatch, so 32-bit games fall back to the CPU as
 # before rather than fail to start. One Dockerfile, one target per image.
+#
+# Also NVIDIA's NGX Wine DLLs (XERK-2073), which the CDI spec leaves out too.
+# Proton copies nvngx.dll and _nvngx.dll into a prefix only when they sit in
+# <dir of libGLX_nvidia.so.0>/nvidia/wine; Talos injects that library into
+# /usr/lib. Without them games offer no DLSS or DLSS Frame Generation.
 
 FROM ghcr.io/games-on-whales/steam:edge@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632 AS driver
 ARG NVIDIA_VERSION=595.71.05
@@ -27,6 +32,8 @@ RUN set -eu; \
       libnvidia-glvkspirv libnvidia-gpucomp; do \
     cp "/tmp/nvidia/32/${lib}.so.${NVIDIA_VERSION}" "$out/"; \
   done; \
+  mkdir -p /out/usr/lib/nvidia/wine; \
+  cp /tmp/nvidia/nvngx.dll /tmp/nvidia/_nvngx.dll /tmp/nvidia/nvngx_dlssg.dll /out/usr/lib/nvidia/wine/; \
   mkdir -p /out/etc/direwolf; echo "${NVIDIA_VERSION}" > /out/etc/direwolf/nvidia-lib32-version
 
 # ldconfig creates each library's soname link (libGLX_nvidia.so.0, which the
