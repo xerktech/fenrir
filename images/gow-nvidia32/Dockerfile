@@ -11,6 +11,11 @@
 # nvidia-open-gpu-kernel-modules extension; until then the cont-init hook
 # removes the libraries on a mismatch, so 32-bit games fall back to the CPU as
 # before rather than fail to start. One Dockerfile, one target per image.
+#
+# Also NVIDIA's NGX Wine DLLs (XERK-2073), which the CDI spec leaves out too.
+# Proton copies nvngx.dll and _nvngx.dll into a prefix only when they sit in
+# <dir of libGLX_nvidia.so.0>/nvidia/wine; Talos injects that library into
+# /usr/lib. Without them games offer no DLSS or DLSS Frame Generation.
 
 FROM ghcr.io/games-on-whales/steam:edge@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632 AS driver
 ARG NVIDIA_VERSION=595.71.05
@@ -27,6 +32,10 @@ RUN set -eu; \
       libnvidia-glvkspirv libnvidia-gpucomp; do \
     cp "/tmp/nvidia/32/${lib}.so.${NVIDIA_VERSION}" "$out/"; \
   done; \
+  # The .run stores these 0700 (its installer applies the manifest's 0755), and
+  # Proton, running as the desktop user, aborts every launch on an unreadable one.
+  install -D -m 0755 -t /out/usr/lib/nvidia/wine \
+    /tmp/nvidia/nvngx.dll /tmp/nvidia/_nvngx.dll /tmp/nvidia/nvngx_dlssg.dll; \
   mkdir -p /out/etc/direwolf; echo "${NVIDIA_VERSION}" > /out/etc/direwolf/nvidia-lib32-version
 
 # ldconfig creates each library's soname link (libGLX_nvidia.so.0, which the
@@ -34,7 +43,8 @@ RUN set -eu; \
 FROM ghcr.io/games-on-whales/steam:edge@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632 AS steam
 COPY --from=driver /out/ /
 COPY --chmod=755 root/etc/cont-init.d/05-nvidia-lib32.sh /etc/cont-init.d/
-RUN ldconfig && ldconfig -p | grep -q 'libGLX_nvidia.so.0 (libc6)'
+RUN ldconfig && ldconfig -p | grep -q 'libGLX_nvidia.so.0 (libc6)' \
+  && gosu nobody sh -c 'cd /usr/lib/nvidia/wine && test -r nvngx.dll -a -r _nvngx.dll -a -r nvngx_dlssg.dll'
 # Steam Input off for every installed game: it needs /dev/uinput (XERK-1953).
 COPY --chmod=755 root/etc/cont-init.d/20-steam-input-off.sh /etc/cont-init.d/
 # No --chmod here: it also applies to the /opt/direwolf it creates, and a 644
@@ -45,4 +55,5 @@ RUN gosu nobody python3 -I /opt/direwolf/steam-input-off.py /nonexistent
 FROM ghcr.io/games-on-whales/heroic-games-launcher:edge@sha256:a207a39367801a8a8bf24b68dac2c9945052d3117cb03b061b27bd6672aab62f AS heroic
 COPY --from=driver /out/ /
 COPY --chmod=755 root/etc/cont-init.d/05-nvidia-lib32.sh /etc/cont-init.d/
-RUN ldconfig && ldconfig -p | grep -q 'libGLX_nvidia.so.0 (libc6)'
+RUN ldconfig && ldconfig -p | grep -q 'libGLX_nvidia.so.0 (libc6)' \
+  && gosu nobody sh -c 'cd /usr/lib/nvidia/wine && test -r nvngx.dll -a -r _nvngx.dll -a -r nvngx_dlssg.dll'
