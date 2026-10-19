@@ -121,7 +121,7 @@ func (f *launchFixture) launch(t *testing.T, user string) (int, Response) {
 		ObjectMeta: metav1.ObjectMeta{Name: user + "-pairing", Namespace: testNamespace},
 	})
 	appID := cmp.Or(f.appID, "1")
-	target := "/launch?appid=" + appID + "&rikey=00&rikeyid=1"
+	target := "/launch?appid=" + appID + "&rikey=773448F67992470C5C62848D361E1025&rikeyid=1"
 	if f.mode != "" {
 		target += "&mode=" + url.QueryEscape(f.mode)
 	}
@@ -838,7 +838,7 @@ func TestLaunchReplyFieldFollowsTheRoute(t *testing.T) {
 		ctx = context.WithValue(ctx, pairingContextKey{}, &v1alpha1types.Pairing{
 			ObjectMeta: metav1.ObjectMeta{Name: "alice-pairing", Namespace: testNamespace},
 		})
-		req := httptest.NewRequestWithContext(ctx, http.MethodGet, path+"?appid=1&rikey=00&rikeyid=1&mode=1920x1080x60", http.NoBody)
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, path+"?appid=1&rikey=773448F67992470C5C62848D361E1025&rikeyid=1&mode=1920x1080x60", http.NoBody)
 		rec := httptest.NewRecorder()
 		if path == "/resume" {
 			f.server.resumeHandler(rec, req)

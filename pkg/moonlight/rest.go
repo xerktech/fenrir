@@ -574,6 +574,11 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if keyErr := validStreamKeys(rikey, rikeyID); keyErr != nil {
+		writeErrorResponse(w, 400, keyErr)
+		return
+	}
+
 	if mode == "" {
 		mode = "1920x1080x60"
 	}
@@ -960,6 +965,22 @@ func busyResponse(reason string) Response {
 	return Response{StatusCode: busyStatusCode, StatusMessage: reason}
 }
 
+// validStreamKeys checks a client's stream keys the way Wolf's sessions/add does: rikey is the AES key as 32 hex
+// digits, rikeyid the IV as a decimal. Wolf refuses anything else with a 400, which the operator retries until the
+// launch times out, so refuse it here instead.
+func validStreamKeys(rikey, rikeyID string) error {
+	if _, err := hex.DecodeString(rikey); err != nil || len(rikey) != 32 {
+		return errors.New("rikey must be 32 hex digits")
+	}
+	if rikeyID == "" || rikeyID[0] == '+' {
+		return errors.New("rikeyid must be a decimal number")
+	}
+	if _, err := strconv.ParseInt(rikeyID, 10, 64); err != nil {
+		return errors.New("rikeyid must be a decimal number")
+	}
+	return nil
+}
+
 // resumeHandler re-attaches the client to its running session. The operator
 // keeps a session's pod through a client disconnect (its grace period), so the
 // game is still running. The client's new stream keys go into the Session's
@@ -970,6 +991,10 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 	rikeyID := r.URL.Query().Get("rikeyid")
 	if rikey == "" || rikeyID == "" {
 		writeErrorResponse(w, 400, errors.New("rikey and rikeyid required"))
+		return
+	}
+	if err := validStreamKeys(rikey, rikeyID); err != nil {
+		writeErrorResponse(w, 400, err)
 		return
 	}
 	clientIP, err := remoteIP(r)

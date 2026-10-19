@@ -67,3 +67,7 @@ paths:
   Session exists (`parseMode`): Wolf's AddSession refuses it from XERK-2042, so the Session would
   never start while the client was told it had. Keep the bounds equal to Wolf's.
   Tests: `TestLaunchRejectsInvalidMode`, `TestLaunchAcceptsModeBounds`.
+- `/launch` and `/resume` refuse a malformed `rikey`/`rikeyid` (`validStreamKeys`): Wolf's `sessions/add`
+  answers 400 to anything but a 32-hex key and a decimal IV, and the operator retries that until the
+  launch times out (~90 s, holding a pod and a GPU claim). Keep both checks in step with Wolf's.
+  - Tests: `pkg/moonlight/rest_test.go` "TestValidStreamKeys", "TestLaunchAndResumeRefuseMalformedKeys".
