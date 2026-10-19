@@ -191,7 +191,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     volumes join the pod after the App checks. Other User volumes stay mountable by the game.
     Tests: `TestBuildPodRejectsAppMountOfUserHostPath`.
   - Apps and examples add no `NET_ADMIN` (XERK-2100): under hostNetwork it reconfigures the
-    node's links, routes and firewall. Steam and Heroic run without it. Not enforced (XERK-1329).
+    node's links, routes and firewall. Steam and Heroic run without it; only the unused
+    `gst-ptp-helper` (file caps incl. `cap_net_admin`) then fails to exec. Not enforced (XERK-1329).
   - wolf-agent re-reads its token and its cert on every request/handshake: the operator may
     regenerate the Secret under a running pod and uses the new token and cert at once.
   - `Agent.Run` resubscribes to Wolf's `/api/v1/events` itself; `SubscribeToEvents` is one
