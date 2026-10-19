@@ -39,6 +39,9 @@ jobs:
   # Only main's current tip is released. A branch dispatch would publish an
   # unreviewed build, and a run main has moved past (a re-run, or a merge that
   # waited behind another release) is shipped by the newer run instead.
+  # Exception: a [skip ci] commit starts no run, so a run it moved past ships
+  # nothing until the next merge. Dispatch a patch release to ship it sooner;
+  # tracking skip markers here would only widen what this gate lets through.
   plan:
     runs-on: ubuntu-latest
     permissions:
@@ -114,6 +117,16 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          fetch-tags: true
+
+      # "Re-run failed jobs" on an old run keeps plan's release=true, so
+      # without this the :main tags would move to old code before the chart
+      # job's same check refuses it. No run can tag meanwhile (concurrency),
+      # so this refuses exactly what the chart job would.
+      - name: Refuse code older than the latest release
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type || 'patch' }}
+        run: hack/release/next-chart-version.sh "$RELEASE_TYPE" "$GITHUB_SHA" > /dev/null
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
