@@ -541,6 +541,36 @@ func TestInvalidSpecEndsSession(t *testing.T) {
 	}
 }
 
+// refRecorder keeps the objects Events are recorded on.
+type refRecorder struct {
+	record.FakeRecorder
+	refs []*corev1.ObjectReference
+}
+
+func (r *refRecorder) Eventf(obj runtime.Object, _, _, _ string, _ ...any) {
+	if ref, ok := obj.(*corev1.ObjectReference); ok {
+		r.refs = append(r.refs, ref)
+	}
+}
+
+// The Event names the App with its UID, or kubectl describe app omits it.
+func TestWarnAppReferencesAppWithUID(t *testing.T) {
+	f, sess := lifecycleFixture(t, podReadySession, nil)
+	app, err := f.sc.AppInformer.Namespaced(portsTestNS).Get(f.app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.UID = "app-uid" // the informer's copy, which warnApp reads
+	recorder := &refRecorder{}
+	f.sc.Recorder = recorder
+	f.sc.warnApp(sess, "InvalidSpec", "bad")
+	want := corev1.ObjectReference{APIVersion: v1alpha1types.GroupVersion.String(), Kind: "App",
+		Namespace: portsTestNS, Name: f.app, UID: "app-uid"}
+	if len(recorder.refs) != 1 || *recorder.refs[0] != want {
+		t.Errorf("Event on %+v, want %+v", recorder.refs, want)
+	}
+}
+
 // A Session is not ended for an invalid App the informer holds while the
 // live App differs (an admin's fix not yet cached): it waits for the cache.
 func TestInvalidSpecRechecksLiveAppAndUser(t *testing.T) {
