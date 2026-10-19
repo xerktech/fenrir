@@ -97,8 +97,10 @@ controllers:
           # lets anyone take a stream's video or block its start (XERK-2115).
           # WOLF_HTTP_SERVERS=FALSE turns off Wolf's Moonlight HTTP/HTTPS and mDNS,
           # which session pods rely on (XERK-1946): never pin an older image.
+          # Moonlight clients that support it get encrypted RTSP (rtspenc://), so others behind
+          # the client's IP or on the path can't take the stream's setup (XERK-2118).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-91fe38e@sha256:6626674a02166a2ebc0c2d0658ebd30cc6f5d4d1f38b37181c55318240247cf8
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-22e488d@sha256:e1bd05abbc0239a7d9616d9482981d63e3a6f2e1ee0a32f31b02f66c983e0abc
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
