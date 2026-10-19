@@ -27,6 +27,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     a mismatch its cont-init hook deletes them (CPU fallback, not a crash).
   - It also ships NVIDIA's NGX Wine DLLs in `/usr/lib/nvidia/wine` (XERK-2073): Proton enables
     DLSS only if `nvngx.dll` sits in `<dir of libGLX_nvidia.so.0>/nvidia/wine`; CDI injects none.
+  - Its `steam` cont-init hook deletes `.cef-enable-remote-debugging` from the shared Steam install
+    (Heroic writes it): Steam would serve its CEF debugger on 127.0.0.1:8080, the node's loopback
+    under hostNetwork, so any node process could drive it. Tests: `TestSteamInputOffHookRunsScript`.
 - The chart's `WOLF_IMAGE` is `ghcr.io/xerktech/wolf` (fork xerktech/wolf, branch `xerktech`;
   XERK-1944), pinned by digest in `charts/direwolf-operator/values.yaml`; CI does not rebuild it.
   - Bump it by hand to a digest the fork's Docker build printed for the `xerktech` branch.

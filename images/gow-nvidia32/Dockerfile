@@ -17,7 +17,10 @@
 # <dir of libGLX_nvidia.so.0>/nvidia/wine; Talos injects that library into
 # /usr/lib. Without them games offer no DLSS or DLSS Frame Generation.
 
-FROM ghcr.io/games-on-whales/steam:edge@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632 AS driver
+# Only unpacks the .run, so any base with sh and coreutils does (it carries its
+# own zstd): not a GoW image, which the heroic leg would pull just for this,
+# and which builder.yml's mode=max cache would store once more per leg.
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS driver
 ARG NVIDIA_VERSION=595.71.05
 ARG NVIDIA_SHA256=36203b8960b7e49c8a42f6ba1f5863cde34a05e93d2b24b798af06dd846f6b82
 ADD --checksum=sha256:${NVIDIA_SHA256} \
@@ -36,7 +39,9 @@ RUN set -eu; \
   # Proton, running as the desktop user, aborts every launch on an unreadable one.
   install -D -m 0755 -t /out/usr/lib/nvidia/wine \
     /tmp/nvidia/nvngx.dll /tmp/nvidia/_nvngx.dll /tmp/nvidia/nvngx_dlssg.dll; \
-  mkdir -p /out/etc/direwolf; echo "${NVIDIA_VERSION}" > /out/etc/direwolf/nvidia-lib32-version
+  mkdir -p /out/etc/direwolf; echo "${NVIDIA_VERSION}" > /out/etc/direwolf/nvidia-lib32-version; \
+  # The 1.6 GB unpacked tree would otherwise sit in this layer and the cache.
+  rm -rf /tmp/nvidia
 
 # ldconfig creates each library's soname link (libGLX_nvidia.so.0, which the
 # Vulkan ICD manifest names) and the cache entry pressure-vessel resolves from.

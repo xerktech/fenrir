@@ -262,6 +262,9 @@ func TestSteamInputOffWithoutSteamLogin(t *testing.T) {
 
 const hook = "root/etc/cont-init.d/20-steam-input-off.sh"
 
+// cefDebugFlag, which Heroic writes, turns on Steam's CEF remote debugger.
+const cefDebugFlag = ".cef-enable-remote-debugging"
+
 // sourceHook sources the cont-init hook the way GOW's entrypoint does (root,
 // `set -e`), with gosu stubbed to run the command as is, and with the script
 // at its image path swapped for the repo's. It reports whether the entrypoint
@@ -305,6 +308,7 @@ func TestSteamInputOffHookRunsScript(t *testing.T) {
 	for name, data := range map[string]string{
 		"steamapps/libraryfolders.vdf": libraryFolders,
 		userConfig:                     localConfig,
+		cefDebugFlag:                   "",
 	} {
 		p := filepath.Join(steam, name)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -320,6 +324,9 @@ func TestSteamInputOffHookRunsScript(t *testing.T) {
 	}
 	if got := readFile(t, filepath.Join(steam, userConfig)); got != wantConfig {
 		t.Errorf("hook did not update localconfig.vdf:\n%s", got)
+	}
+	if _, err := os.Lstat(filepath.Join(steam, cefDebugFlag)); !os.IsNotExist(err) {
+		t.Errorf("%s survived the hook (%v): Steam would open its debugger on the node's loopback", cefDebugFlag, err)
 	}
 }
 
