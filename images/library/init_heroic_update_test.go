@@ -1,6 +1,7 @@
 package library
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -39,7 +40,10 @@ fi
 echo "dpkg $*" >>"$LOG"`,
 	"getent": `echo "abc:x:1000:1000::$FAKE_HOME:/bin/bash"`,
 	// Logs that the home was touched as the desktop user, never as root.
-	"s6-setuidgid":       `[ "$1" = abc ] || exit 111; shift; echo "as-abc $1" >>"$LOG"; exec "$@"`,
+	// FAKE_HUNG_READ: the cache read never returns, as on a hung filesystem.
+	"s6-setuidgid": `[ "$1" = abc ] || exit 111; shift; echo "as-abc $1" >>"$LOG"
+case "$FAKE_HUNG_READ:$3" in 1:*head*) exec sleep 600;; esac
+exec "$@"`,
 	"heroic-postinstall": `echo postinstall >>"$LOG"`,
 	"apt-get": `if [ "$1" = install ]; then
   for deb; do :; done
@@ -117,7 +121,12 @@ func (p *heroicPod) runSized(installed, deb, digest string, size int, env ...str
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.CommandContext(t.Context(), "bash", initHeroicUpdate)
+	// Bounded, so a script that hangs fails the test rather than the suite.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", initHeroicUpdate)
+	// Its stubs' children may hold the output open after bash is killed.
+	cmd.WaitDelay = time.Second
 	cmd.Env = append(os.Environ(),
 		"PATH="+filepath.Join(p.dir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"LOG="+p.log, "FAKE_HOME="+p.home, "FAKE_INSTALLED="+installed,
@@ -279,6 +288,29 @@ func TestHeroicUpdateIgnoresPlantedSpecialFiles(t *testing.T) {
 				t.Fatalf("want a fresh download installed, calls:\n%s", calls)
 			}
 		})
+	}
+}
+
+// A cache read that hangs, as on a hung filesystem, must be given up on: the
+// desktop does not start until the script ends. The [ -f ] check cannot
+// help there; only the timeout does (XERK-1867).
+func TestHeroicUpdateGivesUpOnHungCacheRead(t *testing.T) {
+	realTimeout, err := exec.LookPath("timeout")
+	if err != nil {
+		t.Skipf("no timeout(1): %v", err)
+	}
+	p := newHeroicPod(t)
+	// The script's own limits, cut to a second so the test is quick.
+	writeStub(t, filepath.Join(p.dir, "bin", "timeout"), `echo "timeout $1" >>"$LOG"; shift; exec `+realTimeout+` 1 "$@"`)
+	const deb = "heroic 2.22.4"
+	calls := p.run("2.22.3", deb, "sha256:"+sha256Hex(deb), "FAKE_HUNG_READ=1")
+	// The read is the first command the script times out (the cache write
+	// comes later): a longer limit would hold the desktop's start longer.
+	if i := strings.Index(calls, "timeout "); i < 0 || !strings.HasPrefix(calls[i:], "timeout 60\nas-abc sh\n") {
+		t.Fatalf("want the cache read under a 60s timeout, calls:\n%s", calls)
+	}
+	if !strings.Contains(calls, "download") || !strings.Contains(calls, "apt-get install "+sha256Hex(deb)) {
+		t.Fatalf("want a fresh download installed, calls:\n%s", calls)
 	}
 }
 

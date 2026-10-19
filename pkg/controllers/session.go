@@ -38,6 +38,7 @@ import (
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
@@ -134,6 +135,10 @@ type SessionController struct {
 
 	AppInformer  generic.Informer[*v1alpha1types.App]
 	UserInformer generic.Informer[*v1alpha1types.User]
+	// Read live before a Session is ended for its App or User spec, which
+	// the informers may not yet show fixed (see specCacheCurrent).
+	AppClient  v1alpha1client.AppInterface
+	UserClient v1alpha1client.UserInterface
 
 	// A Session whose Pairing is gone is ended (see revokedReason).
 	PairingClient   v1alpha1client.PairingInterface
@@ -143,6 +148,9 @@ type SessionController struct {
 	UDPRouteClient gatewayv1alpha2.UDPRouteInterface
 
 	K8sClient kubernetes.Interface
+	// Records a Warning Event on the App when a Session ends for its App or
+	// User spec, as the client only sees a failed launch. Nil: none.
+	Recorder record.EventRecorder
 
 	ports *portAllocator
 
@@ -169,9 +177,12 @@ func NewSessionController(
 	sessionInformer generic.Informer[*v1alpha1types.Session],
 	appInformer generic.Informer[*v1alpha1types.App],
 	userInformer generic.Informer[*v1alpha1types.User],
+	appClient v1alpha1client.AppInterface,
+	userClient v1alpha1client.UserInterface,
 	podInformer generic.Informer[*corev1.Pod],
 	pairingClient v1alpha1client.PairingInterface,
 	pairingInformer generic.Informer[*v1alpha1types.Pairing],
+	recorder record.EventRecorder,
 	options SessionControllerOptions,
 ) *SessionController {
 	res := &SessionController{
@@ -182,8 +193,11 @@ func NewSessionController(
 		SessionInformer:          sessionInformer,
 		AppInformer:              appInformer,
 		UserInformer:             userInformer,
+		AppClient:                appClient,
+		UserClient:               userClient,
 		PairingClient:            pairingClient,
 		PairingInformer:          pairingInformer,
+		Recorder:                 recorder,
 		ports:                    newPortAllocator(options.SessionPortRange),
 		SessionControllerOptions: options,
 	}
@@ -863,6 +877,10 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		} else if !errors.IsNotFound(getErr) {
 			return nil, fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, getErr)
 		}
+		if staleErr := c.specCacheCurrent(ctx, session); staleErr != nil {
+			return nil, staleErr
+		}
+		c.warnApp(session, "InvalidSpec", err.Error())
 		return nil, c.endSessionErr(ctx, session, err.Error())
 	case err != nil:
 		return nil, err
@@ -890,11 +908,61 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		// LimitRange), not on time, so every retry fails the same way. The CRDs cannot check all of it (keys nested in
 		// arrays exceed the CEL cost budget, annotation size), so end the
 		// Session now rather than at the unstarted TTL (XERK-1522).
-		return nil, c.endSessionErr(ctx, session, fmt.Sprintf("its pod is invalid (check its App, User and namespace LimitRanges): %v", err))
+		reason := fmt.Sprintf("its pod is invalid (check its App, User and namespace LimitRanges): %v", err)
+		c.warnApp(session, "InvalidPod", reason)
+		return nil, c.endSessionErr(ctx, session, reason)
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to create pod: %w", err)
 	}
 	return created, nil
+}
+
+// specCacheCurrent returns a retryable error unless the cached App and User
+// buildPod read are the live ones: a Session reconciled just after an admin
+// fixed its App must not be ended for the cache's stale copy.
+func (c *SessionController) specCacheCurrent(ctx context.Context, session *v1alpha1types.Session) error {
+	ns := session.Namespace
+	appName, userName := session.Spec.GameReference.Name, session.Spec.UserReference.Name
+	cachedApp, err := c.AppInformer.Namespaced(ns).Get(appName)
+	if err != nil {
+		return fmt.Errorf("failed to get app %s/%s: %w", ns, appName, err)
+	}
+	cachedUser, err := c.UserInformer.Namespaced(ns).Get(userName)
+	if err != nil {
+		return fmt.Errorf("failed to get user %s/%s: %w", ns, userName, err)
+	}
+	liveApp, err := c.AppClient.Get(ctx, appName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get app %s/%s: %w", ns, appName, err)
+	}
+	liveUser, err := c.UserClient.Get(ctx, userName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get user %s/%s: %w", ns, userName, err)
+	}
+	if liveApp.ResourceVersion != cachedApp.ResourceVersion || liveUser.ResourceVersion != cachedUser.ResourceVersion {
+		return fmt.Errorf("app %s or user %s changed since cached; waiting for the cache", appName, userName)
+	}
+	return nil
+}
+
+// warnApp records a Warning Event on session's App that the Session ended
+// for message, so the App's author sees why without the operator's logs.
+func (c *SessionController) warnApp(session *v1alpha1types.Session, reason, message string) {
+	if c.Recorder == nil {
+		return
+	}
+	ref := &corev1.ObjectReference{
+		APIVersion: v1alpha1types.GroupVersion.String(),
+		Kind:       "App",
+		Namespace:  session.Namespace,
+		Name:       session.Spec.GameReference.Name,
+	}
+	// With its UID, or kubectl describe would not list the Event.
+	if app, err := c.AppInformer.Namespaced(session.Namespace).Get(ref.Name); err == nil {
+		ref.UID = app.UID
+	}
+	c.Recorder.Eventf(ref, corev1.EventTypeWarning, reason, "Session %s of user %s ended: %s",
+		session.Name, session.Spec.UserReference.Name, message)
 }
 
 // checkPod returns pod if the session can still use it, and otherwise ends the
@@ -2062,7 +2130,7 @@ func defaultProfileHoleCapability(sc *corev1.SecurityContext) corev1.Capability 
 		return ""
 	}
 	for _, c := range sc.Capabilities.Add {
-		switch strings.TrimPrefix(strings.ToUpper(string(c)), "CAP_") {
+		switch strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(string(c))), "CAP_") {
 		case "SYS_ADMIN", "BPF", "PERFMON", "SYS_MODULE", "SYS_RAWIO", "SYS_BOOT", "SYS_PACCT",
 			"DAC_READ_SEARCH", "ALL":
 			return c

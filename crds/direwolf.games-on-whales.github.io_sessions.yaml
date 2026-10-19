@@ -60,6 +60,10 @@ spec:
                   aesKey:
                     type: string
                   clientIP:
+                    description: |-
+                      The client's IP as moonlight-proxy saw it (zone stripped). Bounded so
+                      the errors quoting it stay within a condition message's limit.
+                    maxLength: 45
                     type: string
                   surroundAudioFlags:
                     type: integer

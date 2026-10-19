@@ -1,0 +1,24 @@
+{
+  "linux":  {
+    "resources":  {
+      "devices":  [
+        {
+          "allow":  true,
+          "type":  "c",
+          "major":  {
+            "value":  "13"
+          },
+          "access":  "rwm"
+        },
+        {
+          "allow":  true,
+          "type":  "c",
+          "major":  {
+            "value":  "241"
+          },
+          "access":  "rwm"
+        }
+      ]
+    }
+  }
+}

@@ -30,6 +30,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - Its steam target keeps GoW's NetworkManager off the node's links (XERK-1867): session pods
     are hostNetwork and Steam adds NET_ADMIN, so stock NM ran DHCP on every new pod veth.
     It manages only loopback and bridges: with nothing managed it reports "disconnected".
+  - Its `steam` cont-init hook deletes `.cef-enable-remote-debugging` from the shared Steam install
+    (Heroic writes it): Steam would serve its CEF debugger on 127.0.0.1:8080, the node's loopback
+    under hostNetwork, so any node process could drive it. Tests: `TestSteamInputOffHookRunsScript`.
 - The chart's `WOLF_IMAGE` is `ghcr.io/xerktech/wolf` (fork xerktech/wolf, branch `xerktech`;
   XERK-1944), pinned by digest in `charts/direwolf-operator/values.yaml`; CI does not rebuild it.
   - Bump it by hand to a digest the fork's Docker build printed for the `xerktech` branch.
@@ -98,6 +101,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       (keys nested in arrays exceed the cost budget, annotation size). `TestInvalidPodEndsSession`.
     - So does a buildPod error from the App/User spec (wrapped in `errInvalidSpec`); a failed
       informer lookup stays retryable. `TestInvalidSpecEndsSession` (XERK-1782).
+    - Both record a Warning Event on the App (the client only sees a failed launch); the
+      operator Role needs `events` create/patch.
     - A Session whose `spec.pairingReference` Pairing is gone (client revoked) is ended; Pairing
       deletes end their Sessions directly. The cache miss is confirmed with a live GET first, as the
       Pairing watch can lag the Session's. Tests: `session_pairing_test.go`.

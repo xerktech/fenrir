@@ -137,7 +137,19 @@ func (f *launchFixture) launch(t *testing.T, user string) (int, Response) {
 	if err := xml.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Errorf("unparseable response %q: %v", rec.Body.String(), err)
 	}
+	// Every reply, errors too, is HTTP 200: moonlight-qt shows a non-2xx
+	// status only as a transport error, never the message.
+	if rec.Code != http.StatusOK {
+		t.Errorf("launch = HTTP %d %s, want 200 with the status in the XML", rec.Code, rec.Body)
+	}
 	return rec.Code, resp
+}
+
+// launchStatus is launch's XML status_code.
+func (f *launchFixture) launchStatus(t *testing.T, user string) int {
+	t.Helper()
+	_, resp := f.launch(t, user)
+	return resp.StatusCode
 }
 
 // slowListSessions delays launch-id (cleanup) Lists. It wraps the client
@@ -279,10 +291,10 @@ func TestLaunchRejectsInvalidMode(t *testing.T) {
 		f := newLaunchFixture(t, &RESTServerOptions{})
 		f.mode = mode
 
-		code, _ := f.launch(t, "alice")
+		code := f.launchStatus(t, "alice")
 
 		if code != http.StatusBadRequest {
-			t.Errorf("mode %q: HTTP %d, want 400", mode, code)
+			t.Errorf("mode %q: status %d, want 400", mode, code)
 		}
 		if n := f.created.Load(); n != 0 {
 			t.Errorf("mode %q: created %d sessions, want 0", mode, n)
@@ -356,11 +368,11 @@ func TestLaunchBusyCheckError(t *testing.T) {
 		},
 	})
 
-	code, _ := f.launch(t, "bob")
+	code := f.launchStatus(t, "bob")
 
 	// Fail closed: an unknown state must not start a second stream.
 	if code != http.StatusInternalServerError {
-		t.Errorf("HTTP status = %d, want 500", code)
+		t.Errorf("status = %d, want 500", code)
 	}
 	if f.created.Load() != 0 {
 		t.Errorf("created %d sessions, want none", f.created.Load())
@@ -379,8 +391,8 @@ func TestLaunchFailureDeletesSession(t *testing.T) {
 		return true, &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}}, nil
 	})
 
-	if code, _ := f.launch(t, "alice"); code != http.StatusInternalServerError {
-		t.Fatalf("HTTP status = %d, want 500 on timeout", code)
+	if code := f.launchStatus(t, "alice"); code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 on timeout", code)
 	}
 	f.waitForSessionCount(t, 0)
 	// And so it doesn't lock out the next user.
@@ -419,14 +431,14 @@ func TestLaunchFailureAnswersBeforeCleanup(t *testing.T) {
 	defer timer.Stop()
 
 	start := time.Now()
-	code, _ := f.launch(t, "alice")
+	code := f.launchStatus(t, "alice")
 	elapsed := time.Since(start)
 	unstall()
 	<-cleanupDone
 
 	// moonlight-qt only accepts the reply once the handler returns.
 	if code != http.StatusInternalServerError || elapsed > 2*time.Second {
-		t.Errorf("launch = HTTP %d after %s, want 500 without waiting on the cleanup", code, elapsed)
+		t.Errorf("launch = status %d after %s, want 500 without waiting on the cleanup", code, elapsed)
 	}
 }
 
@@ -443,8 +455,8 @@ func TestLaunchFailureCleanupHoldsSlot(t *testing.T) {
 	// Alice's cleanup is slow to start deleting.
 	f.slowCleanupList(100 * time.Millisecond) // within bob's 300ms budget
 
-	if code, _ := f.launch(t, "alice"); code != http.StatusInternalServerError {
-		t.Fatalf("alice HTTP status = %d, want 500", code)
+	if code := f.launchStatus(t, "alice"); code != http.StatusInternalServerError {
+		t.Fatalf("alice status = %d, want 500", code)
 	}
 	// Bob launches right away: he must queue behind the cleanup rather than
 	// count alice's orphan.
@@ -479,7 +491,7 @@ func TestLaunchFailureCleanupQueuesForBusySlot(t *testing.T) {
 
 	aliceDone := make(chan int, 1)
 	go func() {
-		code, _ := f.launch(t, "alice")
+		code := f.launchStatus(t, "alice")
 		aliceDone <- code
 	}()
 	time.Sleep(100 * time.Millisecond) // alice is in her readiness wait
@@ -489,7 +501,7 @@ func TestLaunchFailureCleanupQueuesForBusySlot(t *testing.T) {
 		f.launch(t, "carol")
 	}()
 	if code := <-aliceDone; code != http.StatusInternalServerError {
-		t.Fatalf("alice HTTP status = %d, want 500", code)
+		t.Fatalf("alice status = %d, want 500", code)
 	}
 
 	// Bob queues behind alice's cleanup, which queued behind carol.
@@ -532,7 +544,7 @@ func TestLaunchQueuedBeforeFailureStillDrainsCleanup(t *testing.T) {
 
 	aliceDone := make(chan int, 1)
 	go func() {
-		code, _ := f.launch(t, "alice")
+		code := f.launchStatus(t, "alice")
 		aliceDone <- code
 	}()
 	time.Sleep(100 * time.Millisecond) // alice is in her readiness wait
@@ -550,7 +562,7 @@ func TestLaunchQueuedBeforeFailureStillDrainsCleanup(t *testing.T) {
 		bobDone <- resp
 	}()
 	if code := <-aliceDone; code != http.StatusInternalServerError {
-		t.Fatalf("alice HTTP status = %d, want 500", code)
+		t.Fatalf("alice status = %d, want 500", code)
 	}
 	close(release)
 	<-carolDone
@@ -722,7 +734,7 @@ func TestLaunchCreateErrorDeletesStoredSession(t *testing.T) {
 
 	aliceCode := make(chan int, 1)
 	go func() {
-		code, _ := f.launch(t, "alice")
+		code := f.launchStatus(t, "alice")
 		aliceCode <- code
 	}()
 	<-entered
@@ -741,7 +753,7 @@ func TestLaunchCreateErrorDeletesStoredSession(t *testing.T) {
 	close(release)
 
 	if code := <-aliceCode; code != http.StatusInternalServerError {
-		t.Errorf("alice HTTP status = %d, want 500", code)
+		t.Errorf("alice status = %d, want 500", code)
 	}
 	bob := <-bobResult
 	if bob.resp.StatusCode != http.StatusOK {
@@ -943,39 +955,108 @@ func TestLaunchWaitsOutStreamStartFailed(t *testing.T) {
 	f.streamStarted("StreamStartFailed", "pod not ready")
 
 	start := time.Now()
-	code, _ := f.launch(t, "alice")
+	code := f.launchStatus(t, "alice")
 	if elapsed := time.Since(start); code != http.StatusInternalServerError || elapsed < 300*time.Millisecond {
-		t.Errorf("launch = HTTP %d after %s, want 500 at the timeout", code, elapsed)
+		t.Errorf("launch = status %d after %s, want 500 at the timeout", code, elapsed)
 	}
 }
 
-// The operator deletes a launch's Session it can never stream (an IPv6
-// client) before starting its pod; /launch says so at once rather than
-// answering a transport error (XERK-1336, XERK-1335).
+// The operator deletes a launch's Session it can never stream before starting
+// its pod; /launch says so at once rather than answering a transport error
+// (XERK-1336, XERK-1335).
 func TestLaunchSessionEndedByOperator(t *testing.T) {
-	for _, tc := range []struct{ remoteAddr, want string }{
-		{"[2001:db8::1]:51000", "The host ended the session before its stream started: streaming needs IPv4, and this client connected from 2001:db8::1"},
-		{"192.0.2.7:51000", "The host ended the session before its stream started"},
-	} {
-		t.Run(tc.remoteAddr, func(t *testing.T) {
-			f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 5 * time.Second})
-			f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
-				get, ok := action.(k8stesting.GetAction)
-				if !ok {
-					return false, nil, nil
-				}
-				return true, nil, k8serrors.NewNotFound(v1alpha1types.Resource("sessions"), get.GetName())
-			})
-			f.remoteAddr = tc.remoteAddr
+	f := newLaunchFixture(t, &RESTServerOptions{LaunchTimeout: 5 * time.Second})
+	f.client.PrependReactor("get", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		get, ok := action.(k8stesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+		return true, nil, k8serrors.NewNotFound(v1alpha1types.Resource("sessions"), get.GetName())
+	})
+	f.remoteAddr = "192.0.2.7:51000"
 
-			start := time.Now()
-			code, resp := f.launch(t, "alice")
-			if elapsed := time.Since(start); elapsed > 2*time.Second {
-				t.Errorf("launch took %s, want it to fail fast", elapsed)
-			}
-			if code != http.StatusOK || resp.StatusCode != streamRefusedStatusCode || resp.StatusMessage != tc.want {
-				t.Errorf("launch = HTTP %d / %d %q, want 200 / %d %q", code, resp.StatusCode, resp.StatusMessage, streamRefusedStatusCode, tc.want)
-			}
-		})
+	start := time.Now()
+	code, resp := f.launch(t, "alice")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("launch took %s, want it to fail fast", elapsed)
+	}
+	if code != http.StatusOK || resp.StatusCode != streamRefusedStatusCode || resp.StatusMessage != sessionEndedMessage {
+		t.Errorf("launch = HTTP %d / %d %q, want 200 / %d %q", code, resp.StatusCode, resp.StatusMessage, streamRefusedStatusCode, sessionEndedMessage)
+	}
+}
+
+// A launch from an address Wolf can't stream to is refused before any Session
+// exists: no cold start spent on a pod the operator then tears down, and the
+// user's running session is left alone (XERK-1867).
+func TestLaunchRefusesNonIPv4Client(t *testing.T) {
+	const want = "Streaming needs IPv4, and this client connected from 2001:db8::1"
+	f := newLaunchFixture(t, &RESTServerOptions{}, sessionFor("alice"))
+	f.remoteAddr = "[2001:db8::1]:51000"
+
+	code, resp := f.launch(t, "alice")
+	if code != http.StatusOK || resp.StatusCode != streamRefusedStatusCode || resp.StatusMessage != want {
+		t.Errorf("launch = HTTP %d / %d %q, want 200 / %d %q", code, resp.StatusCode, resp.StatusMessage, streamRefusedStatusCode, want)
+	}
+	if n := f.created.Load(); n != 0 {
+		t.Errorf("%d Sessions created, want none", n)
+	}
+	if n := f.sessionCount(t); n != 1 {
+		t.Errorf("%d sessions left, want alice's running one kept", n)
+	}
+}
+
+// An unknown App is reported as such whatever the client's address: the
+// IPv4 refusal is for launches that could otherwise start.
+func TestLaunchUnknownAppFromIPv6(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{})
+	f.remoteAddr = "[2001:db8::1]:51000"
+	f.appID = "99"
+
+	if _, resp := f.launch(t, "alice"); resp.StatusCode != http.StatusNotFound || resp.StatusMessage != "app not found" {
+		t.Errorf("launch = %d %q, want 404 %q", resp.StatusCode, resp.StatusMessage, "app not found")
+	}
+	if n := f.created.Load(); n != 0 {
+		t.Errorf("%d Sessions created, want none", n)
+	}
+}
+
+// stopSessionsForUser keeps going past a Session someone else deleted since
+// its List, so the user's other Sessions still stop (XERK-1867).
+func TestCancelToleratesSessionAlreadyDeleted(t *testing.T) {
+	gone := sessionFor("alice")
+	other := sessionFor("alice")
+	other.Name = "alice-other"
+	f := newLaunchFixture(t, &RESTServerOptions{}, gone, other)
+	f.client.PrependReactor("delete", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if del, ok := action.(k8stesting.DeleteAction); !ok || del.GetName() != gone.Name {
+			return false, nil, nil
+		}
+		return true, nil, k8serrors.NewNotFound(v1alpha1types.Resource("sessions"), gone.Name)
+	})
+	if err := f.server.stopSessionsForUser(t.Context(), &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "alice"}}, false); err != nil {
+		t.Fatalf("stopSessionsForUser = %v, want the NotFound tolerated", err)
+	}
+	if _, err := f.client.DirewolfV1alpha1().Sessions(testNamespace).Get(t.Context(), other.Name, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
+		t.Errorf("alice-other: get = %v, want it deleted", err)
+	}
+}
+
+// The wait for pods follows the caller's context, not its own fixed 25s.
+func TestStopSessionsWaitHonoursContext(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{})
+	pods := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	if err := pods.Add(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "alice-pod", Namespace: testNamespace, Labels: map[string]string{"direwolf/user": "alice"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	f.server.PodLister = generic.NewLister[*corev1.Pod](pods).Namespaced(testNamespace)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := f.server.stopSessionsForUser(ctx, &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "alice"}}, true)
+	if elapsed := time.Since(start); err == nil || elapsed > 2*time.Second {
+		t.Errorf("stopSessionsForUser = %v after %s, want an error once the context ends", err, elapsed)
 	}
 }

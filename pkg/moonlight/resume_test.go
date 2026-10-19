@@ -2,6 +2,7 @@ package moonlight
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,8 +101,8 @@ func TestResumeRequiresKeys(t *testing.T) {
 	srv := &RESTServer{}
 	w := httptest.NewRecorder()
 	srv.resumeHandler(w, resumeRequest("rikey=k"))
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", w.Code)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `status_code="400"`) {
+		t.Errorf("response = %d %s, want HTTP 200 with status 400", w.Code, w.Body.String())
 	}
 }
 
@@ -240,8 +241,8 @@ func TestResumeStreamRefused(t *testing.T) {
 				}
 				return
 			}
-			if w.Code != http.StatusInternalServerError {
-				t.Errorf("resume = %d %s, want 500 at the timeout", w.Code, w.Body.String())
+			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `status_code="500"`) || strings.Contains(w.Body.String(), "alex-steam-abcde") {
+				t.Errorf("resume = %d %s, want status 500 at the timeout", w.Code, w.Body.String())
 			}
 		})
 	}
@@ -274,5 +275,91 @@ func TestResumeSessionEndedWhileWaiting(t *testing.T) {
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `status_message="The host ended the session before its stream started"`) ||
 		time.Since(start) > 2*time.Second {
 		t.Errorf("resume = %d %s after %s, want the ended message at once", w.Code, w.Body.String(), time.Since(start))
+	}
+}
+
+// A Session gone or ending between the resume's List and its key update
+// gets the same message as one gone while waiting, not a 500 naming the
+// Session (XERK-1867).
+func TestResumeSessionEndedBeforeUpdate(t *testing.T) {
+	notFound := k8serrors.NewNotFound(v1alpha1types.Resource("sessions"), "alex-a")
+	for name, react := range map[string]struct {
+		verb   string
+		result func() (runtime.Object, error)
+	}{
+		"get not found":    {"get", func() (runtime.Object, error) { return nil, notFound }},
+		"update not found": {"update", func() (runtime.Object, error) { return nil, notFound }},
+		"terminating at get": {"get", func() (runtime.Object, error) {
+			s := alexSession("alex-a", time.Now())
+			s.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+			return s, nil
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dw := generatedclient.NewSimpleClientset(alexSession("alex-a", time.Now()))
+			dw.PrependReactor(react.verb, "sessions", func(k8stesting.Action) (bool, runtime.Object, error) {
+				obj, err := react.result()
+				return true, obj, err
+			})
+			srv := &RESTServer{SessionClient: dw.DirewolfV1alpha1().Sessions("ns"), RESTServerOptions: RESTServerOptions{LaunchTimeout: 5 * time.Second}}
+
+			w := httptest.NewRecorder()
+			srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+			if body := w.Body.String(); w.Code != http.StatusOK || !strings.Contains(body, `status_message="`+sessionEndedMessage+`"`) || strings.Contains(body, "alex-a") {
+				t.Errorf("resume = %d %s, want the ended message", w.Code, body)
+			}
+		})
+	}
+}
+
+// A 5xx tells the client only that the host failed: the API error behind it
+// (Session names, RBAC detail) stays in the log. 4xx messages are kept.
+func TestServerErrorHidesDetail(t *testing.T) {
+	dw := generatedclient.NewSimpleClientset(alexSession("alex-a", time.Now()))
+	dw.PrependReactor("get", "sessions", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, k8serrors.NewForbidden(v1alpha1types.Resource("sessions"), "alex-a", errors.New("rbac says no"))
+	})
+	srv := &RESTServer{SessionClient: dw.DirewolfV1alpha1().Sessions("ns"), RESTServerOptions: RESTServerOptions{LaunchTimeout: 5 * time.Second}}
+
+	w := httptest.NewRecorder()
+	srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, `status_code="500"`) || !strings.Contains(body, `status_message="`+internalErrorMessage+`"`) {
+		t.Errorf("resume = %d %s, want status 500 with %q", w.Code, body, internalErrorMessage)
+	}
+	for _, leak := range []string{"alex-a", "forbidden", "rbac"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("resume reply leaks %q: %s", leak, body)
+		}
+	}
+
+	w = httptest.NewRecorder()
+	srv.resumeHandler(w, resumeRequest("rikey=k"))
+	if !strings.Contains(w.Body.String(), "rikey and rikeyid required") {
+		t.Errorf("400 reply = %s, want its message kept", w.Body.String())
+	}
+}
+
+// A resume from an address Wolf can't stream to is refused before its IP is
+// written into the Session, which would otherwise sit refused until the
+// disconnect grace period reaps it (XERK-1867).
+func TestResumeRefusesNonIPv4Client(t *testing.T) {
+	dw := generatedclient.NewSimpleClientset(alexSession("alex-a", time.Now()))
+	sessions := dw.DirewolfV1alpha1().Sessions("ns")
+	srv := &RESTServer{SessionClient: sessions, RESTServerOptions: RESTServerOptions{LaunchTimeout: 5 * time.Second}}
+
+	r := resumeRequest("rikey=newkey&rikeyid=42")
+	r.RemoteAddr = "[2001:db8::1]:51000"
+	w := httptest.NewRecorder()
+	srv.resumeHandler(w, r)
+	if body := w.Body.String(); w.Code != http.StatusOK || !strings.Contains(body, `status_message="Streaming needs IPv4, and this client connected from 2001:db8::1"`) {
+		t.Errorf("resume = %d %s, want the IPv4 refusal", w.Code, body)
+	}
+	s, err := sessions.Get(t.Context(), "alex-a", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Spec.Config.AESKey != "old" || s.Spec.Config.ClientIP != "" {
+		t.Errorf("session config = %+v, want it untouched", s.Spec.Config)
 	}
 }

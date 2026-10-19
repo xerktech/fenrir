@@ -22,7 +22,7 @@ import (
 // server's own CRD validation (rule compilation and cost budget), schema
 // validator and CEL validator over the generated CRD.
 func TestAppCRDValidatesEmbeddedMetadata(t *testing.T) {
-	validate := appCRDValidator(t)
+	validate := crdValidator(t, "apps")
 	long := strings.Repeat("a", 63)
 	for _, tc := range []struct {
 		name        string
@@ -79,12 +79,12 @@ func TestAppCRDValidatesEmbeddedMetadata(t *testing.T) {
 	}
 }
 
-// appCRDValidator runs the API server's own CRD validation (rule compilation
-// and cost budget) over the generated App CRD and returns a func applying its
-// schema and CEL validators to an object.
-func appCRDValidator(t *testing.T) func(obj map[string]any) field.ErrorList {
+// crdValidator runs the API server's own CRD validation (rule compilation
+// and cost budget) over the generated CRD of the plural resource and returns
+// a func applying its schema and CEL validators to an object.
+func crdValidator(t *testing.T, plural string) func(obj map[string]any) field.ErrorList {
 	t.Helper()
-	data, err := os.ReadFile("../../../crds/direwolf.games-on-whales.github.io_apps.yaml")
+	data, err := os.ReadFile("../../../crds/direwolf.games-on-whales.github.io_" + plural + ".yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func appCRDValidator(t *testing.T) func(obj map[string]any) field.ErrorList {
 // spec.gpu.memory must be positive, checked without CEL's quantity library,
 // which a 1.28 API server (the chart's floor) lacks (XERK-1521).
 func TestAppCRDValidatesGPUMemory(t *testing.T) {
-	validate := appCRDValidator(t)
+	validate := crdValidator(t, "apps")
 	for _, tc := range []struct {
 		memory  any
 		wantErr bool
@@ -148,5 +148,49 @@ func TestAppCRDValidatesGPUMemory(t *testing.T) {
 		case tc.wantErr && (len(errs) != 1 || !strings.Contains(errs[0].Error(), "memory must be positive")):
 			t.Errorf("memory %v: errors %v, want only \"memory must be positive\"", tc.memory, errs.ToAggregate())
 		}
+	}
+}
+
+// spec.config.clientIP is bounded: streamClientIP quotes a bad one (twice,
+// with ParseAddr's own error) in the StreamStarted condition, and a message
+// over 32768 characters would fail every status write of the Session.
+func TestSessionCRDBoundsClientIP(t *testing.T) {
+	validate := crdValidator(t, "sessions")
+	ref := map[string]any{"name": "x"}
+	session := func(clientIP, message string) map[string]any {
+		obj := map[string]any{
+			"apiVersion": "direwolf.games-on-whales.github.io/v1alpha1",
+			"kind":       "Session",
+			"metadata":   map[string]any{"name": "s", "namespace": "ns"},
+			"spec": map[string]any{
+				"config": map[string]any{
+					"clientIP": clientIP, "aesKey": "k", "aesIV": "i", "surroundAudioFlags": int64(0),
+					"videoWidth": int64(1920), "videoHeight": int64(1080), "videoRefreshRate": int64(60),
+				},
+				"gameReference": ref, "gateway": ref, "pairingReference": ref, "userReference": ref,
+			},
+		}
+		if message != "" {
+			obj["status"] = map[string]any{"conditions": []any{map[string]any{
+				"type": "StreamStarted", "status": "False", "reason": "StreamRefused", "message": message,
+				"lastTransitionTime": "2026-01-01T00:00:00Z",
+			}}}
+		}
+		return obj
+	}
+	// The longest address moonlight-proxy writes (IPv6, zone stripped), and
+	// an IPv4-mapped one at INET6_ADDRSTRLEN-1.
+	for _, ip := range []string{"192.0.2.10", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "0000:0000:0000:0000:0000:ffff:255.255.255.255"} {
+		if errs := validate(session(ip, "")); len(errs) > 0 {
+			t.Errorf("clientIP %q: unexpected errors: %v", ip, errs.ToAggregate())
+		}
+	}
+	if errs := validate(session(strings.Repeat("1", 46), "")); len(errs) != 1 || !strings.Contains(errs[0].Error(), "clientIP") {
+		t.Errorf("46-character clientIP: errors %v, want one on clientIP", errs.ToAggregate())
+	}
+	// What an unbounded clientIP would have led to.
+	// (The status also lacks its required ports; only the message matters.)
+	if errs := validate(session("192.0.2.10", strings.Repeat("x", 32769))); !strings.Contains(errs.ToAggregate().Error(), "conditions[0].message: Too long") {
+		t.Errorf("32769-character condition message: errors %v, want one on message", errs.ToAggregate())
 	}
 }

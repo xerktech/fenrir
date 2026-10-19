@@ -102,7 +102,10 @@ type SessionList struct {
 }
 
 type SessionInfo struct {
+	// The client's IP as moonlight-proxy saw it (zone stripped). Bounded so
+	// the errors quoting it stay within a condition message's limit.
 	//+kubebuilder:validation:Optional
+	//+kubebuilder:validation:MaxLength=45
 	ClientIP string `json:"clientIP,omitempty"`
 
 	//+kubebuilder:validation:Required

@@ -6,10 +6,10 @@
 FROM lscr.io/linuxserver/steam:latest@sha256:d1c9f2c6d522169f6dcede9b17076c0e31ddbc5f9c4a102562cecddfe2d4ecdb
 
 # The baseline: init-heroic-update installs a newer release at pod start.
-# renovate: datasource=github-releases depName=Heroic-Games-Launcher/HeroicGamesLauncher
+# Renovate bumps the SHA256 with the version (github-release-attachments
+# hashes the new release's matching asset); a mismatch fails the build.
+# renovate: datasource=github-release-attachments depName=Heroic-Games-Launcher/HeroicGamesLauncher
 ARG HEROIC_VERSION=v2.22.3
-# Must be updated by hand with the version: a Renovate bump without it fails
-# the build closed rather than installing an unverified .deb.
 ARG HEROIC_SHA256=f89eed7e0eb900fbe3051edfedbe7532db14328241cbf8c1fb766462dfc0b849
 
 # First, so the RUN below can point Heroic's own launchers at the wrapper.

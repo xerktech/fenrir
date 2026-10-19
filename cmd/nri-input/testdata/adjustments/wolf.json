@@ -1,0 +1,43 @@
+{
+  "linux":  {
+    "devices":  [
+      {
+        "path":  "/dev/uinput",
+        "type":  "c",
+        "major":  "10",
+        "minor":  "223"
+      }
+    ],
+    "resources":  {
+      "devices":  [
+        {
+          "allow":  true,
+          "type":  "c",
+          "major":  {
+            "value":  "13"
+          },
+          "access":  "rwm"
+        },
+        {
+          "allow":  true,
+          "type":  "c",
+          "major":  {
+            "value":  "241"
+          },
+          "access":  "rwm"
+        },
+        {
+          "allow":  true,
+          "type":  "c",
+          "major":  {
+            "value":  "10"
+          },
+          "minor":  {
+            "value":  "223"
+          },
+          "access":  "rwm"
+        }
+      ]
+    }
+  }
+}

@@ -210,9 +210,12 @@ func reconcileFixtures(t *testing.T, userPath, appPath string) (*SessionControll
 		sessionInformer,
 		appInformer,
 		userInformer,
+		fakeDirewolf.DirewolfV1alpha1().Apps(user.Namespace),
+		fakeDirewolf.DirewolfV1alpha1().Users(user.Namespace),
 		podInformer,
 		fakeDirewolf.DirewolfV1alpha1().Pairings(user.Namespace),
 		generic.NewInformer[*v1alpha1types.Pairing](dwFactory.Direwolf().V1alpha1().Pairings().Informer()),
+		nil,
 		SessionControllerOptions{
 			SessionPortRange:    PortRange{Min: 20000, Max: 20999},
 			SessionNodeSelector: map[string]string{"kubernetes.io/hostname": "talos04"},
@@ -1033,6 +1036,13 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 	for _, c := range []corev1.Capability{"SYS_ADMIN", "BPF", "PERFMON", "SYS_MODULE", "SYS_RAWIO", "SYS_BOOT", "SYS_PACCT", "DAC_READ_SEARCH", "ALL"} {
 		tests["add "+string(c)] = func(_ *corev1.PodSpec, ctr *corev1.Container) {
 			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_RAW", c}}}
+		}
+	}
+	// Padded or prefixed: containerd likely reads none of these as the gated
+	// cap, but the check stays on the safe side of whatever it does.
+	for _, c := range []corev1.Capability{" SYS_ADMIN", "SYS_ADMIN\t", " cap_bpf "} {
+		tests["add "+strconv.Quote(string(c))] = func(_ *corev1.PodSpec, ctr *corev1.Container) {
+			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{c}}}
 		}
 	}
 	tests["gated cap first"] = func(_ *corev1.PodSpec, ctr *corev1.Container) {

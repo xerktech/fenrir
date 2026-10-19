@@ -1,0 +1,60 @@
+{
+  "linux":  {
+    "resources":  {
+      "devices":  [
+        {
+          "allow":  true,
+          "type":  "c",
+          "major":  {
+            "value":  "13"
+          },
+          "access":  "rwm"
+        },
+        {
+          "allow":  true,
+          "type":  "c",
+          "major":  {
+            "value":  "241"
+          },
+          "access":  "rwm"
+        }
+      ]
+    },
+    "seccompPolicy":  {
+      "defaultAction":  "SCMP_ACT_ALLOW",
+      "architectures":  [
+        "SCMP_ARCH_X86_64",
+        "SCMP_ARCH_X86",
+        "SCMP_ARCH_X32"
+      ],
+      "syscalls":  [
+        {
+          "names":  [
+            "bpf",
+            "perf_event_open",
+            "kexec_load",
+            "kexec_file_load",
+            "init_module",
+            "finit_module",
+            "delete_module",
+            "open_by_handle_at",
+            "name_to_handle_at",
+            "keyctl",
+            "add_key",
+            "request_key",
+            "iopl",
+            "ioperm",
+            "swapon",
+            "swapoff",
+            "reboot",
+            "acct",
+            "lookup_dcookie",
+            "quotactl",
+            "quotactl_fd"
+          ],
+          "action":  "SCMP_ACT_ERRNO"
+        }
+      ]
+    }
+  }
+}

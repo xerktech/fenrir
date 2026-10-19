@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"math"
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
@@ -38,6 +39,11 @@ func addAppGPUClaim(spec *corev1.PodSpec, app *v1alpha1types.App, session *v1alp
 	}
 	if m := app.Spec.GPU.Memory; m != nil && m.Sign() <= 0 {
 		return fmt.Errorf("app %s: spec.gpu.memory must be positive, got %s", app.Name, m.String())
+	}
+	if m := app.Spec.GPU.Memory; m != nil && m.CmpInt64(math.MaxInt64) > 0 {
+		// The CRD only checks the string's shape, so "1e1000" is admitted;
+		// its Value() is 0, which the claim would carry as is.
+		return fmt.Errorf("app %s: spec.gpu.memory %s is out of range", app.Name, m.String())
 	}
 	if slices.ContainsFunc(spec.ResourceClaims, func(c corev1.PodResourceClaim) bool { return c.Name == appGPUClaim }) {
 		return fmt.Errorf("app %s: spec.gpu and a template resourceClaim named %q conflict", app.Name, appGPUClaim)

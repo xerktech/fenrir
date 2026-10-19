@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -102,16 +103,30 @@ const (
 	busyMessage    = "An app is already running on this host"
 )
 
-// sessionEndedMessage answers a /launch whose Session the operator deleted
-// before its stream started. The operator logs why; the likely reason, an
-// address it can't stream to, is named when the client's address is one.
-func sessionEndedMessage(clientIP string) string {
-	const ended = "The host ended the session before its stream started"
-	if addr, err := netip.ParseAddr(clientIP); err == nil && !addr.Unmap().Is4() {
-		return ended + ": streaming needs IPv4, and this client connected from " + addr.String()
+// sessionEndedMessage answers a /launch or /resume whose Session was deleted
+// (by the operator, a cancel from another device, or the reaper) before its
+// stream started. The operator logs why.
+const sessionEndedMessage = "The host ended the session before its stream started"
+
+// refuseUnstreamableClient answers a /launch or /resume from an address Wolf
+// can't stream to (its stream sockets are IPv4-only) before any Session is
+// created or updated: otherwise a launch spends a cold start on a pod the
+// operator then tears down, and a resume leaves the refused IP in the Session
+// until the disconnect grace period reaps it. It reports whether it answered.
+// The operator's streamClientIP applies the same rule.
+func refuseUnstreamableClient(w http.ResponseWriter, clientIP string) bool {
+	addr, err := netip.ParseAddr(clientIP)
+	if err == nil && addr.Unmap().Is4() && !addr.IsUnspecified() {
+		return false
 	}
-	return ended
+	refusal := &streamRefusedError{message: "Streaming needs IPv4, and this client connected from " + clientIP}
+	klog.Infof("Refusing stream to %s: not IPv4", clientIP)
+	sendXMLWithHTTPStatus(w, http.StatusOK, refusal.response())
+	return true
 }
+
+// internalErrorMessage is all a client is told of a 5xx; the log has why.
+const internalErrorMessage = "Internal error on the host"
 
 // streamRefusedStatusCode is the XML status of a launch the operator refused.
 // Moonlight shows any status other than 200 with its message.
@@ -581,7 +596,11 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 
 	app, err := s.getAppByID(appID)
 	if err != nil {
-		writeErrorResponse(w, 404, fmt.Errorf("app not found: %s", err))
+		writeErrorResponse(w, 404, err)
+		return
+	}
+
+	if refuseUnstreamableClient(w, clientIP) {
 		return
 	}
 
@@ -691,7 +710,7 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		if k8serrors.IsNotFound(err) {
 			// The operator ended it, e.g. for a client IP it can never
 			// stream to (it deletes those before starting their pod).
-			return false, &streamRefusedError{message: sessionEndedMessage(clientIP)}
+			return false, &streamRefusedError{message: sessionEndedMessage}
 		}
 		if err != nil {
 			return false, err
@@ -963,6 +982,9 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 		writeErrorResponse(w, 401, errors.New("user not found"))
 		return
 	}
+	if refuseUnstreamableClient(w, clientIP) {
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.LaunchTimeout)
 	defer cancel()
@@ -993,27 +1015,37 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 	var generation int64
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		live, getErr := s.SessionClient.Get(ctx, session.Name, metav1.GetOptions{})
+		// Gone or ending since the List (cancelled from another device, or
+		// reaped): answered as the wait below answers it.
+		if k8serrors.IsNotFound(getErr) || (getErr == nil && live.DeletionTimestamp != nil) {
+			return &streamRefusedError{message: sessionEndedMessage}
+		}
 		if getErr != nil {
 			return fmt.Errorf("failed to get session: %w", getErr)
-		}
-		if live.DeletionTimestamp != nil {
-			return fmt.Errorf("session %s is ending", live.Name)
 		}
 		live.Spec.Config.AESKey = rikey
 		live.Spec.Config.AESIV = rikeyID
 		live.Spec.Config.ClientIP = clientIP
 		updated, updateErr := s.SessionClient.Update(ctx, live, metav1.UpdateOptions{FieldManager: "direwolf-resume"})
+		if k8serrors.IsNotFound(updateErr) {
+			return &streamRefusedError{message: sessionEndedMessage}
+		}
 		if updateErr != nil {
 			return fmt.Errorf("failed to update session: %w", updateErr)
 		}
 		// Same keys as before (a retried request): the generation does not
 		// move, so the operator would never re-attach a disconnected stream.
 		if updated.Generation == live.Generation && updated.Status.WolfSessionID == "" {
-			return errors.New("resume reused the previous stream keys; retry the resume")
+			return &streamRefusedError{message: "The resume reused the previous stream keys; retry the resume"}
 		}
 		generation = updated.Generation
 		return nil
 	})
+	if refusal := (*streamRefusedError)(nil); errors.As(err, &refusal) {
+		klog.Infof("Resume of session %s for user %s refused: %s", session.Name, user.Name, refusal)
+		sendXMLWithHTTPStatus(w, http.StatusOK, refusal.response())
+		return
+	}
 	if err != nil {
 		writeErrorResponse(w, 500, fmt.Errorf("failed to resume session %s: %w", session.Name, err))
 		return
@@ -1026,7 +1058,7 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 		live, getErr := s.SessionClient.Get(ctx, session.Name, metav1.GetOptions{})
 		if k8serrors.IsNotFound(getErr) {
 			// Cancelled from another device, or reaped.
-			return false, &streamRefusedError{message: sessionEndedMessage(clientIP)}
+			return false, &streamRefusedError{message: sessionEndedMessage}
 		}
 		if getErr != nil {
 			return false, fmt.Errorf("failed to get session: %w", getErr)
@@ -1085,7 +1117,12 @@ func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1type
 
 	didDelete := false
 	for _, session := range sessions.Items {
-		if delErr := s.SessionClient.Delete(ctx, session.Name, metav1.DeleteOptions{}); delErr != nil {
+		delErr := s.SessionClient.Delete(ctx, session.Name, metav1.DeleteOptions{})
+		if k8serrors.IsNotFound(delErr) {
+			// Deleted by someone else since the List: still stop the rest.
+			continue
+		}
+		if delErr != nil {
 			return fmt.Errorf("failed to delete session: %w", delErr)
 		}
 		didDelete = true
@@ -1100,7 +1137,7 @@ func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1type
 	// Moonlight's quit-then-launch reads as a failed quit.
 	if shouldWait {
 		// Wait for pods to be cleaned up
-		err = wait.PollUntilContextTimeout(context.Background(), 250*time.Millisecond, 25*time.Second, true, func(ctx context.Context) (bool, error) {
+		err = wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, 25*time.Second, true, func(context.Context) (bool, error) {
 			pods, err := s.PodLister.List(labels.SelectorFromSet(labels.Set{
 				"direwolf/user": user.Name,
 			}))
@@ -1123,13 +1160,13 @@ func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1type
 func (s *RESTServer) appAssetHandler(w http.ResponseWriter, r *http.Request) {
 	appID := r.URL.Query().Get("appid")
 	if appID == "" {
-		writeErrorResponse(w, 400, fmt.Errorf("appid required"))
+		writeAssetError(w, 400, errors.New("appid required"))
 		return
 	}
 
 	app, err := s.getAppByID(appID)
 	if err != nil {
-		writeErrorResponse(w, 404, fmt.Errorf("app not found: %s", err))
+		writeAssetError(w, 404, fmt.Errorf("app not found: %w", err))
 		return
 	}
 
@@ -1137,14 +1174,14 @@ func (s *RESTServer) appAssetHandler(w http.ResponseWriter, r *http.Request) {
 	// rather than a 200 with an empty body, and Content-Length is really sent.
 	img, err := decodeAppAsset(app.Spec.AppAssetWebP)
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, fmt.Errorf("decode app asset for %s: %w", appID, err))
+		writeAssetError(w, http.StatusInternalServerError, fmt.Errorf("decode app asset for %s: %w", appID, err))
 		return
 	}
 
 	pngData := new(bytes.Buffer)
 	encoder := png.Encoder{CompressionLevel: png.BestSpeed}
 	if err = encoder.Encode(pngData, fitBoxArt(img)); err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, fmt.Errorf("encode app asset for %s: %w", appID, err))
+		writeAssetError(w, http.StatusInternalServerError, fmt.Errorf("encode app asset for %s: %w", appID, err))
 		return
 	}
 
@@ -1173,24 +1210,34 @@ const (
 // float buffer (~78MB for a 4096-tall cover), and Moonlight fetches four
 // covers at once against the proxy's 256Mi limit.
 func fitBoxArt(img image.Image) image.Image {
+	return fitWithin(img, boxArtMaxWidth, boxArtMaxHeight)
+}
+
+// fitWithin scales img down, keeping its aspect ratio, to fit within
+// maxW x maxH. An image that already fits is unchanged.
+func fitWithin(img image.Image, maxW, maxH int) image.Image {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
-	if w <= boxArtMaxWidth && h <= boxArtMaxHeight {
+	if w <= maxW && h <= maxH {
 		return img
 	}
-	scale := min(float64(boxArtMaxWidth)/float64(w), float64(boxArtMaxHeight)/float64(h))
+	scale := min(float64(maxW)/float64(w), float64(maxH)/float64(h))
 	dst := image.NewRGBA(image.Rect(0, 0, max(1, int(float64(w)*scale)), max(1, int(float64(h)*scale))))
 	draw.ApproxBiLinear.Scale(dst, dst.Bounds(), img, b, draw.Src, nil)
 	return dst
 }
 
 // decodeAppAsset decodes an App's cover: WebP, or the PNG/JPEG box art the
-// catalogue fetches.
+// catalogue fetches. A JPEG is turned upright per its EXIF orientation, which
+// image/jpeg ignores (a portrait photo would otherwise be served sideways).
 func decodeAppAsset(data []byte) (image.Image, error) {
 	var errs []error
 	for _, decode := range []func(io.Reader) (image.Image, error){webp.Decode, png.Decode, jpeg.Decode} {
 		img, err := decode(bytes.NewReader(data))
 		if err == nil {
+			if o := jpegOrientation(data); o > 1 {
+				img = orient(img, o)
+			}
 			return img, nil
 		}
 		errs = append(errs, err)
@@ -1198,18 +1245,137 @@ func decodeAppAsset(data []byte) (image.Image, error) {
 	return nil, errors.Join(errs...)
 }
 
+// jpegOrientation returns the EXIF Orientation (1-8) of a JPEG, or 1 when
+// data is not a JPEG or carries none. It reads only IFD0's 0x0112 tag from the
+// APP1 "Exif" segment; anything malformed counts as upright.
+func jpegOrientation(data []byte) int {
+	if len(data) < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+		return 1
+	}
+	for i := 2; i+4 <= len(data); {
+		if data[i] != 0xFF {
+			return 1
+		}
+		marker := data[i+1]
+		if marker == 0xDA || marker == 0xD9 { // start of scan / end of image
+			return 1
+		}
+		size := int(data[i+2])<<8 | int(data[i+3])
+		if size < 2 || i+2+size > len(data) {
+			return 1
+		}
+		if seg := data[i+4 : i+2+size]; marker == 0xE1 && bytes.HasPrefix(seg, []byte("Exif\x00\x00")) {
+			return exifOrientation(seg[6:])
+		}
+		i += 2 + size
+	}
+	return 1
+}
+
+// exifOrientation reads the Orientation tag from IFD0 of a TIFF header.
+func exifOrientation(tiff []byte) int {
+	if len(tiff) < 8 {
+		return 1
+	}
+	var order binary.ByteOrder
+	switch string(tiff[:2]) {
+	case "II":
+		order = binary.LittleEndian
+	case "MM":
+		order = binary.BigEndian
+	default:
+		return 1
+	}
+	ifd := int(order.Uint32(tiff[4:8]))
+	if ifd < 8 || ifd+2 > len(tiff) {
+		return 1
+	}
+	count := int(order.Uint16(tiff[ifd:]))
+	for e := ifd + 2; e+12 <= len(tiff) && count > 0; e, count = e+12, count-1 {
+		// Tag 0x0112, type SHORT (3): the value sits in the entry's first two value bytes.
+		if order.Uint16(tiff[e:]) == 0x0112 && order.Uint16(tiff[e+2:]) == 3 {
+			if o := int(order.Uint16(tiff[e+8:])); o >= 1 && o <= 8 {
+				return o
+			}
+			return 1
+		}
+	}
+	return 1
+}
+
+// orient returns img turned upright for EXIF orientation o (2-8). For
+// orientations that swap width and height (5-8), img is first scaled to fit
+// the box art's swapped bounds, so the copy made here stays box-art sized.
+func orient(img image.Image, o int) image.Image {
+	if o >= 5 {
+		img = fitWithin(img, boxArtMaxHeight, boxArtMaxWidth)
+	} else {
+		img = fitBoxArt(img)
+	}
+	// Copied pixel by pixel from an RGBA: At/Set allocate a color each.
+	src, ok := img.(*image.RGBA)
+	if !ok {
+		src = image.NewRGBA(img.Bounds())
+		draw.Draw(src, src.Bounds(), img, img.Bounds().Min, draw.Src)
+	}
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	dw, dh := w, h
+	if o >= 5 {
+		dw, dh = h, w
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
+	for y := range dh {
+		for x := range dw {
+			// The source pixel shown at (x, y) once upright.
+			var sx, sy int
+			switch o {
+			case 2: // mirrored horizontally
+				sx, sy = w-1-x, y
+			case 3: // rotated 180
+				sx, sy = w-1-x, h-1-y
+			case 4: // mirrored vertically
+				sx, sy = x, h-1-y
+			case 5: // transposed
+				sx, sy = y, x
+			case 6: // needs 90 clockwise
+				sx, sy = y, h-1-x
+			case 7: // transversed
+				sx, sy = w-1-y, h-1-x
+			case 8: // needs 90 counter-clockwise
+				sx, sy = w-1-y, x
+			default:
+				return img
+			}
+			copy(dst.Pix[dst.PixOffset(x, y):][:4], src.Pix[src.PixOffset(b.Min.X+sx, b.Min.Y+sy):])
+		}
+	}
+	return dst
+}
+
+// writeErrorResponse answers err as HTTP 200 with status in the XML
+// status_code, as Sunshine does: moonlight-qt turns a non-2xx HTTP status into
+// a transport error and never shows the message.
+//
+// A 5xx's detail (API server errors naming Sessions, namespaces, RBAC) goes
+// only to the log; the client, which then shows it, gets internalErrorMessage.
 func writeErrorResponse(w http.ResponseWriter, status int, err error) {
 	klog.Error(err)
 
+	message := err.Error()
+	if status >= http.StatusInternalServerError {
+		message = internalErrorMessage
+	}
+
 	w.Header().Set("Content-Type", "application/xml")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(xml.Header))
 
 	// First attempt to serialize as XML with the message. If that fails, just
 	// send unfallible statuscode
 	if bytes, err := xml.Marshal(Response{
 		StatusCode:    status,
-		StatusMessage: err.Error(),
+		StatusMessage: message,
 	}); err == nil {
 		w.Write(bytes)
 	} else {
@@ -1220,8 +1386,18 @@ func writeErrorResponse(w http.ResponseWriter, status int, err error) {
 	klog.ErrorS(err, "Sent error response", "status", status)
 }
 
+// sendXML answers resp as HTTP 200 whatever its status_code (e.g. a failed
+// pairing step), for the reason writeErrorResponse gives.
 func sendXML(w http.ResponseWriter, resp Responsable) {
-	sendXMLWithHTTPStatus(w, resp.GetStatusCode(), resp)
+	sendXMLWithHTTPStatus(w, http.StatusOK, resp)
+}
+
+// writeAssetError answers a failed /appasset. It is an image, not XML, so the
+// error is a real HTTP status: the client then shows no cover rather than
+// trying to decode an error body.
+func writeAssetError(w http.ResponseWriter, status int, err error) {
+	klog.ErrorS(err, "Sent app asset error", "status", status)
+	http.Error(w, http.StatusText(status), status)
 }
 
 func sendXMLWithHTTPStatus(w http.ResponseWriter, httpStatus int, resp Responsable) { //nolint:misspell // existing type name

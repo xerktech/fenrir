@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -388,12 +390,20 @@ func TestInvalidPodEndsSession(t *testing.T) {
 				return true, nil, tc.createErr
 			})
 			f.sc.K8sClient = client
+			recorder := record.NewFakeRecorder(10)
+			f.sc.Recorder = recorder
 			_, err := f.sc.reconcilePod(context.Background(), sess)
-			if tc.wantEnded {
+			switch {
+			case tc.wantEnded:
 				if !errors.Is(err, errSessionEnded) {
 					t.Fatalf("reconcilePod = %v, want errSessionEnded", err)
 				}
-			} else if err == nil || errors.Is(err, errSessionEnded) {
+				if len(recorder.Events) != 1 || !strings.HasPrefix(<-recorder.Events, "Warning InvalidPod ") {
+					t.Error("no Warning InvalidPod Event for the ended Session")
+				}
+			case len(recorder.Events) > 0:
+				t.Errorf("event %q for a retried Session", <-recorder.Events)
+			case err == nil || errors.Is(err, errSessionEnded):
 				t.Fatalf("reconcilePod = %v, want a retryable error", err)
 			}
 			if got := f.sessionExists(t, sess.Name); got == tc.wantEnded {
@@ -424,6 +434,10 @@ func TestInvalidSpecEndsSession(t *testing.T) {
 		}, nil, nil, true},
 		{"gpu memory", func(app *v1alpha1types.App, _ *v1alpha1types.User, _ *v1alpha1types.Session) {
 			app.Spec.GPU = &v1alpha1types.AppGPU{Memory: new(resource.MustParse("0"))}
+		}, nil, nil, true},
+		// Admitted by the CRD (it checks only the string), Value() 0.
+		{"gpu memory overflow", func(app *v1alpha1types.App, _ *v1alpha1types.User, _ *v1alpha1types.Session) {
+			app.Spec.GPU = &v1alpha1types.AppGPU{Memory: new(resource.MustParse("1e1000"))}
 		}, nil, nil, true},
 		{"resources over user policy", func(app *v1alpha1types.App, user *v1alpha1types.User, _ *v1alpha1types.Session) {
 			app.Spec.Template.Spec.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}
@@ -489,7 +503,22 @@ func TestInvalidSpecEndsSession(t *testing.T) {
 				})
 			}
 			f.sc.K8sClient = client
+			recorder := record.NewFakeRecorder(10)
+			f.sc.Recorder = recorder
 			pod, err := f.sc.reconcilePod(context.Background(), sess)
+			// Ended for its spec (not by checkPod): the App says why.
+			if tc.wantEnded && tc.livePod == nil {
+				select {
+				case e := <-recorder.Events:
+					if !strings.HasPrefix(e, "Warning InvalidSpec Session "+sess.Name+" of user ") {
+						t.Errorf("event %q, want a Warning InvalidSpec", e)
+					}
+				default:
+					t.Error("no Warning Event for the ended Session")
+				}
+			} else if len(recorder.Events) > 0 {
+				t.Errorf("event %q for a Session not ended for its spec", <-recorder.Events)
+			}
 			switch {
 			case tc.wantEnded:
 				if !errors.Is(err, errSessionEnded) {
@@ -507,6 +536,78 @@ func TestInvalidSpecEndsSession(t *testing.T) {
 			}
 			if pods, _ := client.CoreV1().Pods(portsTestNS).List(context.Background(), metav1.ListOptions{}); len(pods.Items) != len(objs) {
 				t.Errorf("%d pods, want %d", len(pods.Items), len(objs))
+			}
+		})
+	}
+}
+
+// refRecorder keeps the objects Events are recorded on.
+type refRecorder struct {
+	record.FakeRecorder
+	refs []*corev1.ObjectReference
+}
+
+func (r *refRecorder) Eventf(obj runtime.Object, _, _, _ string, _ ...any) {
+	if ref, ok := obj.(*corev1.ObjectReference); ok {
+		r.refs = append(r.refs, ref)
+	}
+}
+
+// The Event names the App with its UID, or kubectl describe app omits it.
+func TestWarnAppReferencesAppWithUID(t *testing.T) {
+	f, sess := lifecycleFixture(t, podReadySession, nil)
+	app, err := f.sc.AppInformer.Namespaced(portsTestNS).Get(f.app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.UID = "app-uid" // the informer's copy, which warnApp reads
+	recorder := &refRecorder{}
+	f.sc.Recorder = recorder
+	f.sc.warnApp(sess, "InvalidSpec", "bad")
+	want := corev1.ObjectReference{APIVersion: v1alpha1types.GroupVersion.String(), Kind: "App",
+		Namespace: portsTestNS, Name: f.app, UID: "app-uid"}
+	if len(recorder.refs) != 1 || *recorder.refs[0] != want {
+		t.Errorf("Event on %+v, want %+v", recorder.refs, want)
+	}
+}
+
+// A Session is not ended for an invalid App the informer holds while the
+// live App differs (an admin's fix not yet cached): it waits for the cache.
+func TestInvalidSpecRechecksLiveAppAndUser(t *testing.T) {
+	for _, stale := range []string{"app", "user"} {
+		t.Run(stale, func(t *testing.T) {
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := podReadySession(f)
+				s.Status.Conditions = s.Status.Conditions[:1] // PortsAllocated only: no pod yet
+				return s
+			}, nil)
+			app, err := f.sc.AppInformer.Namespaced(portsTestNS).Get(f.app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			user, err := f.sc.UserInformer.Namespaced(portsTestNS).Get(f.user)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The informer's copy is invalid and older than the live object.
+			ctr := &app.Spec.Template.Spec.Containers[0]
+			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: "wolf-agent-token", MountPath: "/x"})
+			if stale == "app" {
+				app.ResourceVersion = "stale"
+			} else {
+				user.ResourceVersion = "stale"
+			}
+			recorder := record.NewFakeRecorder(10)
+			f.sc.Recorder = recorder
+			_, err = f.sc.reconcilePod(context.Background(), sess)
+			if err == nil || errors.Is(err, errSessionEnded) {
+				t.Fatalf("reconcilePod = %v, want a retryable error", err)
+			}
+			if !f.sessionExists(t, sess.Name) {
+				t.Error("session ended over a stale cache")
+			}
+			if len(recorder.Events) > 0 {
+				t.Errorf("event %q for a Session kept", <-recorder.Events)
 			}
 		})
 	}
