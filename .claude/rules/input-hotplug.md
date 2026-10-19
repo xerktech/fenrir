@@ -52,6 +52,9 @@ paths:
     any other seccomp field once containerd bumps NRI.
   - seccomp can't see a mount's fstype or path, so devtmpfs and procfs mounts stay possible.
   - Tests: `TestConfinedSeccomp*`, `TestCreateContainerConfinesOnlyApp`.
+- Wolf needs no host `/dev/input` or `/run/udev`: the live User mounts neither and pads work.
+  Don't add them back to the examples; a hostPath `/dev/input` hands Wolf every host input device.
+  Nor hand out `/dev/uinput` from a device plugin: any container requesting it would get it.
 - `cmd/nri-input` grants by container name (`pkg/api/v1alpha1/containers.go`): only `wolf` gets
   `/dev/uinput`; wolf-agent, pulseaudio and the init containers get nothing (wolf-agent's mknod
   is covered by containerd's default `c *:* m`, and it opens nodes only `O_PATH`); every other

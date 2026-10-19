@@ -19,13 +19,9 @@ spec:
       containers:
         - image: ghcr.io/squat/generic-device-plugin
           args:
-            - --device
-            - |
-              name: uinput
-              groups:
-                - count: 10
-                  paths:
-                    - path: /dev/uinput
+            # No uinput device: cmd/nri-input grants /dev/uinput to Wolf only.
+            # Any pod requesting a squat.ai/uinput resource would get it,
+            # App containers included, and could create host input devices.
             - --device
             - |
               name: dri

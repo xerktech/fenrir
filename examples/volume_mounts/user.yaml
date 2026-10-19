@@ -14,16 +14,6 @@ spec:
       cpu: 4000m
       memory: 8G
   volumes:
-    - name: dev-input
-      hostPath:
-        path: /dev/input
-        type: Directory
-
-    - name: dev-uinput
-      hostPath:
-        path: /dev/uinput
-        type: CharDevice
-
     - name: host-dri
       hostPath:
         path: /dev/dri/renderD129
@@ -39,11 +29,9 @@ spec:
         limits:
           cpu: 1000m
           memory: 2G
+      # No /dev/input or /dev/uinput: cmd/nri-input grants Wolf /dev/uinput,
+      # and a hostPath /dev/input would hand it every host input device.
       volumeMounts:
-       - name: dev-input
-         mountPath: /dev/input
-       - name: dev-uinput
-         mountPath: /dev/uinput
        - name: host-dri
          mountPath: /dev/dri/renderD128
          readOnly: false
