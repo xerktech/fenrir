@@ -93,7 +93,7 @@ controllers:
           # Wolf's process runner no longer keep its ports bound after it dies (XERK-2049).
           # GStreamer no longer tries and blacklists Wolf's C library as a plugin (XERK-1867).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-4ce5e52@sha256:35976f50c673f06f33c17a658f68aafea53ece03dee580f61eb07ae08beb97e4
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-8d04e3b@sha256:afcc3412d2cac9d2dd7c62b9c12d725b14670cdf5a483218b9292a7a72bfcc19
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
