@@ -178,6 +178,9 @@ type fakeAgent struct {
 	wedged bool
 	// relistFails fails /api/v1/sessions once a stream has been stopped.
 	relistFails bool
+	// addDelay delays the answer to an add, as a CPU-starved Wolf does
+	// (XERK-2116).
+	addDelay time.Duration
 
 	open atomic.Int32 // client connections not yet closed
 
@@ -232,6 +235,7 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 				t.Errorf("decoding AddSession body: %v", err)
 			}
 			a.mu.Unlock()
+			time.Sleep(a.addDelay)
 			fmt.Fprint(w, `{"success":true,"session_id":"4242"}`)
 		case VideoPacketsPath:
 			a.mu.Lock()

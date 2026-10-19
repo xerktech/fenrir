@@ -74,6 +74,12 @@ const streamPollInterval = 15 * time.Second
 // agents would stall every Session's reconcile.
 const wolfAgentTimeout = 10 * time.Second
 
+// wolfAddSessionTimeout bounds the AddSession call, which Wolf can take over
+// wolfAgentTimeout to answer on a CPU-starved node while still completing it
+// (XERK-2116). A retry that lists Wolf's sessions before that add lands would
+// add a second stream under the same client ID.
+const wolfAddSessionTimeout = 30 * time.Second
+
 // errSessionEnded is returned by reconcilePod once it has deleted the Session:
 // its pod finished, so there is nothing left to reconcile.
 var errSessionEnded = stderrors.New("session ended")
@@ -2443,12 +2449,25 @@ func (c *SessionController) reconcileActiveStreams(
 
 	keyIVHash := util.Hash([]byte(session.Spec.Config.AESKey), []byte(session.Spec.Config.AESIV))
 	var found bool
+	var foundID string
+	var matches int
 	for _, s := range sessions {
 		sHash := util.Hash([]byte(s.AESKey), []byte(s.AESIV))
 		if bytes.Equal(sHash, keyIVHash) {
 			found = true
-			break
+			matches++
+			// Wolf lists a stream's session ID as its client_id.
+			foundID = s.ClientID
 		}
+	}
+
+	if matches > 1 {
+		// A retry added a second stream under the same ID before a timed-out
+		// add landed (XERK-2116): neither can be stopped alone.
+		if freshErr := c.confirmFresh(ctx, session); freshErr != nil {
+			return freshErr
+		}
+		return c.endSessionErr(ctx, session, "Wolf has more than one stream for its keys")
 	}
 
 	status := &session.Status
@@ -2482,9 +2501,21 @@ func (c *SessionController) reconcileActiveStreams(
 		if freshErr := c.confirmFresh(ctx, session); freshErr != nil {
 			return freshErr
 		}
-		// The status update after AddSession was lost. The stream's ID is
-		// unknown, so it cannot be stopped or adopted: end the session.
-		return c.endSessionErr(ctx, session, "Wolf has an unrecorded stream for it")
+		if foundID == "" {
+			// The stream's ID is unknown, so it cannot be stopped or
+			// adopted: end the session.
+			return c.endSessionErr(ctx, session, "Wolf has an unrecorded stream for it")
+		}
+		// An AddSession whose answer we never got: it timed out while Wolf
+		// completed it (XERK-2116), or its status write was lost. Adopt the
+		// stream rather than end a healthy session; without a baseline, the
+		// first poll takes one (streamStalledReason).
+		klog.Infof("Session %s/%s: adopting Wolf stream %s added for it", session.Namespace, session.Name, foundID)
+		status.WolfSessionID = foundID
+		status.AttachedGeneration = session.Generation
+		status.DisconnectedAt = nil
+		status.StreamURL = "rtsp://" + net.JoinHostPort(podIP, strconv.Itoa(int(status.Ports.RTSP)))
+		return nil
 	}
 
 	if status.DisconnectedAt != nil && !resumed {
@@ -2603,7 +2634,9 @@ func (c *SessionController) reconcileActiveStreams(
 			return err
 		}
 		baseline := videoBaseline(ctx, session, agentClient, agentURL)
-		sessionID, err := wolfclient.AddSession(ctx, wolfSession)
+		addClient := *agentClient
+		addClient.Timeout = wolfAddSessionTimeout
+		sessionID, err := wolfapi.NewClient(agentURL, &addClient).AddSession(ctx, wolfSession)
 
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)

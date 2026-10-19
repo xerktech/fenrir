@@ -613,8 +613,80 @@ func TestInvalidSpecRechecksLiveAppAndUser(t *testing.T) {
 	}
 }
 
-// Wolf streaming our keys without our record of it (the status write after
-// AddSession was lost) ends the session: the stream cannot be stopped by ID.
+// Wolf streaming our keys without our record of it (an AddSession that timed
+// out while Wolf completed it, XERK-2116, or whose status write was lost) is
+// adopted by the ID Wolf lists it under, not ended. Shaped as a /resume: the
+// adoption must record the new generation and clear the disconnect, or the
+// Session re-adopts every poll and is reaped after the grace period.
+func TestUnrecordedWolfStreamIsAdopted(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.sessions = `[{"client_id":"4242","aes_key":"k","aes_iv":"i"}]`
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Generation = 2
+		s.Status.Ports = blockPorts(agent.base(t))
+		s.Status.AttachedGeneration = 1
+		s.Status.DisconnectedAt = new(metav1.Now())
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatalf("reconcileActiveStreams = %v", err)
+	}
+	if !f.sessionExists(t, sess.Name) {
+		t.Error("session ended")
+	}
+	if agent.added != 0 || len(agent.stopped) != 0 {
+		t.Errorf("touched Wolf's stream: %d added, stopped %v", agent.added, agent.stopped)
+	}
+	st := sess.Status
+	if st.WolfSessionID != "4242" || st.AttachedGeneration != 2 || st.StreamURL == "" || st.DisconnectedAt != nil {
+		t.Errorf("status = %+v, want stream 4242 attached at generation 2, not disconnected", st)
+	}
+}
+
+// Two streams under our keys (a retry added one before a timed-out add
+// landed) share one ID, so neither can be stopped alone: the session ends,
+// whether or not one of the adds was recorded.
+func TestDuplicateWolfStreamsEndSession(t *testing.T) {
+	for _, recorded := range []string{"", "4242"} {
+		t.Run("recorded="+recorded, func(t *testing.T) {
+			agent := newFakeAgent(t)
+			agent.sessions = `[{"client_id":"4242","aes_key":"k","aes_iv":"i"},{"client_id":"4242","aes_key":"k","aes_iv":"i"}]`
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := f.session("alex-1", f.user)
+				s.Status.Ports = blockPorts(agent.base(t))
+				s.Status.WolfSessionID = recorded
+				return s
+			}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+			if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); !errors.Is(err, errSessionEnded) {
+				t.Fatalf("reconcileActiveStreams = %v, want errSessionEnded", err)
+			}
+		})
+	}
+}
+
+// An add Wolf answers after the generic agent timeout still attaches
+// (XERK-2116): a CPU-starved node took 10-12s.
+func TestSlowAddSessionAttaches(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.addDelay = wolfAgentTimeout + time.Second
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Status.Ports = blockPorts(agent.base(t))
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatalf("reconcileActiveStreams = %v", err)
+	}
+	if sess.Status.WolfSessionID != "4242" {
+		t.Errorf("WolfSessionID = %q, want 4242", sess.Status.WolfSessionID)
+	}
+}
+
+// One Wolf lists without an ID cannot be adopted or stopped: the session ends.
 func TestUnrecordedWolfStreamEndsSession(t *testing.T) {
 	agent := newFakeAgent(t)
 	agent.sessions = `[{"aes_key":"k","aes_iv":"i"}]`
@@ -635,23 +707,29 @@ func TestUnrecordedWolfStreamEndsSession(t *testing.T) {
 	}
 }
 
-// ...but not when our cached Session is just older than the live one.
+// ...but not when our cached Session is just older than the live one, with
+// one stream or two under its keys.
 func TestUnrecordedWolfStreamRechecksLiveSession(t *testing.T) {
-	agent := newFakeAgent(t)
-	agent.sessions = `[{"aes_key":"k","aes_iv":"i"}]`
-	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
-		s := f.session("alex-1", f.user)
-		s.Status.Ports = blockPorts(agent.base(t))
-		return s
-	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
-	stale := sess.DeepCopy()
-	stale.ResourceVersion = "stale"
+	stream := `{"client_id":"","aes_key":"k","aes_iv":"i"}`
+	for name, listed := range map[string]string{"one": "[" + stream + "]", "duplicate": "[" + stream + "," + stream + "]"} {
+		t.Run(name, func(t *testing.T) {
+			agent := newFakeAgent(t)
+			agent.sessions = listed
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := f.session("alex-1", f.user)
+				s.Status.Ports = blockPorts(agent.base(t))
+				return s
+			}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+			stale := sess.DeepCopy()
+			stale.ResourceVersion = "stale"
 
-	if err := f.sc.reconcileActiveStreams(context.Background(), stale, readyPod(stale)); err == nil || errors.Is(err, errSessionEnded) {
-		t.Fatalf("reconcileActiveStreams = %v, want a retryable error", err)
-	}
-	if !f.sessionExists(t, sess.Name) {
-		t.Error("session deleted from a stale cache read")
+			if err := f.sc.reconcileActiveStreams(context.Background(), stale, readyPod(stale)); err == nil || errors.Is(err, errSessionEnded) {
+				t.Fatalf("reconcileActiveStreams = %v, want a retryable error", err)
+			}
+			if !f.sessionExists(t, sess.Name) {
+				t.Error("session deleted from a stale cache read")
+			}
+		})
 	}
 }
 
