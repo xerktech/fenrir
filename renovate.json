@@ -14,5 +14,12 @@
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+ARG \\S+=(?<currentValue>\\S+)(?:\\s+ARG \\S+_SHA256=(?<currentDigest>[0-9a-f]{64}))?"
       ]
     }
+  ],
+  "packageRules": [
+    {
+      "description": "cmd/nri-input/containerd226 pins the NRI talos04's containerd vendors; bump it with the node's containerd, by hand",
+      "matchFileNames": ["cmd/nri-input/containerd226/go.mod"],
+      "enabled": false
+    }
   ]
 }

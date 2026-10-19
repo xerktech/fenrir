@@ -37,6 +37,10 @@ type Agent struct {
 	// ends or a subscribe fails. A stream that stayed up for maxDelay resets
 	// it to minDelay.
 	minResubscribeDelay, maxResubscribeDelay time.Duration
+	// Reports a failed subscribe; utilruntime.HandleError outside tests.
+	// Its rate limiter keeps real time, which a synctest bubble's fake
+	// clock reads as a sleep of decades.
+	subscribeFailed func(error)
 
 	lobby *lobbyJoiner
 }
@@ -51,6 +55,7 @@ func NewAgent(
 
 		minResubscribeDelay: 200 * time.Millisecond,
 		maxResubscribeDelay: 10 * time.Second,
+		subscribeFailed:     utilruntime.HandleError,
 	}
 	res.lobby = &lobbyJoiner{client: wolfClient, settle: lobbyJoinSettle, unplug: res.handleDeviceUnplug}
 
@@ -69,7 +74,7 @@ func (a *Agent) Run(ctx context.Context) {
 		start := time.Now()
 		ch, err := a.WolfClient.SubscribeToEvents(ctx)
 		if err != nil {
-			utilruntime.HandleError(fmt.Errorf("failed to subscribe to Wolf events: %w", err))
+			a.subscribeFailed(fmt.Errorf("failed to subscribe to Wolf events: %w", err))
 		} else {
 			klog.Infof("Subscribed to Wolf events")
 			a.catchUp(ctx)
