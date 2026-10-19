@@ -99,8 +99,10 @@ controllers:
           # which session pods rely on (XERK-1946): never pin an older image.
           # Moonlight clients that support it get encrypted RTSP (rtspenc://), so others behind
           # the client's IP or on the path can't take the stream's setup (XERK-2118).
+          # A stream's producer shutting down while viewers join, leave or switch no longer
+          # crashes Wolf (patched gst-interpipe, XERK-2114).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-22e488d@sha256:e1bd05abbc0239a7d9616d9482981d63e3a6f2e1ee0a32f31b02f66c983e0abc
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-31a8575@sha256:792f190b69a35f6c12dd84491155a8370ff8ad851148a1a2ca148b130efe59f9
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
