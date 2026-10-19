@@ -55,7 +55,7 @@ RUN gosu nobody python3 -I /opt/direwolf/steam-input-off.py /nonexistent
 # runs in the node's network namespace: keep it off the node's links.
 COPY root/etc/NetworkManager/conf.d/99-direwolf-hostnetwork.conf /etc/NetworkManager/conf.d/
 RUN NetworkManager --print-config | grep -qx 'no-auto-default=\*' \
-  && NetworkManager --print-config | grep -qx 'unmanaged-devices=interface-name:veth\*'
+  && NetworkManager --print-config | grep -qx 'unmanaged-devices=\*,except:type:loopback,except:type:bridge'
 
 FROM ghcr.io/games-on-whales/heroic-games-launcher:edge@sha256:a207a39367801a8a8bf24b68dac2c9945052d3117cb03b061b27bd6672aab62f AS heroic
 COPY --from=driver /out/ /

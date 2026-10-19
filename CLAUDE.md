@@ -29,6 +29,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     DLSS only if `nvngx.dll` sits in `<dir of libGLX_nvidia.so.0>/nvidia/wine`; CDI injects none.
   - Its steam target keeps GoW's NetworkManager off the node's links (XERK-1867): session pods
     are hostNetwork and Steam adds NET_ADMIN, so stock NM ran DHCP on every new pod veth.
+    It manages only loopback and bridges: with nothing managed it reports "disconnected".
 - The chart's `WOLF_IMAGE` is `ghcr.io/xerktech/wolf` (fork xerktech/wolf, branch `xerktech`;
   XERK-1944), pinned by digest in `charts/direwolf-operator/values.yaml`; CI does not rebuild it.
   - Bump it by hand to a digest the fork's Docker build printed for the `xerktech` branch.
