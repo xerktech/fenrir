@@ -14,8 +14,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
 	direwolfv1alpha1 "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -195,6 +198,11 @@ func main() {
 		klog.Fatal("Error creating resource lock", err)
 	}
 
+	// Only Warning Events on Apps, for Sessions ended over their spec.
+	eventBroadcaster := record.NewBroadcaster(record.WithContext(appContext))
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: k8sClient.CoreV1().Events(*namespace)})
+	defer eventBroadcaster.Shutdown()
+
 	sessionController := controllers.NewSessionController(
 		k8sClient,
 		gatewayClient.GatewayV1alpha2().TCPRoutes(*namespace),
@@ -203,9 +211,12 @@ func main() {
 		generic.NewInformer[*direwolfv1alpha1.Session](sessionInformer),
 		generic.NewInformer[*direwolfv1alpha1.App](appInformer),
 		generic.NewInformer[*direwolfv1alpha1.User](userInformer),
+		direwolfClient.DirewolfV1alpha1().Apps(*namespace),
+		direwolfClient.DirewolfV1alpha1().Users(*namespace),
 		generic.NewInformer[*corev1.Pod](podInformer),
 		direwolfClient.DirewolfV1alpha1().Pairings(*namespace),
 		generic.NewInformer[*direwolfv1alpha1.Pairing](pairingInformer),
+		eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "direwolf-operator"}),
 		controllers.SessionControllerOptions{
 			WolfAgentImage:      *wolfAgentImage,
 			SessionPortRange:    portRange,
@@ -257,17 +268,22 @@ func main() {
 			libraryProxySecret,
 		)
 		go func() {
-			if err := libraryServer.Run(appContext, *libraryPort); err != nil {
-				klog.Errorf("Library server failed: %v", err)
+			if runErr := libraryServer.Run(appContext, *libraryPort); runErr != nil {
+				klog.Errorf("Library server failed: %v", runErr)
 				appCancel()
 			}
 		}()
 	}
 
 	var romm *controllers.RomM
+	var rommBaseChanged <-chan struct{}
 	if *rommURL != "" {
 		romm, err = controllers.NewRomM(direwolfClient.DirewolfV1alpha1().Apps(*namespace),
 			*rommURL, os.Getenv("ROMM_TOKEN"), *rommApp, *rommCollection)
+		if err != nil {
+			klog.Fatalf("RomM: %v", err)
+		}
+		rommBaseChanged, err = controllers.BaseAppChanges(appInformer, *rommApp)
 		if err != nil {
 			klog.Fatalf("RomM: %v", err)
 		}
@@ -295,6 +311,9 @@ func main() {
 					go libraryController.Catalogue.RunRefresh(appContext, catalogueBaseChanged)
 				}
 				if romm != nil {
+					// A base App change reaches the ROMs' Apps at once, and
+					// also while RomM is unreachable (its scan syncs nothing).
+					go romm.Catalogue.RunRefresh(appContext, rommBaseChanged)
 					go func() {
 						if err := romm.Run(appContext); err != nil && !errors.Is(err, context.Canceled) {
 							klog.Errorf("error running RomM sync: %v", err)

@@ -19,6 +19,8 @@ paths:
   /resume from an IPv4 address may still save the game.
   - Look the pod up, never trust `PodCreated`: it is False or missing while a pod runs after a
     failed reconcile or a lost status write. Tests: `TestUnstreamableClientIP*`.
+- `spec.config.clientIP` has a CRD maxLength (45): the refusal quotes it twice in the
+  StreamStarted message, and one over 32768 characters fails every status write.
 - There is no default client IP: a placeholder makes Wolf stream to the wrong peer silently.
 - Wolf does not read `WOLF_STREAM_CLIENT_IP`; don't reintroduce it as a way to pass the IP.
 - `gh` defaults to the `upstream` remote (games-on-whales/fenrir); pass `--repo xerktech/fenrir`.

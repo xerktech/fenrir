@@ -21,6 +21,8 @@ package v1alpha1
 // SessionInfoApplyConfiguration represents a declarative configuration of the SessionInfo type for use
 // with apply.
 type SessionInfoApplyConfiguration struct {
+	// The client's IP as moonlight-proxy saw it (zone stripped). Bounded so
+	// the errors quoting it stay within a condition message's limit.
 	ClientIP           *string `json:"clientIP,omitempty"`
 	AESKey             *string `json:"aesKey,omitempty"`
 	AESIV              *string `json:"aesIV,omitempty"`
