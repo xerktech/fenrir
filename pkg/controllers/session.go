@@ -1022,7 +1022,8 @@ func (c *SessionController) endSession(ctx context.Context, session *v1alpha1typ
 func containerExitReason(name string, t *corev1.ContainerStateTerminated) string {
 	reason := fmt.Sprintf("container %s exited (code %d, %s)", name, t.ExitCode, t.Reason)
 	if msg := strings.TrimSpace(t.Message); msg != "" {
-		reason += ": " + msg[strings.LastIndex(msg, "\n")+1:]
+		// Quoted: it is the container's own output (colour codes, \r).
+		reason += ": " + strconv.Quote(msg[strings.LastIndex(msg, "\n")+1:])
 	}
 	return reason
 }

@@ -704,11 +704,15 @@ func TestContainerExitReasonKeepsLastMessageLine(t *testing.T) {
 	got := containerExitReason("wolf", &corev1.ContainerStateTerminated{
 		ExitCode: 1, Reason: "Error", Message: "starting\n/wolf/wolf predates WOLF_HTTP_SERVERS\n",
 	})
-	if want := "container wolf exited (code 1, Error): /wolf/wolf predates WOLF_HTTP_SERVERS"; got != want {
+	if want := `container wolf exited (code 1, Error): "/wolf/wolf predates WOLF_HTTP_SERVERS"`; got != want {
 		t.Errorf("reason = %q, want %q", got, want)
 	}
-	if got := containerExitReason("steam", &corev1.ContainerStateTerminated{Reason: "Completed"}); got != "container steam exited (code 0, Completed)" {
+	if got = containerExitReason("steam", &corev1.ContainerStateTerminated{Reason: "Completed"}); got != "container steam exited (code 0, Completed)" {
 		t.Errorf("reason without a message = %q", got)
+	}
+	got = containerExitReason("app", &corev1.ContainerStateTerminated{ExitCode: 2, Reason: "Error", Message: "\x1b[31mboom\r"})
+	if want := `container app exited (code 2, Error): "\x1b[31mboom"`; got != want {
+		t.Errorf("reason = %q, want control characters quoted: %q", got, want)
 	}
 }
 
