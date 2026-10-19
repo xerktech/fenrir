@@ -992,7 +992,7 @@ func (c *SessionController) checkPod(ctx context.Context, session *v1alpha1types
 	}
 	for _, cs := range pod.Status.ContainerStatuses {
 		if t := cs.State.Terminated; t != nil {
-			return nil, c.endSessionErr(ctx, session, fmt.Sprintf("container %s exited (code %d, %s)", cs.Name, t.ExitCode, t.Reason))
+			return nil, c.endSessionErr(ctx, session, containerExitReason(cs.Name, t))
 		}
 	}
 	return pod, nil
@@ -1014,6 +1014,17 @@ func (c *SessionController) endSession(ctx context.Context, session *v1alpha1typ
 		return fmt.Errorf("failed to delete session %s/%s: %w", session.Namespace, session.Name, err)
 	}
 	return nil
+}
+
+// containerExitReason says why a container's exit ends its session, with the
+// last line of its termination message: the pod, and its logs, go with the
+// session (e.g. wolfCommand's refusal of an old Wolf).
+func containerExitReason(name string, t *corev1.ContainerStateTerminated) string {
+	reason := fmt.Sprintf("container %s exited (code %d, %s)", name, t.ExitCode, t.Reason)
+	if msg := strings.TrimSpace(t.Message); msg != "" {
+		reason += ": " + msg[strings.LastIndex(msg, "\n")+1:]
+	}
+	return reason
 }
 
 // endSessionErr is endSession for reconcile steps: errSessionEnded once the
@@ -1523,7 +1534,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 			Name:    v1alpha1types.WolfContainerName,
 			Image:   WOLF_IMAGE,
 			Command: wolfCommand,
-			Env:     withWolfHTTPServersOff(append(wolfEnvVarsSlice, wolfEnv...)),
+			// Keeps wolfCommand's refusal of an old Wolf once the pod is gone.
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+			Env:                      withWolfHTTPServersOff(append(wolfEnvVarsSlice, wolfEnv...)),
 			// Declared so they become hostPorts; see HostNetwork above.
 			Ports: []corev1.ContainerPort{
 				{Name: "http", ContainerPort: ports.HTTP, Protocol: corev1.ProtocolTCP},

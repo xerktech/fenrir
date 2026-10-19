@@ -699,6 +699,33 @@ func TestWolfCommandRefusesWolfWithoutHTTPServersSwitch(t *testing.T) {
 	}
 }
 
+func TestContainerExitReasonKeepsLastMessageLine(t *testing.T) {
+	t.Parallel()
+	got := containerExitReason("wolf", &corev1.ContainerStateTerminated{
+		ExitCode: 1, Reason: "Error", Message: "starting\n/wolf/wolf predates WOLF_HTTP_SERVERS\n",
+	})
+	if want := "container wolf exited (code 1, Error): /wolf/wolf predates WOLF_HTTP_SERVERS"; got != want {
+		t.Errorf("reason = %q, want %q", got, want)
+	}
+	if got := containerExitReason("steam", &corev1.ContainerStateTerminated{Reason: "Completed"}); got != "container steam exited (code 0, Completed)" {
+		t.Errorf("reason without a message = %q", got)
+	}
+}
+
+// The wolf container keeps its last log lines as its termination message.
+func TestSessionPodWolfKeepsRefusalAsTerminationMessage(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	for _, c := range pod.Spec.Containers {
+		if c.Name == "wolf" {
+			if c.TerminationMessagePolicy != corev1.TerminationMessageFallbackToLogsOnError {
+				t.Errorf("wolf terminationMessagePolicy = %q", c.TerminationMessagePolicy)
+			}
+			return
+		}
+	}
+	t.Fatal("no wolf container")
+}
+
 // fakeWolfBinary stands in for the Wolf binary, holding the WOLF_HTTP_SERVERS
 // name among other bytes as a build that reads it does.
 func fakeWolfBinary(t *testing.T, knowsHTTPServers bool) string {
