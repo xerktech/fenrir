@@ -613,6 +613,7 @@ func TestWolfCommandPicksClaimedRenderNode(t *testing.T) {
 	}
 	dri := t.TempDir()
 	script := strings.ReplaceAll(wolfCommand[2], "/dev/dri/", dri+"/")
+	script = strings.ReplaceAll(script, wolfBinary, fakeWolfBinary(t, true))
 	script = strings.ReplaceAll(script, "exec /entrypoint.sh", `echo "$WOLF_RENDER_NODE"`)
 	run := func(env ...string) string {
 		cmd := exec.CommandContext(t.Context(), "sh", "-c", script)
@@ -659,16 +660,58 @@ func TestSessionPodStartsWolfThroughRenderNodeWrapper(t *testing.T) {
 // Wolf's HTTP/HTTPS must not listen on the node IP (XERK-1682): the session
 // pod turns them off, and a User's wolf policy can't turn them back on.
 func TestSessionPodTurnsOffWolfHTTPServers(t *testing.T) {
-	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
-	for _, c := range pod.Spec.Containers {
-		if c.Name == "wolf" {
-			if n := len(c.Env); n == 0 || c.Env[n-1] != (corev1.EnvVar{Name: "WOLF_HTTP_SERVERS", Value: "FALSE"}) {
-				t.Errorf("wolf env = %+v, want WOLF_HTTP_SERVERS=FALSE last", c.Env)
+	for _, user := range []string{"../../examples/user.yaml", "testdata/user-wolf-http-servers.yaml"} {
+		_, _, _, pod := reconcileFixtures(t, user, "../../examples/steam.yaml")
+		var wolf *corev1.Container
+		for i := range pod.Spec.Containers {
+			if pod.Spec.Containers[i].Name == "wolf" {
+				wolf = &pod.Spec.Containers[i]
 			}
-			return
+		}
+		if wolf == nil {
+			t.Fatal("no wolf container")
+		}
+		var servers []corev1.EnvVar
+		for _, e := range wolf.Env {
+			if e.Name == "WOLF_HTTP_SERVERS" {
+				servers = append(servers, e)
+			}
+		}
+		if want := []corev1.EnvVar{{Name: "WOLF_HTTP_SERVERS", Value: "FALSE"}}; !slices.Equal(servers, want) {
+			t.Errorf("%s: wolf WOLF_HTTP_SERVERS = %+v, want %+v", user, servers, want)
 		}
 	}
-	t.Fatal("no wolf container")
+}
+
+// Wolf older than XERK-1946 ignores WOLF_HTTP_SERVERS and would serve HTTP/HTTPS
+// on the node IP: wolfCommand refuses to start it.
+func TestWolfCommandRefusesWolfWithoutHTTPServersSwitch(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	for _, knows := range []bool{true, false} {
+		script := strings.ReplaceAll(wolfCommand[2], wolfBinary, fakeWolfBinary(t, knows))
+		script = strings.ReplaceAll(script, "exec /entrypoint.sh", "echo started")
+		out, err := exec.CommandContext(t.Context(), "sh", "-c", script).Output()
+		if started := err == nil && strings.TrimSpace(string(out)) == "started"; started != knows {
+			t.Errorf("Wolf binary knowing %s=%v: started=%v (%v)", wolfHTTPServersEnv, knows, started, err)
+		}
+	}
+}
+
+// fakeWolfBinary stands in for the Wolf binary, holding the WOLF_HTTP_SERVERS
+// name among other bytes as a build that reads it does.
+func fakeWolfBinary(t *testing.T, knowsHTTPServers bool) string {
+	t.Helper()
+	content := "\x7fELF\x00WOLF_HTTP_PORT\x00"
+	if knowsHTTPServers {
+		content += wolfHTTPServersEnv + "\x00"
+	}
+	p := filepath.Join(t.TempDir(), "wolf")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 func TestWithWolfHTTPServersOffOverridesPolicy(t *testing.T) {

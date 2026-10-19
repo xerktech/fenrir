@@ -140,7 +140,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     HTTP/HTTPS, no mDNS. On the host network they'd listen on the node IP, and Wolf's HTTPS is how
     an unpaired client gets in (XERK-1682). Nothing uses them; moonlight-proxy terminates Moonlight.
     - Needs xerktech/wolf >= 91fe38e (XERK-1946): older Wolf ignores the variable and listens on
-      0.0.0.0. Never point `WOLF_IMAGE` at upstream or an older fork image.
+      0.0.0.0, so `wolfCommand` refuses a `/wolf/wolf` without the string `WOLF_HTTP_SERVERS`.
+      Tests: `TestWolfCommandRefusesWolfWithoutHTTPServersSwitch`.
     - Set last, replacing any from a User's wolf policy. Tests: `TestSessionPodTurnsOffWolfHTTPServers`,
       `TestWithWolfHTTPServersOffOverridesPolicy`.
     - HTTP/HTTPS keep their slots in the port block so recorded blocks keep their layout.

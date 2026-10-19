@@ -2212,7 +2212,17 @@ func withHotplugMounts(mounts []corev1.VolumeMount) []corev1.VolumeMount {
 // "not a device here", not "unset". A WOLF_RENDER_NODE from the App
 // (wolfConfig.runtimeVariables.renderNode) or a User's wolf policy that does
 // exist in the container is kept.
-var wolfCommand = []string{"/bin/sh", "-c", `if [ ! -c "${WOLF_RENDER_NODE:-}" ]; then
+//
+// It refuses to start a Wolf that doesn't know WOLF_HTTP_SERVERS (older than
+// xerktech/wolf 91fe38e, XERK-1946): one would ignore withWolfHTTPServersOff
+// and serve Moonlight HTTP/HTTPS on the node IP, where its HTTPS lets an
+// unpaired client in (XERK-1682). Wolf reads the name from its binary's
+// strings, so the binary holding it is the check.
+var wolfCommand = []string{"/bin/sh", "-c", `if ! grep -qF ` + wolfHTTPServersEnv + ` ` + wolfBinary + `; then
+  echo "` + wolfBinary + ` predates ` + wolfHTTPServersEnv + ` (needs xerktech/wolf >= 91fe38e), refusing to serve its HTTP/HTTPS on the node" >&2
+  exit 1
+fi
+if [ ! -c "${WOLF_RENDER_NODE:-}" ]; then
   for n in /dev/dri/renderD*; do
     if [ -c "$n" ]; then export WOLF_RENDER_NODE="$n"; break; fi
   done
@@ -2231,7 +2241,11 @@ func withWolfHTTPServersOff(env []corev1.EnvVar) []corev1.EnvVar {
 	return append(env, corev1.EnvVar{Name: wolfHTTPServersEnv, Value: "FALSE"})
 }
 
-const wolfHTTPServersEnv = "WOLF_HTTP_SERVERS"
+const (
+	wolfHTTPServersEnv = "WOLF_HTTP_SERVERS"
+	// Where the Wolf image's entrypoint runs Wolf from.
+	wolfBinary = "/wolf/wolf"
+)
 
 // AppHomePath is HOME in the GOW app images. The operator mounts the App's own
 // state there (wolf-data, state/<app>) unless the App mounts something itself.
