@@ -28,7 +28,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - It also ships NVIDIA's NGX Wine DLLs in `/usr/lib/nvidia/wine` (XERK-2073): Proton enables
     DLSS only if `nvngx.dll` sits in `<dir of libGLX_nvidia.so.0>/nvidia/wine`; CDI injects none.
   - Its steam target keeps GoW's NetworkManager off the node's links (XERK-1867): session pods
-    are hostNetwork and Steam adds NET_ADMIN, so stock NM ran DHCP on every new pod veth.
+    are hostNetwork and Steam added NET_ADMIN, so stock NM ran DHCP on every new pod veth.
     It manages only loopback and bridges: with nothing managed it reports "disconnected".
   - Its `steam` cont-init hook deletes `.cef-enable-remote-debugging` from the shared Steam install
     (Heroic writes it): Steam would serve its CEF debugger on 127.0.0.1:8080, the node's loopback
@@ -190,6 +190,9 @@ Three binaries in `cmd/`, all sharing `pkg/`:
   - Nor mount a User's hostPath volume by name (`validateNoUserHostPathMounts`, XERK-1950): User
     volumes join the pod after the App checks. Other User volumes stay mountable by the game.
     Tests: `TestBuildPodRejectsAppMountOfUserHostPath`.
+  - Apps and examples add no `NET_ADMIN` (XERK-2100): under hostNetwork it reconfigures the
+    node's links, routes and firewall. Steam and Heroic run without it; only the unused
+    `gst-ptp-helper` (file caps incl. `cap_net_admin`) then fails to exec. Not enforced (XERK-1329).
   - wolf-agent re-reads its token and its cert on every request/handshake: the operator may
     regenerate the Secret under a running pod and uses the new token and cert at once.
   - `Agent.Run` resubscribes to Wolf's `/api/v1/events` itself; `SubscribeToEvents` is one

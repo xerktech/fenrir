@@ -31,8 +31,9 @@ spec:
         image: ghcr.io/games-on-whales/fenrir/retroarch:main
         securityContext:
           capabilities:
-            # As in GoW's own RetroArch app config.
-            add: ["NET_RAW", "MKNOD", "NET_ADMIN"]
+            # GoW's own RetroArch config also adds NET_ADMIN: dropped, as session pods
+            # are hostNetwork and it would act on the node's network (XERK-2100).
+            add: ["NET_RAW", "MKNOD"]
         env:
         - name: RUN_SWAY
           value: "true"
