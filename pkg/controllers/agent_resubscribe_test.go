@@ -118,11 +118,12 @@ func streamFor(d time.Duration) func(context.Context) (<-chan *sse.Event, error)
 }
 
 // runScripted runs a in a synctest bubble until client has seen every
-// step, then hands the subscribe times to check. Time in the bubble is
+// step, and returns when each subscribe came. Time in the bubble is
 // fake: it advances only when every goroutine is blocked, so the delays
 // are exact however loaded the machine is (XERK-1867).
-func runScripted(t *testing.T, steps []func(context.Context) (<-chan *sse.Event, error), minDelay, maxDelay time.Duration, check func(t *testing.T, calls []time.Time)) {
+func runScripted(t *testing.T, steps []func(context.Context) (<-chan *sse.Event, error), minDelay, maxDelay time.Duration) []time.Time {
 	t.Helper()
+	var calls []time.Time
 	synctest.Test(t, func(t *testing.T) {
 		client := &scriptedEventsClient{steps: steps, calls: make(chan time.Time, len(steps)+1)}
 		a := NewAgent(client)
@@ -137,7 +138,6 @@ func runScripted(t *testing.T, steps []func(context.Context) (<-chan *sse.Event,
 			defer close(done)
 			a.Run(ctx)
 		}()
-		var calls []time.Time
 		for len(calls) < want {
 			select {
 			case c := <-client.calls:
@@ -146,22 +146,21 @@ func runScripted(t *testing.T, steps []func(context.Context) (<-chan *sse.Event,
 				t.Fatalf("%d subscribes, want %d", len(calls), want)
 			}
 		}
-		check(t, calls)
 	})
+	return calls
 }
 
 // Repeated failures must back off, not retry at the minimum delay forever.
 func TestAgentResubscribeBacksOff(t *testing.T) {
 	steps := []func(context.Context) (<-chan *sse.Event, error){refused, refused, refused, refused}
-	runScripted(t, steps, 20*time.Millisecond, 80*time.Millisecond, func(t *testing.T, calls []time.Time) {
-		// Delays 20, 40, 80, 80ms.
-		if d := calls[4].Sub(calls[0]); d != 220*time.Millisecond {
-			t.Errorf("4 retries took %s, want 220ms of backoff", d)
-		}
-		if d := calls[4].Sub(calls[3]); d != 80*time.Millisecond {
-			t.Errorf("last retry after %s, want the 80ms cap", d)
-		}
-	})
+	calls := runScripted(t, steps, 20*time.Millisecond, 80*time.Millisecond)
+	// Delays 20, 40, 80, 80ms.
+	if d := calls[4].Sub(calls[0]); d != 220*time.Millisecond {
+		t.Errorf("4 retries took %s, want 220ms of backoff", d)
+	}
+	if d := calls[4].Sub(calls[3]); d != 80*time.Millisecond {
+		t.Errorf("last retry after %s, want the 80ms cap", d)
+	}
 }
 
 // A stream that stayed up resets the backoff: after a Wolf restart the agent
@@ -170,14 +169,13 @@ func TestAgentResubscribeResetsAfterLongStream(t *testing.T) {
 	const minDelay, maxDelay = 20 * time.Millisecond, 160 * time.Millisecond
 	// Delays 20, 40, 80, 160, 160ms: at the cap before the stream.
 	steps := []func(context.Context) (<-chan *sse.Event, error){refused, refused, refused, refused, refused, streamFor(maxDelay)}
-	runScripted(t, steps, minDelay, maxDelay, func(t *testing.T, calls []time.Time) {
-		if d := calls[5].Sub(calls[4]); d != maxDelay {
-			t.Fatalf("delay before the stream %s, want the %s cap", d, maxDelay)
-		}
-		if d := calls[6].Sub(calls[5]) - maxDelay; d != minDelay {
-			t.Errorf("resubscribed %s after a long stream closed, want the %s minimum", d, minDelay)
-		}
-	})
+	calls := runScripted(t, steps, minDelay, maxDelay)
+	if d := calls[5].Sub(calls[4]); d != maxDelay {
+		t.Fatalf("delay before the stream %s, want the %s cap", d, maxDelay)
+	}
+	if d := calls[6].Sub(calls[5]) - maxDelay; d != minDelay {
+		t.Errorf("resubscribed %s after a long stream closed, want the %s minimum", d, minDelay)
+	}
 }
 
 // slowConnect is a stream whose headers take d to arrive and which then
@@ -196,11 +194,10 @@ func slowConnect(d time.Duration) func(context.Context) (<-chan *sse.Event, erro
 func TestAgentResubscribeResetsAfterSlowHeaders(t *testing.T) {
 	const minDelay, maxDelay = 20 * time.Millisecond, 160 * time.Millisecond
 	steps := []func(context.Context) (<-chan *sse.Event, error){refused, refused, refused, refused, refused, slowConnect(maxDelay)}
-	runScripted(t, steps, minDelay, maxDelay, func(t *testing.T, calls []time.Time) {
-		if d := calls[6].Sub(calls[5]) - maxDelay; d != minDelay {
-			t.Errorf("resubscribed %s after a slow-header stream closed, want the %s minimum", d, minDelay)
-		}
-	})
+	calls := runScripted(t, steps, minDelay, maxDelay)
+	if d := calls[6].Sub(calls[5]) - maxDelay; d != minDelay {
+		t.Errorf("resubscribed %s after a slow-header stream closed, want the %s minimum", d, minDelay)
+	}
 }
 
 // Cancelling Run must not wait for Wolf to answer a StopSession.

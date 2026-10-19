@@ -52,8 +52,8 @@ func TestAdjustmentsMatchTestdata(t *testing.T) {
 			require.NotNil(t, adjust)
 			path := filepath.Join(dir, name+".json")
 			if *updateAdjustments {
-				b, err := protojson.MarshalOptions{Multiline: true}.Marshal(adjust)
-				require.NoError(t, err)
+				b, mErr := protojson.MarshalOptions{Multiline: true}.Marshal(adjust)
+				require.NoError(t, mErr)
 				require.NoError(t, os.WriteFile(path, append(b, '\n'), 0o600))
 				return
 			}

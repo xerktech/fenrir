@@ -38,7 +38,7 @@ func renderedObjects(t *testing.T) []manifestObject {
 	if path == "" {
 		t.Skip("DIREWOLF_CHART_MANIFEST unset: run on `helm template` output (CI verify_chart does)")
 	}
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // the manifest CI rendered
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,8 @@ func TestMoonlightProxyPodWritesAreNamed(t *testing.T) {
 			continue
 		}
 		found++
-		for _, r := range o.Rules {
+		for i := range o.Rules {
+			r := &o.Rules[i]
 			if !coversPods(r) || len(r.ResourceNames) > 0 {
 				continue
 			}
@@ -105,7 +106,7 @@ func TestMoonlightProxyPodWritesAreNamed(t *testing.T) {
 }
 
 // coversPods reports whether r applies to core pods.
-func coversPods(r rbacv1.PolicyRule) bool {
+func coversPods(r *rbacv1.PolicyRule) bool {
 	return (slices.Contains(r.APIGroups, "") || slices.Contains(r.APIGroups, "*")) &&
 		(slices.Contains(r.Resources, "pods") || slices.Contains(r.Resources, "*"))
 }
