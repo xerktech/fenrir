@@ -70,7 +70,6 @@ func TestAdjustmentOperatorSidecarsGetNothing(t *testing.T) {
 		v1alpha1types.WolfAgentContainerName,
 		v1alpha1types.PulseAudioContainerName,
 		v1alpha1types.InitContainerName,
-		v1alpha1types.LoopbackShimContainerName,
 		v1alpha1types.SteamRelinkContainerName,
 	} {
 		t.Run(name, func(t *testing.T) {

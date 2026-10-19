@@ -489,7 +489,6 @@ func TestSessionPodOperatorContainerNames(t *testing.T) {
 	}
 	want := []string{
 		v1alpha1types.InitContainerName,
-		v1alpha1types.LoopbackShimContainerName,
 		v1alpha1types.WolfAgentContainerName,
 		v1alpha1types.PulseAudioContainerName,
 		v1alpha1types.WolfContainerName,
@@ -614,7 +613,6 @@ func TestWolfCommandPicksClaimedRenderNode(t *testing.T) {
 	}
 	dri := t.TempDir()
 	script := strings.ReplaceAll(wolfCommand[2], "/dev/dri/", dri+"/")
-	script = strings.ReplaceAll(script, wolfLoopbackShimPath, loadableLib(t))
 	script = strings.ReplaceAll(script, "exec /entrypoint.sh", `echo "$WOLF_RENDER_NODE"`)
 	run := func(env ...string) string {
 		cmd := exec.CommandContext(t.Context(), "sh", "-c", script)
@@ -658,85 +656,34 @@ func TestSessionPodStartsWolfThroughRenderNodeWrapper(t *testing.T) {
 	t.Fatal("no wolf container")
 }
 
-// Wolf's HTTP/HTTPS must not listen on the node IP (XERK-1682): Wolf starts
-// only with the loopback shim, copied in from the wolf-agent image.
-func TestSessionPodPreloadsLoopbackShim(t *testing.T) {
+// Wolf's HTTP/HTTPS must not listen on the node IP (XERK-1682): the session
+// pod turns them off, and a User's wolf policy can't turn them back on.
+func TestSessionPodTurnsOffWolfHTTPServers(t *testing.T) {
 	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
-	var agentImage string
 	for _, c := range pod.Spec.Containers {
-		if c.Name == "wolf-agent" {
-			agentImage = c.Image
-		}
-	}
-	var copied bool
-	for _, c := range pod.Spec.InitContainers {
-		if c.Name == wolfLoopbackShimVolume {
-			copied = c.Image == agentImage &&
-				slices.Equal(c.Command, []string{"cp", wolfLoopbackShimImagePath, wolfLoopbackShimPath}) &&
-				slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool {
-					return m.Name == wolfLoopbackShimVolume && m.MountPath == wolfLoopbackShimDir
-				})
-		}
-	}
-	if !copied {
-		t.Errorf("no init container copying the shim from the wolf-agent image: %+v", pod.Spec.InitContainers)
-	}
-	if got := mountsAt(t, &pod.Spec, "wolf")[wolfLoopbackShimDir]; got != wolfLoopbackShimVolume {
-		t.Errorf("wolf %s = %q, want %s", wolfLoopbackShimDir, got, wolfLoopbackShimVolume)
-	}
-	// Read-only, or Wolf could swap the shim for a fresh exec of itself.
-	for _, c := range pod.Spec.Containers {
-		for _, m := range c.VolumeMounts {
-			if m.Name == wolfLoopbackShimVolume && !m.ReadOnly {
-				t.Errorf("%s mounts the shim read-write", c.Name)
+		if c.Name == "wolf" {
+			if n := len(c.Env); n == 0 || c.Env[n-1] != (corev1.EnvVar{Name: "WOLF_HTTP_SERVERS", Value: "FALSE"}) {
+				t.Errorf("wolf env = %+v, want WOLF_HTTP_SERVERS=FALSE last", c.Env)
 			}
+			return
 		}
 	}
-
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no sh")
-	}
-	shim := filepath.Join(t.TempDir(), "shim.so")
-	script := strings.ReplaceAll(wolfCommand[2], wolfLoopbackShimPath, shim)
-	script = strings.ReplaceAll(script, "exec /entrypoint.sh", `echo "$LD_PRELOAD"`)
-	run := func(env ...string) (string, error) {
-		cmd := exec.CommandContext(t.Context(), "sh", "-c", script)
-		cmd.Env = env
-		out, err := cmd.Output()
-		return strings.TrimSpace(string(out)), err
-	}
-	if out, err := run(); err == nil {
-		t.Errorf("Wolf started without the shim (LD_PRELOAD=%q)", out)
-	}
-	// An unloadable shim (here empty) is ignored by ld.so, so it must refuse too.
-	if err := os.WriteFile(shim, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := run(); err == nil {
-		t.Errorf("Wolf started with an unloadable shim (LD_PRELOAD=%q)", out)
-	}
-	lib := loadableLib(t)
-	script = strings.ReplaceAll(script, shim, lib)
-	shim = lib
-	if got, err := run(); err != nil || got != shim {
-		t.Errorf("LD_PRELOAD = %q (%v), want %q", got, err, shim)
-	}
-	if got, err := run("LD_PRELOAD=/user.so"); err != nil || got != shim+" /user.so" {
-		t.Errorf("with a User's LD_PRELOAD: LD_PRELOAD = %q (%v), want the shim first", got, err)
-	}
+	t.Fatal("no wolf container")
 }
 
-// loadableLib returns a shared object ld.so can preload, standing in for the
-// loopback shim in wolfCommand.
-func loadableLib(t *testing.T) string {
-	t.Helper()
-	for _, pattern := range []string{"/lib/*-linux-gnu/libc.so.6", "/usr/lib/*-linux-gnu/libc.so.6", "/lib64/libc.so.6", "/usr/lib64/libc.so.6"} {
-		if m, _ := filepath.Glob(pattern); len(m) > 0 {
-			return m[0]
-		}
+func TestWithWolfHTTPServersOffOverridesPolicy(t *testing.T) {
+	policy := []corev1.EnvVar{
+		{Name: "WOLF_HTTP_SERVERS", Value: "TRUE"},
+		{Name: "WOLF_LOG_LEVEL", Value: "DEBUG"},
+		{Name: "WOLF_HTTP_SERVERS", Value: "yes"},
 	}
-	t.Skip("no glibc to preload")
-	return ""
+	want := []corev1.EnvVar{
+		{Name: "WOLF_LOG_LEVEL", Value: "DEBUG"},
+		{Name: "WOLF_HTTP_SERVERS", Value: "FALSE"},
+	}
+	if got := withWolfHTTPServersOff(policy); !slices.Equal(got, want) {
+		t.Errorf("env = %+v, want %+v", got, want)
+	}
 }
 
 func TestSessionPodKeepsAppsOwnHome(t *testing.T) {
@@ -919,8 +866,8 @@ func TestBuildPodRejectsWolfAgentHotplugOverride(t *testing.T) {
 	}
 }
 
-// The operator's volumes hold wolf-agent's token and TLS key, Wolf's API
-// socket and config, and Wolf's preload shim: an App container mounting one
+// The operator's volumes hold wolf-agent's token and TLS key, and Wolf's API
+// socket and config: an App container mounting one
 // by name could drive Wolf or impersonate wolf-agent (XERK-1366).
 func TestBuildPodRejectsAppMountOfOperatorVolume(t *testing.T) {
 	mounts := map[string]corev1.VolumeMount{
@@ -928,7 +875,7 @@ func TestBuildPodRejectsAppMountOfOperatorVolume(t *testing.T) {
 		"subPath":     {MountPath: "/x", SubPath: "tls.key"},
 		"subPathExpr": {MountPath: "/x", SubPathExpr: "$(POD_NAME)"},
 	}
-	for _, name := range []string{"wolf-agent-token", "wolf-cfg", "wolf-data", wolfLoopbackShimVolume} {
+	for _, name := range []string{"wolf-agent-token", "wolf-cfg", "wolf-data"} {
 		for kind, mount := range mounts {
 			for _, initCtr := range []bool{false, true} {
 				sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml")

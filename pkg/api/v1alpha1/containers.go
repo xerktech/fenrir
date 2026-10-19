@@ -17,9 +17,6 @@ const (
 	PulseAudioContainerName = "pulseaudio"
 	// InitContainerName seeds Wolf's config; it opens no device nodes.
 	InitContainerName = "init"
-	// LoopbackShimContainerName copies Wolf's bind() shim; it opens no device
-	// nodes.
-	LoopbackShimContainerName = "wolf-loopback-shim"
 	// SteamRelinkContainerName repoints the Library's Steam links in a shared
 	// Steam home; it opens no device nodes.
 	SteamRelinkContainerName = "steam-relink"

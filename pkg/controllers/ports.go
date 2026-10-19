@@ -15,11 +15,9 @@ import (
 // session pod listens on must be unique on that node. Each session pod gets
 // one contiguous block, laid out as the offsets below.
 //
-// HTTP/HTTPS are in the block although Moonlight never reaches them (it talks
-// to moonlight-proxy): Wolf always binds them, and on the host network two
-// Wolfs, or Wolf and a host-networked moonlight-proxy, would collide on the
-// defaults 47989/47984. They listen on loopback only and serve nobody (see
-// wolfCommand).
+// HTTP/HTTPS are in the block although Wolf no longer listens on them (see
+// withWolfHTTPServersOff): dropping them would shift every later offset of the
+// blocks already recorded in Sessions' status.ports.
 const (
 	portOffsetHTTP = iota
 	portOffsetHTTPS
