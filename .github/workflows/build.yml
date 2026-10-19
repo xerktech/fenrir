@@ -90,7 +90,16 @@ jobs:
       # helm template defaults to a Kubernetes version below the chart's
       # kubeVersion floor (>=1.28), so it has to be stated.
       - name: Render chart
-        run: helm template direwolf charts/direwolf-operator --include-crds --kube-version 1.36.0 > /dev/null
+        run: helm template direwolf charts/direwolf-operator --include-crds --kube-version 1.36.0 > "$RUNNER_TEMP/chart.yaml"
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+
+      # Checks on what the chart renders, e.g. moonlight-proxy's RBAC scope.
+      # They skip without the manifest, so they only really run here.
+      - name: Test rendered chart
+        run: DIREWOLF_CHART_MANIFEST="$RUNNER_TEMP/chart.yaml" go test -count=1 ./charts/
 
       - name: Package chart
         run: helm package charts/direwolf-operator -d packaged
