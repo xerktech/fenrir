@@ -138,9 +138,10 @@ func podAccess(r *rbacv1.PolicyRule) (pods, subresource bool) {
 	}
 	for _, res := range r.Resources {
 		switch {
-		case res == "*" || res == "pods":
+		case res == "pods":
 			pods = true
-		case strings.HasPrefix(res, "pods/") || strings.HasPrefix(res, "*/"):
+		// "*" matches every subresource too.
+		case res == "*" || strings.HasPrefix(res, "pods/") || strings.HasPrefix(res, "*/"):
 			pods, subresource = true, true
 		}
 	}
