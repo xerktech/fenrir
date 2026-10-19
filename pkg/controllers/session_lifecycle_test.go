@@ -613,8 +613,34 @@ func TestInvalidSpecRechecksLiveAppAndUser(t *testing.T) {
 	}
 }
 
-// Wolf streaming our keys without our record of it (the status write after
-// AddSession was lost) ends the session: the stream cannot be stopped by ID.
+// Wolf streaming our keys without our record of it (an AddSession that timed
+// out while Wolf completed it, XERK-2116, or whose status write was lost) is
+// adopted by the ID Wolf lists it under, not ended.
+func TestUnrecordedWolfStreamIsAdopted(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.sessions = `[{"client_id":"4242","aes_key":"k","aes_iv":"i"}]`
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Status.Ports = blockPorts(agent.base(t))
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatalf("reconcileActiveStreams = %v", err)
+	}
+	if !f.sessionExists(t, sess.Name) {
+		t.Error("session ended")
+	}
+	if agent.added != 0 || len(agent.stopped) != 0 {
+		t.Errorf("touched Wolf's stream: %d added, stopped %v", agent.added, agent.stopped)
+	}
+	st := sess.Status
+	if st.WolfSessionID != "4242" || st.AttachedGeneration != sess.Generation || st.StreamURL == "" || st.DisconnectedAt != nil {
+		t.Errorf("status = %+v, want stream 4242 attached at generation %d", st, sess.Generation)
+	}
+}
+
+// One Wolf lists without an ID cannot be adopted or stopped: the session ends.
 func TestUnrecordedWolfStreamEndsSession(t *testing.T) {
 	agent := newFakeAgent(t)
 	agent.sessions = `[{"aes_key":"k","aes_iv":"i"}]`
