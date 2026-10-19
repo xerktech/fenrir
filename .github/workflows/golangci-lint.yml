@@ -23,3 +23,12 @@ jobs:
           # main carries ~500 findings from before this config was added, so
           # a full run fails every PR. Report only what the PR introduces.
           only-new-issues: true
+
+      # cmd/nri-input/containerd226 is its own module (it pins containerd's
+      # NRI), so the run above never reaches it.
+      - name: golangci-lint (containerd226)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12
+          working-directory: cmd/nri-input/containerd226
+          args: --config=${{ github.workspace }}/.golangci.yml

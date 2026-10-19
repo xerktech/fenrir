@@ -97,11 +97,12 @@ func TestMoonlightProxyPodWritesAreNamed(t *testing.T) {
 		found++
 		for i := range o.Rules {
 			r := &o.Rules[i]
-			if !coversPods(r) || len(r.ResourceNames) > 0 {
+			pods, subresource := podAccess(r)
+			if !pods || len(r.ResourceNames) > 0 {
 				continue
 			}
 			for _, v := range r.Verbs {
-				if !slices.Contains(readOnlyVerbs, v) {
+				if subresource || !slices.Contains(readOnlyVerbs, v) {
 					t.Errorf("%s %s grants %q on pods without resourceNames: %+v", o.Kind, o.Metadata.Name, v, r)
 				}
 			}
@@ -118,17 +119,30 @@ func bindsProxy(s rbacv1.Subject) bool {
 	switch s.Kind {
 	case rbacv1.ServiceAccountKind:
 		return s.Name == proxyServiceAccount
+	case rbacv1.UserKind:
+		// The ServiceAccount's username: system:serviceaccount:<ns>:<name>.
+		return strings.HasPrefix(s.Name, "system:serviceaccount:") && strings.HasSuffix(s.Name, ":"+proxyServiceAccount)
 	case rbacv1.GroupKind:
 		return slices.Contains(proxyGroups, s.Name) || strings.HasPrefix(s.Name, "system:serviceaccounts:")
 	}
 	return false
 }
 
-// coversPods reports whether r applies to core pods or any of their
-// subresources.
-func coversPods(r *rbacv1.PolicyRule) bool {
-	return (slices.Contains(r.APIGroups, "") || slices.Contains(r.APIGroups, "*")) &&
-		slices.ContainsFunc(r.Resources, func(res string) bool {
-			return res == "*" || res == "pods" || strings.HasPrefix(res, "pods/")
-		})
+// podAccess reports whether r applies to core pods, and whether it reaches a
+// pod subresource (pods/x, or */x as the authorizer matches it): there even
+// get counts, as get on pods/exec or pods/attach opens a session on some
+// apiservers.
+func podAccess(r *rbacv1.PolicyRule) (pods, subresource bool) {
+	if !slices.Contains(r.APIGroups, "") && !slices.Contains(r.APIGroups, "*") {
+		return false, false
+	}
+	for _, res := range r.Resources {
+		switch {
+		case res == "*" || res == "pods":
+			pods = true
+		case strings.HasPrefix(res, "pods/") || strings.HasPrefix(res, "*/"):
+			pods, subresource = true, true
+		}
+	}
+	return pods, subresource
 }
