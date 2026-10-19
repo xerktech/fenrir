@@ -645,19 +645,25 @@ func TestUnrecordedWolfStreamIsAdopted(t *testing.T) {
 	}
 }
 
-// Two streams under our keys (a retry added one before the timed-out add
-// landed) share one ID, so neither can be stopped alone: the session ends.
-func TestDuplicateUnrecordedWolfStreamsEndSession(t *testing.T) {
-	agent := newFakeAgent(t)
-	agent.sessions = `[{"client_id":"4242","aes_key":"k","aes_iv":"i"},{"client_id":"4242","aes_key":"k","aes_iv":"i"}]`
-	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
-		s := f.session("alex-1", f.user)
-		s.Status.Ports = blockPorts(agent.base(t))
-		return s
-	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+// Two streams under our keys (a retry added one before a timed-out add
+// landed) share one ID, so neither can be stopped alone: the session ends,
+// whether or not one of the adds was recorded.
+func TestDuplicateWolfStreamsEndSession(t *testing.T) {
+	for _, recorded := range []string{"", "4242"} {
+		t.Run("recorded="+recorded, func(t *testing.T) {
+			agent := newFakeAgent(t)
+			agent.sessions = `[{"client_id":"4242","aes_key":"k","aes_iv":"i"},{"client_id":"4242","aes_key":"k","aes_iv":"i"}]`
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := f.session("alex-1", f.user)
+				s.Status.Ports = blockPorts(agent.base(t))
+				s.Status.WolfSessionID = recorded
+				return s
+			}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
 
-	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); !errors.Is(err, errSessionEnded) {
-		t.Fatalf("reconcileActiveStreams = %v, want errSessionEnded", err)
+			if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); !errors.Is(err, errSessionEnded) {
+				t.Fatalf("reconcileActiveStreams = %v, want errSessionEnded", err)
+			}
+		})
 	}
 }
 

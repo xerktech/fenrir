@@ -2461,6 +2461,15 @@ func (c *SessionController) reconcileActiveStreams(
 		}
 	}
 
+	if matches > 1 {
+		// A retry added a second stream under the same ID before a timed-out
+		// add landed (XERK-2116): neither can be stopped alone.
+		if freshErr := c.confirmFresh(ctx, session); freshErr != nil {
+			return freshErr
+		}
+		return c.endSessionErr(ctx, session, "Wolf has more than one stream for its keys")
+	}
+
 	status := &session.Status
 	// spec.config changed since the last attach: /resume brought new keys.
 	resumed := session.Generation > status.AttachedGeneration
@@ -2492,10 +2501,9 @@ func (c *SessionController) reconcileActiveStreams(
 		if freshErr := c.confirmFresh(ctx, session); freshErr != nil {
 			return freshErr
 		}
-		if foundID == "" || matches > 1 {
-			// The stream's ID is unknown, or a retry added a second stream
-			// under the same ID before the first add landed: neither can be
-			// stopped or adopted alone, so end the session.
+		if foundID == "" {
+			// The stream's ID is unknown, so it cannot be stopped or
+			// adopted: end the session.
 			return c.endSessionErr(ctx, session, "Wolf has an unrecorded stream for it")
 		}
 		// An AddSession whose answer we never got: it timed out while Wolf
