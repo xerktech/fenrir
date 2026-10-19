@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -15,9 +16,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"k8s.io/klog/v2"
 
 	"games-on-whales.github.io/direwolf/pkg/controllers"
 	"games-on-whales.github.io/direwolf/pkg/util"
@@ -580,6 +584,99 @@ func TestProxyAbortsOnBackendError(t *testing.T) {
 	defer resp.Body.Close()
 	if body, err := io.ReadAll(resp.Body); err == nil {
 		t.Errorf("read %q to a clean end, want an error", body)
+	}
+}
+
+// lockedBuffer is a bytes.Buffer safe for klog's writer and the test reader.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p) //nolint:wrapcheck // io.Writer passthrough
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// A client that goes away mid-stream ends the proxied read with its own
+// context's error: that is a normal disconnect, logged as one, not a Wolf
+// failure (XERK-1867). The operator drops its stream on every attach.
+func TestProxyLogsClientDisconnect(t *testing.T) {
+	fs := flag.NewFlagSet("klog", flag.ContinueOnError)
+	klog.InitFlags(fs)
+	for k, v := range map[string]string{"logtostderr": "false", "alsologtostderr": "false", "stderrthreshold": "FATAL"} {
+		if err := fs.Set(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := &lockedBuffer{}
+	klog.SetOutput(out)
+	t.Cleanup(func() {
+		klog.Flush()
+		klog.SetOutput(os.Stderr)
+		_ = fs.Set("logtostderr", "true")
+		_ = fs.Set("stderrthreshold", "ERROR")
+	})
+
+	sock := filepath.Join(t.TempDir(), "w.sock")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wolf := &httptest.Server{
+		Listener: ln,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "event: Other\ndata: {}\n\n")
+			if flushErr := http.NewResponseController(w).Flush(); flushErr != nil {
+				t.Error(flushErr)
+			}
+			<-r.Context().Done()
+		})},
+	}
+	wolf.Start()
+	defer wolf.Close()
+
+	var ready atomic.Bool
+	ready.Store(true)
+	client := UnixHTTPClient(sock)
+	f, _ := testTokenFile(t, "s3cret")
+	agent := httptest.NewServer(apiHandler(f, &client, &ready))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, agent.URL+"/api/v1/events", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer s3cret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Read the first event, so the proxy is in its copy loop, then leave.
+	if _, err := resp.Body.Read(make([]byte, 64)); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	resp.Body.Close()
+	// Close waits for the handler to return: everything it logs is written.
+	agent.Close()
+	klog.Flush()
+
+	logged := out.String()
+	if !strings.Contains(logged, "Client connection closed") {
+		t.Errorf("disconnect not logged as one: %q", logged)
+	}
+	if strings.Contains(logged, "Error reading from backend") {
+		t.Errorf("disconnect logged as a Wolf error: %q", logged)
 	}
 }
 
