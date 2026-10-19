@@ -591,13 +591,13 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if refuseUnstreamableClient(w, clientIP) {
-		return
-	}
-
 	app, err := s.getAppByID(appID)
 	if err != nil {
 		writeErrorResponse(w, 404, fmt.Errorf("app not found: %s", err))
+		return
+	}
+
+	if refuseUnstreamableClient(w, clientIP) {
 		return
 	}
 
