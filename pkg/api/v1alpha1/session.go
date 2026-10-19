@@ -125,6 +125,12 @@ type SessionInfo struct {
 
 	//+kubebuilder:validation:Required
 	SurroundAudioFlags int `json:"surroundAudioFlags,omitempty"`
+
+	// The client supports Sunshine's encrypted RTSP (it sent corever>=1 on
+	// /launch or /resume), so Wolf is asked to encrypt RTSP with AESKey.
+	// status.streamURL is rtspenc:// only once Wolf confirms it does.
+	//+kubebuilder:validation:Optional
+	EncryptedRTSP bool `json:"encryptedRTSP,omitempty"`
 }
 
 // SessionPorts is a session pod's block of host ports. Session pods use

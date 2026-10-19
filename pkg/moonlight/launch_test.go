@@ -39,6 +39,8 @@ type launchFixture struct {
 	appID string
 	// mode is the launch mode; empty sends none, so the proxy's default applies.
 	mode string
+	// extraQuery is appended to the launch's query string, e.g. "&corever=1".
+	extraQuery string
 }
 
 // newLaunchFixture builds a RESTServer over a fake clientset seeded with one
@@ -125,6 +127,7 @@ func (f *launchFixture) launch(t *testing.T, user string) (int, Response) {
 	if f.mode != "" {
 		target += "&mode=" + url.QueryEscape(f.mode)
 	}
+	target += f.extraQuery
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
 	if f.remoteAddr != "" {
 		req.RemoteAddr = f.remoteAddr
@@ -322,6 +325,36 @@ func TestLaunchAcceptsModeBounds(t *testing.T) {
 		c := sessions.Items[0].Spec.Config
 		if got := [3]int{c.VideoWidth, c.VideoHeight, c.VideoRefreshRate}; got != want {
 			t.Errorf("mode %q: stored %v, want %v", mode, got, want)
+		}
+	}
+}
+
+// A client that sends corever>=1 can speak Sunshine's encrypted RTSP; the
+// Session asks Wolf for it (XERK-2118). Anything else stays plaintext.
+func TestLaunchRecordsEncryptedRTSPSupport(t *testing.T) {
+	for query, want := range map[string]bool{
+		"":                     false,
+		"&corever=1":           true,
+		"&corever=2":           true,
+		"&corever=0":           false,
+		"&corever=":            false,
+		"&corever=yes":         false,
+		"&corever=+1":          false, // as Wolf parses it
+		"&corever=1abc":        false,
+		"&corever=99999999999": true,
+	} {
+		f := newLaunchFixture(t, &RESTServerOptions{})
+		f.extraQuery = query
+
+		if code, resp := f.launch(t, "alice"); code != http.StatusOK || resp.StatusCode != http.StatusOK {
+			t.Fatalf("query %q: HTTP %d / %d %q, want success", query, code, resp.StatusCode, resp.StatusMessage)
+		}
+		sessions, err := f.client.DirewolfV1alpha1().Sessions(testNamespace).List(context.Background(), metav1.ListOptions{})
+		if err != nil || len(sessions.Items) != 1 {
+			t.Fatalf("query %q: sessions = %v, %v; want one", query, sessions, err)
+		}
+		if got := sessions.Items[0].Spec.Config.EncryptedRTSP; got != want {
+			t.Errorf("query %q: encryptedRTSP = %v, want %v", query, got, want)
 		}
 	}
 }

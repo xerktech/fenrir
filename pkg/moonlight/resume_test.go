@@ -65,7 +65,7 @@ func TestResumeReattachesRunningSession(t *testing.T) {
 
 	srv := &RESTServer{SessionClient: sessions, RESTServerOptions: RESTServerOptions{LaunchTimeout: 10 * time.Second}}
 	w := httptest.NewRecorder()
-	srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+	srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42&corever=1"))
 
 	if body := w.Body.String(); !strings.Contains(body, "<sessionUrl0>rtsp://10.0.0.4:20002</sessionUrl0>") {
 		t.Fatalf("resume response = %d %s, want the attached stream URL", w.Code, body)
@@ -81,8 +81,8 @@ func TestResumeReattachesRunningSession(t *testing.T) {
 	if s.UID != "uid" {
 		t.Error("session was replaced, not resumed")
 	}
-	if c := s.Spec.Config; c.AESKey != "newkey" || c.AESIV != "42" || c.ClientIP != "192.0.2.7" {
-		t.Errorf("session config = %+v, want the resume's keys and client IP", c)
+	if c := s.Spec.Config; c.AESKey != "newkey" || c.AESIV != "42" || c.ClientIP != "192.0.2.7" || !c.EncryptedRTSP {
+		t.Errorf("session config = %+v, want the resume's keys, client IP and encrypted RTSP (corever=1)", c)
 	}
 }
 

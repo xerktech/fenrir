@@ -65,6 +65,12 @@ spec:
                       the errors quoting it stay within a condition message's limit.
                     maxLength: 45
                     type: string
+                  encryptedRTSP:
+                    description: |-
+                      The client supports Sunshine's encrypted RTSP (it sent corever>=1 on
+                      /launch or /resume), so Wolf is asked to encrypt RTSP with AESKey.
+                      status.streamURL is rtspenc:// only once Wolf confirms it does.
+                    type: boolean
                   surroundAudioFlags:
                     type: integer
                   videoHeight:

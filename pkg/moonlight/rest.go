@@ -663,6 +663,7 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 						AESIV:              rikeyID,
 						AESKey:             rikey,
 						SurroundAudioFlags: surroundFlags,
+						EncryptedRTSP:      clientSupportsEncryptedRTSP(r),
 						VideoWidth:         width,
 						VideoHeight:        height,
 						VideoRefreshRate:   refreshRate,
@@ -956,6 +957,18 @@ func (s *RESTServer) closeLibraryOffered() bool {
 	return err != nil
 }
 
+// clientSupportsEncryptedRTSP reports whether the Moonlight client can speak
+// Sunshine's encrypted RTSP: it sends corever>=1 on /launch and /resume.
+func clientSupportsEncryptedRTSP(r *http.Request) bool {
+	// Digits only, as Wolf parses it: Atoi alone would also take "+1".
+	value := r.URL.Query().Get("corever")
+	if strings.HasPrefix(value, "+") {
+		return false
+	}
+	corever, err := strconv.Atoi(value)
+	return err == nil && corever >= 1
+}
+
 func busyResponse(reason string) Response {
 	return Response{StatusCode: busyStatusCode, StatusMessage: reason}
 }
@@ -1026,6 +1039,7 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 		live.Spec.Config.AESKey = rikey
 		live.Spec.Config.AESIV = rikeyID
 		live.Spec.Config.ClientIP = clientIP
+		live.Spec.Config.EncryptedRTSP = clientSupportsEncryptedRTSP(r)
 		updated, updateErr := s.SessionClient.Update(ctx, live, metav1.UpdateOptions{FieldManager: "direwolf-resume"})
 		if k8serrors.IsNotFound(updateErr) {
 			return &streamRefusedError{message: sessionEndedMessage}

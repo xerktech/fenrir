@@ -30,6 +30,10 @@ type SessionInfoApplyConfiguration struct {
 	VideoHeight        *int    `json:"videoHeight,omitempty"`
 	VideoRefreshRate   *int    `json:"videoRefreshRate,omitempty"`
 	SurroundAudioFlags *int    `json:"surroundAudioFlags,omitempty"`
+	// The client supports Sunshine's encrypted RTSP (it sent corever>=1 on
+	// /launch or /resume), so Wolf is asked to encrypt RTSP with AESKey.
+	// status.streamURL is rtspenc:// only once Wolf confirms it does.
+	EncryptedRTSP *bool `json:"encryptedRTSP,omitempty"`
 }
 
 // SessionInfoApplyConfiguration constructs a declarative configuration of the SessionInfo type for use with
@@ -91,5 +95,13 @@ func (b *SessionInfoApplyConfiguration) WithVideoRefreshRate(value int) *Session
 // If called multiple times, the SurroundAudioFlags field is set to the value of the last call.
 func (b *SessionInfoApplyConfiguration) WithSurroundAudioFlags(value int) *SessionInfoApplyConfiguration {
 	b.SurroundAudioFlags = &value
+	return b
+}
+
+// WithEncryptedRTSP sets the EncryptedRTSP field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the EncryptedRTSP field is set to the value of the last call.
+func (b *SessionInfoApplyConfiguration) WithEncryptedRTSP(value bool) *SessionInfoApplyConfiguration {
+	b.EncryptedRTSP = &value
 	return b
 }

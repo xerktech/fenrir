@@ -181,6 +181,10 @@ type fakeAgent struct {
 	// addDelay delays the answer to an add, as a CPU-starved Wolf does
 	// (XERK-2116).
 	addDelay time.Duration
+	// encryptsRTSP answers sessions/add like a Wolf with encrypted RTSP
+	// (XERK-2118): it encrypts when asked. Without it, like an older Wolf, it
+	// ignores the request.
+	encryptsRTSP bool
 
 	open atomic.Int32 // client connections not yet closed
 
@@ -234,9 +238,14 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 			if err := json.NewDecoder(r.Body).Decode(&a.last); err != nil {
 				t.Errorf("decoding AddSession body: %v", err)
 			}
+			encrypted := a.encryptsRTSP && a.last.RTSPEncrypted
 			a.mu.Unlock()
 			time.Sleep(a.addDelay)
-			fmt.Fprint(w, `{"success":true,"session_id":"4242"}`)
+			if encrypted {
+				fmt.Fprint(w, `{"success":true,"session_id":"4242","rtsp_encrypted":true}`)
+			} else {
+				fmt.Fprint(w, `{"success":true,"session_id":"4242"}`)
+			}
 		case VideoPacketsPath:
 			a.mu.Lock()
 			body := a.videoPackets
@@ -373,6 +382,65 @@ func TestReconcileActiveStreamsUsesPortBlock(t *testing.T) {
 	}
 	if agent.last.ClientIP != "192.0.2.10" {
 		t.Errorf("Wolf AddSession client_ip = %q, want the Moonlight client's IP", agent.last.ClientIP)
+	}
+}
+
+// The client gets rtspenc:// only when Wolf says it encrypts the stream's
+// RTSP: an older Wolf ignores the request and speaks plaintext, and an
+// encrypting Wolf refuses plaintext RTSP (XERK-2118).
+func TestReconcileActiveStreamsEncryptedRTSPFollowsWolf(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		requested, encrypts bool
+		wantScheme          string
+	}{
+		{"requested, Wolf encrypts", true, true, "rtspenc://"},
+		{"requested, older Wolf", true, false, "rtsp://"},
+		{"not requested", false, true, "rtsp://"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := newFakeAgent(t)
+			agent.encryptsRTSP = tc.encrypts
+			probe := newPortsFixture(t)
+			sess := probe.session("alex-1", "alex")
+			sess.Status.Ports = blockPorts(agent.base(t))
+			sess.Spec.Config.ClientIP = "192.0.2.10"
+			sess.Spec.Config.EncryptedRTSP = tc.requested
+			f := newPortsFixture(t, tokenSecret(sess))
+			if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Create(context.Background(), sess, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+				t.Fatal(err)
+			}
+			if agent.last.RTSPEncrypted != tc.requested {
+				t.Errorf("Wolf AddSession rtsp_encrypted = %v, want %v", agent.last.RTSPEncrypted, tc.requested)
+			}
+			want := fmt.Sprintf("%s127.0.0.1:%d", tc.wantScheme, sess.Status.Ports.RTSP)
+			if sess.Status.StreamURL != want {
+				t.Errorf("StreamURL = %q, want %q", sess.Status.StreamURL, want)
+			}
+
+			// Later polls take it from Wolf's listing of the attached stream.
+			listed, err := json.Marshal([]wolfapi.Session{{
+				AESKey: sess.Spec.Config.AESKey, AESIV: sess.Spec.Config.AESIV,
+				RTSPEncrypted: tc.requested && tc.encrypts,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent.mu.Lock()
+			agent.sessions = string(listed)
+			agent.mu.Unlock()
+			sess.Status.StreamURL = ""
+			if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+				t.Fatal(err)
+			}
+			if agent.added != 1 || sess.Status.StreamURL != want {
+				t.Errorf("after a poll: %d adds, StreamURL = %q; want 1 add, %q", agent.added, sess.Status.StreamURL, want)
+			}
+		})
 	}
 }
 
