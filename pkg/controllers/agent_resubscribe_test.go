@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/r3labs/sse/v2"
@@ -116,40 +117,51 @@ func streamFor(d time.Duration) func(context.Context) (<-chan *sse.Event, error)
 	}
 }
 
-func runScripted(t *testing.T, a *Agent, client *scriptedEventsClient) []time.Time {
+// runScripted runs a in a synctest bubble until client has seen every
+// step, then hands the subscribe times to check. Time in the bubble is
+// fake: it advances only when every goroutine is blocked, so the delays
+// are exact however loaded the machine is (XERK-1867).
+func runScripted(t *testing.T, steps []func(context.Context) (<-chan *sse.Event, error), minDelay, maxDelay time.Duration, check func(t *testing.T, calls []time.Time)) {
 	t.Helper()
-	want := len(client.steps) + 1
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	go a.Run(ctx)
-	var calls []time.Time
-	for len(calls) < want {
-		select {
-		case c := <-client.calls:
-			calls = append(calls, c)
-		case <-time.After(10 * time.Second):
-			t.Fatalf("%d subscribes, want %d", len(calls), want)
+	synctest.Test(t, func(t *testing.T) {
+		client := &scriptedEventsClient{steps: steps, calls: make(chan time.Time, len(steps)+1)}
+		a := NewAgent(client)
+		a.minResubscribeDelay, a.maxResubscribeDelay = minDelay, maxDelay
+		a.subscribeFailed = func(err error) { t.Log(err) }
+		want := len(steps) + 1
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		// Run logs to t: it must return before the test does.
+		defer func() { cancel(); <-done }()
+		go func() {
+			defer close(done)
+			a.Run(ctx)
+		}()
+		var calls []time.Time
+		for len(calls) < want {
+			select {
+			case c := <-client.calls:
+				calls = append(calls, c)
+			case <-time.After(time.Hour):
+				t.Fatalf("%d subscribes, want %d", len(calls), want)
+			}
 		}
-	}
-	return calls
+		check(t, calls)
+	})
 }
 
 // Repeated failures must back off, not retry at the minimum delay forever.
 func TestAgentResubscribeBacksOff(t *testing.T) {
-	client := &scriptedEventsClient{
-		steps: []func(context.Context) (<-chan *sse.Event, error){refused, refused, refused, refused},
-		calls: make(chan time.Time, 8),
-	}
-	a := NewAgent(client)
-	a.minResubscribeDelay, a.maxResubscribeDelay = 20*time.Millisecond, 80*time.Millisecond
-	calls := runScripted(t, a, client)
-	// Delays 20, 40, 80, 80ms; timers never fire early.
-	if d := calls[4].Sub(calls[0]); d < 220*time.Millisecond {
-		t.Errorf("4 retries took %s, want at least 220ms of backoff", d)
-	}
-	if d := calls[4].Sub(calls[3]); d < 80*time.Millisecond {
-		t.Errorf("last retry after %s, want the 80ms cap", d)
-	}
+	steps := []func(context.Context) (<-chan *sse.Event, error){refused, refused, refused, refused}
+	runScripted(t, steps, 20*time.Millisecond, 80*time.Millisecond, func(t *testing.T, calls []time.Time) {
+		// Delays 20, 40, 80, 80ms.
+		if d := calls[4].Sub(calls[0]); d != 220*time.Millisecond {
+			t.Errorf("4 retries took %s, want 220ms of backoff", d)
+		}
+		if d := calls[4].Sub(calls[3]); d != 80*time.Millisecond {
+			t.Errorf("last retry after %s, want the 80ms cap", d)
+		}
+	})
 }
 
 // A stream that stayed up resets the backoff: after a Wolf restart the agent
@@ -157,19 +169,15 @@ func TestAgentResubscribeBacksOff(t *testing.T) {
 func TestAgentResubscribeResetsAfterLongStream(t *testing.T) {
 	const minDelay, maxDelay = 20 * time.Millisecond, 160 * time.Millisecond
 	// Delays 20, 40, 80, 160, 160ms: at the cap before the stream.
-	client := &scriptedEventsClient{
-		steps: []func(context.Context) (<-chan *sse.Event, error){refused, refused, refused, refused, refused, streamFor(maxDelay)},
-		calls: make(chan time.Time, 8),
-	}
-	a := NewAgent(client)
-	a.minResubscribeDelay, a.maxResubscribeDelay = minDelay, maxDelay
-	calls := runScripted(t, a, client)
-	if d := calls[5].Sub(calls[4]); d < maxDelay {
-		t.Fatalf("delay before the stream %s, want the %s cap", d, maxDelay)
-	}
-	if d := calls[6].Sub(calls[5]) - maxDelay; d > maxDelay/2 {
-		t.Errorf("resubscribed %s after a long stream closed, want about the %s minimum", d, minDelay)
-	}
+	steps := []func(context.Context) (<-chan *sse.Event, error){refused, refused, refused, refused, refused, streamFor(maxDelay)}
+	runScripted(t, steps, minDelay, maxDelay, func(t *testing.T, calls []time.Time) {
+		if d := calls[5].Sub(calls[4]); d != maxDelay {
+			t.Fatalf("delay before the stream %s, want the %s cap", d, maxDelay)
+		}
+		if d := calls[6].Sub(calls[5]) - maxDelay; d != minDelay {
+			t.Errorf("resubscribed %s after a long stream closed, want the %s minimum", d, minDelay)
+		}
+	})
 }
 
 // slowConnect is a stream whose headers take d to arrive and which then
@@ -187,16 +195,12 @@ func slowConnect(d time.Duration) func(context.Context) (<-chan *sse.Event, erro
 // whose headers came late was still up all along.
 func TestAgentResubscribeResetsAfterSlowHeaders(t *testing.T) {
 	const minDelay, maxDelay = 20 * time.Millisecond, 160 * time.Millisecond
-	client := &scriptedEventsClient{
-		steps: []func(context.Context) (<-chan *sse.Event, error){refused, refused, refused, refused, refused, slowConnect(maxDelay)},
-		calls: make(chan time.Time, 8),
-	}
-	a := NewAgent(client)
-	a.minResubscribeDelay, a.maxResubscribeDelay = minDelay, maxDelay
-	calls := runScripted(t, a, client)
-	if d := calls[6].Sub(calls[5]) - maxDelay; d > maxDelay/2 {
-		t.Errorf("resubscribed %s after a slow-header stream closed, want about the %s minimum", d, minDelay)
-	}
+	steps := []func(context.Context) (<-chan *sse.Event, error){refused, refused, refused, refused, refused, slowConnect(maxDelay)}
+	runScripted(t, steps, minDelay, maxDelay, func(t *testing.T, calls []time.Time) {
+		if d := calls[6].Sub(calls[5]) - maxDelay; d != minDelay {
+			t.Errorf("resubscribed %s after a slow-header stream closed, want the %s minimum", d, minDelay)
+		}
+	})
 }
 
 // Cancelling Run must not wait for Wolf to answer a StopSession.
