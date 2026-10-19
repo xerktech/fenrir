@@ -58,6 +58,14 @@ paths:
   - Tests: `images/library/init_heroic_update_test.go` (real script, stubbed curl/dpkg).
     Stubs never reach a host package tool: TrueNAS's dpkg is a wrapper that refuses to run,
     so the dpkg stub compares versions itself (XERK-2008).
+- `wrapped-steam` checks for a running Steam again under a per-pod `flock`, held until it
+  execs Steam: two cold launches at once would otherwise both start Steam and Heroic.
+  - No child may inherit the lock fd (`9>&-`): Heroic outlives the script, and every later cold
+    launch would wait out the timeout. Tests: `images/library/wrapped_steam_test.go`.
+- `wrapped-heroic` turns Heroic's "Add games to Steam" off in its config.json: Steam always runs
+  beside Heroic here and its CEF debugger stays off, so adding or removing a shortcut fails with
+  a "Steam is running" error. Removal on uninstall is unconditional in Heroic, so that error
+  still shows on uninstall; it is cosmetic. Tests: `images/library/wrapped_heroic_test.go`.
 - Idle rule: (no browser traffic for `--library-idle-timeout` OR no user-opened page load for
   `--library-max-runtime`) AND nothing downloading.
   - An open Selkies tab sends WebSocket traffic every few seconds with nobody there, so traffic

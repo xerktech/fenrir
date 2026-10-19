@@ -1,0 +1,127 @@
+package library
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+const wrappedSteam = "root/usr/bin/wrapped-steam"
+
+// steamDesktop is a Library desktop with Steam and Heroic stubbed. The steam
+// stub is a script named steam, so the real `pgrep -x steam` sees it run.
+type steamDesktop struct {
+	t                     *testing.T
+	dir, home, log, wrap  string
+	steamLife, heroicLife string
+}
+
+func newSteamDesktop(t *testing.T) *steamDesktop {
+	t.Helper()
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("needs util-linux flock")
+	}
+	if out, err := exec.CommandContext(t.Context(), "pgrep", "-x", "steam|steam\\.sh|heroic").Output(); err == nil {
+		t.Skipf("a real Steam or Heroic runs on this host: %s", out)
+	}
+	d := &steamDesktop{t: t, dir: t.TempDir(), steamLife: "3", heroicLife: "3"}
+	d.home = filepath.Join(d.dir, "home")
+	d.log = filepath.Join(d.dir, "log")
+	bin := filepath.Join(d.dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A cold start carries wrapped-steam's preloads; a hand-off to a running
+	// client does not, and returns at once as the real client's does.
+	writeStub(t, filepath.Join(bin, "steam"), `if [ -n "$LD_PRELOAD" ]; then echo cold >>"$LOG"; sleep "$STEAM_LIFE"
+else echo "handoff $*" >>"$LOG"; fi`)
+	writeStub(t, filepath.Join(bin, "wrapped-heroic"), `echo heroic >>"$LOG"; sleep "$HEROIC_LIFE"`)
+	// The user-namespace probe, slowed so two launches overlap in it.
+	writeStub(t, filepath.Join(bin, "bwrap"), `sleep 1; exit 1`)
+	src, err := os.ReadFile(wrappedSteam)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patched := strings.NewReplacer(
+		"/usr/bin/steam ", filepath.Join(bin, "steam")+" ",
+		"/usr/bin/wrapped-heroic ", filepath.Join(bin, "wrapped-heroic")+" ",
+	).Replace(string(src))
+	if strings.Contains(patched, "exec /usr/bin/steam") || strings.Contains(patched, "-f /usr/bin/wrapped-heroic") {
+		t.Fatal("wrapped-steam runs Steam or Heroic from a path this test does not stub")
+	}
+	d.wrap = filepath.Join(d.dir, "wrapped-steam")
+	if err := os.WriteFile(d.wrap, []byte(patched), 0o600); err != nil { //nolint:gosec // d.wrap is under t.TempDir
+		t.Fatal(err)
+	}
+	return d
+}
+
+// start runs wrapped-steam with args, returning a wait func.
+func (d *steamDesktop) start(args ...string) func() {
+	d.t.Helper()
+	cmd := exec.CommandContext(d.t.Context(), "bash", append([]string{d.wrap}, args...)...) //nolint:gosec // the test's own script
+	cmd.Env = append(os.Environ(),
+		"HOME="+d.home, "LOG="+d.log, "STEAM_LIFE="+d.steamLife, "HEROIC_LIFE="+d.heroicLife,
+		"PATH="+filepath.Join(d.dir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := cmd.Start(); err != nil {
+		d.t.Fatal(err)
+	}
+	return func() {
+		if err := cmd.Wait(); err != nil {
+			d.t.Errorf("wrapped-steam: %v", err)
+		}
+	}
+}
+
+func (d *steamDesktop) calls() []string {
+	d.t.Helper()
+	b, err := os.ReadFile(d.log)
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	return strings.Fields(string(b))
+}
+
+func count(calls []string, word string) int {
+	n := 0
+	for _, c := range calls {
+		if c == word {
+			n++
+		}
+	}
+	return n
+}
+
+func TestWrappedSteamConcurrentColdLaunchesStartSteamOnce(t *testing.T) {
+	d := newSteamDesktop(t)
+	var wg sync.WaitGroup
+	for _, arg := range []string{"steam://open/games", "steam://open/downloads"} {
+		wait := d.start(arg)
+		wg.Go(wait)
+	}
+	wg.Wait()
+	calls := d.calls()
+	if count(calls, "cold") != 1 || count(calls, "heroic") != 1 || count(calls, "handoff") != 1 {
+		t.Errorf("calls %q: want Steam and Heroic started once, the other launch handed to the running client", calls)
+	}
+}
+
+func TestWrappedSteamLockOutlivesNoLaunch(t *testing.T) {
+	d := newSteamDesktop(t)
+	// Heroic outlives Steam here: had it inherited the lock, the next cold
+	// launch would wait out the 30s timeout.
+	d.steamLife, d.heroicLife = "0", "20"
+	d.start()()
+	begin := time.Now()
+	d.start()()
+	if took := time.Since(begin); took > 10*time.Second {
+		t.Errorf("second cold launch took %v: the lock outlived the first launch", took)
+	}
+	if calls := d.calls(); count(calls, "cold") != 2 {
+		t.Errorf("calls %q: want two cold starts", calls)
+	}
+}

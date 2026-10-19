@@ -14,8 +14,22 @@ mkdir -p "${LOG_DIR}"
 # The taskbar's start menu and Steam's own shortcuts also land here (via the
 # /usr/local/bin/steam shim and steam.desktop). With Steam already up, hand
 # the request (a steam:// URL, say) to the running client and start nothing.
-if pgrep -x steam >/dev/null; then
+# steam.sh too: Valve's launcher runs it (as the parent of the real client)
+# before any process is named steam, for seconds on a bootstrap update.
+STEAM_PROCS='steam|steam\.sh'
+if pgrep -x "${STEAM_PROCS}" >/dev/null; then
   exec /usr/bin/steam "$@"
+fi
+
+# Two cold launches at once (a double-click in the start menu) would both pass
+# that check and start Steam and Heroic twice, the second truncating the logs.
+# So check again under a per-pod lock, held until Steam is exec'd below. No
+# child may inherit fd 9 (hence 9>&-): one outliving this script would make
+# every later cold launch wait out the timeout. Never block a launch for good.
+exec 9>"/tmp/wrapped-steam-$(id -u).lock"
+flock -w 30 9 || echo "wrapped-steam: timed out waiting for another launch, starting anyway" >&2
+if pgrep -x "${STEAM_PROCS}" >/dev/null; then
+  exec /usr/bin/steam "$@" 9>&-
 fi
 
 # The home's ~/Desktop copy of steam.desktop predates this image and names
@@ -58,9 +72,9 @@ fi
 # setsid: Heroic must outlive this script's session (it otherwise dies with
 # its stdout); wrapped-heroic sets its own preloads.
 if ! pgrep -x heroic >/dev/null; then
-  setsid -f /usr/bin/wrapped-heroic >"${LOG_DIR}/heroic.log" 2>&1 </dev/null
+  setsid -f /usr/bin/wrapped-heroic >"${LOG_DIR}/heroic.log" 2>&1 </dev/null 9>&-
 fi
 
 export LD_PRELOAD="${STEAM_PRELOAD}"
 # In the foreground, as the base image ran it.
-exec /usr/bin/steam "${STEAM_ARGS[@]}" "$@" >"${LOG_DIR}/steam.log" 2>&1 </dev/null
+exec /usr/bin/steam "${STEAM_ARGS[@]}" "$@" >"${LOG_DIR}/steam.log" 2>&1 </dev/null 9>&-
