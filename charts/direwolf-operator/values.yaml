@@ -92,8 +92,9 @@ controllers:
           # Lobby creation rejects invalid screen modes (XERK-2048), and apps started by
           # Wolf's process runner no longer keep its ports bound after it dies (XERK-2049).
           # GStreamer no longer tries and blacklists Wolf's C library as a plugin (XERK-1867).
+          # A flood of RTSP ANNOUNCEs at a stream no longer crashes Wolf (XERK-2096).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-8d04e3b@sha256:afcc3412d2cac9d2dd7c62b9c12d725b14670cdf5a483218b9292a7a72bfcc19
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-a1d2a28@sha256:ba5f6c0fc6b899d54ea40f000e8f36f0b52809b052add3a1a981c8e3df8e6c4e
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
