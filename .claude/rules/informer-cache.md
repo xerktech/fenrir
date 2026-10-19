@@ -23,5 +23,8 @@ paths:
   precondition. A failed delete (`errEndSessionFailed`) must requeue without a status write:
   recorded as PodCreated=False, the next reconcile recreates a gone pod.
   Tests: `TestFailedEndSessionDoesNotRecreatePod`, `TestEndSessionPreconditionsResourceVersion`.
+- An App or User the cache still shows invalid may already be fixed: before ending a Session
+  for its spec, `specCacheCurrent` compares the cached resourceVersions with live GETs and
+  retries on a mismatch. Tests: `TestInvalidSpecRechecksLiveAppAndUser`.
 - Tests: `TestReconcilerGetsCopyOfCachedObject` (pkg/generic/controller_test.go).
 - Tests: `TestBuildPodLeavesCachedObjects` (session_test.go) — run it under `-race`.

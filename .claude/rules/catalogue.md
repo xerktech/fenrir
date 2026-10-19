@@ -47,6 +47,11 @@ paths:
     It reads each game back from its App; the ID annotation goes into a shell line, so it is
     checked as a scan would and must still give the App's name. It creates/deletes nothing.
     Tests: `catalogue_refresh_test.go`.
+  - Refresh lists in pages (`catalogueRefreshPageSize`): every App carries its cover, and one
+    LIST of 300 with 200 KB covers held ~140 MiB at once, beside the App informer's copy
+    (256Mi operator limit).
+  - RomM's Catalogue runs `RunRefresh` too: its base change reaches the ROMs' Apps at once,
+    even while RomM is down (a failed RomM scan syncs nothing).
 - The Library's files are user-writable, so treat them as untrusted:
   - Heroic appNames must match `heroicAppName` (they go into a shell line and a URL).
   - Box art is fetched only over https from `artHosts`, every redirect re-checked, at most
@@ -73,6 +78,8 @@ paths:
   - Pods reference it by name, so a template's generated claims' GC doesn't cover it.
   - A claim still owned by an earlier same-named Session is waited out, never adopted.
   - Don't combine it with a template GPU claim: the pod would get two cards.
+  - The CRD checks only the memory string's shape: `addAppGPUClaim` rejects a value over
+    int64 ("1e1000" has Value() 0), ending the Session.
   - Wolf gets it directly, not only via the App's containers: testball has none (XERK-1676).
     Tests: `TestContainerlessAppGPUReachesWolf`.
 - Tests: `pkg/controllers/catalogue_test.go` (fixtures in `testdata/catalogue`, run through

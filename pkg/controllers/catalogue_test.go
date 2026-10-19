@@ -217,7 +217,7 @@ func TestLaunchCommand(t *testing.T) {
 		{catalogueGame{Store: v1alpha1types.CatalogueStoreEpic, ID: "Quail"}, "heroic 'heroic://launch?appName=Quail&runner=legendary'"},
 		{catalogueGame{Store: v1alpha1types.CatalogueStoreGOG, ID: "1207658924"}, "heroic 'heroic://launch?appName=1207658924&runner=gog'"},
 	} {
-		if got := launchCommand(tc.game); got != tc.want {
+		if got := launchCommand(&tc.game); got != tc.want {
 			t.Errorf("launchCommand(%+v) = %q, want %q", tc.game, got, tc.want)
 		}
 	}

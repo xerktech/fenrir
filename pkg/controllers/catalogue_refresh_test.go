@@ -3,13 +3,17 @@ package controllers
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 
@@ -119,6 +123,59 @@ func TestCatalogueRefreshKeepsRomMLaunch(t *testing.T) {
 	ctr := got.Spec.Template.Spec.Containers[0]
 	if ctr.Image != "retroarch:2" || ctr.Env[len(ctr.Env)-1].Value != "retroarch 'x.sfc'" {
 		t.Errorf("romm-5 image %q env %+v", ctr.Image, ctr.Env)
+	}
+}
+
+// Refresh lists in pages (each App carries its cover) and refreshes the
+// Apps of every page.
+func TestCatalogueRefreshPagesList(t *testing.T) {
+	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil))
+	f.scan(t)
+	for _, name := range []string{"steam-base", "heroic-base"} {
+		base := f.app(t, name)
+		base.Spec.Template.Spec.Containers[0].Image = "new:2"
+		f.update(t, base)
+	}
+
+	pages := 0
+	// One App per page: an API server may return fewer than the limit.
+	f.dw.PrependReactor("list", "apps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		list, ok := action.(k8stesting.ListActionImpl)
+		if !ok {
+			return false, nil, nil
+		}
+		if list.ListOptions.Limit != catalogueRefreshPageSize {
+			t.Errorf("listed with limit %d, want %d", list.ListOptions.Limit, catalogueRefreshPageSize)
+		}
+		gv := schema.GroupVersion(v1alpha1types.GroupVersion)
+		obj, err := f.dw.Tracker().List(gv.WithResource("apps"), gv.WithKind("App"), libraryTestNS)
+		if err != nil {
+			return true, nil, fmt.Errorf("listing the tracker: %w", err)
+		}
+		var items []v1alpha1types.App
+		for _, app := range obj.(*v1alpha1types.AppList).Items { //nolint:forcetypeassert // the tracker's own list
+			if list.GetListRestrictions().Labels.Matches(labels.Set(app.Labels)) {
+				items = append(items, app)
+			}
+		}
+		i, _ := strconv.Atoi(list.ListOptions.Continue) // "" is the first page
+		page := &v1alpha1types.AppList{Items: items[i : i+1]}
+		if i+1 < len(items) {
+			page.Continue = strconv.Itoa(i + 1)
+		}
+		pages++
+		return true, page, nil
+	})
+	if err := f.catalogue.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if pages < 2 {
+		t.Fatalf("Refresh listed %d pages, want one per App", pages)
+	}
+	for _, name := range []string{"steam-570", catalogueAppName(v1alpha1types.CatalogueStoreEpic, "Quail")} {
+		if img := f.app(t, name).Spec.Template.Spec.Containers[0].Image; img != "new:2" {
+			t.Errorf("%s image = %q, want new:2", name, img)
+		}
 	}
 }
 

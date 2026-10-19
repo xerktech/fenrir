@@ -71,9 +71,11 @@ func newPortsFixture(t *testing.T, k8sObjects ...runtime.Object) *portsFixture {
 		generic.NewInformer[*v1alpha1types.Session](dwF.Direwolf().V1alpha1().Sessions().Informer()),
 		generic.NewInformer[*v1alpha1types.App](dwF.Direwolf().V1alpha1().Apps().Informer()),
 		generic.NewInformer[*v1alpha1types.User](dwF.Direwolf().V1alpha1().Users().Informer()),
+		dw.DirewolfV1alpha1().Apps(portsTestNS), dw.DirewolfV1alpha1().Users(portsTestNS),
 		generic.NewInformer[*corev1.Pod](kF.Core().V1().Pods().Informer()),
 		dw.DirewolfV1alpha1().Pairings(portsTestNS),
 		generic.NewInformer[*v1alpha1types.Pairing](dwF.Direwolf().V1alpha1().Pairings().Informer()),
+		nil,
 		SessionControllerOptions{SessionPortRange: PortRange{Min: 20000, Max: 20999}, DisconnectGracePeriod: 10 * time.Minute})
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })

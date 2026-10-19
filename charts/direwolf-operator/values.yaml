@@ -224,6 +224,11 @@ rbac:
         - apiGroups: [""]
           resources: ["pods/exec"]
           verbs: ["get", "create"]
+        # Warning Events on an App whose Session ended over its spec
+        # (patch: the recorder aggregates repeats into one Event).
+        - apiGroups: [""]
+          resources: ["events"]
+          verbs: ["create", "patch"]
     moonlight_proxy:
       forceRename: *proxyName
       type: Role

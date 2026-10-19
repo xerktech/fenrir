@@ -51,6 +51,9 @@ const (
 	// from their base Apps with no base App change seen: it heals a missed
 	// event or a refresh that lost a write conflict.
 	catalogueRefreshInterval = 10 * time.Minute
+	// catalogueRefreshPageSize is how many Apps one page of Refresh's LIST
+	// holds; each carries up to catalogueMaxArtBytes of cover.
+	catalogueRefreshPageSize = 20
 
 	// catalogueIDAnnotation is the store's own ID of the game (Steam appid,
 	// Heroic appName); App names are derived from it and may be lossy.
@@ -680,7 +683,7 @@ func catalogueMoonlightID(store, id string) int {
 
 // launchCommand is the shell command line that starts the game. IDs are
 // checked (numeric, heroicAppName) before they get here.
-func launchCommand(game catalogueGame) string {
+func launchCommand(game *catalogueGame) string {
 	switch game.Store {
 	case v1alpha1types.CatalogueStoreRomM:
 		return game.Launch
@@ -728,7 +731,8 @@ func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame, artBudget t
 	defer cancel()
 	wanted := map[string]bool{}
 	ids := map[int]string{}
-	for _, game := range games {
+	for i := range games {
+		game := &games[i]
 		base := bases[game.Store]
 		if base == nil {
 			continue
@@ -794,19 +798,28 @@ func (c *Catalogue) bases(ctx context.Context) (map[string]*v1alpha1types.App, [
 	return bases, errs
 }
 
-// catalogueApps lists, by name, the catalogue Apps of the stores in bases.
-func (c *Catalogue) catalogueApps(ctx context.Context, bases map[string]*v1alpha1types.App) (map[string]*v1alpha1types.App, error) {
+// catalogueSelector selects the catalogue Apps of the stores in bases.
+func catalogueSelector(bases map[string]*v1alpha1types.App) (string, error) {
 	stores := make([]string, 0, len(bases))
 	for s := range bases {
 		stores = append(stores, s)
 	}
 	req, err := labels.NewRequirement(v1alpha1types.CatalogueLabel, selection.In, stores)
 	if err != nil {
-		return nil, fmt.Errorf("building catalogue selector: %w", err)
+		return "", fmt.Errorf("building catalogue selector: %w", err)
+	}
+	return labels.NewSelector().Add(*req).String(), nil
+}
+
+// catalogueApps lists, by name, the catalogue Apps of the stores in bases.
+func (c *Catalogue) catalogueApps(ctx context.Context, bases map[string]*v1alpha1types.App) (map[string]*v1alpha1types.App, error) {
+	selector, err := catalogueSelector(bases)
+	if err != nil {
+		return nil, err
 	}
 	// From the API server, not a cache: a stale list would recreate or keep
 	// Apps the last scan already handled.
-	list, err := c.Apps.List(ctx, metav1.ListOptions{LabelSelector: labels.NewSelector().Add(*req).String()})
+	list, err := c.Apps.List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return nil, fmt.Errorf("listing catalogue Apps: %w", err)
 	}
@@ -829,22 +842,36 @@ func (c *Catalogue) Refresh(ctx context.Context) error {
 	if len(bases) == 0 {
 		return errors.Join(errs...)
 	}
-	existing, err := c.catalogueApps(ctx, bases)
+	selector, err := catalogueSelector(bases)
 	if err != nil {
 		return errors.Join(append(errs, err)...)
 	}
-	for name, app := range existing {
-		game, err := catalogueGameOf(app)
+	// In pages, unlike a scan: every App carries its cover, so one LIST of
+	// them all held every cover twice over (JSON and decoded) on top of the
+	// App informer's copy, every catalogueRefreshInterval.
+	opts := metav1.ListOptions{LabelSelector: selector, Limit: catalogueRefreshPageSize}
+	for {
+		list, err := c.Apps.List(ctx, opts)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("catalogue App %s: %w", name, err))
-			continue
+			return errors.Join(append(errs, fmt.Errorf("listing catalogue Apps: %w", err))...)
 		}
-		// No ArtURL: art() fetches nothing and the App keeps its cover.
-		if err := c.syncApp(ctx, ctx, bases[game.Store], game, name, app); err != nil {
-			errs = append(errs, err)
+		for i := range list.Items {
+			app := &list.Items[i]
+			game, err := catalogueGameOf(app)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("catalogue App %s: %w", app.Name, err))
+				continue
+			}
+			// No ArtURL: art() fetches nothing and the App keeps its cover.
+			if err := c.syncApp(ctx, ctx, bases[game.Store], &game, app.Name, app); err != nil {
+				errs = append(errs, err)
+			}
 		}
+		if list.Continue == "" {
+			return errors.Join(errs...)
+		}
+		opts.Continue = list.Continue
 	}
-	return errors.Join(errs...)
 }
 
 // catalogueGameOf is the game a catalogue App was made for, as a scan would
@@ -936,7 +963,7 @@ func BaseAppChanges(informer cache.SharedIndexInformer, names ...string) (<-chan
 // The per-game settings (hidden, gpu) are the user's once the App exists;
 // everything else follows the base App and the scan. Box art is the
 // scanner's: the fetched cover, or the base App's until one is fetched.
-func (c *Catalogue) syncApp(ctx, artCtx context.Context, base *v1alpha1types.App, game catalogueGame, name string, existing *v1alpha1types.App) error {
+func (c *Catalogue) syncApp(ctx, artCtx context.Context, base *v1alpha1types.App, game *catalogueGame, name string, existing *v1alpha1types.App) error {
 	if existing == nil {
 		// A hand-made App may hold the name; never overwrite it (and don't
 		// fetch art for an App that can't be created).
@@ -1006,7 +1033,7 @@ func (c *Catalogue) syncApp(ctx, artCtx context.Context, base *v1alpha1types.App
 // keep what the App has: art already fetched from the first URL that works,
 // every URL failing (retried after catalogueArtRetry), or ctx (the scan's
 // art budget) done.
-func (c *Catalogue) art(ctx context.Context, game catalogueGame, fetchedFrom string) (art []byte, from string) {
+func (c *Catalogue) art(ctx context.Context, game *catalogueGame, fetchedFrom string) (art []byte, from string) {
 	for _, u := range game.ArtURL {
 		if u == fetchedFrom {
 			return nil, ""
