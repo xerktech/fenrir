@@ -333,12 +333,15 @@ func TestLaunchAcceptsModeBounds(t *testing.T) {
 // Session asks Wolf for it (XERK-2118). Anything else stays plaintext.
 func TestLaunchRecordsEncryptedRTSPSupport(t *testing.T) {
 	for query, want := range map[string]bool{
-		"":             false,
-		"&corever=1":   true,
-		"&corever=2":   true,
-		"&corever=0":   false,
-		"&corever=":    false,
-		"&corever=yes": false,
+		"":                     false,
+		"&corever=1":           true,
+		"&corever=2":           true,
+		"&corever=0":           false,
+		"&corever=":            false,
+		"&corever=yes":         false,
+		"&corever=+1":          false, // as Wolf parses it
+		"&corever=1abc":        false,
+		"&corever=99999999999": true,
 	} {
 		f := newLaunchFixture(t, &RESTServerOptions{})
 		f.extraQuery = query

@@ -960,7 +960,12 @@ func (s *RESTServer) closeLibraryOffered() bool {
 // clientSupportsEncryptedRTSP reports whether the Moonlight client can speak
 // Sunshine's encrypted RTSP: it sends corever>=1 on /launch and /resume.
 func clientSupportsEncryptedRTSP(r *http.Request) bool {
-	corever, err := strconv.Atoi(r.URL.Query().Get("corever"))
+	// Digits only, as Wolf parses it: Atoi alone would also take "+1".
+	value := r.URL.Query().Get("corever")
+	if strings.HasPrefix(value, "+") {
+		return false
+	}
+	corever, err := strconv.Atoi(value)
 	return err == nil && corever >= 1
 }
 
