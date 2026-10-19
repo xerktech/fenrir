@@ -36,7 +36,7 @@ func adjust(t *testing.T, name string) *rspec.Spec {
 	// Strict: containerd decodes the wire format, which drops a field v0.11.0
 	// does not know without a word, and the plugin's intent with it.
 	a := &nri.ContainerAdjustment{}
-	if err := protojson.Unmarshal(b, a); err != nil {
+	if err = protojson.Unmarshal(b, a); err != nil {
 		t.Fatalf("NRI v0.11.0 cannot read %s (containerd 2.2.6 would drop what it does not know): %v", name, err)
 	}
 	g, err := generate.New("linux")
@@ -50,7 +50,7 @@ func adjust(t *testing.T, name string) *rspec.Spec {
 			t.Fatalf("NRI v0.11.0 panics applying %s, as containerd 2.2.6 would: %v", name, r)
 		}
 	}()
-	if err := nrigen.SpecGenerator(&g).Adjust(a); err != nil {
+	if err = nrigen.SpecGenerator(&g).Adjust(a); err != nil {
 		t.Fatalf("NRI v0.11.0 refuses %s: %v", name, err)
 	}
 	return g.Config
@@ -61,7 +61,7 @@ func TestEveryAdjustmentIsReplayed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var names []string
+	names := make([]string, 0, len(files))
 	for _, f := range files {
 		names = append(names, strings.TrimSuffix(filepath.Base(f), ".json"))
 	}

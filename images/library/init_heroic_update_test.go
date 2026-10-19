@@ -304,8 +304,10 @@ func TestHeroicUpdateGivesUpOnHungCacheRead(t *testing.T) {
 	writeStub(t, filepath.Join(p.dir, "bin", "timeout"), `echo "timeout $1" >>"$LOG"; shift; exec `+realTimeout+` 1 "$@"`)
 	const deb = "heroic 2.22.4"
 	calls := p.run("2.22.3", deb, "sha256:"+sha256Hex(deb), "FAKE_HUNG_READ=1")
-	if !strings.Contains(calls, "timeout 60\nas-abc sh\n") {
-		t.Fatalf("want the cache read under its timeout, calls:\n%s", calls)
+	// The read is the first command the script times out (the cache write
+	// comes later): a longer limit would hold the desktop's start longer.
+	if i := strings.Index(calls, "timeout "); i < 0 || !strings.HasPrefix(calls[i:], "timeout 60\nas-abc sh\n") {
+		t.Fatalf("want the cache read under a 60s timeout, calls:\n%s", calls)
 	}
 	if !strings.Contains(calls, "download") || !strings.Contains(calls, "apt-get install "+sha256Hex(deb)) {
 		t.Fatalf("want a fresh download installed, calls:\n%s", calls)

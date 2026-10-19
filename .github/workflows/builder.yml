@@ -121,12 +121,11 @@ jobs:
 
       # "Re-run failed jobs" on an old run keeps plan's release=true, so
       # without this the :main tags would move to old code before the chart
-      # job's same check refuses it. No run can tag meanwhile (concurrency),
-      # so this refuses exactly what the chart job would.
+      # job's check refuses it. Ancestry only (minor skips the patch-only
+      # "already released" refusal): re-running a failed image leg of the
+      # current release must still republish that image.
       - name: Refuse code older than the latest release
-        env:
-          RELEASE_TYPE: ${{ inputs.release_type || 'patch' }}
-        run: hack/release/next-chart-version.sh "$RELEASE_TYPE" "$GITHUB_SHA" > /dev/null
+        run: hack/release/next-chart-version.sh minor "$GITHUB_SHA" > /dev/null
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0

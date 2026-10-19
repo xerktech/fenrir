@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -16,6 +17,11 @@ import (
 
 // proxyServiceAccount is moonlight-proxy's ServiceAccount.
 const proxyServiceAccount = "moonlight-proxy"
+
+// proxyGroups are the groups every ServiceAccount, moonlight-proxy's
+// included, is in: a binding to one grants it too. Its namespace's
+// system:serviceaccounts:<ns> group is matched by prefix.
+var proxyGroups = []string{"system:serviceaccounts", "system:authenticated"}
 
 // readOnlyVerbs are the verbs moonlight-proxy may hold on every pod.
 var readOnlyVerbs = []string{"get", "list", "watch"}
@@ -64,7 +70,8 @@ func renderedObjects(t *testing.T) []manifestObject {
 
 // moonlight-proxy is internet-facing: beyond reading pods, it may only delete
 // the Library pod, by name. A pod rule without resourceNames would let it
-// delete (or patch) every pod in the namespace (XERK-1867).
+// delete (or patch) every pod in the namespace, and one on a subresource
+// (pods/exec, pods/ephemeralcontainers) run code in any of them (XERK-1867).
 func TestMoonlightProxyPodWritesAreNamed(t *testing.T) {
 	objs := renderedObjects(t)
 	// The roles bound to moonlight-proxy's ServiceAccount, whatever they're named.
@@ -74,7 +81,7 @@ func TestMoonlightProxyPodWritesAreNamed(t *testing.T) {
 			continue
 		}
 		for _, s := range o.Subjects {
-			if s.Kind == rbacv1.ServiceAccountKind && s.Name == proxyServiceAccount {
+			if bindsProxy(s) {
 				bound[o.RoleRef.Kind+"/"+o.RoleRef.Name] = true
 			}
 		}
@@ -105,8 +112,23 @@ func TestMoonlightProxyPodWritesAreNamed(t *testing.T) {
 	}
 }
 
-// coversPods reports whether r applies to core pods.
+// bindsProxy reports whether a binding subject includes moonlight-proxy's
+// ServiceAccount.
+func bindsProxy(s rbacv1.Subject) bool {
+	switch s.Kind {
+	case rbacv1.ServiceAccountKind:
+		return s.Name == proxyServiceAccount
+	case rbacv1.GroupKind:
+		return slices.Contains(proxyGroups, s.Name) || strings.HasPrefix(s.Name, "system:serviceaccounts:")
+	}
+	return false
+}
+
+// coversPods reports whether r applies to core pods or any of their
+// subresources.
 func coversPods(r *rbacv1.PolicyRule) bool {
 	return (slices.Contains(r.APIGroups, "") || slices.Contains(r.APIGroups, "*")) &&
-		(slices.Contains(r.Resources, "pods") || slices.Contains(r.Resources, "*"))
+		slices.ContainsFunc(r.Resources, func(res string) bool {
+			return res == "*" || res == "pods" || strings.HasPrefix(res, "pods/")
+		})
 }
