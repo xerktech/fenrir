@@ -125,3 +125,20 @@ func TestWrappedSteamLockOutlivesNoLaunch(t *testing.T) {
 		t.Errorf("calls %q: want two cold starts", calls)
 	}
 }
+
+func TestWrappedSteamHandsOffWhileSteamShStarts(t *testing.T) {
+	d := newSteamDesktop(t)
+	// Valve's launcher runs steam.sh before any process is named steam.
+	sh := filepath.Join(d.dir, "bin", "steam.sh")
+	writeStub(t, sh, `sleep 5`)
+	bootstrap := exec.CommandContext(t.Context(), sh)
+	if err := bootstrap.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bootstrap.Process.Kill(); _ = bootstrap.Wait() })
+	time.Sleep(200 * time.Millisecond) // let it exec, so pgrep sees its name
+	d.start("steam://open/games")()
+	if calls := d.calls(); count(calls, "cold") != 0 || count(calls, "handoff") != 1 {
+		t.Errorf("calls %q: want the launch handed to the starting client", calls)
+	}
+}

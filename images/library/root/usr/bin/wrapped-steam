@@ -27,7 +27,7 @@ fi
 # child may inherit fd 9 (hence 9>&-): one outliving this script would make
 # every later cold launch wait out the timeout. Never block a launch for good.
 exec 9>"/tmp/wrapped-steam-$(id -u).lock"
-flock -w 30 9 || echo "wrapped-steam: timed out waiting for another launch, starting anyway" >&2
+flock -w 30 9 || echo "wrapped-steam: no launch lock (timed out or unavailable), starting anyway" >&2
 if pgrep -x "${STEAM_PROCS}" >/dev/null; then
   exec /usr/bin/steam "$@" 9>&-
 fi
