@@ -667,26 +667,6 @@ func TestDuplicateWolfStreamsEndSession(t *testing.T) {
 	}
 }
 
-// ...but not when our cached Session is just older than the live one.
-func TestDuplicateWolfStreamsRechecksLiveSession(t *testing.T) {
-	agent := newFakeAgent(t)
-	agent.sessions = `[{"client_id":"4242","aes_key":"k","aes_iv":"i"},{"client_id":"4242","aes_key":"k","aes_iv":"i"}]`
-	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
-		s := f.session("alex-1", f.user)
-		s.Status.Ports = blockPorts(agent.base(t))
-		return s
-	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
-	stale := sess.DeepCopy()
-	stale.ResourceVersion = "stale"
-
-	if err := f.sc.reconcileActiveStreams(context.Background(), stale, readyPod(stale)); err == nil || errors.Is(err, errSessionEnded) {
-		t.Fatalf("reconcileActiveStreams = %v, want a retryable error", err)
-	}
-	if !f.sessionExists(t, sess.Name) {
-		t.Error("session deleted from a stale cache read")
-	}
-}
-
 // An add Wolf answers after the generic agent timeout still attaches
 // (XERK-2116): a CPU-starved node took 10-12s.
 func TestSlowAddSessionAttaches(t *testing.T) {
@@ -727,23 +707,29 @@ func TestUnrecordedWolfStreamEndsSession(t *testing.T) {
 	}
 }
 
-// ...but not when our cached Session is just older than the live one.
+// ...but not when our cached Session is just older than the live one, with
+// one stream or two under its keys.
 func TestUnrecordedWolfStreamRechecksLiveSession(t *testing.T) {
-	agent := newFakeAgent(t)
-	agent.sessions = `[{"aes_key":"k","aes_iv":"i"}]`
-	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
-		s := f.session("alex-1", f.user)
-		s.Status.Ports = blockPorts(agent.base(t))
-		return s
-	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
-	stale := sess.DeepCopy()
-	stale.ResourceVersion = "stale"
+	stream := `{"client_id":"","aes_key":"k","aes_iv":"i"}`
+	for name, listed := range map[string]string{"one": "[" + stream + "]", "duplicate": "[" + stream + "," + stream + "]"} {
+		t.Run(name, func(t *testing.T) {
+			agent := newFakeAgent(t)
+			agent.sessions = listed
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := f.session("alex-1", f.user)
+				s.Status.Ports = blockPorts(agent.base(t))
+				return s
+			}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+			stale := sess.DeepCopy()
+			stale.ResourceVersion = "stale"
 
-	if err := f.sc.reconcileActiveStreams(context.Background(), stale, readyPod(stale)); err == nil || errors.Is(err, errSessionEnded) {
-		t.Fatalf("reconcileActiveStreams = %v, want a retryable error", err)
-	}
-	if !f.sessionExists(t, sess.Name) {
-		t.Error("session deleted from a stale cache read")
+			if err := f.sc.reconcileActiveStreams(context.Background(), stale, readyPod(stale)); err == nil || errors.Is(err, errSessionEnded) {
+				t.Fatalf("reconcileActiveStreams = %v, want a retryable error", err)
+			}
+			if !f.sessionExists(t, sess.Name) {
+				t.Error("session deleted from a stale cache read")
+			}
+		})
 	}
 }
 
