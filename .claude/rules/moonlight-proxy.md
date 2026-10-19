@@ -7,9 +7,14 @@ paths:
 
 # moonlight-proxy
 
-- An error the Moonlight user should read goes out as HTTP 200 with the error in the XML
-  `status_code`/`status_message` (as Sunshine does), via `sendXMLWithHTTPStatus`.
+- Every XML reply, errors included, is HTTP 200 with the error in the XML
+  `status_code`/`status_message` (as Sunshine does): `writeErrorResponse` and `sendXML` force it.
   - moonlight-qt turns a non-2xx HTTP status into a transport error and never shows the message.
+  - Exception: `/appasset` is an image, so its errors are real HTTP statuses (`writeAssetError`).
+  - Tests: the `launch` helper in `launch_test.go` fails any non-200 reply.
+- A 5xx from `writeErrorResponse` shows the client only `internalErrorMessage`; the detail
+  (API errors naming Sessions, RBAC) goes to klog. A message the user can act on is a 4xx or
+  a `streamRefusedError`, never a 5xx. Tests: `TestServerErrorHidesDetail`.
 - A `/launch` reply carries `<gamesession>`, a `/resume` reply `<resume>` (as Sunshine does), keyed on
   the route because a resume with nothing to resume is served by `launchHandler`. Moonlight for
   Android fails a resume without it: "Missing mandatory field in host response: resume".
@@ -25,7 +30,12 @@ paths:
   - Never fail fast on `StreamStartFailed`: it also means the pod is still starting, on every cold
     start. A new permanent refusal wraps `errStreamRefused` in the operator.
   - A launch's Session the operator deletes mid-wait (it ends an unstreamable one before its
-    pod, XERK-1335) is answered the same way, naming IPv4 when the client isn't on it.
+    pod, XERK-1335) is answered the same way (`sessionEndedMessage`).
+  - So is a /resume's Session gone or terminating before its key update.
+    Tests: `TestResumeSessionEndedBeforeUpdate`.
+  - A non-IPv4 client is refused by the proxy before any Session is created or updated
+    (`refuseUnstreamableClient`), after the Close Library tile, which streams nothing.
+    The operator's checks stay as the backstop. Tests: `Test*RefusesNonIPv4Client`.
   - `/resume` honours a refusal only if its `observedGeneration` is the resume's own.
   - The operator's early (pre-ready) client-IP check is for never-attached Sessions only: on a
     resume, the disconnect handling must run first or the Session is never reaped.

@@ -156,6 +156,19 @@ func TestRemoteIP(t *testing.T) {
 	}
 }
 
+// A failed pairing step is HTTP 200 with its status in the XML, like every
+// other reply: moonlight-qt shows a non-2xx status only as a transport error.
+func TestFailedPairIsHTTP200(t *testing.T) {
+	s := &RESTServer{}
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pair", http.NoBody)
+	r.RemoteAddr = "192.0.2.7:51000"
+	w := httptest.NewRecorder()
+	s.pairHandler(w, r)
+	if body := w.Body.String(); w.Code != http.StatusOK || !strings.Contains(body, `status_code="400"`) || !strings.Contains(body, "uniqueid required") {
+		t.Errorf("pair = %d %s, want HTTP 200 with status 400", w.Code, body)
+	}
+}
+
 // The handlers must take the client IP from remoteIP, not a ':' split that
 // accepts any RemoteAddr: an unparseable one is refused before anything else.
 func TestHandlersRejectUnparseableRemoteAddr(t *testing.T) {
