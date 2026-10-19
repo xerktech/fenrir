@@ -908,9 +908,12 @@ func TestBuildPodRejectsWolfAgentHotplugOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The informer's copy: buildPod reads it back below.
-	user.Spec.SidecarPolicies.WolfAgent = &v1alpha1api.SidecarPolicy{
-		VolumeMounts: []corev1.VolumeMount{{Name: user.Spec.Volumes[0].Name, MountPath: "run/udev/data"}},
-	}
+	user.Spec.Volumes = append(user.Spec.Volumes, corev1.Volume{Name: "udev-override", VolumeSource: corev1.VolumeSource{
+		EmptyDir: &corev1.EmptyDirVolumeSource{},
+	}})
+	user.Spec.SidecarPolicies = &v1alpha1api.SidecarPolicies{WolfAgent: &v1alpha1api.SidecarPolicy{
+		VolumeMounts: []corev1.VolumeMount{{Name: "udev-override", MountPath: "run/udev/data"}},
+	}}
 	if _, err := sc.buildPod(sess); err == nil || !strings.Contains(err.Error(), "reserves for hotplugged devices") {
 		t.Errorf("buildPod err = %v, want the hotplug override rejected", err)
 	}
@@ -1083,12 +1086,19 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 }
 
 // The User picks a host path and the App mounts it by name: the route around
-// the App-template hostPath ban (XERK-1950). examples/user.yaml declares the
-// host's /dev/input as dev-input.
+// the App-template hostPath ban (XERK-1950).
 func TestBuildPodRejectsAppMountOfUserHostPath(t *testing.T) {
 	for _, initCtr := range []bool{false, true} {
 		for _, device := range []bool{false, true} {
 			sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+			user, err := sc.UserInformer.Namespaced(sess.Namespace).Get(sess.Spec.UserReference.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The informer's copy: buildPod reads it back below.
+			user.Spec.Volumes = append(user.Spec.Volumes, corev1.Volume{Name: "dev-input", VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/dev/input"},
+			}})
 			app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
 			if err != nil {
 				t.Fatal(err)

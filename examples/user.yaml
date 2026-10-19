@@ -5,25 +5,9 @@ kind: User
 metadata:
   name: alex
   namespace: direwolf
-spec:
-  # hostPath volume for the input, this is for testing
-  volumes:
-   - name: dev-input
-     hostPath:
-       path: /dev/input
-       type: Directory
-   - name: host-udev
-     hostPath:
-       path: /run/udev
-       type: Directory
-  sidecarPolicies:
-    # Define policies for the 'wolf' sidecar container.
-    wolf:
-      # No GPU resource here: the GPU comes from the App's DRA claim
-      # (App.spec.gpu, or a claim like examples/nvidia_devices/gpu-claim.yaml).
-      # # Mount the hostPath volumes defined above into the 'wolf' sidecar
-      volumeMounts:
-        - name: dev-input
-          mountPath: /dev/input
-        - name: host-udev
-          mountPath: /run/udev
+# No host /dev/input or /run/udev for Wolf: it builds its pads on /dev/uinput,
+# which cmd/nri-input grants it, and wolf-agent shares each pad with the game.
+# A hostPath /dev/input would hand Wolf every host input device.
+# No GPU resource here either: the GPU comes from the App's DRA claim
+# (App.spec.gpu, or a claim like examples/nvidia_devices/gpu-claim.yaml).
+spec: {}
