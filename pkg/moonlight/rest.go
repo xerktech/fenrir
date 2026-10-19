@@ -574,8 +574,8 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := validStreamKeys(rikey, rikeyID); err != nil {
-		writeErrorResponse(w, 400, err)
+	if keyErr := validStreamKeys(rikey, rikeyID); keyErr != nil {
+		writeErrorResponse(w, 400, keyErr)
 		return
 	}
 
