@@ -178,12 +178,46 @@ func TestHandlersRejectUnparseableRemoteAddr(t *testing.T) {
 		"pair":   s.pairHandler,
 		"unpair": s.unpairHandler,
 	} {
-		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/"+name+"?uniqueid=x&appid=a&rikey=k&rikeyid=1", nil)
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/"+name+"?uniqueid=x&appid=a&rikey=773448F67992470C5C62848D361E1025&rikeyid=1", nil)
 		r.RemoteAddr = "[::1"
 		w := httptest.NewRecorder()
 		h(w, r)
 		if body := w.Body.String(); !strings.Contains(body, "unparseable client address") {
 			t.Errorf("%s: response %d %q does not reject the address", name, w.Code, body)
+		}
+	}
+}
+
+func TestValidStreamKeys(t *testing.T) {
+	const key = "773448F67992470C5C62848D361E1025"
+	for _, ok := range [][2]string{{key, "1311662065"}, {strings.ToLower(key), "-1"}, {key, "4294967295"}, {key, "9223372036854775807"}} {
+		if err := validStreamKeys(ok[0], ok[1]); err != nil {
+			t.Errorf("validStreamKeys(%q, %q) = %v, want nil", ok[0], ok[1], err)
+		}
+	}
+	// What Wolf's sessions/add refuses with a 400 (the operator would retry it until the launch times out)
+	for _, bad := range [][2]string{
+		{"00", "1"}, {key + "00", "1"}, {key[:31] + "Z", "1"},
+		{key, "abc"}, {key, "+5"}, {key, " 5"}, {key, "1e3"}, {key, "1.5"}, {key, "0x10"}, {key, "9223372036854775808"},
+	} {
+		if err := validStreamKeys(bad[0], bad[1]); err == nil {
+			t.Errorf("validStreamKeys(%q, %q) = nil, want an error", bad[0], bad[1])
+		}
+	}
+}
+
+func TestLaunchAndResumeRefuseMalformedKeys(t *testing.T) {
+	srv := &RESTServer{}
+	for _, path := range []string{"/launch?appid=1&rikey=00&rikeyid=1", "/resume?rikey=773448F67992470C5C62848D361E1025&rikeyid=abc"} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, http.NoBody)
+		if strings.HasPrefix(path, "/launch") {
+			srv.launchHandler(w, r)
+		} else {
+			srv.resumeHandler(w, r)
+		}
+		if !strings.Contains(w.Body.String(), `status_code="400"`) {
+			t.Errorf("%s: response = %d %s, want status 400", path, w.Code, w.Body.String())
 		}
 	}
 }

@@ -52,7 +52,7 @@ func TestResumeReattachesRunningSession(t *testing.T) {
 	go func() {
 		for ctx.Err() == nil {
 			s, err := sessions.Get(ctx, "alex-steam-abcde", metav1.GetOptions{})
-			if err == nil && s.Spec.Config.AESKey == "newkey" && s.Status.AttachedGeneration < s.Generation {
+			if err == nil && s.Spec.Config.AESKey == "773448F67992470C5C62848D361E1025" && s.Status.AttachedGeneration < s.Generation {
 				s.Status.AttachedGeneration = s.Generation
 				s.Status.WolfSessionID = "7"
 				s.Status.StreamURL = "rtsp://10.0.0.4:20002"
@@ -65,7 +65,7 @@ func TestResumeReattachesRunningSession(t *testing.T) {
 
 	srv := &RESTServer{SessionClient: sessions, RESTServerOptions: RESTServerOptions{LaunchTimeout: 10 * time.Second}}
 	w := httptest.NewRecorder()
-	srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+	srv.resumeHandler(w, resumeRequest("rikey=773448F67992470C5C62848D361E1025&rikeyid=42"))
 
 	if body := w.Body.String(); !strings.Contains(body, "<sessionUrl0>rtsp://10.0.0.4:20002</sessionUrl0>") {
 		t.Fatalf("resume response = %d %s, want the attached stream URL", w.Code, body)
@@ -81,7 +81,7 @@ func TestResumeReattachesRunningSession(t *testing.T) {
 	if s.UID != "uid" {
 		t.Error("session was replaced, not resumed")
 	}
-	if c := s.Spec.Config; c.AESKey != "newkey" || c.AESIV != "42" || c.ClientIP != "192.0.2.7" {
+	if c := s.Spec.Config; c.AESKey != "773448F67992470C5C62848D361E1025" || c.AESIV != "42" || c.ClientIP != "192.0.2.7" {
 		t.Errorf("session config = %+v, want the resume's keys and client IP", c)
 	}
 }
@@ -91,7 +91,7 @@ func TestResumeWithoutSessionLaunches(t *testing.T) {
 	dw := generatedclient.NewSimpleClientset()
 	srv := &RESTServer{SessionClient: dw.DirewolfV1alpha1().Sessions("ns"), RESTServerOptions: RESTServerOptions{LaunchTimeout: time.Second}}
 	w := httptest.NewRecorder()
-	srv.resumeHandler(w, resumeRequest("rikey=k&rikeyid=1"))
+	srv.resumeHandler(w, resumeRequest("rikey=773448F67992470C5C62848D361E1025&rikeyid=1"))
 	if !strings.Contains(w.Body.String(), "appid required") {
 		t.Errorf("response = %d %s, want the launch path's appid error", w.Code, w.Body.String())
 	}
@@ -153,7 +153,7 @@ func TestResumeWhileAttachedWaitsForNewKeys(t *testing.T) {
 	go func() {
 		for ctx.Err() == nil {
 			s, err := sessions.Get(ctx, "alex-b", metav1.GetOptions{})
-			if err == nil && s.Spec.Config.AESKey == "newkey" && s.Status.AttachedGeneration < s.Generation {
+			if err == nil && s.Spec.Config.AESKey == "773448F67992470C5C62848D361E1025" && s.Status.AttachedGeneration < s.Generation {
 				time.Sleep(300 * time.Millisecond) // Wolf's add takes a while
 				s.Status.AttachedGeneration = s.Generation
 				s.Status.WolfSessionID = "6"
@@ -165,7 +165,7 @@ func TestResumeWhileAttachedWaitsForNewKeys(t *testing.T) {
 
 	srv := &RESTServer{SessionClient: sessions, RESTServerOptions: RESTServerOptions{LaunchTimeout: 10 * time.Second}}
 	w := httptest.NewRecorder()
-	srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+	srv.resumeHandler(w, resumeRequest("rikey=773448F67992470C5C62848D361E1025&rikeyid=42"))
 	if !strings.Contains(w.Body.String(), "<sessionUrl0>rtsp://10.0.0.4:20002</sessionUrl0>") {
 		t.Fatalf("resume response = %d %s", w.Code, w.Body.String())
 	}
@@ -194,7 +194,7 @@ func TestResumeWithUnchangedKeysFailsFast(t *testing.T) {
 
 	start := time.Now()
 	w := httptest.NewRecorder()
-	srv.resumeHandler(w, resumeRequest("rikey=k&rikeyid=1"))
+	srv.resumeHandler(w, resumeRequest("rikey=773448F67992470C5C62848D361E1025&rikeyid=1"))
 	if !strings.Contains(w.Body.String(), "previous stream keys") || time.Since(start) > 2*time.Second {
 		t.Errorf("response after %s = %d %s, want a fast keys error", time.Since(start), w.Code, w.Body.String())
 	}
@@ -232,7 +232,7 @@ func TestResumeStreamRefused(t *testing.T) {
 
 			start := time.Now()
 			w := httptest.NewRecorder()
-			srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+			srv.resumeHandler(w, resumeRequest("rikey=773448F67992470C5C62848D361E1025&rikeyid=42"))
 			elapsed := time.Since(start)
 
 			if tc.wantImmediate {
@@ -271,7 +271,7 @@ func TestResumeSessionEndedWhileWaiting(t *testing.T) {
 
 	start := time.Now()
 	w := httptest.NewRecorder()
-	srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+	srv.resumeHandler(w, resumeRequest("rikey=773448F67992470C5C62848D361E1025&rikeyid=42"))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `status_message="The host ended the session before its stream started"`) ||
 		time.Since(start) > 2*time.Second {
 		t.Errorf("resume = %d %s after %s, want the ended message at once", w.Code, w.Body.String(), time.Since(start))
@@ -304,7 +304,7 @@ func TestResumeSessionEndedBeforeUpdate(t *testing.T) {
 			srv := &RESTServer{SessionClient: dw.DirewolfV1alpha1().Sessions("ns"), RESTServerOptions: RESTServerOptions{LaunchTimeout: 5 * time.Second}}
 
 			w := httptest.NewRecorder()
-			srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+			srv.resumeHandler(w, resumeRequest("rikey=773448F67992470C5C62848D361E1025&rikeyid=42"))
 			if body := w.Body.String(); w.Code != http.StatusOK || !strings.Contains(body, `status_message="`+sessionEndedMessage+`"`) || strings.Contains(body, "alex-a") {
 				t.Errorf("resume = %d %s, want the ended message", w.Code, body)
 			}
@@ -322,7 +322,7 @@ func TestServerErrorHidesDetail(t *testing.T) {
 	srv := &RESTServer{SessionClient: dw.DirewolfV1alpha1().Sessions("ns"), RESTServerOptions: RESTServerOptions{LaunchTimeout: 5 * time.Second}}
 
 	w := httptest.NewRecorder()
-	srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+	srv.resumeHandler(w, resumeRequest("rikey=773448F67992470C5C62848D361E1025&rikeyid=42"))
 	body := w.Body.String()
 	if w.Code != http.StatusOK || !strings.Contains(body, `status_code="500"`) || !strings.Contains(body, `status_message="`+internalErrorMessage+`"`) {
 		t.Errorf("resume = %d %s, want status 500 with %q", w.Code, body, internalErrorMessage)
@@ -348,7 +348,7 @@ func TestResumeRefusesNonIPv4Client(t *testing.T) {
 	sessions := dw.DirewolfV1alpha1().Sessions("ns")
 	srv := &RESTServer{SessionClient: sessions, RESTServerOptions: RESTServerOptions{LaunchTimeout: 5 * time.Second}}
 
-	r := resumeRequest("rikey=newkey&rikeyid=42")
+	r := resumeRequest("rikey=773448F67992470C5C62848D361E1025&rikeyid=42")
 	r.RemoteAddr = "[2001:db8::1]:51000"
 	w := httptest.NewRecorder()
 	srv.resumeHandler(w, r)
