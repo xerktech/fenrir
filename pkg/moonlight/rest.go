@@ -125,6 +125,9 @@ func refuseUnstreamableClient(w http.ResponseWriter, clientIP string) bool {
 	return true
 }
 
+// internalErrorMessage is all a client is told of a 5xx; the log has why.
+const internalErrorMessage = "Internal error on the host"
+
 // streamRefusedStatusCode is the XML status of a launch the operator refused.
 // Moonlight shows any status other than 200 with its message.
 const streamRefusedStatusCode = 503
@@ -1033,7 +1036,7 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 		// Same keys as before (a retried request): the generation does not
 		// move, so the operator would never re-attach a disconnected stream.
 		if updated.Generation == live.Generation && updated.Status.WolfSessionID == "" {
-			return errors.New("resume reused the previous stream keys; retry the resume")
+			return &streamRefusedError{message: "The resume reused the previous stream keys; retry the resume"}
 		}
 		generation = updated.Generation
 		return nil
@@ -1353,8 +1356,16 @@ func orient(img image.Image, o int) image.Image {
 // writeErrorResponse answers err as HTTP 200 with status in the XML
 // status_code, as Sunshine does: moonlight-qt turns a non-2xx HTTP status into
 // a transport error and never shows the message.
+//
+// A 5xx's detail (API server errors naming Sessions, namespaces, RBAC) goes
+// only to the log; the client, which then shows it, gets internalErrorMessage.
 func writeErrorResponse(w http.ResponseWriter, status int, err error) {
 	klog.Error(err)
+
+	message := err.Error()
+	if status >= http.StatusInternalServerError {
+		message = internalErrorMessage
+	}
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
@@ -1364,7 +1375,7 @@ func writeErrorResponse(w http.ResponseWriter, status int, err error) {
 	// send unfallible statuscode
 	if bytes, err := xml.Marshal(Response{
 		StatusCode:    status,
-		StatusMessage: err.Error(),
+		StatusMessage: message,
 	}); err == nil {
 		w.Write(bytes)
 	} else {

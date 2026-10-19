@@ -2,6 +2,7 @@ package moonlight
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -240,7 +241,7 @@ func TestResumeStreamRefused(t *testing.T) {
 				}
 				return
 			}
-			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `status_code="500"`) {
+			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `status_code="500"`) || strings.Contains(w.Body.String(), "alex-steam-abcde") {
 				t.Errorf("resume = %d %s, want status 500 at the timeout", w.Code, w.Body.String())
 			}
 		})
@@ -308,6 +309,34 @@ func TestResumeSessionEndedBeforeUpdate(t *testing.T) {
 				t.Errorf("resume = %d %s, want the ended message", w.Code, body)
 			}
 		})
+	}
+}
+
+// A 5xx tells the client only that the host failed: the API error behind it
+// (Session names, RBAC detail) stays in the log. 4xx messages are kept.
+func TestServerErrorHidesDetail(t *testing.T) {
+	dw := generatedclient.NewSimpleClientset(alexSession("alex-a", time.Now()))
+	dw.PrependReactor("get", "sessions", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, k8serrors.NewForbidden(v1alpha1types.Resource("sessions"), "alex-a", errors.New("rbac says no"))
+	})
+	srv := &RESTServer{SessionClient: dw.DirewolfV1alpha1().Sessions("ns"), RESTServerOptions: RESTServerOptions{LaunchTimeout: 5 * time.Second}}
+
+	w := httptest.NewRecorder()
+	srv.resumeHandler(w, resumeRequest("rikey=newkey&rikeyid=42"))
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, `status_code="500"`) || !strings.Contains(body, `status_message="`+internalErrorMessage+`"`) {
+		t.Errorf("resume = %d %s, want status 500 with %q", w.Code, body, internalErrorMessage)
+	}
+	for _, leak := range []string{"alex-a", "forbidden", "rbac"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("resume reply leaks %q: %s", leak, body)
+		}
+	}
+
+	w = httptest.NewRecorder()
+	srv.resumeHandler(w, resumeRequest("rikey=k"))
+	if !strings.Contains(w.Body.String(), "rikey and rikeyid required") {
+		t.Errorf("400 reply = %s, want its message kept", w.Body.String())
 	}
 }
 

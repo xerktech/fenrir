@@ -12,6 +12,9 @@ paths:
   - moonlight-qt turns a non-2xx HTTP status into a transport error and never shows the message.
   - Exception: `/appasset` is an image, so its errors are real HTTP statuses (`writeAssetError`).
   - Tests: the `launch` helper in `launch_test.go` fails any non-200 reply.
+- A 5xx from `writeErrorResponse` shows the client only `internalErrorMessage`; the detail
+  (API errors naming Sessions, RBAC) goes to klog. A message the user can act on is a 4xx or
+  a `streamRefusedError`, never a 5xx. Tests: `TestServerErrorHidesDetail`.
 - A `/launch` reply carries `<gamesession>`, a `/resume` reply `<resume>` (as Sunshine does), keyed on
   the route because a resume with nothing to resume is served by `launchHandler`. Moonlight for
   Android fails a resume without it: "Missing mandatory field in host response: resume".
