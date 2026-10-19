@@ -1005,6 +1005,21 @@ func TestLaunchRefusesNonIPv4Client(t *testing.T) {
 	}
 }
 
+// An unknown App is reported as such whatever the client's address: the
+// IPv4 refusal is for launches that could otherwise start.
+func TestLaunchUnknownAppFromIPv6(t *testing.T) {
+	f := newLaunchFixture(t, &RESTServerOptions{})
+	f.remoteAddr = "[2001:db8::1]:51000"
+	f.appID = "99"
+
+	if _, resp := f.launch(t, "alice"); resp.StatusCode != http.StatusNotFound || resp.StatusMessage != "app not found" {
+		t.Errorf("launch = %d %q, want 404 %q", resp.StatusCode, resp.StatusMessage, "app not found")
+	}
+	if n := f.created.Load(); n != 0 {
+		t.Errorf("%d Sessions created, want none", n)
+	}
+}
+
 // stopSessionsForUser keeps going past a Session someone else deleted since
 // its List, so the user's other Sessions still stop (XERK-1867).
 func TestCancelToleratesSessionAlreadyDeleted(t *testing.T) {

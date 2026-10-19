@@ -593,7 +593,7 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 
 	app, err := s.getAppByID(appID)
 	if err != nil {
-		writeErrorResponse(w, 404, fmt.Errorf("app not found: %s", err))
+		writeErrorResponse(w, 404, err)
 		return
 	}
 
