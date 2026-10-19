@@ -22,7 +22,7 @@ spec:
         image: ghcr.io/games-on-whales/steam:edge
         securityContext:
           capabilities:
-            add: ["SYS_ADMIN", "SYS_NICE", "SYS_PTRACE", "NET_RAW", "MKNOD", "NET_ADMIN"]
+            add: ["SYS_ADMIN", "SYS_NICE", "SYS_PTRACE", "NET_RAW", "MKNOD"]
           seccompProfile:
             type: Unconfined
           appArmorProfile:
