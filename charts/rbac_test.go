@@ -26,6 +26,10 @@ var proxyGroups = []string{"system:serviceaccounts", "system:authenticated"}
 // readOnlyVerbs are the verbs moonlight-proxy may hold on every pod.
 var readOnlyVerbs = []string{"get", "list", "watch"}
 
+// transferVerbs hand over other identities' or roles' permissions, pods
+// included, so moonlight-proxy may hold none of them on anything.
+var transferVerbs = []string{"impersonate", "bind", "escalate"}
+
 // manifestObject is the subset of any rendered object the checks read: a
 // Role's rules and a binding's subjects and roleRef.
 type manifestObject struct {
@@ -33,9 +37,10 @@ type manifestObject struct {
 	Metadata struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
-	Rules    []rbacv1.PolicyRule `json:"rules"`
-	Subjects []rbacv1.Subject    `json:"subjects"`
-	RoleRef  rbacv1.RoleRef      `json:"roleRef"`
+	Rules           []rbacv1.PolicyRule     `json:"rules"`
+	AggregationRule *rbacv1.AggregationRule `json:"aggregationRule"`
+	Subjects        []rbacv1.Subject        `json:"subjects"`
+	RoleRef         rbacv1.RoleRef          `json:"roleRef"`
 }
 
 func renderedObjects(t *testing.T) []manifestObject {
@@ -58,6 +63,11 @@ func renderedObjects(t *testing.T) []manifestObject {
 		} else if err != nil {
 			t.Fatal(err)
 		}
+		// Fail closed: the checks read top-level objects only, and a List's
+		// items would be applied unchecked.
+		if strings.HasSuffix(o.Kind, "List") {
+			t.Fatalf("%s holds a %s: its items are not checked", path, o.Kind)
+		}
 		if o.Kind != "" {
 			objs = append(objs, o)
 		}
@@ -72,6 +82,8 @@ func renderedObjects(t *testing.T) []manifestObject {
 // the Library pod, by name. A pod rule without resourceNames would let it
 // delete (or patch) every pod in the namespace, and one on a subresource
 // (pods/exec, pods/ephemeralcontainers) run code in any of them (XERK-1867).
+// What can't be checked fails closed: impersonate, bind and escalate (or "*"),
+// which pass on other permissions, aggregated roles, and List-wrapped objects.
 func TestMoonlightProxyPodWritesAreNamed(t *testing.T) {
 	objs := renderedObjects(t)
 	// The roles bound to moonlight-proxy's ServiceAccount, whatever they're named.
@@ -95,8 +107,19 @@ func TestMoonlightProxyPodWritesAreNamed(t *testing.T) {
 			continue
 		}
 		found++
+		// Its rules come from whatever ClusterRoles match the selector, at
+		// runtime: none of them are checked here.
+		if o.AggregationRule != nil {
+			t.Errorf("%s %s bound to %s aggregates other roles: its rules can't be checked", o.Kind, o.Metadata.Name, proxyServiceAccount)
+		}
 		for i := range o.Rules {
 			r := &o.Rules[i]
+			// "*" includes impersonate, bind and escalate.
+			for _, v := range r.Verbs {
+				if v == "*" || slices.Contains(transferVerbs, v) {
+					t.Errorf("%s %s grants %q, which can hand moonlight-proxy other permissions: %+v", o.Kind, o.Metadata.Name, v, r)
+				}
+			}
 			pods, subresource := podAccess(r)
 			if !pods || len(r.ResourceNames) > 0 {
 				continue
