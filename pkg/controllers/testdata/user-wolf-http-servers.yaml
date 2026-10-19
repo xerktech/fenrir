@@ -1,0 +1,14 @@
+# A User whose wolf policy tries to turn Wolf's Moonlight HTTP/HTTPS back on.
+apiVersion: direwolf.games-on-whales.github.io/v1alpha1
+kind: User
+metadata:
+  name: alex
+  namespace: direwolf
+spec:
+  sidecarPolicies:
+    wolf:
+      env:
+        - name: WOLF_HTTP_SERVERS
+          value: "TRUE"
+        - name: WOLF_LOG_LEVEL
+          value: DEBUG

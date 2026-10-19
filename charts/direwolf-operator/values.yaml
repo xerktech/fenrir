@@ -95,8 +95,10 @@ controllers:
           # A flood of RTSP ANNOUNCEs at a stream no longer crashes Wolf (XERK-2096).
           # RTSP only serves a stream to its own client's IP, so knowing the pod IP no longer
           # lets anyone take a stream's video or block its start (XERK-2115).
+          # WOLF_HTTP_SERVERS=FALSE turns off Wolf's Moonlight HTTP/HTTPS and mDNS,
+          # which session pods rely on (XERK-1946): never pin an older image.
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-a72549f@sha256:b50734452216c560b4c491d703764e65b26f6b0210e89ceb7435b3234678a96c
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-91fe38e@sha256:6626674a02166a2ebc0c2d0658ebd30cc6f5d4d1f38b37181c55318240247cf8
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:

@@ -223,8 +223,8 @@ tolerations as the operator's `--session-node-selector` and `--session-toleratio
 (talos04 carries `nvidia.com/gpu=present:NoSchedule`); keep them in sync. Host networking needs the
 release namespace to allow it (PodSecurity `privileged`). App templates must not
 declare their own container ports: on the host network they become host ports and
-collide between sessions. Wolf's mDNS responder (UDP 5353, shared via SO_REUSEPORT)
-is outside the block and advertises the node on the LAN at 47989, the proxy's port.
+collide between sessions. Session pods run Wolf without its Moonlight HTTP/HTTPS
+servers or mDNS, so nothing advertises the node on the LAN: add it to Moonlight by address.
 
 #### Alternative Design Idea: Gateway API
 

@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Lint / format: `make lint`, `make fmt` (golangci-lint v2, config in `.golangci.yml`); `make vet`.
 - Build one binary: `go build ./cmd/<operator|moonlight-proxy|wolf-agent>`
 - Image: `docker build --build-arg APP_NAME=<cmd name> .` — one Dockerfile, `APP_NAME` picks the cmd.
-  - Exception: `nri-nvenc-fix` and `wolf-agent` ship C shims, so each has `cmd/<name>/Dockerfile` (repo-root
+  - Exception: `nri-nvenc-fix` ships a C shim, so it has `cmd/nri-nvenc-fix/Dockerfile` (repo-root
     context); the workflow matrix passes it as `file:`.
 - Non-Go images live in `images/<name>/` (own Dockerfile + context), e.g. `images/library`
   (linuxserver/steam + Heroic), `images/retroarch` (GoW RetroArch + pinned cores).
@@ -136,15 +136,15 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       scheduler holds a pod whose block a terminating predecessor still binds.
     - A pod records its block in the `port-block` annotation; one whose block differs from
       `status.ports` ends the Session, since the advertised ports would go unserved.
-    - Exception: Wolf's mDNS (UDP 5353, SO_REUSEPORT) is hardcoded and outside the block.
-  - Wolf's HTTP/HTTPS bind to 127.0.0.1 via a `bind()` preload shim (`cmd/wolf-agent/shim`,
-    `wolfCommand`): Wolf hardcodes 0.0.0.0 and its HTTPS accepts any cert naming an unknown issuer
-    as paired (XERK-1682). Flannel enforces no NetworkPolicy, and none applies to hostNetwork.
-    - Loopback is shared by every hostNetwork pod, so the shim also closes every connection those
-      two listeners accept (XERK-1737); nothing uses them. Not an AF_UNIX swap: asio registers the
-      fd with epoll before bind, so a swapped file never wakes accept. `TestLoopbackShimDrops*`.
-    - The shim ships in the wolf-agent image (own Dockerfile); an init container copies it in.
-      Wolf refuses to start without it. Tests: `TestLoopbackShim`, `TestSessionPodPreloadsLoopbackShim`.
+  - Session pods run Wolf with `WOLF_HTTP_SERVERS=FALSE` (`withWolfHTTPServersOff`): no Moonlight
+    HTTP/HTTPS, no mDNS. On the host network they'd listen on the node IP, and Wolf's HTTPS is how
+    an unpaired client gets in (XERK-1682). Nothing uses them; moonlight-proxy terminates Moonlight.
+    - Needs xerktech/wolf >= 91fe38e (XERK-1946): older Wolf ignores the variable and listens on
+      0.0.0.0, so `wolfCommand` refuses a `/wolf/wolf` without the string `WOLF_HTTP_SERVERS`.
+      Tests: `TestWolfCommandRefusesWolfWithoutHTTPServersSwitch`.
+    - Set last, replacing any from a User's wolf policy. Tests: `TestSessionPodTurnsOffWolfHTTPServers`,
+      `TestWithWolfHTTPServersOffOverridesPolicy`.
+    - HTTP/HTTPS keep their slots in the port block so recorded blocks keep their layout.
   - Chart: moonlight-proxy is host-networked with a nodeSelector and tolerations that must match
     the operator's `--session-node-selector` / `--session-tolerations`.
     - Talos labels `kubernetes.io/hostname` with the FQDN (`talos04.xerktech.com`), and talos04
