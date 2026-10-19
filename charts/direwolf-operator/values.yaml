@@ -91,8 +91,9 @@ controllers:
           # A quick API pause-then-start no longer loses its video and audio (XERK-2046).
           # Lobby creation rejects invalid screen modes (XERK-2048), and apps started by
           # Wolf's process runner no longer keep its ports bound after it dies (XERK-2049).
+          # GStreamer no longer tries and blacklists Wolf's C library as a plugin (XERK-1867).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-83cb169@sha256:e2a58a5f54ef67762eb1f24057f341e9a6d086cfe9d6d953dc734ebda0ceb130
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-4ce5e52@sha256:35976f50c673f06f33c17a658f68aafea53ece03dee580f61eb07ae08beb97e4
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
