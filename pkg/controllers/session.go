@@ -2451,6 +2451,10 @@ func (c *SessionController) reconcileActiveStreams(
 	var found bool
 	var foundID string
 	var matches int
+	// Whether Wolf encrypts RTSP for the stream: as Wolf lists it, or as its
+	// AddSession reply says below. Never from spec: an older Wolf ignores the
+	// request and the client must then get plaintext rtsp://.
+	var encryptedRTSP bool
 	for _, s := range sessions {
 		sHash := util.Hash([]byte(s.AESKey), []byte(s.AESIV))
 		if bytes.Equal(sHash, keyIVHash) {
@@ -2458,6 +2462,7 @@ func (c *SessionController) reconcileActiveStreams(
 			matches++
 			// Wolf lists a stream's session ID as its client_id.
 			foundID = s.ClientID
+			encryptedRTSP = s.RTSPEncrypted
 		}
 	}
 
@@ -2481,7 +2486,7 @@ func (c *SessionController) reconcileActiveStreams(
 			if reason := c.streamStalledReason(ctx, session, agentClient, agentURL); reason != "" {
 				return c.endSessionErr(ctx, session, reason)
 			}
-			status.StreamURL = "rtsp://" + net.JoinHostPort(podIP, strconv.Itoa(int(status.Ports.RTSP)))
+			status.StreamURL = streamURL(podIP, status.Ports.RTSP, encryptedRTSP)
 			return nil
 		}
 		// The stream we attached is gone: the client disconnected, or
@@ -2636,12 +2641,13 @@ func (c *SessionController) reconcileActiveStreams(
 		baseline := videoBaseline(ctx, session, agentClient, agentURL)
 		addClient := *agentClient
 		addClient.Timeout = wolfAddSessionTimeout
-		sessionID, err := wolfapi.NewClient(agentURL, &addClient).AddSession(ctx, wolfSession)
+		added, err := wolfapi.NewClient(agentURL, &addClient).AddSession(ctx, wolfSession)
 
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)
 		}
-		status.WolfSessionID = sessionID
+		status.WolfSessionID = added.SessionID
+		encryptedRTSP = added.RTSPEncrypted
 		status.AttachedGeneration = session.Generation
 		status.DisconnectedAt = nil
 		if baseline != nil {
@@ -2649,8 +2655,18 @@ func (c *SessionController) reconcileActiveStreams(
 		}
 	}
 
-	status.StreamURL = "rtsp://" + net.JoinHostPort(podIP, strconv.Itoa(int(status.Ports.RTSP)))
+	status.StreamURL = streamURL(podIP, status.Ports.RTSP, encryptedRTSP)
 	return nil
+}
+
+// streamURL is the sessionUrl0 Moonlight connects RTSP to. rtspenc:// makes
+// it use Sunshine's encrypted RTSP, which Wolf then requires for the stream.
+func streamURL(podIP string, port int32, encryptedRTSP bool) string {
+	scheme := "rtsp://"
+	if encryptedRTSP {
+		scheme = "rtspenc://"
+	}
+	return scheme + net.JoinHostPort(podIP, strconv.Itoa(int(port)))
 }
 
 // stopStaleStreams stops the streams Wolf still has before the pod attaches a
@@ -2818,6 +2834,7 @@ func wolfSessionFor(session *v1alpha1types.Session, podIP string) (wolfapi.Sessi
 		// to wolf, we just need a client ID wolf accepts for this specific
 		// pairing/client...
 		// ClientID:   "4193251087262667199",
-		RTSPFakeIP: podIP,
+		RTSPFakeIP:    podIP,
+		RTSPEncrypted: session.Spec.Config.EncryptedRTSP,
 	}, nil
 }

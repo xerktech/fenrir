@@ -67,3 +67,10 @@ paths:
   Session exists (`parseMode`): Wolf's AddSession refuses it from XERK-2042, so the Session would
   never start while the client was told it had. Keep the bounds equal to Wolf's.
   Tests: `TestLaunchRejectsInvalidMode`, `TestLaunchAcceptsModeBounds`.
+- Encrypted RTSP (Sunshine's `rtspenc://`, XERK-2118): a client sending `corever>=1` on /launch or
+  /resume sets `spec.config.encryptedRTSP`, and the operator asks Wolf for it (`rtsp_encrypted`).
+  - `status.streamURL`'s scheme comes only from Wolf: its sessions/add reply, then its session
+    listing. Never from spec: an older Wolf ignores the request and speaks plaintext, while an
+    encrypting Wolf refuses plaintext RTSP, so a wrong scheme fails the stream either way.
+  - Tests: `TestLaunchRecordsEncryptedRTSPSupport`, `TestResumeReattachesRunningSession`,
+    `TestReconcileActiveStreamsEncryptedRTSPFollowsWolf`.

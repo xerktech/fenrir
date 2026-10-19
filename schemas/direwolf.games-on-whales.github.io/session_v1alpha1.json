@@ -29,6 +29,10 @@
               "maxLength": 45,
               "type": "string"
             },
+            "encryptedRTSP": {
+              "description": "The client supports Sunshine's encrypted RTSP (it sent corever>=1 on\n/launch or /resume), so Wolf is asked to encrypt RTSP with AESKey.\nstatus.streamURL is rtspenc:// only once Wolf confirms it does.",
+              "type": "boolean"
+            },
             "surroundAudioFlags": {
               "type": "integer"
             },

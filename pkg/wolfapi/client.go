@@ -26,6 +26,9 @@ type Session struct {
 	AESIV  string `json:"aes_iv"`
 
 	RTSPFakeIP string `json:"rtsp_fake_ip,omitempty"`
+	// Sunshine's encrypted RTSP (xerktech/wolf, XERK-2118). Wolf lists it
+	// for its sessions; an older Wolf ignores it and omits it.
+	RTSPEncrypted bool `json:"rtsp_encrypted,omitempty"`
 
 	// State is what the stream is doing, as Wolf lists it (one of the
 	// SessionState values). Read only: Wolf ignores it on add.
@@ -71,7 +74,7 @@ type ClientSettings struct {
 	MotionControllerOverride string `json:"motion_controller_override"`
 }
 type Client interface {
-	AddSession(ctx context.Context, session Session) (string, error)
+	AddSession(ctx context.Context, session Session) (AddSessionResponse, error)
 	AddApp(ctx context.Context, app App) error
 	StopSession(ctx context.Context, sessionID string) error
 	ListSessions(ctx context.Context) ([]Session, error)
@@ -104,12 +107,12 @@ func NewClient(
 func (c *client) AddSession(
 	ctx context.Context,
 	session Session,
-) (string, error) {
+) (AddSessionResponse, error) {
 	var resp AddSessionResponse
 	if err := c.call(ctx, http.MethodPost, "/api/v1/sessions/add", session, &resp); err != nil {
-		return "", fmt.Errorf("failed to add session: %w", err)
+		return AddSessionResponse{}, fmt.Errorf("failed to add session: %w", err)
 	}
-	return resp.SessionID, nil
+	return resp, nil
 }
 
 // GET /api/v1/sessions
@@ -245,6 +248,9 @@ type SessionsResponse struct {
 type AddSessionResponse struct {
 	Response  `json:",inline"`
 	SessionID string `json:"session_id"`
+	// Whether Wolf encrypts the stream's RTSP: the client must get an
+	// rtspenc:// URL then, and only then. False from a Wolf without it.
+	RTSPEncrypted bool `json:"rtsp_encrypted"`
 }
 
 type App struct {
