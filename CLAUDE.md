@@ -93,7 +93,7 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     - A stream Wolf lists under the Session's keys with no `status.wolfSessionID` is adopted by its
       `client_id`, not ended: a slow `sessions/add` times out while Wolf completes it (XERK-2116).
       The add gets its own longer timeout so a retry rarely adds a second stream.
-      Tests: `TestUnrecordedWolfStreamIsAdopted`.
+      Two streams under its keys still end it (one shared ID). Tests: `TestUnrecordedWolfStream*`.
     - A stream Wolf still lists whose video flows (wolf-agent reads the node's conntrack for its
       `--video-port`) rose during the attach but not for `streamStallTimeout` froze; the Session
       ends (XERK-1741). Judge per flow against the attach's first sample: a previous attach's

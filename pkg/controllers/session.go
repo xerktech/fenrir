@@ -2450,13 +2450,14 @@ func (c *SessionController) reconcileActiveStreams(
 	keyIVHash := util.Hash([]byte(session.Spec.Config.AESKey), []byte(session.Spec.Config.AESIV))
 	var found bool
 	var foundID string
+	var matches int
 	for _, s := range sessions {
 		sHash := util.Hash([]byte(s.AESKey), []byte(s.AESIV))
 		if bytes.Equal(sHash, keyIVHash) {
 			found = true
+			matches++
 			// Wolf lists a stream's session ID as its client_id.
 			foundID = s.ClientID
-			break
 		}
 	}
 
@@ -2491,9 +2492,10 @@ func (c *SessionController) reconcileActiveStreams(
 		if freshErr := c.confirmFresh(ctx, session); freshErr != nil {
 			return freshErr
 		}
-		if foundID == "" {
-			// The stream's ID is unknown, so it cannot be stopped or
-			// adopted: end the session.
+		if foundID == "" || matches > 1 {
+			// The stream's ID is unknown, or a retry added a second stream
+			// under the same ID before the first add landed: neither can be
+			// stopped or adopted alone, so end the session.
 			return c.endSessionErr(ctx, session, "Wolf has an unrecorded stream for it")
 		}
 		// An AddSession whose answer we never got: it timed out while Wolf

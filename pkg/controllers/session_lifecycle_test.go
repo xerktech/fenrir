@@ -615,13 +615,18 @@ func TestInvalidSpecRechecksLiveAppAndUser(t *testing.T) {
 
 // Wolf streaming our keys without our record of it (an AddSession that timed
 // out while Wolf completed it, XERK-2116, or whose status write was lost) is
-// adopted by the ID Wolf lists it under, not ended.
+// adopted by the ID Wolf lists it under, not ended. Shaped as a /resume: the
+// adoption must record the new generation and clear the disconnect, or the
+// Session re-adopts every poll and is reaped after the grace period.
 func TestUnrecordedWolfStreamIsAdopted(t *testing.T) {
 	agent := newFakeAgent(t)
 	agent.sessions = `[{"client_id":"4242","aes_key":"k","aes_iv":"i"}]`
 	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
 		s := f.session("alex-1", f.user)
+		s.Generation = 2
 		s.Status.Ports = blockPorts(agent.base(t))
+		s.Status.AttachedGeneration = 1
+		s.Status.DisconnectedAt = new(metav1.Now())
 		return s
 	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
 
@@ -635,8 +640,43 @@ func TestUnrecordedWolfStreamIsAdopted(t *testing.T) {
 		t.Errorf("touched Wolf's stream: %d added, stopped %v", agent.added, agent.stopped)
 	}
 	st := sess.Status
-	if st.WolfSessionID != "4242" || st.AttachedGeneration != sess.Generation || st.StreamURL == "" || st.DisconnectedAt != nil {
-		t.Errorf("status = %+v, want stream 4242 attached at generation %d", st, sess.Generation)
+	if st.WolfSessionID != "4242" || st.AttachedGeneration != 2 || st.StreamURL == "" || st.DisconnectedAt != nil {
+		t.Errorf("status = %+v, want stream 4242 attached at generation 2, not disconnected", st)
+	}
+}
+
+// Two streams under our keys (a retry added one before the timed-out add
+// landed) share one ID, so neither can be stopped alone: the session ends.
+func TestDuplicateUnrecordedWolfStreamsEndSession(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.sessions = `[{"client_id":"4242","aes_key":"k","aes_iv":"i"},{"client_id":"4242","aes_key":"k","aes_iv":"i"}]`
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Status.Ports = blockPorts(agent.base(t))
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); !errors.Is(err, errSessionEnded) {
+		t.Fatalf("reconcileActiveStreams = %v, want errSessionEnded", err)
+	}
+}
+
+// An add Wolf answers after the generic agent timeout still attaches
+// (XERK-2116): a CPU-starved node took 10-12s.
+func TestSlowAddSessionAttaches(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.addDelay = wolfAgentTimeout + time.Second
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Status.Ports = blockPorts(agent.base(t))
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatalf("reconcileActiveStreams = %v", err)
+	}
+	if sess.Status.WolfSessionID != "4242" {
+		t.Errorf("WolfSessionID = %q, want 4242", sess.Status.WolfSessionID)
 	}
 }
 
