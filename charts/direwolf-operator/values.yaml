@@ -101,8 +101,11 @@ controllers:
           # the client's IP or on the path can't take the stream's setup (XERK-2118).
           # A stream's producer shutting down while viewers join, leave or switch no longer
           # crashes Wolf (patched gst-interpipe, XERK-2114).
+          # The API's get-icon serves only real image files, never arbitrary host files such as
+          # keys or /etc/shadow (XERK-2097); a stream ended before it starts no longer leaks its
+          # pipelines (XERK-2111).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-31a8575@sha256:792f190b69a35f6c12dd84491155a8370ff8ad851148a1a2ca148b130efe59f9
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-49541c1@sha256:99b54dd87f8eb3499bb82d5c2f778407ca699f44ffcea716e7984cb9320bf5fe
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
