@@ -157,6 +157,14 @@ func TestWrappedSteamColdLaunchDeletesCEFDebugFlag(t *testing.T) {
 		writeCEFDebugFlag(t, d.home, ".steam/steam"),
 	}
 	d.start()()
+	// Heroic is setsid'd and may log after Steam exits; let it, or its write
+	// races t.TempDir's cleanup.
+	for deadline := time.Now().Add(10 * time.Second); count(d.calls(), "heroic") == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("Heroic never started")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	for _, p := range flags {
 		if _, err := os.Lstat(p); !os.IsNotExist(err) {
 			t.Errorf("%s survived a cold launch (%v): Steam would open its CEF debugger", p, err)
