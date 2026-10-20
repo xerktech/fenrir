@@ -38,6 +38,13 @@ if [ -f "${HOME}/Desktop/steam.desktop" ]; then
   sed -i 's|^Exec=/usr/bin/steam|Exec=/usr/bin/wrapped-steam|' "${HOME}/Desktop/steam.desktop"
 fi
 
+# Heroic writes this flag into the shared Steam install when it cannot reach
+# Steam; Steam then serves its CEF remote debugger on 127.0.0.1:8080, where any
+# process in this pod could drive the client. Session pods delete it too
+# (gow-nvidia32's 20-steam-input-off.sh), as they share the install.
+rm -f "${HOME}/.local/share/Steam/.cef-enable-remote-debugging" \
+  "${HOME}/.steam/steam/.cef-enable-remote-debugging"
+
 # 64 and 32 bit input interposers and fake udev for gamepads
 STEAM_PRELOAD="/usr/lib/selkies_input_interposer.so:/usr/lib/libudev.so.1.0.0-fake:/usr/lib/selkies_input_interposer_32.so:/usr/lib/libudev.so.1.0.0-fake_32"
 PROOT_BWRAP="${HOME}/.local/bin/proot-bwrap"

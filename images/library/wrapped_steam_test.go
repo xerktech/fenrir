@@ -142,3 +142,26 @@ func TestWrappedSteamHandsOffWhileSteamShStarts(t *testing.T) {
 		t.Errorf("calls %q: want the launch handed to the starting client", calls)
 	}
 }
+
+func TestWrappedSteamColdLaunchDeletesCEFDebugFlag(t *testing.T) {
+	d := newSteamDesktop(t)
+	d.steamLife, d.heroicLife = "0", "0"
+	// Both names of the shared install: Valve's launcher here and ~/.steam/steam.
+	var flags []string
+	for _, dir := range []string{".local/share/Steam", ".steam/steam"} {
+		p := filepath.Join(d.home, dir, ".cef-enable-remote-debugging")
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		flags = append(flags, p)
+	}
+	d.start()()
+	for _, p := range flags {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived a cold launch (%v): Steam would open its CEF debugger", p, err)
+		}
+	}
+}
