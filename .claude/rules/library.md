@@ -62,6 +62,11 @@ paths:
   execs Steam: two cold launches at once would otherwise both start Steam and Heroic.
   - No child may inherit the lock fd (`9>&-`): Heroic outlives the script, and every later cold
     launch would wait out the timeout. Tests: `images/library/wrapped_steam_test.go`.
+  - Those tests `pgrep` host-wide: a Steam stub from another test binary on the host (another
+    worktree's run) makes launches hand off and fails them. Never run two trees' tests at once.
+  - A cold launch deletes `.cef-enable-remote-debugging` (Heroic writes it into the shared
+    install), as session pods' cont-init does: Steam would serve its CEF debugger on the pod's
+    127.0.0.1:8080 (XERK-2094). Tests: `TestWrappedSteamColdLaunchDeletesCEFDebugFlag`.
 - `wrapped-heroic` turns Heroic's "Add games to Steam" off in its config.json: Steam always runs
   beside Heroic here and its CEF debugger stays off, so adding or removing a shortcut fails with
   a "Steam is running" error. Removal on uninstall is unconditional in Heroic, so that error

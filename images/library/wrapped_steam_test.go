@@ -86,6 +86,19 @@ func (d *steamDesktop) calls() []string {
 	return strings.Fields(string(b))
 }
 
+// waitHeroics waits until n Heroic starts are logged. Heroic is setsid'd and
+// may log after Steam exits; a write after the test ends races t.TempDir's
+// cleanup ("directory not empty").
+func (d *steamDesktop) waitHeroics(n int) {
+	d.t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); count(d.calls(), "heroic") < n; {
+		if time.Now().After(deadline) {
+			d.t.Fatalf("calls %q: want %d Heroic starts", d.calls(), n)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func count(calls []string, word string) int {
 	n := 0
 	for _, c := range calls {
@@ -121,6 +134,7 @@ func TestWrappedSteamLockOutlivesNoLaunch(t *testing.T) {
 	if took := time.Since(begin); took > 10*time.Second {
 		t.Errorf("second cold launch took %v: the lock outlived the first launch", took)
 	}
+	d.waitHeroics(2)
 	if calls := d.calls(); count(calls, "cold") != 2 {
 		t.Errorf("calls %q: want two cold starts", calls)
 	}
@@ -137,8 +151,43 @@ func TestWrappedSteamHandsOffWhileSteamShStarts(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = bootstrap.Process.Kill(); _ = bootstrap.Wait() })
 	time.Sleep(200 * time.Millisecond) // let it exec, so pgrep sees its name
+	// Only a cold launch clears the CEF debug flag; a hand-off starts nothing.
+	flag := writeCEFDebugFlag(t, d.home, ".local/share/Steam")
 	d.start("steam://open/games")()
 	if calls := d.calls(); count(calls, "cold") != 0 || count(calls, "handoff") != 1 {
 		t.Errorf("calls %q: want the launch handed to the starting client", calls)
 	}
+	if _, err := os.Lstat(flag); err != nil {
+		t.Errorf("a hand-off touched the CEF debug flag: %v", err)
+	}
+}
+
+func TestWrappedSteamColdLaunchDeletesCEFDebugFlag(t *testing.T) {
+	d := newSteamDesktop(t)
+	d.steamLife, d.heroicLife = "0", "0"
+	// Both names of the shared install: Valve's launcher here and ~/.steam/steam.
+	flags := []string{
+		writeCEFDebugFlag(t, d.home, ".local/share/Steam"),
+		writeCEFDebugFlag(t, d.home, ".steam/steam"),
+	}
+	d.start()()
+	d.waitHeroics(1)
+	for _, p := range flags {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived a cold launch (%v): Steam would open its CEF debugger", p, err)
+		}
+	}
+}
+
+// writeCEFDebugFlag writes Heroic's CEF debug flag into dir under home.
+func writeCEFDebugFlag(t *testing.T, home, dir string) string {
+	t.Helper()
+	p := filepath.Join(home, dir, ".cef-enable-remote-debugging")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
