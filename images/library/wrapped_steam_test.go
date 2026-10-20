@@ -86,6 +86,19 @@ func (d *steamDesktop) calls() []string {
 	return strings.Fields(string(b))
 }
 
+// waitHeroics waits until n Heroic starts are logged. Heroic is setsid'd and
+// may log after Steam exits; a write after the test ends races t.TempDir's
+// cleanup ("directory not empty").
+func (d *steamDesktop) waitHeroics(n int) {
+	d.t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); count(d.calls(), "heroic") < n; {
+		if time.Now().After(deadline) {
+			d.t.Fatalf("calls %q: want %d Heroic starts", d.calls(), n)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func count(calls []string, word string) int {
 	n := 0
 	for _, c := range calls {
@@ -121,6 +134,7 @@ func TestWrappedSteamLockOutlivesNoLaunch(t *testing.T) {
 	if took := time.Since(begin); took > 10*time.Second {
 		t.Errorf("second cold launch took %v: the lock outlived the first launch", took)
 	}
+	d.waitHeroics(2)
 	if calls := d.calls(); count(calls, "cold") != 2 {
 		t.Errorf("calls %q: want two cold starts", calls)
 	}
@@ -157,14 +171,7 @@ func TestWrappedSteamColdLaunchDeletesCEFDebugFlag(t *testing.T) {
 		writeCEFDebugFlag(t, d.home, ".steam/steam"),
 	}
 	d.start()()
-	// Heroic is setsid'd and may log after Steam exits; let it, or its write
-	// races t.TempDir's cleanup.
-	for deadline := time.Now().Add(10 * time.Second); count(d.calls(), "heroic") == 0; {
-		if time.Now().After(deadline) {
-			t.Fatal("Heroic never started")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	d.waitHeroics(1)
 	for _, p := range flags {
 		if _, err := os.Lstat(p); !os.IsNotExist(err) {
 			t.Errorf("%s survived a cold launch (%v): Steam would open its CEF debugger", p, err)
