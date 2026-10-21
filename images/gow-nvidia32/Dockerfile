@@ -65,10 +65,13 @@ RUN NetworkManager --print-config | grep -qx 'no-auto-default=\*' \
 # loopback under hostNetwork, and serves its auth token there to any caller;
 # installing it also turns on Steam's CEF debugger, which Decky drives. Nothing
 # uses it (XERK-2128). Cut the block, and fail the build if GoW reworks it: a
-# missed end line would delete through EOF, so the cut must be its 18 lines.
-RUN f=/etc/cont-init.d/system-services.sh; n=$(wc -l < "$f") \
-  && sed -i '/^# Install Decky Loader/,/^\$HOME\/homebrew\/services\/PluginLoader &$/d' "$f" \
-  && test $((n - $(wc -l < "$f"))) -eq 18 \
+# missed end line would delete through EOF, so the cut must hash to the block
+# as pinned (the GoW digest above); re-read it and update the hash on a bump.
+RUN f=/etc/cont-init.d/system-services.sh \
+  && r='/^# Install Decky Loader/,/^\$HOME\/homebrew\/services\/PluginLoader &$/' \
+  && test "$(sed -n "${r}p" "$f" | sha256sum)" = \
+    'f2d3dbe79ec4569e0adcd18aabefefa62fbed560551f25301e50d39b81b06990  -' \
+  && sed -i "${r}d" "$f" \
   && ! grep -n -i -e decky -e PluginLoader -e homebrew -e cef-enable "$f" \
   && grep -qx 'steamos-dbus-watchdog.sh &' "$f" && grep -qx disown "$f" \
   && rm -r /opt/decky
