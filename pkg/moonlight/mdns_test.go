@@ -14,6 +14,7 @@ func testAdvertiser() *MDNSAdvertiser {
 		instance: "Direwolf._nvstream._tcp.local.",
 		host:     "talos04.local.",
 		port:     47989,
+		addrsOf:  func(net.Interface) ([]net.Addr, error) { return nil, nil },
 	}
 }
 
@@ -179,6 +180,106 @@ func TestMDNSHostName(t *testing.T) {
 		if got := mdnsHostName(in); got != want {
 			t.Errorf("mdnsHostName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+type mdnsPacket struct {
+	buf []byte
+	cm  *ipv4.ControlMessage
+	to  net.Addr
+}
+
+// fakeMDNSConn feeds the responder queued packets and records what it sends.
+type fakeMDNSConn struct {
+	in     chan mdnsPacket
+	out    chan mdnsPacket
+	closed chan struct{}
+}
+
+func newFakeMDNSConn() *fakeMDNSConn {
+	return &fakeMDNSConn{in: make(chan mdnsPacket), out: make(chan mdnsPacket, 64), closed: make(chan struct{})}
+}
+
+func (c *fakeMDNSConn) ReadFrom(b []byte) (int, *ipv4.ControlMessage, net.Addr, error) {
+	select {
+	case p := <-c.in:
+		return copy(b, p.buf), p.cm, p.to, nil
+	case <-c.closed:
+		return 0, nil, nil, net.ErrClosed
+	}
+}
+
+func (c *fakeMDNSConn) WriteTo(b []byte, cm *ipv4.ControlMessage, dst net.Addr) (int, error) {
+	c.out <- mdnsPacket{buf: append([]byte(nil), b...), cm: cm, to: dst}
+	return len(b), nil
+}
+
+func (c *fakeMDNSConn) Close() error {
+	close(c.closed)
+	return nil
+}
+
+// next returns the next packet sent anywhere but the mDNS group, skipping
+// the start-up announcements.
+func (c *fakeMDNSConn) nextUnicast(t *testing.T) mdnsPacket {
+	t.Helper()
+	for {
+		select {
+		case p := <-c.out:
+			if p.to.String() != mdnsGroup.String() {
+				return p
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("responder sent no unicast reply")
+		}
+	}
+}
+
+// serve drops queries from off-link sources and answers on-link ones, and
+// Shutdown withdraws the records with a goodbye on every link.
+func TestMDNSAdvertiserServeAndShutdown(t *testing.T) {
+	conn := newFakeMDNSConn()
+	lan := net.Interface{Index: 7, Name: "lan0"}
+	addrsOf := func(net.Interface) ([]net.Addr, error) {
+		_, n, _ := net.ParseCIDR("192.168.50.0/24")
+		n.IP = net.IPv4(192, 168, 50, 1)
+		return []net.Addr{n}, nil
+	}
+	adv := newMDNSAdvertiser(conn, map[int]net.Interface{lan.Index: lan}, addrsOf, "talos04", 47989)
+
+	m := new(dns.Msg)
+	m.SetQuestion("talos04.local.", dns.TypeA)
+	buf, err := m.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm := &ipv4.ControlMessage{IfIndex: lan.Index}
+	offLink := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 5), Port: 40000}
+	onLink := &net.UDPAddr{IP: net.IPv4(192, 168, 50, 9), Port: 40000}
+	// serve handles packets in order, so the on-link reply comes after the
+	// off-link query was dealt with.
+	conn.in <- mdnsPacket{buf: buf, cm: cm, to: offLink}
+	conn.in <- mdnsPacket{buf: buf, cm: cm, to: onLink}
+	if p := conn.nextUnicast(t); p.to.String() != onLink.String() {
+		t.Fatalf("reply went to %s, want only %s (off-link queries get none)", p.to, onLink)
+	}
+
+	adv.Shutdown()
+	var goodbye bool
+	for len(conn.out) > 0 {
+		p := <-conn.out
+		reply := new(dns.Msg)
+		if reply.Unpack(p.buf) != nil || p.to.String() != mdnsGroup.String() || p.cm == nil || p.cm.IfIndex != lan.Index {
+			continue
+		}
+		for _, rr := range reply.Answer {
+			if ptr, ok := rr.(*dns.PTR); ok && ptr.Hdr.Ttl == 0 {
+				goodbye = true
+			}
+		}
+	}
+	if !goodbye {
+		t.Error("Shutdown sent no TTL-0 PTR on lan0")
 	}
 }
 

@@ -49,8 +49,9 @@ var mdnsGroup = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
 // (RFC 6762 §11), and a query gets at most one reply however many questions
 // it holds, so the responder is no amplifier.
 type MDNSAdvertiser struct {
-	conn     *ipv4.PacketConn
+	conn     mdnsConn
 	ifaces   map[int]net.Interface
+	addrsOf  func(net.Interface) ([]net.Addr, error)
 	instance string // e.g. Direwolf._nvstream._tcp.local.
 	host     string // e.g. talos04.local.
 	port     uint16
@@ -58,6 +59,13 @@ type MDNSAdvertiser struct {
 	shutdown sync.Once
 	wg       sync.WaitGroup
 	done     chan struct{}
+}
+
+// mdnsConn is the subset of *ipv4.PacketConn the responder uses.
+type mdnsConn interface {
+	ReadFrom(b []byte) (int, *ipv4.ControlMessage, net.Addr, error)
+	WriteTo(b []byte, cm *ipv4.ControlMessage, dst net.Addr) (int, error)
+	Close() error
 }
 
 // AdvertiseMDNS starts advertising host (the node's host name) and port. Call
@@ -106,21 +114,30 @@ func AdvertiseMDNS(host string, port int) (*MDNSAdvertiser, error) {
 		return nil, errors.New("joined the mDNS group on no interface")
 	}
 
+	addrsOf := func(ifi net.Interface) ([]net.Addr, error) { return ifi.Addrs() }
+	a := newMDNSAdvertiser(conn, joined, addrsOf, host, uint16(port))
+	for _, ifi := range joined {
+		klog.Infof("mDNS: advertising %s (%s) on %s", a.instance, a.host, ifi.Name)
+	}
+	return a, nil
+}
+
+// newMDNSAdvertiser starts answering on conn, which has joined the mDNS group
+// on ifaces.
+func newMDNSAdvertiser(conn mdnsConn, ifaces map[int]net.Interface, addrsOf func(net.Interface) ([]net.Addr, error), host string, port uint16) *MDNSAdvertiser {
 	a := &MDNSAdvertiser{
 		conn:     conn,
-		ifaces:   joined,
+		ifaces:   ifaces,
+		addrsOf:  addrsOf,
 		instance: dns.Fqdn(ServerName + "." + mdnsService),
 		host:     mdnsHostName(host),
-		port:     uint16(port),
+		port:     port,
 		done:     make(chan struct{}),
 	}
 	a.wg.Add(2)
 	go a.serve()
 	go a.announce()
-	for _, ifi := range joined {
-		klog.Infof("mDNS: advertising %s (%s) on %s", a.instance, a.host, ifi.Name)
-	}
-	return a, nil
+	return a
 }
 
 // Shutdown sends goodbye records and stops answering.
@@ -210,7 +227,7 @@ func (a *MDNSAdvertiser) serve() {
 		if !ok {
 			continue
 		}
-		addrs, err := ifi.Addrs()
+		addrs, err := a.addrsOf(ifi)
 		if err != nil {
 			continue
 		}
@@ -309,7 +326,7 @@ func (a *MDNSAdvertiser) reply(query *dns.Msg, legacy bool, nets []*net.IPNet) (
 // unsolicited is the full record set for ifi, as announced and (with ttl 0)
 // withdrawn.
 func (a *MDNSAdvertiser) unsolicited(ifi net.Interface, ttl uint32) *dns.Msg {
-	addrs, err := ifi.Addrs()
+	addrs, err := a.addrsOf(ifi)
 	if err != nil {
 		return nil
 	}
