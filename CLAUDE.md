@@ -33,6 +33,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - Its `steam` cont-init hook deletes `.cef-enable-remote-debugging` from the shared Steam install
     (Heroic writes it): Steam would serve its CEF debugger on 127.0.0.1:8080, the node's loopback
     under hostNetwork, so any node process could drive it. Tests: `TestSteamInputOffHookRunsScript`.
+  - Its steam target cuts GoW's Decky Loader block from `system-services.sh` (XERK-2128): Decky
+    runs as root on 127.0.0.1:1337, the node's loopback, and hands its auth token to any caller.
+    The build fails if that script still names Decky; re-check it when bumping the GoW digest.
 - The chart's `WOLF_IMAGE` is `ghcr.io/xerktech/wolf` (fork xerktech/wolf, branch `xerktech`;
   XERK-1944), pinned by digest in `charts/direwolf-operator/values.yaml`; CI does not rebuild it.
   - Bump it by hand to a digest the fork's Docker build printed for the `xerktech` branch.

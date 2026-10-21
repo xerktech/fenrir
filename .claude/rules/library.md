@@ -31,8 +31,9 @@ paths:
   - `init-steam-home` never exits non-zero: a failed oneshot stops s6 starting the desktop, and
     the pod stays Running, never Ready, holding the Steam lock.
   - Tests: `images/library/init_steam_home_test.go` (runs the real script).
-  - GoW's cont-init dies on a dangling `~/.steam/steam` when `~/homebrew/services/PluginLoader`
-    is missing (`mkdir -p ~/.steam/steam/`), i.e. a fresh home where the Library ran first.
+  - GoW's cont-init died on a dangling `~/.steam/steam` when `~/homebrew/services/PluginLoader`
+    was missing (its Decky install's `mkdir -p ~/.steam/steam/`); the session image cuts that
+    block (XERK-2128), but Steam's Debian launcher still needs the link to resolve.
     So `stop()` repoints every absolute `/config/...` link in `~/.steam` to `/home/retro/...`
     after `steam -shutdown` (`steamRelinkCommand`, XERK-1916); that path resolves in both pods.
     Tests: `TestSteamRelinkCommand*`, `TestLibraryStopRelinksSteamForSessions`.

@@ -318,6 +318,14 @@ func TestSteamInputOffHookRunsScript(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// GoW's old Decky install wrote it here, beside a real ~/.steam/steam dir.
+	debian := filepath.Join(home, ".steam", "debian-installation", cefDebugFlag)
+	if err := os.MkdirAll(filepath.Dir(debian), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(debian, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	out, started := sourceHook(t, home)
 	if !started {
 		t.Fatalf("Steam would not start:\n%s", out)
@@ -325,8 +333,10 @@ func TestSteamInputOffHookRunsScript(t *testing.T) {
 	if got := readFile(t, filepath.Join(steam, userConfig)); got != wantConfig {
 		t.Errorf("hook did not update localconfig.vdf:\n%s", got)
 	}
-	if _, err := os.Lstat(filepath.Join(steam, cefDebugFlag)); !os.IsNotExist(err) {
-		t.Errorf("%s survived the hook (%v): Steam would open its debugger on the node's loopback", cefDebugFlag, err)
+	for _, p := range []string{filepath.Join(steam, cefDebugFlag), debian} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived the hook (%v): Steam would open its debugger on the node's loopback", p, err)
+		}
 	}
 }
 

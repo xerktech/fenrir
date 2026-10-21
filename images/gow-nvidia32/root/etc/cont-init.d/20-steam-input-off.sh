@@ -9,7 +9,10 @@ if [ -d "${HOME}/.steam/steam/" ]; then
     # Heroic (in the Library, sharing this install) writes this flag when it
     # cannot reach Steam to manage a shortcut. Steam would then serve its CEF
     # remote debugger on 127.0.0.1:8080, which under hostNetwork is the node's
-    # loopback: any process on the node could drive this Steam client.
-    gosu "${UNAME}" rm -f "${HOME}/.steam/steam/.cef-enable-remote-debugging" ||
+    # loopback: any process on the node could drive this Steam client. GoW's
+    # Decky install (cut from this image, XERK-2128) wrote it into
+    # debian-installation, which ~/.steam/steam is not always a link to.
+    gosu "${UNAME}" rm -f "${HOME}/.steam/steam/.cef-enable-remote-debugging" \
+        "${HOME}/.steam/debian-installation/.cef-enable-remote-debugging" ||
         gow_log "Could not remove .cef-enable-remote-debugging; Steam's debugger is open on the node"
 fi
