@@ -525,6 +525,27 @@ func TestSessionPodDropsAppMknod(t *testing.T) {
 	}
 }
 
+// wolf-agent is on the node's network namespace: by default it keeps only
+// the MKNOD it hotplugs controllers with (XERK-2143).
+func TestSessionPodConfinesWolfAgent(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	for _, ctr := range pod.Spec.Containers {
+		if ctr.Name != v1alpha1types.WolfAgentContainerName {
+			continue
+		}
+		sc := ctr.SecurityContext
+		if sc == nil || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+			t.Fatalf("wolf-agent securityContext = %+v, want allowPrivilegeEscalation false", sc)
+		}
+		if caps := sc.Capabilities; caps == nil || !slices.Equal(caps.Drop, []corev1.Capability{"ALL"}) ||
+			!slices.Equal(caps.Add, []corev1.Capability{"MKNOD"}) {
+			t.Errorf("wolf-agent capabilities = %+v, want drop ALL, add MKNOD", caps)
+		}
+		return
+	}
+	t.Fatal("no wolf-agent container")
+}
+
 func TestSessionPodMountsNoServiceAccountToken(t *testing.T) {
 	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
 	if got := pod.Spec.AutomountServiceAccountToken; got == nil || *got {
