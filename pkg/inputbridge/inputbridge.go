@@ -79,20 +79,26 @@ type Server struct {
 	createNode func(dir string, props map[string]string) error
 	// Checks path is a char device before it is bind-mounted.
 	checkNode func(path string) error
-	// Gives a new udev entry to LockedOwner; LockFile outside tests.
-	lockFile func(path string) error
+	// TmpDir is on InputDir's and UdevDataDir's filesystem but outside
+	// every App mount: files are made there before they are renamed into
+	// place (WriteLockedFile).
+	TmpDir string
+	// Gives a file being written to LockedOwner; fchownLocked outside tests.
+	chown func(f *os.File) error
 }
 
-// NewServer returns a Server publishing into inputDir and udevDataDir.
-func NewServer(inputDir, udevDataDir string) *Server {
+// NewServer returns a Server publishing into inputDir and udevDataDir,
+// staging files in tmpDir.
+func NewServer(inputDir, udevDataDir, tmpDir string) *Server {
 	return &Server{
 		InputDir:    inputDir,
 		UdevDataDir: udevDataDir,
+		TmpDir:      tmpDir,
+		chown:       fchownLocked,
 		bindSelf:    bindSelf,
 		unmount:     unmount,
 		createNode:  fakeudev.CreateDeviceNode,
 		checkNode:   isCharDevice,
-		lockFile:    LockFile,
 	}
 }
 
@@ -103,12 +109,40 @@ func NewServer(inputDir, udevDataDir string) *Server {
 // create, rename or remove entries there. Root on the node still may.
 const LockedOwner = 4294967294
 
-// LockFile makes path owned by LockedOwner, so the App's root can't rewrite
-// it either. Only the node's root creates files in a locked directory, so
-// path is that file.
-func LockFile(path string) error {
-	if err := os.Lchown(path, LockedOwner, LockedOwner); err != nil {
-		return fmt.Errorf("chown %s: %w", path, err)
+// WriteLockedFile writes data to path, 0644 and owned by LockedOwner, so the
+// App's root can't rewrite it. Created in path's directory, the file would
+// be the node root's, which the App's idmap maps to its own root, until the
+// chown: the App could open it in that gap and write through the descriptor
+// later (QA won that race 48/50). So it is made in tmpDir, outside every App
+// mount, and renamed into place already locked.
+func WriteLockedFile(tmpDir, path string, data []byte) error {
+	return writeLockedFile(tmpDir, path, data, fchownLocked)
+}
+
+func writeLockedFile(tmpDir, path string, data []byte, chown func(*os.File) error) error {
+	f, err := os.CreateTemp(tmpDir, ".locked-*")
+	if err != nil {
+		return fmt.Errorf("staging %s: %w", path, err)
+	}
+	tmp := f.Name()
+	err = errors.Join(chown(f), f.Chmod(0o644))
+	if err == nil {
+		_, err = f.Write(data)
+	}
+	err = errors.Join(err, f.Close())
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
+func fchownLocked(f *os.File) error {
+	if err := f.Chown(LockedOwner, LockedOwner); err != nil {
+		return fmt.Errorf("chown: %w", err)
 	}
 	return nil
 }
@@ -196,10 +230,9 @@ func (s *Server) Handle(req Request) error {
 		if err := hwdbName(req.Filename); err != nil {
 			return err
 		}
-		if err := fakeudev.WriteHwDbEntry(s.UdevDataDir, req.Filename, req.Content); err != nil {
-			return fmt.Errorf("write udev entry: %w", err)
-		}
-		return s.lockFile(filepath.Join(s.UdevDataDir, req.Filename))
+		// fakeudev.WriteHwDbEntry's format, written locked.
+		return writeLockedFile(s.TmpDir, filepath.Join(s.UdevDataDir, req.Filename),
+			[]byte(strings.Join(req.Content, "\n")), s.chown)
 	case OpRemoveHwDB:
 		if err := hwdbName(req.Filename); err != nil {
 			return err

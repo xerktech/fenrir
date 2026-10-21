@@ -19,7 +19,7 @@ func TestResetUdevDirLocksControlAndData(t *testing.T) {
 	if err := os.Symlink("/", filepath.Join(dir, "planted")); err != nil {
 		t.Fatal(err)
 	}
-	if err := resetUdevDir(dir); err != nil {
+	if err := resetUdevDir(dir, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := os.ReadDir(dir)

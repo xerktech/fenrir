@@ -20,7 +20,13 @@ type fakeServer struct {
 
 func newFakeServer(t *testing.T) *fakeServer {
 	t.Helper()
-	f := &fakeServer{Server: NewServer(t.TempDir(), t.TempDir()), mounted: map[string]bool{}}
+	tmp := t.TempDir()
+	f := &fakeServer{Server: NewServer(filepath.Join(tmp, "input"), filepath.Join(tmp, "data"), tmp), mounted: map[string]bool{}}
+	for _, d := range []string{f.InputDir, f.UdevDataDir} {
+		if err := os.Mkdir(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
 	f.bindSelf = func(path string) error {
 		f.calls = append(f.calls, "bind "+filepath.Base(path))
 		f.mounted[path] = true
@@ -34,7 +40,7 @@ func newFakeServer(t *testing.T) *fakeServer {
 		return nil
 	}
 	f.checkNode = func(string) error { return nil }
-	f.lockFile = func(string) error { return nil }
+	f.chown = func(*os.File) error { return nil }
 	f.createNode = func(dir string, props map[string]string) error {
 		return os.WriteFile(filepath.Join(dir, filepath.Base(props["DEVNAME"])), nil, 0o600)
 	}
@@ -84,7 +90,7 @@ func TestServerCreateReplacesMountedNode(t *testing.T) {
 // Only input nodes, directly in the directory; never another major.
 func TestServerRefusesOtherDevices(t *testing.T) {
 	f := newFakeServer(t)
-	f.createNode = NewServer(f.InputDir, f.UdevDataDir).createNode
+	f.createNode = NewServer(f.InputDir, f.UdevDataDir, f.TmpDir).createNode
 	for _, props := range []map[string]string{
 		event("/dev/hidraw0", "241"),
 		event("/dev/input/../sda", "13"),
@@ -226,5 +232,34 @@ func TestServerHwDbEntries(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(f.UdevDataDir); len(entries) != 0 {
 		t.Errorf("left %v", entries)
+	}
+}
+
+// An entry is staged in TmpDir and renamed into place: the App can never
+// open it before it is locked. Nothing is left in TmpDir.
+func TestServerStagesEntriesOutsideTheApp(t *testing.T) {
+	f := newFakeServer(t)
+	var staged []string
+	f.chown = func(file *os.File) error {
+		staged = append(staged, filepath.Dir(file.Name()))
+		if _, err := os.Stat(filepath.Join(f.UdevDataDir, "c13:69")); !os.IsNotExist(err) {
+			t.Errorf("entry visible to the App before its chown: %v", err)
+		}
+		return nil
+	}
+	if err := f.Handle(Request{Op: OpWriteHwDB, Filename: "c13:69", Content: []string{"a", "b"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(staged) != 1 || staged[0] != f.TmpDir {
+		t.Errorf("staged in %v, want %s", staged, f.TmpDir)
+	}
+	if got, _ := os.ReadFile(filepath.Join(f.UdevDataDir, "c13:69")); string(got) != "a\nb" {
+		t.Errorf("entry = %q", got)
+	}
+	entries, _ := os.ReadDir(f.TmpDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".locked-") {
+			t.Errorf("left %s in TmpDir", e.Name())
+		}
 	}
 }

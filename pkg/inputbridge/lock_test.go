@@ -14,14 +14,19 @@ func TestLockOwnsDirsAndEntries(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("chown needs root")
 	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o777); err != nil {
+	// Outside the App pod's idmap of 65536 IDs, whatever the constant says.
+	if LockedOwner < 1<<16 {
+		t.Fatalf("LockedOwner %d is an ID the App pod's idmap maps", LockedOwner)
+	}
+	tmp := t.TempDir()
+	dir := filepath.Join(tmp, "data")
+	if err := os.Mkdir(dir, 0o777); err != nil {
 		t.Fatal(err)
 	}
 	if err := LockDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	s := NewServer(t.TempDir(), dir)
+	s := NewServer(t.TempDir(), dir, tmp)
 	if err := s.Handle(Request{Op: OpWriteHwDB, Filename: "c13:69", Content: []string{"E:ID_INPUT=1"}}); err != nil {
 		t.Fatal(err)
 	}

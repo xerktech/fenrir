@@ -33,7 +33,7 @@ func runInputBridge(args []string) {
 	}
 
 	udevDir := filepath.Join(*sessionDir, "udev")
-	server := inputbridge.NewServer(filepath.Join(*sessionDir, "input"), filepath.Join(udevDir, "data"))
+	server := inputbridge.NewServer(filepath.Join(*sessionDir, "input"), filepath.Join(udevDir, "data"), *sessionDir)
 	for _, dir := range []string{server.InputDir, udevDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			klog.Fatalf("creating %s: %v", dir, err)
@@ -49,7 +49,7 @@ func runInputBridge(args []string) {
 	if err := server.Clear(); err != nil {
 		klog.Fatalf("clearing %s: %v", server.InputDir, err)
 	}
-	if err := resetUdevDir(udevDir); err != nil {
+	if err := resetUdevDir(udevDir, *sessionDir); err != nil {
 		klog.Fatal(err)
 	}
 	_ = os.Remove(*socket)
@@ -75,7 +75,7 @@ func runInputBridge(args []string) {
 // resetUdevDir empties the locked udev directory and recreates what libudev
 // expects in it: the control file (see udevControlPath in the operator) and
 // the data directory, itself locked, where the bridge writes udev entries.
-func resetUdevDir(dir string) error {
+func resetUdevDir(dir, tmpDir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", dir, err)
@@ -85,12 +85,9 @@ func resetUdevDir(dir string) error {
 			return fmt.Errorf("clearing %s: %w", dir, err)
 		}
 	}
-	control := filepath.Join(dir, "control")
-	if err := os.WriteFile(control, nil, 0o644); err != nil { //nolint:gosec // libudev only checks it exists
+	// libudev only checks it exists.
+	if err := inputbridge.WriteLockedFile(tmpDir, filepath.Join(dir, "control"), nil); err != nil {
 		return fmt.Errorf("creating udev control: %w", err)
-	}
-	if err := inputbridge.LockFile(control); err != nil {
-		return fmt.Errorf("locking udev control: %w", err)
 	}
 	data := filepath.Join(dir, "data")
 	if err := os.Mkdir(data, 0o755); err != nil {

@@ -30,6 +30,9 @@ paths:
     `udev/data/` to `LockedOwner`, an ID outside the App's idmap, then clears them; the App's root
     has no capability over an unmapped owner. Never let a privileged process trust a path there
     without that lock.
+  - Files there (udev entries, `control`) are staged in `<dir>/<UID>` (no App mount) and renamed
+    in already locked: created in place they are briefly the App root's, and an fd it opens then
+    outlives the chown (QA won 48/50). `WriteLockedFile`; tests `TestLock*` need root (CI skips).
 - A user-namespaced pod's volumes are all mounted `nodev` (PVC, hostPath, emptyDir; measured), and
   mknod is refused there, so a node in a shared volume never opens in the App pod.
   - The `input-bridge` sidecar (privileged, `<dir>` mounted Bidirectional) mknods each node into
