@@ -35,7 +35,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     under hostNetwork, so any node process could drive it. Tests: `TestSteamInputOffHookRunsScript`.
   - Its steam target cuts GoW's Decky Loader block from `system-services.sh` (XERK-2128): Decky
     runs as root on 127.0.0.1:1337, the node's loopback, and hands its auth token to any caller.
-    The build fails if that script still names Decky; re-check it when bumping the GoW digest.
+    The cut block is pinned by sha256, so a GoW digest bump that changes it fails the build.
 - The chart's `WOLF_IMAGE` is `ghcr.io/xerktech/wolf` (fork xerktech/wolf, branch `xerktech`;
   XERK-1944), pinned by digest in `charts/direwolf-operator/values.yaml`; CI does not rebuild it.
   - Bump it by hand to a digest the fork's Docker build printed for the `xerktech` branch.
