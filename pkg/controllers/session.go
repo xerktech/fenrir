@@ -80,9 +80,25 @@ const wolfAgentTimeout = 10 * time.Second
 // add a second stream under the same client ID.
 const wolfAddSessionTimeout = 30 * time.Second
 
+// wolfAgentBudget bounds all of one reconcile's wolf-agent calls but
+// AddSession, which keeps its own wolfAddSessionTimeout: an attach makes
+// several calls (list, stops, relist, lobbies, clients, video baseline), and
+// at wolfAgentTimeout each two CPU-starved pods held both workers for over a
+// minute. A var so tests can shorten it.
+var wolfAgentBudget = 2 * wolfAgentTimeout
+
 // errSessionEnded is returned by reconcilePod once it has deleted the Session:
 // its pod finished, so there is nothing left to reconcile.
 var errSessionEnded = stderrors.New("session ended")
+
+// errPodNotReady is every cold start's wait, not a failure: Reconcile records
+// it without logging an error, and the pod's readiness event requeues the
+// Session (podNotReadyRecheck is the fallback).
+var errPodNotReady = stderrors.New("pod not ready")
+
+// podNotReadyRecheck requeues a Session waiting for its pod in case its
+// readiness event is missed.
+const podNotReadyRecheck = 5 * time.Second
 
 // errInvalidSpec marks a buildPod error caused by the App or User spec, not by
 // a lookup: every retry fails the same way, so reconcilePod ends the Session.
@@ -468,7 +484,9 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 			ObservedGeneration: newObj.Generation,
 		})
 	case streamError != nil:
-		klog.Errorf("Failed to reconcile active streams: %s", streamError)
+		if !stderrors.Is(streamError, errPodNotReady) {
+			klog.Errorf("Failed to reconcile active streams: %s", streamError)
+		}
 		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
 			Type:    v1alpha1types.SessionStreamStartedCondition,
 			Status:  metav1.ConditionFalse,
@@ -512,7 +530,12 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	// the status stopped changing, until the unstarted-session reaper
 	// deleted it and Moonlight timed out. Return the error so the workqueue
 	// requeues with backoff and the stream is started as soon as the agent
-	// is reachable.
+	// is reachable. A pod not yet ready is requeued without one: it is no
+	// error, and its backoff logged one every few milliseconds.
+	if stderrors.Is(streamError, errPodNotReady) {
+		c.controller.EnqueueAfter(namespace, name, podNotReadyRecheck)
+		return nil
+	}
 	return streamError
 }
 
@@ -990,12 +1013,26 @@ func (c *SessionController) checkPod(ctx context.Context, session *v1alpha1types
 		// so the pod no longer serves the ports the session advertises.
 		return nil, c.endSessionErr(ctx, session, fmt.Sprintf("its pod is on port block %s, not %d", pod.Annotations[portBlockAnnotation], session.Status.Ports.HTTP))
 	}
-	for _, cs := range pod.Status.ContainerStatuses {
-		if t := cs.State.Terminated; t != nil {
-			return nil, c.endSessionErr(ctx, session, containerExitReason(cs.Name, t))
-		}
+	if reason := podExitReason(pod); reason != "" {
+		return nil, c.endSessionErr(ctx, session, reason)
 	}
 	return pod, nil
+}
+
+// podExitReason is containerExitReason for the pod's container that exited
+// first, or "" while none has: when Wolf dies the game exits after it, and the
+// game's exit says nothing of why.
+func podExitReason(pod *corev1.Pod) string {
+	var first *corev1.ContainerStatus
+	for i, cs := range pod.Status.ContainerStatuses {
+		if t := cs.State.Terminated; t != nil && (first == nil || t.FinishedAt.Before(&first.State.Terminated.FinishedAt)) {
+			first = &pod.Status.ContainerStatuses[i]
+		}
+	}
+	if first == nil {
+		return ""
+	}
+	return containerExitReason(first.Name, first.State.Terminated)
 }
 
 // endSession deletes the Session, which garbage-collects its pod (and the
@@ -2405,11 +2442,15 @@ func (c *SessionController) reconcileActiveStreams(
 		}
 	}
 	if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" || !podReady(pod) {
-		return fmt.Errorf("pod %s/%s not ready (phase %s)", pod.Namespace, pod.Name, pod.Status.Phase)
+		return fmt.Errorf("%w: pod %s/%s (phase %s)", errPodNotReady, pod.Namespace, pod.Name, pod.Status.Phase)
 	}
 	// The pod is on the host network, so this is also the node IP Moonlight
 	// streams from.
 	podIP := pod.Status.PodIP
+
+	addCtx := ctx
+	ctx, cancel := context.WithTimeout(ctx, wolfAgentBudget)
+	defer cancel()
 
 	token, tlsConfig, err := c.agentCredentials(ctx, session)
 	if stderrors.Is(err, errAgentCertMissing) {
@@ -2514,7 +2555,7 @@ func (c *SessionController) reconcileActiveStreams(
 		status.WolfSessionID = foundID
 		status.AttachedGeneration = session.Generation
 		status.DisconnectedAt = nil
-		status.StreamURL = "rtsp://" + net.JoinHostPort(podIP, strconv.Itoa(int(status.Ports.RTSP)))
+		status.StreamURL = streamURL(podIP, status.Ports.RTSP, encryptedRTSP)
 		return nil
 	}
 
@@ -2636,7 +2677,7 @@ func (c *SessionController) reconcileActiveStreams(
 		baseline := videoBaseline(ctx, session, agentClient, agentURL)
 		addClient := *agentClient
 		addClient.Timeout = wolfAddSessionTimeout
-		added, err := wolfapi.NewClient(agentURL, &addClient).AddSession(ctx, wolfSession)
+		added, err := wolfapi.NewClient(agentURL, &addClient).AddSession(addCtx, wolfSession)
 
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)

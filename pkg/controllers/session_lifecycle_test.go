@@ -12,6 +12,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -1222,5 +1223,128 @@ func TestUnstreamableClientIPLooksUpPod(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// An adopted stream's URL follows the scheme Wolf lists for it, as an attached
+// one's does: an encrypting Wolf refuses plaintext RTSP.
+func TestAdoptedWolfStreamKeepsEncryptedRTSP(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.sessions = `[{"client_id":"4242","aes_key":"k","aes_iv":"i","rtsp_encrypted":true}]`
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Status.Ports = blockPorts(agent.base(t))
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatalf("reconcileActiveStreams = %v", err)
+	}
+	if sess.Status.WolfSessionID != "4242" || !strings.HasPrefix(sess.Status.StreamURL, "rtspenc://") {
+		t.Errorf("status = %+v, want stream 4242 adopted with an rtspenc:// URL", sess.Status)
+	}
+}
+
+// One reconcile's wolf-agent calls share wolfAgentBudget, so a slow agent
+// holds a controller worker for that long, not wolfAgentTimeout per call.
+func TestSlowAgentCallsShareOneBudget(t *testing.T) {
+	budget := wolfAgentBudget
+	t.Cleanup(func() { wolfAgentBudget = budget })
+	wolfAgentBudget = 300 * time.Millisecond
+
+	agent := newFakeAgent(t)
+	// The attach makes four calls before its add (sessions, lobbies,
+	// clients, video baseline): 800ms at this delay.
+	agent.callDelay = 200 * time.Millisecond
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Status.Ports = blockPorts(agent.base(t))
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	start := time.Now()
+	err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("reconcileActiveStreams = %v, want the budget exceeded", err)
+	}
+	if took := time.Since(start); took > 600*time.Millisecond {
+		t.Errorf("reconcile took %s, want about the %s budget", took, wolfAgentBudget)
+	}
+	if agent.added != 0 {
+		t.Error("added a stream after the budget ran out")
+	}
+}
+
+// AddSession is outside the budget: a slow add after slow calls before it
+// still attaches (XERK-2116).
+func TestSlowAddSessionOutlastsAgentBudget(t *testing.T) {
+	budget := wolfAgentBudget
+	t.Cleanup(func() { wolfAgentBudget = budget })
+	wolfAgentBudget = 300 * time.Millisecond
+
+	agent := newFakeAgent(t)
+	agent.callDelay = 50 * time.Millisecond
+	agent.addDelay = 500 * time.Millisecond
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Status.Ports = blockPorts(agent.base(t))
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatalf("reconcileActiveStreams = %v", err)
+	}
+	if sess.Status.WolfSessionID != "4242" {
+		t.Errorf("WolfSessionID = %q, want 4242", sess.Status.WolfSessionID)
+	}
+}
+
+// The Session's end names the container that exited first, with its message:
+// when Wolf dies the game exits after it, and the game's exit says nothing.
+func TestPodExitReasonNamesFirstExit(t *testing.T) {
+	t.Parallel()
+	at := func(sec int) metav1.Time { return metav1.NewTime(time.Unix(int64(1000+sec), 0)) }
+	pod := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: "steam", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error", FinishedAt: at(5)}}},
+		{Name: "pulseaudio", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		{Name: "wolf", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error", Message: "wolf died", FinishedAt: at(2)}}},
+	}}}
+	if got, want := podExitReason(pod), `container wolf exited (code 1, Error): "wolf died"`; got != want {
+		t.Errorf("podExitReason = %q, want %q", got, want)
+	}
+	pod.Status.ContainerStatuses = pod.Status.ContainerStatuses[1:2]
+	if got := podExitReason(pod); got != "" {
+		t.Errorf("podExitReason with nothing exited = %q, want none", got)
+	}
+}
+
+// A pod still starting is every cold start's wait, not an error: Reconcile
+// records it for /launch (StreamStartFailed) and returns nil, so the
+// workqueue's backoff doesn't log one every few milliseconds.
+func TestPodNotReadyIsNoReconcileError(t *testing.T) {
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := podReadySession(f)
+		s.CreationTimestamp = metav1.Now() // not yet reaped as unstarted
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object {
+		pod := readyPod(s)
+		pod.Status.Phase = corev1.PodPending
+		return []runtime.Object{pod}
+	})
+	for range 500 {
+		if _, err := f.sc.podController.Informer().Namespaced(portsTestNS).Get(sess.Name); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := f.sc.Reconcile(portsTestNS, sess.Name, sess.DeepCopy()); err != nil {
+		t.Fatalf("Reconcile = %v, want nil while the pod starts", err)
+	}
+	got, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Get(context.Background(), sess.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, v1alpha1types.SessionStreamStartedCondition); c == nil || c.Reason != "StreamStartFailed" {
+		t.Errorf("StreamStarted = %+v, want StreamStartFailed while the pod starts", c)
 	}
 }
