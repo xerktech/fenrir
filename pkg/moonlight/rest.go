@@ -353,7 +353,7 @@ func (s *RESTServer) serverInfoHandler(w http.ResponseWriter, r *http.Request) {
 			StatusCode: 200,
 		},
 		ServerInfo: ServerInfo{
-			Hostname:               "Direwolf",
+			Hostname:               ServerName,
 			AppVersion:             "7.1.431.-1",
 			GfeVersion:             "3.23.0.74",
 			UniqueID:               "dd7c60f6-4b88-4ef1-be07-eeec72f96080", // Does this matter?

@@ -5,9 +5,11 @@ go 1.26.9
 require (
 	github.com/containerd/nri v0.12.3
 	github.com/google/go-cmp v0.7.0
+	github.com/miekg/dns v1.1.73
 	github.com/r3labs/sse/v2 v2.10.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/image v0.46.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/time v0.15.0
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
@@ -96,7 +98,6 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/term v0.46.0 // indirect

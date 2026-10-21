@@ -74,3 +74,16 @@ paths:
     encrypting Wolf refuses plaintext RTSP, so a wrong scheme fails the stream either way.
   - Tests: `TestLaunchRecordsEncryptedRTSPSupport`, `TestResumeReattachesRunningSession`,
     `TestReconcileActiveStreamsEncryptedRTSPFollowsWolf`.
+- mDNS (`pkg/moonlight/mdns.go`, `--mdns`, XERK-2144) is a hand-rolled IPv4 responder.
+  - zeroconf libraries failed QA: libp2p/zeroconf never answers the host's A query (moonlight-qt
+    then never resolves it), and it and brutella/dnssd reply once per question to any source.
+  - A reply carries only the receiving link's addresses; a fixed IP list sends pod-network
+    addresses to the LAN. Tests: `TestMDNSReplyCarriesOnlyReceivingLinkAddresses`.
+  - Off-link sources get nothing; a query gets one bounded reply (`TestMDNSReplyIsBoundedPerQuery`).
+  - IPv4 only: the proxy refuses non-IPv4 streams, so no AAAA may steer a client to IPv6.
+  - It joins only links that have an IPv4 address: the kernel caps one socket's group joins
+    (`igmp_max_memberships`, 20 on talos04), and talos04 has 30+ links, most pod veths.
+  - A bind failure (another responder on 5353) only warns: adding the host by address still works.
+  - `TestAdvertiseMDNSAnswersQueries` skips where 5353 is taken (e.g. avahi); run it in
+    `unshare -rn` over a veth pair, with `lo` up (unicast replies to a local querier ride it).
+    Don't name links `a`/`b`: `ip` reads them as keywords.
