@@ -61,6 +61,20 @@ RUN gosu nobody python3 -I /opt/direwolf/steam-input-off.py /nonexistent
 COPY root/etc/NetworkManager/conf.d/99-direwolf-hostnetwork.conf /etc/NetworkManager/conf.d/
 RUN NetworkManager --print-config | grep -qx 'no-auto-default=\*' \
   && NetworkManager --print-config | grep -qx 'unmanaged-devices=\*,except:type:loopback,except:type:bridge'
+# GoW's cont-init starts Decky Loader as root on 127.0.0.1:1337, the node's
+# loopback under hostNetwork, and serves its auth token there to any caller;
+# installing it also turns on Steam's CEF debugger, which Decky drives. Nothing
+# uses it (XERK-2128). Cut the block, and fail the build if GoW reworks it: a
+# missed end line would delete through EOF, so the cut must hash to the block
+# as pinned (the GoW digest above); re-read it and update the hash on a bump.
+RUN f=/etc/cont-init.d/system-services.sh \
+  && r='/^# Install Decky Loader/,/^\$HOME\/homebrew\/services\/PluginLoader &$/' \
+  && test "$(sed -n "${r}p" "$f" | sha256sum)" = \
+    'f2d3dbe79ec4569e0adcd18aabefefa62fbed560551f25301e50d39b81b06990  -' \
+  && sed -i "${r}d" "$f" \
+  && ! grep -n -i -e decky -e PluginLoader -e homebrew -e cef-enable "$f" \
+  && grep -qx 'steamos-dbus-watchdog.sh &' "$f" && grep -qx disown "$f" \
+  && rm -r /opt/decky
 
 FROM ghcr.io/games-on-whales/heroic-games-launcher:edge@sha256:a207a39367801a8a8bf24b68dac2c9945052d3117cb03b061b27bd6672aab62f AS heroic
 COPY --from=driver /out/ /
