@@ -104,8 +104,11 @@ controllers:
           # The API's get-icon serves only real image files, never arbitrary host files such as
           # keys or /etc/shadow (XERK-2097); a stream ended before it starts no longer leaks its
           # pipelines (XERK-2111).
+          # Wolf creates its CUDA context on the GPU the pod was given, not on that GPU's index
+          # among all host GPUs (XERK-1391); stopping a live stream's viewers early no longer
+          # hangs them (XERK-2130).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-49541c1@sha256:99b54dd87f8eb3499bb82d5c2f778407ca699f44ffcea716e7984cb9320bf5fe
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-d74b274@sha256:4a8a9c3b225b86f46a54a349f85064549eaa9ed82e2c44b03684981073f4979d
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           ROMM_TOKEN:
