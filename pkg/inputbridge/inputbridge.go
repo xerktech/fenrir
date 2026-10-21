@@ -79,6 +79,8 @@ type Server struct {
 	createNode func(dir string, props map[string]string) error
 	// Checks path is a char device before it is bind-mounted.
 	checkNode func(path string) error
+	// Gives a new udev entry to LockedOwner; LockFile outside tests.
+	lockFile func(path string) error
 }
 
 // NewServer returns a Server publishing into inputDir and udevDataDir.
@@ -90,6 +92,7 @@ func NewServer(inputDir, udevDataDir string) *Server {
 		unmount:     unmount,
 		createNode:  fakeudev.CreateDeviceNode,
 		checkNode:   isCharDevice,
+		lockFile:    LockFile,
 	}
 }
 
@@ -99,6 +102,16 @@ func NewServer(inputDir, udevDataDir string) *Server {
 // read-write (which a user namespace allows, measured on talos04), may not
 // create, rename or remove entries there. Root on the node still may.
 const LockedOwner = 4294967294
+
+// LockFile makes path owned by LockedOwner, so the App's root can't rewrite
+// it either. Only the node's root creates files in a locked directory, so
+// path is that file.
+func LockFile(path string) error {
+	if err := os.Lchown(path, LockedOwner, LockedOwner); err != nil {
+		return fmt.Errorf("chown %s: %w", path, err)
+	}
+	return nil
+}
 
 // LockDir makes dir owned by LockedOwner and 0755, so only the node's root
 // (the bridge, wolf-agent) changes what is in it. Run it before trusting
@@ -160,9 +173,9 @@ func (s *Server) serveConn(conn net.Conn) {
 		resp.Error = err.Error()
 	}
 	if resp.Error != "" {
-		klog.Warningf("input-bridge: %s %q: %s", req.Op, req.Props["DEVNAME"], resp.Error)
+		klog.Warningf("input-bridge: %s %q %q: %s", req.Op, req.Props["DEVNAME"], req.Filename, resp.Error)
 	} else {
-		klog.InfoS("input-bridge", "op", req.Op, "devname", req.Props["DEVNAME"])
+		klog.InfoS("input-bridge", "op", req.Op, "devname", req.Props["DEVNAME"], "filename", req.Filename)
 	}
 	out, err := json.Marshal(resp)
 	if err != nil {
@@ -186,7 +199,7 @@ func (s *Server) Handle(req Request) error {
 		if err := fakeudev.WriteHwDbEntry(s.UdevDataDir, req.Filename, req.Content); err != nil {
 			return fmt.Errorf("write udev entry: %w", err)
 		}
-		return nil
+		return s.lockFile(filepath.Join(s.UdevDataDir, req.Filename))
 	case OpRemoveHwDB:
 		if err := hwdbName(req.Filename); err != nil {
 			return err

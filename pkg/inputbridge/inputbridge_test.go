@@ -34,6 +34,7 @@ func newFakeServer(t *testing.T) *fakeServer {
 		return nil
 	}
 	f.checkNode = func(string) error { return nil }
+	f.lockFile = func(string) error { return nil }
 	f.createNode = func(dir string, props map[string]string) error {
 		return os.WriteFile(filepath.Join(dir, filepath.Base(props["DEVNAME"])), nil, 0o600)
 	}
@@ -207,6 +208,9 @@ func TestServerHwDbEntries(t *testing.T) {
 		t.Fatalf("entry = %q, %v", got, err)
 	}
 	for _, name := range []string{"", ".", "..", "../control", "a/b"} {
+		if err := hwdbName(name); err == nil {
+			t.Errorf("hwdbName(%q) accepted", name)
+		}
 		if err := f.Handle(Request{Op: OpWriteHwDB, Filename: name}); err == nil {
 			t.Errorf("wrote entry %q", name)
 		}

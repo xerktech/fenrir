@@ -85,8 +85,12 @@ func resetUdevDir(dir string) error {
 			return fmt.Errorf("clearing %s: %w", dir, err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "control"), nil, 0o644); err != nil { //nolint:gosec // libudev only checks it exists
+	control := filepath.Join(dir, "control")
+	if err := os.WriteFile(control, nil, 0o644); err != nil { //nolint:gosec // libudev only checks it exists
 		return fmt.Errorf("creating udev control: %w", err)
+	}
+	if err := inputbridge.LockFile(control); err != nil {
+		return fmt.Errorf("locking udev control: %w", err)
 	}
 	data := filepath.Join(dir, "data")
 	if err := os.Mkdir(data, 0o755); err != nil {
