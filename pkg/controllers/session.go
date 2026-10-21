@@ -70,8 +70,8 @@ var (
 const streamPollInterval = 15 * time.Second
 
 // wolfAgentTimeout bounds each call to wolf-agent. The session controller has
-// two workers and polls every attached session: without a bound, two hung
-// agents would stall every Session's reconcile.
+// sessionWorkers workers and polls every attached session: without a bound,
+// hung agents would stall every Session's reconcile.
 const wolfAgentTimeout = 10 * time.Second
 
 // wolfAddSessionTimeout bounds the AddSession call, which Wolf can take over
@@ -80,9 +80,25 @@ const wolfAgentTimeout = 10 * time.Second
 // add a second stream under the same client ID.
 const wolfAddSessionTimeout = 30 * time.Second
 
+// sessionWorkers is how many Sessions reconcile at once. An attach on a
+// CPU-starved node makes several wolf-agent calls at up to wolfAgentTimeout
+// each, plus AddSession: over a minute per worker. Each call must keep its
+// full timeout (a shared budget never let a slow node attach, and missed a
+// wedged Wolf), so it takes as many such pods as workers to stall the rest.
+const sessionWorkers = 4
+
 // errSessionEnded is returned by reconcilePod once it has deleted the Session:
 // its pod finished, so there is nothing left to reconcile.
 var errSessionEnded = stderrors.New("session ended")
+
+// errPodNotReady is every cold start's wait, not a failure: Reconcile records
+// it without logging an error, and the pod's readiness event requeues the
+// Session (podNotReadyRecheck is the fallback).
+var errPodNotReady = stderrors.New("pod not ready")
+
+// podNotReadyRecheck requeues a Session waiting for its pod in case its
+// readiness event is missed.
+const podNotReadyRecheck = 5 * time.Second
 
 // errInvalidSpec marks a buildPod error caused by the App or User spec, not by
 // a lookup: every retry fails the same way, so reconcilePod ends the Session.
@@ -213,7 +229,7 @@ func NewSessionController(
 		res.Reconcile,
 		generic.ControllerOptions{
 			Name:    "session-controller",
-			Workers: 2,
+			Workers: sessionWorkers,
 		},
 	)
 
@@ -468,7 +484,9 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 			ObservedGeneration: newObj.Generation,
 		})
 	case streamError != nil:
-		klog.Errorf("Failed to reconcile active streams: %s", streamError)
+		if !stderrors.Is(streamError, errPodNotReady) {
+			klog.Errorf("Failed to reconcile active streams: %s", streamError)
+		}
 		meta.SetStatusCondition(&newObj.Status.Conditions, metav1.Condition{
 			Type:    v1alpha1types.SessionStreamStartedCondition,
 			Status:  metav1.ConditionFalse,
@@ -512,7 +530,12 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	// the status stopped changing, until the unstarted-session reaper
 	// deleted it and Moonlight timed out. Return the error so the workqueue
 	// requeues with backoff and the stream is started as soon as the agent
-	// is reachable.
+	// is reachable. A pod not yet ready is requeued without one: it is no
+	// error, and its backoff logged one every few milliseconds.
+	if stderrors.Is(streamError, errPodNotReady) {
+		c.controller.EnqueueAfter(namespace, name, podNotReadyRecheck)
+		return nil
+	}
 	return streamError
 }
 
@@ -990,12 +1013,49 @@ func (c *SessionController) checkPod(ctx context.Context, session *v1alpha1types
 		// so the pod no longer serves the ports the session advertises.
 		return nil, c.endSessionErr(ctx, session, fmt.Sprintf("its pod is on port block %s, not %d", pod.Annotations[portBlockAnnotation], session.Status.Ports.HTTP))
 	}
-	for _, cs := range pod.Status.ContainerStatuses {
-		if t := cs.State.Terminated; t != nil {
-			return nil, c.endSessionErr(ctx, session, containerExitReason(cs.Name, t))
-		}
+	if reason := podExitReason(pod); reason != "" {
+		return nil, c.endSessionErr(ctx, session, reason)
 	}
 	return pod, nil
+}
+
+// podExitReason is containerExitReason for the pod's container that exited
+// first, or "" while none has: when Wolf dies the game exits after it, and the
+// game's exit says nothing of why. finishedAt has whole seconds, so on a tie
+// an operator sidecar (Wolf, wolf-agent, pulseaudio) wins over the App's
+// containers, whose exit usually follows a sidecar's; an unknown finishedAt
+// (zero) loses to every known one.
+func podExitReason(pod *corev1.Pod) string {
+	var first *corev1.ContainerStatus
+	for i, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Terminated != nil && (first == nil || exitedBefore(&cs, first)) {
+			first = &pod.Status.ContainerStatuses[i]
+		}
+	}
+	if first == nil {
+		return ""
+	}
+	return containerExitReason(first.Name, first.State.Terminated)
+}
+
+// exitedBefore orders terminated containers for podExitReason.
+func exitedBefore(a, b *corev1.ContainerStatus) bool {
+	at, bt := a.State.Terminated.FinishedAt, b.State.Terminated.FinishedAt
+	if at.IsZero() != bt.IsZero() {
+		return bt.IsZero()
+	}
+	if !at.Equal(&bt) {
+		return at.Before(&bt)
+	}
+	return operatorSidecar(a.Name) && !operatorSidecar(b.Name)
+}
+
+func operatorSidecar(name string) bool {
+	switch name {
+	case v1alpha1types.WolfContainerName, v1alpha1types.WolfAgentContainerName, v1alpha1types.PulseAudioContainerName:
+		return true
+	}
+	return false
 }
 
 // endSession deletes the Session, which garbage-collects its pod (and the
@@ -2419,7 +2479,7 @@ func (c *SessionController) reconcileActiveStreams(
 		}
 	}
 	if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" || !podReady(pod) {
-		return fmt.Errorf("pod %s/%s not ready (phase %s)", pod.Namespace, pod.Name, pod.Status.Phase)
+		return fmt.Errorf("%w: pod %s/%s (phase %s)", errPodNotReady, pod.Namespace, pod.Name, pod.Status.Phase)
 	}
 	// The pod is on the host network, so this is also the node IP Moonlight
 	// streams from.
@@ -2528,7 +2588,7 @@ func (c *SessionController) reconcileActiveStreams(
 		status.WolfSessionID = foundID
 		status.AttachedGeneration = session.Generation
 		status.DisconnectedAt = nil
-		status.StreamURL = "rtsp://" + net.JoinHostPort(podIP, strconv.Itoa(int(status.Ports.RTSP)))
+		status.StreamURL = streamURL(podIP, status.Ports.RTSP, encryptedRTSP)
 		return nil
 	}
 

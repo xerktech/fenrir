@@ -12,6 +12,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -1222,5 +1223,85 @@ func TestUnstreamableClientIPLooksUpPod(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// An adopted stream's URL follows the scheme Wolf lists for it, as an attached
+// one's does: an encrypting Wolf refuses plaintext RTSP.
+func TestAdoptedWolfStreamKeepsEncryptedRTSP(t *testing.T) {
+	agent := newFakeAgent(t)
+	agent.sessions = `[{"client_id":"4242","aes_key":"k","aes_iv":"i","rtsp_encrypted":true}]`
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.Status.Ports = blockPorts(agent.base(t))
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
+
+	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
+		t.Fatalf("reconcileActiveStreams = %v", err)
+	}
+	if sess.Status.WolfSessionID != "4242" || !strings.HasPrefix(sess.Status.StreamURL, "rtspenc://") {
+		t.Errorf("status = %+v, want stream 4242 adopted with an rtspenc:// URL", sess.Status)
+	}
+}
+
+// The Session's end names the container that exited first, with its message:
+// when Wolf dies the game exits after it, and the game's exit says nothing.
+func TestPodExitReasonNamesFirstExit(t *testing.T) {
+	t.Parallel()
+	at := func(sec int) metav1.Time { return metav1.NewTime(time.Unix(int64(1000+sec), 0)) }
+	pod := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: "steam", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error", FinishedAt: at(5)}}},
+		{Name: "pulseaudio", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		{Name: "wolf", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error", Message: "wolf died", FinishedAt: at(2)}}},
+	}}}
+	if got, want := podExitReason(pod), `container wolf exited (code 1, Error): "wolf died"`; got != want {
+		t.Errorf("podExitReason = %q, want %q", got, want)
+	}
+	// Same second (the apiserver keeps whole seconds): the sidecar, listed
+	// after the game, is still named; an unknown finishedAt never is.
+	pod.Status.ContainerStatuses[0].State.Terminated.FinishedAt = at(2)
+	pod.Status.ContainerStatuses[1].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "ContainerStatusUnknown"}}
+	if got, want := podExitReason(pod), `container wolf exited (code 1, Error): "wolf died"`; got != want {
+		t.Errorf("podExitReason on a tie = %q, want %q", got, want)
+	}
+	pod.Status.ContainerStatuses[2].Name = "wolf-agent"
+	if got := podExitReason(pod); !strings.HasPrefix(got, "container wolf-agent exited") {
+		t.Errorf("podExitReason on a tie with wolf-agent = %q, want wolf-agent named", got)
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "pulseaudio", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+	if got := podExitReason(pod); got != "" {
+		t.Errorf("podExitReason with nothing exited = %q, want none", got)
+	}
+}
+
+// A pod still starting is every cold start's wait, not an error: Reconcile
+// records it for /launch (StreamStartFailed) and returns nil, so the
+// workqueue's backoff doesn't log one every few milliseconds.
+func TestPodNotReadyIsNoReconcileError(t *testing.T) {
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := podReadySession(f)
+		s.CreationTimestamp = metav1.Now() // not yet reaped as unstarted
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object {
+		pod := readyPod(s)
+		pod.Status.Phase = corev1.PodPending
+		return []runtime.Object{pod}
+	})
+	for range 500 {
+		if _, err := f.sc.podController.Informer().Namespaced(portsTestNS).Get(sess.Name); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := f.sc.Reconcile(portsTestNS, sess.Name, sess.DeepCopy()); err != nil {
+		t.Fatalf("Reconcile = %v, want nil while the pod starts", err)
+	}
+	got, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Get(context.Background(), sess.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, v1alpha1types.SessionStreamStartedCondition); c == nil || c.Reason != "StreamStartFailed" {
+		t.Errorf("StreamStarted = %+v, want StreamStartFailed while the pod starts", c)
 	}
 }

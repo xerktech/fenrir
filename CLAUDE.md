@@ -16,6 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Lint / format: `make lint`, `make fmt` (golangci-lint v2, config in `.golangci.yml`); `make vet`.
 - Build one binary: `go build ./cmd/<operator|moonlight-proxy|wolf-agent>`
 - Image: `docker build --build-arg APP_NAME=<cmd name> .` — one Dockerfile, `APP_NAME` picks the cmd.
+  - The entrypoint is fixed at build time, never read from env: Users set wolf-agent's env.
   - Exception: `nri-nvenc-fix` ships a C shim, so it has `cmd/nri-nvenc-fix/Dockerfile` (repo-root
     context); the workflow matrix passes it as `file:`.
 - Non-Go images live in `images/<name>/` (own Dockerfile + context), e.g. `images/library`
@@ -39,6 +40,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - The chart's `WOLF_IMAGE` is `ghcr.io/xerktech/wolf` (fork xerktech/wolf, branch `xerktech`;
   XERK-1944), pinned by digest in `charts/direwolf-operator/values.yaml`; CI does not rebuild it.
   - Bump it by hand to a digest the fork's Docker build printed for the `xerktech` branch.
+  - CI `wolf-image.yml` runs `wolfCommand` in the pinned image: the unit tests fake `wolfBinary`.
   - Fix Wolf behaviour in the fork (its `.claude/rules/xerktech-fork.md`), not with an overlay
     image here. The fork carries the XERK-1740 waylanddisplaysrc CUDA-context fix.
 - Codegen after editing `pkg/api/v1alpha1/*.go`: `hack/update-codegen.sh` (bash + python3).
@@ -98,6 +100,9 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       The add gets its own longer timeout so a retry rarely adds a second stream.
       Two streams under its keys end it, ID recorded or not (one shared ID, XERK-2116).
       Tests: `TestUnrecordedWolfStream*`, `TestDuplicateWolfStreamsEndSession`.
+    - Never put an attach's wolf-agent calls under one shared deadline: a slow node then never
+      attaches and a wedged Wolf goes unnoticed (XERK-2119). Slow pods are absorbed by
+      `sessionWorkers` instead.
     - A stream Wolf still lists whose video flows (wolf-agent reads the node's conntrack for its
       `--video-port`) rose during the attach but not for `streamStallTimeout` froze; the Session
       ends (XERK-1741). Judge per flow against the attach's first sample: a previous attach's

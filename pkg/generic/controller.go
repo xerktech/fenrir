@@ -93,6 +93,11 @@ func (c *controller[T]) Enqueue(namespace, name string) {
 }
 
 func (c *controller[T]) EnqueueAfter(namespace, name string, after time.Duration) {
+	if c.queue == nil {
+		// Not running (a test calling the reconciler directly): Run's
+		// initial list enqueues every object anyway.
+		return
+	}
 	c.queue.AddAfter(cache.ObjectName{
 		Namespace: namespace,
 		Name:      name,
