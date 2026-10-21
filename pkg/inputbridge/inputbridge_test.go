@@ -263,3 +263,22 @@ func TestServerStagesEntriesOutsideTheApp(t *testing.T) {
 		}
 	}
 }
+
+// A failed write leaves nothing staged behind.
+func TestWriteLockedFileCleansUpOnError(t *testing.T) {
+	tmp := t.TempDir()
+	err := writeLockedFile(tmp, filepath.Join(tmp, "missing", "x"), []byte("a"), func(*os.File) error { return nil })
+	if err == nil {
+		t.Fatal("rename into a missing directory succeeded")
+	}
+	if left, _ := os.ReadDir(tmp); len(left) != 0 {
+		t.Errorf("left %v", left)
+	}
+	err = writeLockedFile(tmp, filepath.Join(tmp, "y"), nil, func(*os.File) error { return os.ErrPermission })
+	if err == nil {
+		t.Fatal("chown failure ignored")
+	}
+	if left, _ := os.ReadDir(tmp); len(left) != 0 {
+		t.Errorf("left %v", left)
+	}
+}

@@ -81,20 +81,27 @@ func resetUdevDir(dir, tmpDir string) error {
 		return fmt.Errorf("read %s: %w", dir, err)
 	}
 	for _, e := range entries {
-		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+		if err = os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
 			return fmt.Errorf("clearing %s: %w", dir, err)
 		}
 	}
 	// libudev only checks it exists.
-	if err := inputbridge.WriteLockedFile(tmpDir, filepath.Join(dir, "control"), nil); err != nil {
+	if err = inputbridge.WriteLockedFile(tmpDir, filepath.Join(dir, "control"), nil); err != nil {
 		return fmt.Errorf("creating udev control: %w", err)
 	}
-	data := filepath.Join(dir, "data")
-	if err := os.Mkdir(data, 0o755); err != nil {
-		return fmt.Errorf("creating %s: %w", data, err)
+	// Staged and locked like control: made in place, the App could create
+	// in it before the lock.
+	staged, err := os.MkdirTemp(tmpDir, ".locked-*")
+	if err != nil {
+		return fmt.Errorf("staging udev data: %w", err)
 	}
-	if err := inputbridge.LockDir(data); err != nil {
+	if err = inputbridge.LockDir(staged); err != nil {
+		_ = os.Remove(staged)
 		return fmt.Errorf("locking udev data: %w", err)
+	}
+	if err = os.Rename(staged, filepath.Join(dir, "data")); err != nil {
+		_ = os.Remove(staged)
+		return fmt.Errorf("creating udev data: %w", err)
 	}
 	return nil
 }
