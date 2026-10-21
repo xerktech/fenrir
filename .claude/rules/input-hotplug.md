@@ -20,7 +20,11 @@ paths:
     sibling running non-root with all caps dropped.
   - Opening is gated only by the device cgroup, by number and not path: 13:64 gave EPERM without
     the `cmd/nri-input` grant (13:* rwm). Re-check `nodev` if Talos or kubelet changes.
-- wolf-agent needs CAP_MKNOD (runtime default; dropping ALL in its sidecar policy breaks hotplug).
+- wolf-agent needs CAP_MKNOD. With no `sidecarPolicies.wolfAgent.securityContext` it runs as root
+  with drop ALL + add MKNOD, allowPrivilegeEscalation false (XERK-2143); a policy one replaces it
+  whole, so a policy dropping ALL without adding MKNOD breaks hotplug.
+  - Measured on talos04 (hostNetwork, those caps): conntrack table and `nf_conntrack_acct` read,
+    a root 0700 unix socket connects, mknod 13:x + O_PATH chmod work. Tests: `TestSessionPodConfinesWolfAgent`.
 - The App's containers (init too) always lose CAP_MKNOD (`dropMknod`, even if the App adds it):
   `13:*` plus containerd's default `c *:* m` would let a root App mknod and open host keyboards or
   another session's pads (XERK-1338). Tests: `TestSessionPodDropsAppMknod`.

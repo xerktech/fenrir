@@ -525,6 +525,64 @@ func TestSessionPodDropsAppMknod(t *testing.T) {
 	}
 }
 
+// wolf-agent is on the node's network namespace: by default it keeps only
+// the MKNOD it hotplugs controllers with (XERK-2143).
+func TestSessionPodConfinesWolfAgent(t *testing.T) {
+	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	for _, ctr := range pod.Spec.Containers {
+		if ctr.Name != v1alpha1types.WolfAgentContainerName {
+			continue
+		}
+		sc := ctr.SecurityContext
+		if sc == nil || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+			t.Fatalf("wolf-agent securityContext = %+v, want allowPrivilegeEscalation false", sc)
+		}
+		if caps := sc.Capabilities; caps == nil || !slices.Equal(caps.Drop, []corev1.Capability{"ALL"}) ||
+			!slices.Equal(caps.Add, []corev1.Capability{"MKNOD"}) {
+			t.Errorf("wolf-agent capabilities = %+v, want drop ALL, add MKNOD", caps)
+		}
+		return
+	}
+	t.Fatal("no wolf-agent container")
+}
+
+// A User's wolfAgent securityContext replaces the default whole.
+func TestSessionPodKeepsWolfAgentPolicySecurityContext(t *testing.T) {
+	data, err := os.ReadFile("../../examples/user.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var user v1alpha1api.User
+	if err = sigsyaml.Unmarshal(data, &user); err != nil {
+		t.Fatal(err)
+	}
+	if user.Spec.SidecarPolicies == nil {
+		user.Spec.SidecarPolicies = &v1alpha1api.SidecarPolicies{}
+	}
+	if user.Spec.SidecarPolicies.WolfAgent == nil {
+		user.Spec.SidecarPolicies.WolfAgent = &v1alpha1api.SidecarPolicy{}
+	}
+	user.Spec.SidecarPolicies.WolfAgent.SecurityContext = &corev1.SecurityContext{RunAsUser: new(int64(1234))}
+	if data, err = sigsyaml.Marshal(&user); err != nil {
+		t.Fatal(err)
+	}
+	userPath := filepath.Join(t.TempDir(), "user.yaml")
+	if err = os.WriteFile(userPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, pod := reconcileFixtures(t, userPath, "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
+	for _, ctr := range pod.Spec.Containers {
+		if ctr.Name != v1alpha1types.WolfAgentContainerName {
+			continue
+		}
+		if sc := ctr.SecurityContext; sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 1234 || sc.Capabilities != nil {
+			t.Errorf("wolf-agent securityContext = %+v, want the policy's alone", sc)
+		}
+		return
+	}
+	t.Fatal("no wolf-agent container")
+}
+
 func TestSessionPodMountsNoServiceAccountToken(t *testing.T) {
 	_, _, _, pod := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml") //nolint:dogsled // only the Pod matters here
 	if got := pod.Spec.AutomountServiceAccountToken; got == nil || *got {
