@@ -10,9 +10,9 @@ import (
 )
 
 // bindSelf bind-mounts path onto itself, so the node is a mount of its own:
-// one that propagates, without the App pod volume's nodev. Only the bridge
-// writes the directory (the App pod mounts it read-only), so path is the
-// node createNode just made.
+// one that propagates, without the App pod volume's nodev. Only the node's
+// root writes the directory (LockDir), so path is the node createNode just
+// made, which Server.create checked.
 func bindSelf(path string) error {
 	if err := unix.Mount(path, path, "", unix.MS_BIND, ""); err != nil {
 		return fmt.Errorf("mount: %w", err)

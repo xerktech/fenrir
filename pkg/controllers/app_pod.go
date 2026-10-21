@@ -126,9 +126,10 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 		}}},
 	)
 
-	// The App only reads the hotplug directories: wolf-agent and the bridge
-	// write them, and a read-only mount can't be remounted writable from a
-	// user namespace, so the game can't swap a node for a symlink.
+	// The App only reads the hotplug directories; wolf-agent and the bridge
+	// write them. Read-only is a hint, not the boundary: the App can remount
+	// them writable from its user namespace, so the bridge gives them an
+	// owner the App can't map (inputbridge.LockDir).
 	for _, ctrs := range [][]corev1.Container{app.Spec.InitContainers, app.Spec.Containers} {
 		for i := range ctrs {
 			for j := range ctrs[i].VolumeMounts {

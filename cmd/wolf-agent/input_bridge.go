@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"net"
 	"os"
 	"os/signal"
@@ -32,12 +33,24 @@ func runInputBridge(args []string) {
 	}
 
 	server := inputbridge.NewServer(filepath.Join(*sessionDir, "input"))
-	if err := os.MkdirAll(server.InputDir, 0o755); err != nil {
-		klog.Fatalf("creating %s: %v", server.InputDir, err)
+	udevDir := filepath.Join(*sessionDir, "udev")
+	for _, dir := range []string{server.InputDir, udevDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			klog.Fatalf("creating %s: %v", dir, err)
+		}
+		// The App pod mounts both read-only, but can remount them
+		// writable: only their owner keeps it out (LockedOwner).
+		if err := inputbridge.LockDir(dir); err != nil {
+			klog.Fatal(err)
+		}
 	}
-	// Left over from a crashed bridge of this pod, if any.
+	// Whatever the App put there before the lock, or a crashed bridge of
+	// this pod left.
 	if err := server.Clear(); err != nil {
 		klog.Fatalf("clearing %s: %v", server.InputDir, err)
+	}
+	if err := resetUdevDir(udevDir); err != nil {
+		klog.Fatal(err)
 	}
 	_ = os.Remove(*socket)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -57,4 +70,30 @@ func runInputBridge(args []string) {
 	if err := os.RemoveAll(*sessionDir); err != nil {
 		klog.Errorf("input-bridge: removing %s: %v", *sessionDir, err)
 	}
+}
+
+// resetUdevDir empties the locked udev directory and recreates what libudev
+// and wolf-agent expect in it: the control file (see udevControlPath in the
+// operator) and the data directory, itself locked, which wolf-agent writes.
+func resetUdevDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return fmt.Errorf("clearing %s: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "control"), nil, 0o644); err != nil { //nolint:gosec // libudev only checks it exists
+		return fmt.Errorf("creating udev control: %w", err)
+	}
+	data := filepath.Join(dir, "data")
+	if err := os.Mkdir(data, 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", data, err)
+	}
+	if err := inputbridge.LockDir(data); err != nil {
+		return fmt.Errorf("locking udev data: %w", err)
+	}
+	return nil
 }

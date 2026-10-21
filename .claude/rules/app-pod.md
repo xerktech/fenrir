@@ -25,6 +25,11 @@ paths:
   `AppPodCreated` True and no pod ends the Session. Tests: `TestFinishedAppPodEndsSession`.
 - The pods share per-Session host dirs `<dir>/<session UID>/{runtime,udev,input}` (UID, not name:
   a new Session of the same name must not see old nodes). The App mounts udev and input read-only.
+  - Read-only is not the boundary: the App's idmapped hostPath mounts aren't locked, so its root
+    remounts them rw and wrote into both (QA on talos04). The bridge chowns `input/`, `udev/` and
+    `udev/data/` to `LockedOwner`, an ID outside the App's idmap, then clears them; the App's root
+    has no capability over an unmapped owner. Never let a privileged process trust a path there
+    without that lock.
 - A user-namespaced pod's volumes are all mounted `nodev` (PVC, hostPath, emptyDir; measured), and
   mknod is refused there, so a node in a shared volume never opens in the App pod.
   - The `input-bridge` sidecar (privileged, `<dir>` mounted Bidirectional) mknods each node into
@@ -32,6 +37,7 @@ paths:
     node arrives as a mount of its own without nodev (measured: opens from the userns pod).
   - wolf-agent asks it over a unix socket in an emptyDir only the two mount
     (`--input-bridge-socket`); it publishes only major 13 directly in `input/`.
+  - It lstat-checks the new node is a char device before bind-mounting it.
   - The bridge unmounts before removing (a mount point unlinks EBUSY) and on exit clears and
     deletes `<dir>/<UID>`. A SIGKILLed bridge leaves that directory (and its mounts) on the node.
   - `<dir>` must sit on a mount with shared propagation on the node, or Bidirectional fails.

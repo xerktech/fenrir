@@ -33,6 +33,7 @@ func newFakeServer(t *testing.T) *fakeServer {
 		}
 		return nil
 	}
+	f.checkNode = func(string) error { return nil }
 	f.createNode = func(dir string, props map[string]string) error {
 		return os.WriteFile(filepath.Join(dir, filepath.Base(props["DEVNAME"])), nil, 0o600)
 	}
@@ -153,5 +154,43 @@ func TestClientServerRoundTrip(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Errorf("Serve = %v", err)
+	}
+}
+
+// Clear also removes what the App may have left before the bridge locked the
+// directory: a directory, a symlink (not followed).
+func TestServerClearRemovesPlantedEntries(t *testing.T) {
+	f := newFakeServer(t)
+	outside := t.TempDir()
+	keep := filepath.Join(outside, "keep")
+	if err := os.WriteFile(keep, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(f.InputDir, "planted", "deep"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(f.InputDir, "evil")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(f.InputDir); len(entries) != 0 {
+		t.Errorf("left %v", entries)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("followed the symlink: %v", err)
+	}
+}
+
+// A path that is not the char device just created is never bind-mounted.
+func TestServerRefusesToBindNonDevice(t *testing.T) {
+	f := newFakeServer(t)
+	f.checkNode = isCharDevice
+	if err := f.Handle(Request{Op: OpCreate, Props: event("/dev/input/event5", "13")}); err == nil {
+		t.Error("bind-mounted a regular file")
+	}
+	if len(f.mounted) != 0 {
+		t.Errorf("mounted %v", f.mounted)
 	}
 }

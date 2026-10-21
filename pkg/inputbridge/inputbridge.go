@@ -68,6 +68,8 @@ type Server struct {
 	unmount  func(path string) error
 	// Creates the node; fakeudev.CreateDeviceNode outside tests.
 	createNode func(dir string, props map[string]string) error
+	// Checks path is a char device before it is bind-mounted.
+	checkNode func(path string) error
 }
 
 // NewServer returns a Server publishing into inputDir.
@@ -77,7 +79,39 @@ func NewServer(inputDir string) *Server {
 		bindSelf:   bindSelf,
 		unmount:    unmount,
 		createNode: fakeudev.CreateDeviceNode,
+		checkNode:  isCharDevice,
 	}
+}
+
+// LockedOwner owns the directories the App pod mounts read-only (LockDir).
+// The App pod's idmapped mounts map only the pod's own 65536 IDs, so to the
+// App this owner is unmapped: even its root, after remounting the mount
+// read-write (which a user namespace allows, measured on talos04), may not
+// create, rename or remove entries there. Root on the node still may.
+const LockedOwner = 4294967294
+
+// LockDir makes dir owned by LockedOwner and 0755, so only the node's root
+// (the bridge, wolf-agent) changes what is in it. Run it before trusting
+// what dir holds, then clear what the App may have put there first.
+func LockDir(dir string) error {
+	if err := os.Lchown(dir, LockedOwner, LockedOwner); err != nil {
+		return fmt.Errorf("chown %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		return fmt.Errorf("chmod %s: %w", dir, err)
+	}
+	return nil
+}
+
+func isCharDevice(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("stat new node: %w", err)
+	}
+	if fi.Mode()&os.ModeCharDevice == 0 {
+		return fmt.Errorf("%s is %v, not a char device", path, fi.Mode())
+	}
+	return nil
 }
 
 // Serve answers requests on l until ctx ends, one connection at a time:
@@ -154,6 +188,9 @@ func (s *Server) create(props map[string]string) error {
 	if err := s.createNode(s.InputDir, props); err != nil {
 		return err
 	}
+	if err := s.checkNode(path); err != nil {
+		return err
+	}
 	if err := s.bindSelf(path); err != nil {
 		_ = os.Remove(path)
 		return fmt.Errorf("bind-mount %s: %w", path, err)
@@ -192,7 +229,9 @@ func (s *Server) Clear() error {
 			errs = append(errs, err)
 			continue
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		// RemoveAll: an App could have left a directory here before the
+		// bridge locked InputDir. It doesn't follow symlinks.
+		if err := os.RemoveAll(path); err != nil {
 			errs = append(errs, err)
 		}
 	}
