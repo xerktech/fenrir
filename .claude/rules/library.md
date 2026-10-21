@@ -71,7 +71,7 @@ paths:
   - A cold launch also starts a guard that keeps deleting it while `steam` or `steam.sh` runs:
     Steam's exit-42 restart (`steam.sh` re-execs itself) skips wrapped-steam (XERK-2119).
     `steam.sh` alone runs for seconds between clients, so the pattern needs both.
-    Tests: `TestWrappedSteamGuard*`.
+    Tests: `TestWrappedSteamGuard*` (a relaunch waits out the last guard's lock: `-w`, not `-n`).
 - `wrapped-heroic` turns Heroic's "Add games to Steam" off in its config.json: Steam always runs
   beside Heroic here and its CEF debugger stays off, so adding or removing a shortcut fails with
   a "Steam is running" error. Removal on uninstall is unconditional in Heroic, so that error

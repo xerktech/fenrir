@@ -284,3 +284,38 @@ func TestWrappedSteamGuardOutlastsSteamShRestartGap(t *testing.T) {
 		}
 	}
 }
+
+// A cold launch right after Steam quit finds the last guard's lock still held
+// for a moment: it waits for it rather than run unguarded.
+func TestWrappedSteamGuardWaitsOutLastGuard(t *testing.T) {
+	d := newSteamDesktop(t)
+	d.steamLife, d.heroicLife = "4", "0"
+	lock := filepath.Join(d.home, ".local/state/library/cef-flag-guard.lock")
+	if err := os.MkdirAll(filepath.Dir(lock), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	last := exec.CommandContext(t.Context(), "flock", lock, "sleep", "1.5")
+	if err := last.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = last.Wait() })
+	time.Sleep(100 * time.Millisecond) // let it take the lock
+	wait := d.start()
+	for deadline := time.Now().Add(5 * time.Second); count(d.callsSoFar(), "cold") == 0; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("Steam never started")
+		}
+	}
+	time.Sleep(time.Second) // the cold launch's own delete is behind us
+	flag := writeCEFDebugFlag(t, d.home, ".local/share/Steam")
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if _, err := os.Lstat(flag); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no guard after a relaunch that found the lock held")
+		}
+	}
+	wait()
+	d.waitHeroics(1)
+}
