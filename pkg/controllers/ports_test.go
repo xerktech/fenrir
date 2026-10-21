@@ -101,7 +101,7 @@ func TestParsePortRange(t *testing.T) {
 	if r, err := ParsePortRange("40000-40999"); err != nil || r != (PortRange{Min: 40000, Max: 40999}) {
 		t.Fatalf("ParsePortRange = %+v, %v", r, err)
 	}
-	for _, bad := range []string{"", "40000", "40999-40000", "40000-40005", "0-100", "40000-70000", "a-b"} {
+	for _, bad := range []string{"", "40000", "40999-40000", "40000-40005", "0-100", "1000-1999", "40000-70000", "a-b"} {
 		if _, err := ParsePortRange(bad); err == nil {
 			t.Errorf("ParsePortRange(%q) succeeded", bad)
 		}
