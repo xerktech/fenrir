@@ -134,6 +134,10 @@ type SessionControllerOptions struct {
 	SessionNodeSelector map[string]string
 	// Taints of that node session pods tolerate.
 	SessionTolerations []corev1.Toleration
+	// Host directory (absolute) under which each Session's App runs in a
+	// user-namespaced pod of its own (see app_pod.go). Empty: the App runs
+	// in the session pod.
+	AppPodHostDir string
 	// How long a session's pod outlives its client's disconnect, so /resume
 	// can re-attach to the still-running game. Zero ends the session on
 	// disconnect.
@@ -870,6 +874,19 @@ func (c *SessionController) unstreamableReason(ctx context.Context, session *v1a
 // finished (a container exited, or it was deleted), the Session is deleted and
 // errSessionEnded returned.
 func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1types.Session) (*corev1.Pod, error) {
+	pod, err := c.reconcileSessionPod(ctx, session)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.reconcileAppPod(ctx, session, pod); err != nil {
+		return nil, err
+	}
+	return pod, nil
+}
+
+// reconcileSessionPod creates or checks the session's pod: with
+// AppPodHostDir, its Wolf pod (see reconcileAppPod for the App's).
+func (c *SessionController) reconcileSessionPod(ctx context.Context, session *v1alpha1types.Session) (*corev1.Pod, error) {
 	if !meta.IsStatusConditionPresentAndEqual(session.Status.Conditions, "PortsAllocated", metav1.ConditionTrue) {
 		return nil, stderrors.New("waiting for PortsAllocated")
 	}
@@ -893,7 +910,7 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		return c.checkPod(ctx, session, live)
 	}
 
-	pod, err := c.buildPod(session)
+	pod, _, err := c.buildPods(session)
 	switch {
 	case stderrors.Is(err, errInvalidSpec):
 		// Like an Invalid pod create below: end the Session now rather than
@@ -998,6 +1015,16 @@ func (c *SessionController) warnApp(session *v1alpha1types.Session, reason, mess
 // session. Nothing restarts a container of a restartPolicy Never pod, so one
 // exited container (the game quitting, or a sidecar crashing) ends it.
 func (c *SessionController) checkPod(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod) (*corev1.Pod, error) {
+	return c.checkSessionPod(ctx, session, pod, true)
+}
+
+// checkPodContainers is checkPod for a split Session's App pod, which serves
+// no ports.
+func (c *SessionController) checkPodContainers(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod) (*corev1.Pod, error) {
+	return c.checkSessionPod(ctx, session, pod, false)
+}
+
+func (c *SessionController) checkSessionPod(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod, servesPorts bool) (*corev1.Pod, error) {
 	if !metav1.IsControlledBy(pod, session) {
 		// Left over from an earlier Session of the same name; garbage
 		// collection removes it.
@@ -1005,10 +1032,10 @@ func (c *SessionController) checkPod(ctx context.Context, session *v1alpha1types
 	}
 	switch {
 	case pod.DeletionTimestamp != nil:
-		return nil, c.endSessionErr(ctx, session, "its pod is being deleted")
+		return nil, c.endSessionErr(ctx, session, "its pod "+pod.Name+" is being deleted")
 	case pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed:
-		return nil, c.endSessionErr(ctx, session, fmt.Sprintf("its pod %s", pod.Status.Phase))
-	case pod.Annotations[portBlockAnnotation] != strconv.Itoa(int(session.Status.Ports.HTTP)):
+		return nil, c.endSessionErr(ctx, session, fmt.Sprintf("its pod %s %s", pod.Name, pod.Status.Phase))
+	case servesPorts && pod.Annotations[portBlockAnnotation] != strconv.Itoa(int(session.Status.Ports.HTTP)):
 		// Its block was re-allocated (e.g. lost across an operator restart),
 		// so the pod no longer serves the ports the session advertises.
 		return nil, c.endSessionErr(ctx, session, fmt.Sprintf("its pod is on port block %s, not %d", pod.Annotations[portBlockAnnotation], session.Status.Ports.HTTP))
@@ -2091,6 +2118,8 @@ var operatorVolumes = []string{
 	hotplugDevVolume,
 	hotplugUdevVolume,
 	"wolf-agent-token",
+	inputBridgeVolume,
+	appPodSessionsVolume,
 }
 
 // validateNoOperatorVolumeMounts rejects App template containers (init too)
@@ -2480,6 +2509,9 @@ func (c *SessionController) reconcileActiveStreams(
 	}
 	if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" || !podReady(pod) {
 		return fmt.Errorf("%w: pod %s/%s (phase %s)", errPodNotReady, pod.Namespace, pod.Name, pod.Status.Phase)
+	}
+	if err := c.appPodReady(pod); err != nil {
+		return err
 	}
 	// The pod is on the host network, so this is also the node IP Moonlight
 	// streams from.

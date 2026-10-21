@@ -133,7 +133,7 @@ func isOperatorContainer(ctrName string) bool {
 	switch ctrName {
 	case v1alpha1types.WolfContainerName, v1alpha1types.WolfAgentContainerName,
 		v1alpha1types.PulseAudioContainerName, v1alpha1types.InitContainerName,
-		v1alpha1types.SteamRelinkContainerName:
+		v1alpha1types.SteamRelinkContainerName, v1alpha1types.InputBridgeContainerName:
 		return true
 	}
 	return false

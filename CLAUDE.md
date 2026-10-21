@@ -176,6 +176,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       and their author can already run any pod spec, so a per-User GPU policy adds no boundary
       (XERK-1329). An App template's own resourceClaims may still ask for more than one device.
   - Watches session pods (label `direwolf/session=true` only) to re-reconcile their Session.
+  - `--app-pod-host-dir` (off by default) runs the App in a second, user-namespaced pod beside the
+    session pod, which keeps Wolf and the sidecars; see `.claude/rules/app-pod.md` (XERK-1920).
 - **wolf-agent** (`pkg/controllers/agent.go`, `pkg/wolfapi`, `pkg/fakeudev`): sidecar talking to
   Wolf's HTTP API over a mounted unix socket.
   - Syncs desired sessions into Wolf and emulates udev (mknods `/dev/input/*` nodes and writes

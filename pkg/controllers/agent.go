@@ -12,6 +12,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"games-on-whales.github.io/direwolf/pkg/fakeudev"
+	"games-on-whales.github.io/direwolf/pkg/inputbridge"
 	"games-on-whales.github.io/direwolf/pkg/wolfapi"
 )
 
@@ -32,6 +33,9 @@ type Agent struct {
 	// Where hotplugged devices are published; InputDevPath and
 	// UdevDataPath outside tests.
 	inputDevPath, udevDataPath string
+	// Publishes the /dev/input nodes: the input-bridge sidecar when the App
+	// runs in its own pod (UseInputBridge), else nil: mknod into inputDevPath.
+	bridge deviceNodes
 
 	// Bounds of the delay before resubscribing after Wolf's event stream
 	// ends or a subscribe fails. A stream that stayed up for maxDelay resets
@@ -60,6 +64,47 @@ func NewAgent(
 	res.lobby = &lobbyJoiner{client: wolfClient, settle: lobbyJoinSettle, unplug: res.handleDeviceUnplug}
 
 	return res
+}
+
+// deviceNodes publishes the /dev/input nodes of hotplugged devices.
+type deviceNodes interface {
+	Create(props map[string]string) error
+	Remove(props map[string]string) error
+	Clear() error
+}
+
+// dirNodes mknods nodes into dir, a volume the App's containers share.
+type dirNodes struct{ dir string }
+
+func (d dirNodes) Create(props map[string]string) error {
+	return wrapNodeErr(fakeudev.CreateDeviceNode(d.dir, props))
+}
+
+func (d dirNodes) Remove(props map[string]string) error {
+	return wrapNodeErr(fakeudev.RemoveDeviceNode(d.dir, props))
+}
+
+func (d dirNodes) Clear() error { return wrapNodeErr(fakeudev.ClearDir(d.dir)) }
+
+func wrapNodeErr(err error) error {
+	if err != nil {
+		return fmt.Errorf("device node: %w", err)
+	}
+	return nil
+}
+
+// UseInputBridge publishes device nodes through the input-bridge sidecar
+// listening on socket: the App runs in a user-namespaced pod of its own,
+// where a node in a shared volume would not open (pkg/inputbridge).
+func (a *Agent) UseInputBridge(socket string) {
+	a.bridge = &inputbridge.Client{Socket: socket}
+}
+
+func (a *Agent) nodes() deviceNodes {
+	if a.bridge != nil {
+		return a.bridge
+	}
+	return dirNodes{dir: a.inputDevPath}
 }
 
 // Run handles Wolf's events until ctx ends. Whenever the stream closes or a
@@ -284,10 +329,11 @@ func logEvent(ev *sse.Event) {
 // a 0666 node would open whichever device the kernel gives its minor next,
 // possibly another session's keyboard. A resumed stream plugs anew.
 func (a *Agent) clearDevices() {
-	for _, dir := range []string{a.inputDevPath, a.udevDataPath} {
-		if err := fakeudev.ClearDir(dir); err != nil {
-			utilruntime.HandleError(fmt.Errorf("failed to clear %s: %w", dir, err))
-		}
+	if err := a.nodes().Clear(); err != nil {
+		utilruntime.HandleError(fmt.Errorf("failed to clear device nodes: %w", err))
+	}
+	if err := fakeudev.ClearDir(a.udevDataPath); err != nil {
+		utilruntime.HandleError(fmt.Errorf("failed to clear %s: %w", a.udevDataPath, err))
 	}
 }
 
@@ -304,7 +350,7 @@ func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
 		if !fakeudev.IsInputDeviceNode(udevEvent) {
 			continue
 		}
-		if err := fakeudev.CreateDeviceNode(a.inputDevPath, udevEvent); err != nil {
+		if err := a.nodes().Create(udevEvent); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to create device node: %w", err))
 		} else {
 			klog.InfoS("Created device node", "devname", udevEvent["DEVNAME"], "session", ev.SessionID)
@@ -334,7 +380,7 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 		if !fakeudev.IsInputDeviceNode(udevEvent) {
 			continue
 		}
-		if err := fakeudev.RemoveDeviceNode(a.inputDevPath, udevEvent); err != nil {
+		if err := a.nodes().Remove(udevEvent); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to remove device node: %w", err))
 		}
 	}

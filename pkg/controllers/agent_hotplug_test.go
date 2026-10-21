@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -137,5 +138,48 @@ func TestAgentPlugPublishesDevice(t *testing.T) {
 	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent(ev))
 	if _, err := os.Stat(node); !os.IsNotExist(err) {
 		t.Errorf("node after unplug: %v", err)
+	}
+}
+
+type recordingNodes struct{ calls []string }
+
+func (r *recordingNodes) Create(p map[string]string) error {
+	r.calls = append(r.calls, "create "+p["DEVNAME"])
+	return nil
+}
+
+func (r *recordingNodes) Remove(p map[string]string) error {
+	r.calls = append(r.calls, "remove "+p["DEVNAME"])
+	return nil
+}
+
+func (r *recordingNodes) Clear() error {
+	r.calls = append(r.calls, "clear")
+	return nil
+}
+
+// With the App in its own pod, nodes go through the input-bridge and nothing
+// is created in /dev/input; udev entries are still written (XERK-1920).
+func TestAgentPublishesNodesThroughBridge(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	bridge := &recordingNodes{}
+	a.bridge = bridge
+	ev := wolfapi.PlugDeviceEvent{
+		SessionID: "42",
+		UdevEvents: []map[string]string{
+			{"ACTION": "add", "DEVPATH": "/devices/virtual/input/input9"},
+			{"ACTION": "add", "DEVNAME": "/dev/input/event69", "MAJOR": "13", "MINOR": "69", "DEVPATH": "/devices/virtual/input/input9/event69"},
+		},
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69", Content: []string{"E:ID_INPUT_JOYSTICK=1"}}},
+	}
+	a.handleDevicePlug(ev)
+	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent(ev))
+	a.clearDevices()
+	want := []string{"create /dev/input/event69", "remove /dev/input/event69", "clear"}
+	if !slices.Equal(bridge.calls, want) {
+		t.Errorf("bridge calls = %v, want %v", bridge.calls, want)
+	}
+	if entries, _ := os.ReadDir(a.inputDevPath); len(entries) != 0 {
+		t.Errorf("created in /dev/input: %v", entries)
 	}
 }

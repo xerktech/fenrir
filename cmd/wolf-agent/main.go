@@ -23,6 +23,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == inputBridgeCommand {
+		runInputBridge(os.Args[2:])
+		return
+	}
 	appContext, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
 
@@ -32,6 +36,8 @@ func main() {
 	wolfSocketPath := flag.String("socket", "/var/run/wolf.sock", "Path to wolf.sock")
 	tokenFile := flag.String("token-file", "", "Path to a file holding the bearer token required on /api/v1/ (required)")
 	videoPort := flag.Int("video-port", 0, "Wolf's video RTP port, whose outbound packets "+controllers.VideoPacketsPath+" counts (0: not counted)")
+	inputBridgeSocket := flag.String("input-bridge-socket", "",
+		"Publish /dev/input nodes through the input-bridge sidecar on this socket instead of mknod into /dev/input")
 	klog.InitFlags(nil)
 	flag.Parse()
 
@@ -75,6 +81,9 @@ func main() {
 					agentController := controllers.NewAgent(
 						wolfClient,
 					)
+					if *inputBridgeSocket != "" {
+						agentController.UseInputBridge(*inputBridgeSocket)
+					}
 
 					// Run resubscribes to Wolf's events itself until appContext ends.
 					go agentController.Run(appContext)
