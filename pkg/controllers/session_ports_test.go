@@ -181,8 +181,6 @@ type fakeAgent struct {
 	// addDelay delays the answer to an add, as a CPU-starved Wolf does
 	// (XERK-2116).
 	addDelay time.Duration
-	// callDelay delays the answer to every other call.
-	callDelay time.Duration
 	// encryptsRTSP answers sessions/add like a Wolf with encrypted RTSP
 	// (XERK-2118): it encrypts when asked. Without it, like an older Wolf, it
 	// ignores the request.
@@ -209,9 +207,6 @@ func newFakeAgent(t *testing.T) *fakeAgent {
 		a.mu.Lock()
 		a.calls = append(a.calls, r.URL.Path)
 		a.mu.Unlock()
-		if r.URL.Path != "/api/v1/sessions/add" {
-			time.Sleep(a.callDelay)
-		}
 		switch r.URL.Path {
 		case "/api/v1/lobbies":
 			fmt.Fprintf(w, `{"success":true,"lobbies":%s}`, a.lobbies)

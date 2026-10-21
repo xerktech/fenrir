@@ -70,8 +70,8 @@ var (
 const streamPollInterval = 15 * time.Second
 
 // wolfAgentTimeout bounds each call to wolf-agent. The session controller has
-// two workers and polls every attached session: without a bound, two hung
-// agents would stall every Session's reconcile.
+// sessionWorkers workers and polls every attached session: without a bound,
+// hung agents would stall every Session's reconcile.
 const wolfAgentTimeout = 10 * time.Second
 
 // wolfAddSessionTimeout bounds the AddSession call, which Wolf can take over
@@ -80,12 +80,12 @@ const wolfAgentTimeout = 10 * time.Second
 // add a second stream under the same client ID.
 const wolfAddSessionTimeout = 30 * time.Second
 
-// wolfAgentBudget bounds all of one reconcile's wolf-agent calls but
-// AddSession, which keeps its own wolfAddSessionTimeout: an attach makes
-// several calls (list, stops, relist, lobbies, clients, video baseline), and
-// at wolfAgentTimeout each two CPU-starved pods held both workers for over a
-// minute. A var so tests can shorten it.
-var wolfAgentBudget = 2 * wolfAgentTimeout
+// sessionWorkers is how many Sessions reconcile at once. An attach on a
+// CPU-starved node makes several wolf-agent calls at up to wolfAgentTimeout
+// each, plus AddSession: over a minute per worker. Each call must keep its
+// full timeout (a shared budget never let a slow node attach, and missed a
+// wedged Wolf), so it takes as many such pods as workers to stall the rest.
+const sessionWorkers = 4
 
 // errSessionEnded is returned by reconcilePod once it has deleted the Session:
 // its pod finished, so there is nothing left to reconcile.
@@ -229,7 +229,7 @@ func NewSessionController(
 		res.Reconcile,
 		generic.ControllerOptions{
 			Name:    "session-controller",
-			Workers: 2,
+			Workers: sessionWorkers,
 		},
 	)
 
@@ -1021,11 +1021,14 @@ func (c *SessionController) checkPod(ctx context.Context, session *v1alpha1types
 
 // podExitReason is containerExitReason for the pod's container that exited
 // first, or "" while none has: when Wolf dies the game exits after it, and the
-// game's exit says nothing of why.
+// game's exit says nothing of why. finishedAt has whole seconds, so on a tie
+// an operator sidecar (Wolf, wolf-agent, pulseaudio) wins over the App's
+// containers, whose exit usually follows a sidecar's; an unknown finishedAt
+// (zero) loses to every known one.
 func podExitReason(pod *corev1.Pod) string {
 	var first *corev1.ContainerStatus
 	for i, cs := range pod.Status.ContainerStatuses {
-		if t := cs.State.Terminated; t != nil && (first == nil || t.FinishedAt.Before(&first.State.Terminated.FinishedAt)) {
+		if cs.State.Terminated != nil && (first == nil || exitedBefore(&cs, first)) {
 			first = &pod.Status.ContainerStatuses[i]
 		}
 	}
@@ -1033,6 +1036,26 @@ func podExitReason(pod *corev1.Pod) string {
 		return ""
 	}
 	return containerExitReason(first.Name, first.State.Terminated)
+}
+
+// exitedBefore orders terminated containers for podExitReason.
+func exitedBefore(a, b *corev1.ContainerStatus) bool {
+	at, bt := a.State.Terminated.FinishedAt, b.State.Terminated.FinishedAt
+	if at.IsZero() != bt.IsZero() {
+		return bt.IsZero()
+	}
+	if !at.Equal(&bt) {
+		return at.Before(&bt)
+	}
+	return operatorSidecar(a.Name) && !operatorSidecar(b.Name)
+}
+
+func operatorSidecar(name string) bool {
+	switch name {
+	case v1alpha1types.WolfContainerName, v1alpha1types.WolfAgentContainerName, v1alpha1types.PulseAudioContainerName:
+		return true
+	}
+	return false
 }
 
 // endSession deletes the Session, which garbage-collects its pod (and the
@@ -2448,10 +2471,6 @@ func (c *SessionController) reconcileActiveStreams(
 	// streams from.
 	podIP := pod.Status.PodIP
 
-	addCtx := ctx
-	ctx, cancel := context.WithTimeout(ctx, wolfAgentBudget)
-	defer cancel()
-
 	token, tlsConfig, err := c.agentCredentials(ctx, session)
 	if stderrors.Is(err, errAgentCertMissing) {
 		// Created before the cert was pinned, so the pod serves a cert we
@@ -2677,7 +2696,7 @@ func (c *SessionController) reconcileActiveStreams(
 		baseline := videoBaseline(ctx, session, agentClient, agentURL)
 		addClient := *agentClient
 		addClient.Timeout = wolfAddSessionTimeout
-		added, err := wolfapi.NewClient(agentURL, &addClient).AddSession(addCtx, wolfSession)
+		added, err := wolfapi.NewClient(agentURL, &addClient).AddSession(ctx, wolfSession)
 
 		if err != nil {
 			return fmt.Errorf("failed to create session: %w", err)

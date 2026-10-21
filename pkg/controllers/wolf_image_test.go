@@ -29,6 +29,7 @@ func TestPinnedWolfImageStartsUnderWolfCommand(t *testing.T) {
 	if script == wolfCommand[2] {
 		t.Fatal("wolfCommand no longer ends in exec /entrypoint.sh; update this test")
 	}
+	//nolint:gosec // the chart's own image and the operator's own command
 	out, err := exec.CommandContext(t.Context(), "docker", "run", "--rm", "--entrypoint", wolfCommand[0],
 		string(m[1]), wolfCommand[1], script).CombinedOutput()
 	if err != nil || !strings.HasSuffix(strings.TrimSpace(string(out)), "started") {

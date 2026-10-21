@@ -100,8 +100,9 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       The add gets its own longer timeout so a retry rarely adds a second stream.
       Two streams under its keys end it, ID recorded or not (one shared ID, XERK-2116).
       Tests: `TestUnrecordedWolfStream*`, `TestDuplicateWolfStreamsEndSession`.
-    - One reconcile's wolf-agent calls share `wolfAgentBudget`; AddSession keeps its own timeout
-      outside it, so a slow add still lands (XERK-2119). Tests: `TestSlow*Budget`.
+    - Never put an attach's wolf-agent calls under one shared deadline: a slow node then never
+      attaches and a wedged Wolf goes unnoticed (XERK-2119). Slow pods are absorbed by
+      `sessionWorkers` instead.
     - A stream Wolf still lists whose video flows (wolf-agent reads the node's conntrack for its
       `--video-port`) rose during the attach but not for `streamStallTimeout` froze; the Session
       ends (XERK-1741). Judge per flow against the attach's first sample: a previous attach's

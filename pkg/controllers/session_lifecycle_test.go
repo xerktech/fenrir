@@ -1245,60 +1245,6 @@ func TestAdoptedWolfStreamKeepsEncryptedRTSP(t *testing.T) {
 	}
 }
 
-// One reconcile's wolf-agent calls share wolfAgentBudget, so a slow agent
-// holds a controller worker for that long, not wolfAgentTimeout per call.
-func TestSlowAgentCallsShareOneBudget(t *testing.T) {
-	budget := wolfAgentBudget
-	t.Cleanup(func() { wolfAgentBudget = budget })
-	wolfAgentBudget = 300 * time.Millisecond
-
-	agent := newFakeAgent(t)
-	// The attach makes four calls before its add (sessions, lobbies,
-	// clients, video baseline): 800ms at this delay.
-	agent.callDelay = 200 * time.Millisecond
-	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
-		s := f.session("alex-1", f.user)
-		s.Status.Ports = blockPorts(agent.base(t))
-		return s
-	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
-
-	start := time.Now()
-	err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess))
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("reconcileActiveStreams = %v, want the budget exceeded", err)
-	}
-	if took := time.Since(start); took > 600*time.Millisecond {
-		t.Errorf("reconcile took %s, want about the %s budget", took, wolfAgentBudget)
-	}
-	if agent.added != 0 {
-		t.Error("added a stream after the budget ran out")
-	}
-}
-
-// AddSession is outside the budget: a slow add after slow calls before it
-// still attaches (XERK-2116).
-func TestSlowAddSessionOutlastsAgentBudget(t *testing.T) {
-	budget := wolfAgentBudget
-	t.Cleanup(func() { wolfAgentBudget = budget })
-	wolfAgentBudget = 300 * time.Millisecond
-
-	agent := newFakeAgent(t)
-	agent.callDelay = 50 * time.Millisecond
-	agent.addDelay = 500 * time.Millisecond
-	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
-		s := f.session("alex-1", f.user)
-		s.Status.Ports = blockPorts(agent.base(t))
-		return s
-	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{tokenSecret(s)} })
-
-	if err := f.sc.reconcileActiveStreams(context.Background(), sess, readyPod(sess)); err != nil {
-		t.Fatalf("reconcileActiveStreams = %v", err)
-	}
-	if sess.Status.WolfSessionID != "4242" {
-		t.Errorf("WolfSessionID = %q, want 4242", sess.Status.WolfSessionID)
-	}
-}
-
 // The Session's end names the container that exited first, with its message:
 // when Wolf dies the game exits after it, and the game's exit says nothing.
 func TestPodExitReasonNamesFirstExit(t *testing.T) {
@@ -1312,7 +1258,14 @@ func TestPodExitReasonNamesFirstExit(t *testing.T) {
 	if got, want := podExitReason(pod), `container wolf exited (code 1, Error): "wolf died"`; got != want {
 		t.Errorf("podExitReason = %q, want %q", got, want)
 	}
-	pod.Status.ContainerStatuses = pod.Status.ContainerStatuses[1:2]
+	// Same second (the apiserver keeps whole seconds): the sidecar, listed
+	// after the game, is still named; an unknown finishedAt never is.
+	pod.Status.ContainerStatuses[0].State.Terminated.FinishedAt = at(2)
+	pod.Status.ContainerStatuses[1].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "ContainerStatusUnknown"}}
+	if got, want := podExitReason(pod), `container wolf exited (code 1, Error): "wolf died"`; got != want {
+		t.Errorf("podExitReason on a tie = %q, want %q", got, want)
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "pulseaudio", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
 	if got := podExitReason(pod); got != "" {
 		t.Errorf("podExitReason with nothing exited = %q, want none", got)
 	}
