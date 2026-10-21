@@ -1430,6 +1430,20 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		}
 	}
 
+	// wolf-agent runs as root (Wolf's socket and the token Secret are root's)
+	// on the node's network namespace, so by default it keeps only MKNOD, for
+	// the hotplugged controllers (XERK-2143). Reading the node's conntrack
+	// table and its root-owned files needs no capability.
+	if wolfAgentSecurityContext == nil {
+		wolfAgentSecurityContext = &corev1.SecurityContext{
+			AllowPrivilegeEscalation: new(false),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+				Add:  []corev1.Capability{"MKNOD"},
+			},
+		}
+	}
+
 	// Captured before the sidecars are appended: these are the App's containers only.
 	wolfResources.Claims = appendResourceClaims(wolfResources.Claims, appResourceClaims(podToCreate.Spec.Containers)...)
 	// Directly too: an App with no containers (Wolf renders a test source)

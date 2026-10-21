@@ -54,8 +54,9 @@ func ParsePortRange(s string) (PortRange, error) {
 		return PortRange{}, fmt.Errorf("port range %q: %w", s, err)
 	}
 	r := PortRange{Min: int32(minPort), Max: int32(maxPort)}
-	if r.Min < 1 || r.blocks() < 1 {
-		return PortRange{}, fmt.Errorf("port range %q must hold at least %d ports starting at 1 or above", s, sessionPortBlockSize)
+	// wolf-agent binds its block port without NET_BIND_SERVICE (XERK-2143).
+	if r.Min < 1024 || r.blocks() < 1 {
+		return PortRange{}, fmt.Errorf("port range %q must hold at least %d ports starting at 1024 or above", s, sessionPortBlockSize)
 	}
 	return r, nil
 }
