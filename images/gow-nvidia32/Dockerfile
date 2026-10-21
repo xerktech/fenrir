@@ -64,11 +64,13 @@ RUN NetworkManager --print-config | grep -qx 'no-auto-default=\*' \
 # GoW's cont-init starts Decky Loader as root on 127.0.0.1:1337, the node's
 # loopback under hostNetwork, and serves its auth token there to any caller;
 # installing it also turns on Steam's CEF debugger, which Decky drives. Nothing
-# uses it (XERK-2128). Cut the block, and fail the build if GoW reworks it.
-RUN sed -i '/^# Install Decky Loader/,/^\$HOME\/homebrew\/services\/PluginLoader &$/d' \
-    /etc/cont-init.d/system-services.sh \
-  && ! grep -n -i -e decky -e PluginLoader -e cef-enable /etc/cont-init.d/system-services.sh \
-  && grep -q '^steamos-dbus-watchdog.sh &$' /etc/cont-init.d/system-services.sh \
+# uses it (XERK-2128). Cut the block, and fail the build if GoW reworks it: a
+# missed end line would delete through EOF, so the cut must be its 18 lines.
+RUN f=/etc/cont-init.d/system-services.sh; n=$(wc -l < "$f") \
+  && sed -i '/^# Install Decky Loader/,/^\$HOME\/homebrew\/services\/PluginLoader &$/d' "$f" \
+  && test $((n - $(wc -l < "$f"))) -eq 18 \
+  && ! grep -n -i -e decky -e PluginLoader -e homebrew -e cef-enable "$f" \
+  && grep -qx 'steamos-dbus-watchdog.sh &' "$f" && grep -qx disown "$f" \
   && rm -r /opt/decky
 
 FROM ghcr.io/games-on-whales/heroic-games-launcher:edge@sha256:a207a39367801a8a8bf24b68dac2c9945052d3117cb03b061b27bd6672aab62f AS heroic

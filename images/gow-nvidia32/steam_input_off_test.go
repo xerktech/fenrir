@@ -340,6 +340,23 @@ func TestSteamInputOffHookRunsScript(t *testing.T) {
 	}
 }
 
+func TestSteamInputOffHookDeletesDebianFlagWithoutSteamDir(t *testing.T) {
+	home := t.TempDir()
+	p := filepath.Join(home, ".steam", "debian-installation", cefDebugFlag)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, started := sourceHook(t, home); !started || strings.Contains(out, "LOG:") {
+		t.Errorf("hook:\n%s", out)
+	}
+	if _, err := os.Lstat(p); !os.IsNotExist(err) {
+		t.Errorf("%s survived the hook (%v): Steam installs there and would open its debugger", p, err)
+	}
+}
+
 func TestSteamInputOffHookNeverStopsTheEntrypoint(t *testing.T) {
 	// Fresh home: no Steam yet, nothing to do.
 	if out, started := sourceHook(t, t.TempDir()); !started || strings.Contains(out, "LOG:") {
