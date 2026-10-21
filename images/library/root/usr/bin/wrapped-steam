@@ -86,11 +86,12 @@ fi
 # Steam restarts itself in place (exit 42: a self-update or a settings
 # restart) without coming back here, and Heroic may have written the flag
 # meanwhile. So keep deleting it for as long as Steam (or steam.sh) runs. One
-# guard per Library: a second cold launch finds its lock held. The lock file
+# guard per Library: a second cold launch finds its lock held, and waits a
+# little first, in case that is the last Steam's guard on its way out. The lock file
 # is made here, not by the detached guard, which may start after we exit.
 GUARD_LOCK="${LOG_DIR}/cef-flag-guard.lock"
 : >>"${GUARD_LOCK}"
-STEAM_PROCS="${STEAM_PROCS}" setsid -f flock -n "${GUARD_LOCK}" bash -c \
+STEAM_PROCS="${STEAM_PROCS}" setsid -f flock -w 3 "${GUARD_LOCK}" bash -c \
   'while :; do rm -f "$@"; sleep 1; pgrep -x "${STEAM_PROCS}" >/dev/null || exit 0; done' \
   cef-flag-guard "${CEF_FLAGS[@]}" >/dev/null 2>&1 </dev/null 9>&-
 

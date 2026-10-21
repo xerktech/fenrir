@@ -251,3 +251,36 @@ func (d *steamDesktop) callsSoFar() []string {
 	}
 	return strings.Fields(string(b))
 }
+
+// Across an exit-42 restart only steam.sh runs, for seconds: the guard must
+// keep going while it does.
+func TestWrappedSteamGuardOutlastsSteamShRestartGap(t *testing.T) {
+	d := newSteamDesktop(t)
+	d.steamLife, d.heroicLife = "1", "0"
+	wait := d.start()
+	for deadline := time.Now().Add(5 * time.Second); count(d.callsSoFar(), "cold") == 0; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("Steam never started")
+		}
+	}
+	// Started after the cold launch, which would otherwise hand off to it.
+	sh := filepath.Join(d.dir, "bin", "steam.sh")
+	writeStub(t, sh, `sleep 6`)
+	restart := exec.CommandContext(t.Context(), sh)
+	if err := restart.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restart.Process.Kill(); _ = restart.Wait() })
+	wait()
+	d.waitHeroics(1)
+	time.Sleep(1500 * time.Millisecond) // past the guard's next check with no steam running
+	flag := writeCEFDebugFlag(t, d.home, ".steam/steam")
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if _, err := os.Lstat(flag); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the guard stopped while steam.sh ran: the restarted client would open the CEF debugger")
+		}
+	}
+}
