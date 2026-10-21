@@ -184,12 +184,13 @@ service:
     # Clients reach the proxy on the node IP (hostNetwork), not through this.
     type: ClusterIP
     ports:
+      # moonlight-proxy --port / --secure-port.
       http:
         protocol: TCP
-        port: 47984
+        port: 47989
       https:
         protocol: TCP
-        port: 47989
+        port: 47984
   # The Library page (operator --library-port). The Ingress points here, behind
   # Authentik; the operator adds the pod's own basic-auth password.
   library:
