@@ -42,8 +42,9 @@ fi
 # Steam; Steam then serves its CEF remote debugger on 127.0.0.1:8080, where any
 # process in this pod could drive the client. Session pods delete it too
 # (gow-nvidia32's 20-steam-input-off.sh), as they share the install.
-rm -f "${HOME}/.local/share/Steam/.cef-enable-remote-debugging" \
-  "${HOME}/.steam/steam/.cef-enable-remote-debugging"
+CEF_FLAGS=("${HOME}/.local/share/Steam/.cef-enable-remote-debugging"
+  "${HOME}/.steam/steam/.cef-enable-remote-debugging")
+rm -f "${CEF_FLAGS[@]}"
 
 # 64 and 32 bit input interposers and fake udev for gamepads
 STEAM_PRELOAD="/usr/lib/selkies_input_interposer.so:/usr/lib/libudev.so.1.0.0-fake:/usr/lib/selkies_input_interposer_32.so:/usr/lib/libudev.so.1.0.0-fake_32"
@@ -81,6 +82,17 @@ fi
 if ! pgrep -x heroic >/dev/null; then
   setsid -f /usr/bin/wrapped-heroic >"${LOG_DIR}/heroic.log" 2>&1 </dev/null 9>&-
 fi
+
+# Steam restarts itself in place (exit 42: a self-update or a settings
+# restart) without coming back here, and Heroic may have written the flag
+# meanwhile. So keep deleting it for as long as Steam (or steam.sh) runs. One
+# guard per Library: a second cold launch finds its lock held. The lock file
+# is made here, not by the detached guard, which may start after we exit.
+GUARD_LOCK="${LOG_DIR}/cef-flag-guard.lock"
+: >>"${GUARD_LOCK}"
+STEAM_PROCS="${STEAM_PROCS}" setsid -f flock -n "${GUARD_LOCK}" bash -c \
+  'while :; do rm -f "$@"; sleep 1; pgrep -x "${STEAM_PROCS}" >/dev/null || exit 0; done' \
+  cef-flag-guard "${CEF_FLAGS[@]}" >/dev/null 2>&1 </dev/null 9>&-
 
 export LD_PRELOAD="${STEAM_PRELOAD}"
 # In the foreground, as the base image ran it.

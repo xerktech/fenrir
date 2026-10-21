@@ -191,3 +191,63 @@ func writeCEFDebugFlag(t *testing.T, home, dir string) string {
 	}
 	return p
 }
+
+// Steam restarting itself in place (exit 42) skips wrapped-steam, so a flag
+// Heroic writes while Steam runs must go too: a guard deletes it until Steam
+// exits, then exits itself.
+func TestWrappedSteamGuardDeletesCEFDebugFlagWhileSteamRuns(t *testing.T) {
+	d := newSteamDesktop(t)
+	d.steamLife, d.heroicLife = "4", "0"
+	wait := d.start()
+	for deadline := time.Now().Add(5 * time.Second); count(d.callsSoFar(), "cold") == 0; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("Steam never started")
+		}
+	}
+	flag := writeCEFDebugFlag(t, d.home, ".local/share/Steam")
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if _, err := os.Lstat(flag); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a flag written while Steam ran survived: a restart in place would open the CEF debugger")
+		}
+	}
+	wait()
+	d.waitHeroics(1)
+	lock := filepath.Join(d.home, ".local/state/library/cef-flag-guard.lock")
+	for deadline := time.Now().Add(5 * time.Second); exec.CommandContext(t.Context(), "flock", "-n", lock, "true").Run() != nil; time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the guard outlived Steam")
+		}
+	}
+}
+
+// A running Heroic is left alone: the cold launch starts only Steam.
+func TestWrappedSteamKeepsRunningHeroic(t *testing.T) {
+	d := newSteamDesktop(t)
+	d.steamLife = "0"
+	heroic := filepath.Join(d.dir, "bin", "heroic")
+	writeStub(t, heroic, `sleep 10`)
+	running := exec.CommandContext(t.Context(), heroic)
+	if err := running.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = running.Process.Kill(); _ = running.Wait() })
+	time.Sleep(200 * time.Millisecond) // let it exec, so pgrep sees its name
+	d.start()()
+	time.Sleep(500 * time.Millisecond) // a setsid'd Heroic would have logged by now
+	if calls := d.calls(); count(calls, "cold") != 1 || count(calls, "heroic") != 0 {
+		t.Errorf("calls %q: want Steam started and no second Heroic", calls)
+	}
+}
+
+// callsSoFar is calls before anything has logged.
+func (d *steamDesktop) callsSoFar() []string {
+	d.t.Helper()
+	b, err := os.ReadFile(d.log)
+	if err != nil && !os.IsNotExist(err) {
+		d.t.Fatal(err)
+	}
+	return strings.Fields(string(b))
+}

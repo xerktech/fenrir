@@ -75,9 +75,13 @@ RUN f=/etc/cont-init.d/system-services.sh \
   && ! grep -n -i -e decky -e PluginLoader -e homebrew -e cef-enable "$f" \
   && grep -qx 'steamos-dbus-watchdog.sh &' "$f" && grep -qx disown "$f" \
   && rm -r /opt/decky
+# GoW ships some cont-init scripts world-writable (0777), and its entrypoint
+# sources each as root: only root may change them.
+RUN chmod -R go-w /etc/cont-init.d && test -z "$(find /etc/cont-init.d ! -type l -perm /022)"
 
 FROM ghcr.io/games-on-whales/heroic-games-launcher:edge@sha256:a207a39367801a8a8bf24b68dac2c9945052d3117cb03b061b27bd6672aab62f AS heroic
 COPY --from=driver /out/ /
 COPY --chmod=755 root/etc/cont-init.d/05-nvidia-lib32.sh /etc/cont-init.d/
 RUN ldconfig && ldconfig -p | grep -q 'libGLX_nvidia.so.0 (libc6)' \
   && gosu nobody sh -c 'cd /usr/lib/nvidia/wine && test -r nvngx.dll -a -r _nvngx.dll -a -r nvngx_dlssg.dll'
+RUN chmod -R go-w /etc/cont-init.d && test -z "$(find /etc/cont-init.d ! -type l -perm /022)"
