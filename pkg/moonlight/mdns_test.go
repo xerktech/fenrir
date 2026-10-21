@@ -209,7 +209,14 @@ func (c *fakeMDNSConn) ReadFrom(b []byte) (int, *ipv4.ControlMessage, net.Addr, 
 	}
 }
 
+// WriteTo fails once closed, as a real socket does, so a goodbye sent after
+// Close is lost here too.
 func (c *fakeMDNSConn) WriteTo(b []byte, cm *ipv4.ControlMessage, dst net.Addr) (int, error) {
+	select {
+	case <-c.closed:
+		return 0, net.ErrClosed
+	default:
+	}
 	c.out <- mdnsPacket{buf: append([]byte(nil), b...), cm: cm, to: dst}
 	return len(b), nil
 }
