@@ -33,11 +33,13 @@ paths:
   - NRI can't narrow the grant per minor: device rules are set only at container create.
   - A privileged App container, or any App hostPath volume, is refused
     (`validateAppConfinement`, XERK-1915). Tests: `TestBuildPodRejectsAppHostDevices`.
-  - Not covered: an App adding SYS_ADMIN mounts a devtmpfs and opens every `13:*`/`241:*` node,
-    host keyboards included. The Steam/Heroic Apps add SYS_ADMIN with seccomp Unconfined.
-  - Steam can't drop SYS_ADMIN: Proton's bwrap mounts a fresh `/proc`, which a masked `/proc`
-    forbids (EPERM, measured on talos04); `procMount: Unmasked` needs `hostUsers: false`, which
-    the apiserver rejects with hostNetwork. A per-minor eBPF device filter doesn't help either:
+  - Not covered in one pod: an App adding SYS_ADMIN mounts a devtmpfs and opens every
+    `13:*`/`241:*` node, host keyboards included, and can write the node's `core_pattern`.
+    The Steam/Heroic Apps add SYS_ADMIN with seccomp Unconfined. `--app-pod-host-dir` runs
+    the App user-namespaced in a pod of its own, where neither works (`app-pod.md`).
+  - In one pod Steam can't drop SYS_ADMIN: Proton's bwrap mounts a fresh `/proc`, which a masked
+    `/proc` forbids (EPERM, measured on talos04); `procMount: Unmasked` needs `hostUsers: false`,
+    which the apiserver rejects with hostNetwork. A per-minor eBPF device filter doesn't help:
     SYS_ADMIN with no seccomp detaches its own `cgroup_device` program via bpf() and then opens
     any device, host disks included (measured on talos04, XERK-1915).
 - `cmd/nri-input` gives every seccomp-Unconfined App container a default-allow filter denying bpf,

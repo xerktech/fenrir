@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -48,6 +49,9 @@ func main() {
 		"Node labels session pods are pinned to, e.g. kubernetes.io/hostname=talos04.xerktech.com")
 	sessionTolerations := flag.String("session-tolerations", "",
 		"Comma-separated taints (key[=value]:Effect) session pods tolerate, e.g. nvidia.com/gpu=present:NoSchedule")
+	appPodHostDir := flag.String("app-pod-host-dir", "",
+		"Absolute node directory under which each Session's App runs in a user-namespaced pod of its own, apart from Wolf "+
+			"(must be on a mount with shared propagation); empty runs the App in the session pod")
 	disconnectGracePeriod := flag.Duration("disconnect-grace-period", 10*time.Minute,
 		"How long a session's pod is kept after its Moonlight client disconnects, so /resume can re-attach")
 	libraryPort := flag.Int("library-port", 0,
@@ -85,6 +89,12 @@ func main() {
 	nodeSelector, err := labels.ConvertSelectorToLabelsMap(*sessionNodeSelector)
 	if err != nil {
 		klog.Fatalf("--session-node-selector: %v", err)
+	}
+	if *appPodHostDir != "" {
+		if !path.IsAbs(*appPodHostDir) || path.Clean(*appPodHostDir) == "/" {
+			klog.Fatalf("--app-pod-host-dir must be an absolute directory other than /, got %q", *appPodHostDir)
+		}
+		*appPodHostDir = path.Clean(*appPodHostDir)
 	}
 	tolerations, err := controllers.ParseTolerations(*sessionTolerations)
 	if err != nil {
@@ -221,6 +231,7 @@ func main() {
 			WolfAgentImage:      *wolfAgentImage,
 			SessionPortRange:    portRange,
 			SessionNodeSelector: nodeSelector,
+			AppPodHostDir:       *appPodHostDir,
 			SessionTolerations:  tolerations,
 
 			DisconnectGracePeriod: *disconnectGracePeriod,

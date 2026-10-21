@@ -20,4 +20,7 @@ const (
 	// SteamRelinkContainerName repoints the Library's Steam links in a shared
 	// Steam home; it opens no device nodes.
 	SteamRelinkContainerName = "steam-relink"
+	// InputBridgeContainerName publishes device nodes into a user-namespaced
+	// App pod (pkg/inputbridge). It is privileged, so it needs no grant.
+	InputBridgeContainerName = "input-bridge"
 )

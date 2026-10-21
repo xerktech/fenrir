@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"games-on-whales.github.io/direwolf/pkg/fakeudev"
+	"games-on-whales.github.io/direwolf/pkg/inputbridge"
 	"games-on-whales.github.io/direwolf/pkg/wolfapi"
 )
 
@@ -32,6 +34,9 @@ type Agent struct {
 	// Where hotplugged devices are published; InputDevPath and
 	// UdevDataPath outside tests.
 	inputDevPath, udevDataPath string
+	// Publishes the /dev/input nodes: the input-bridge sidecar when the App
+	// runs in its own pod (UseInputBridge), else nil: mknod into inputDevPath.
+	bridge deviceNodes
 
 	// Bounds of the delay before resubscribing after Wolf's event stream
 	// ends or a subscribe fails. A stream that stayed up for maxDelay resets
@@ -60,6 +65,63 @@ func NewAgent(
 	res.lobby = &lobbyJoiner{client: wolfClient, settle: lobbyJoinSettle, unplug: res.handleDeviceUnplug}
 
 	return res
+}
+
+// deviceNodes publishes the /dev/input nodes of hotplugged devices.
+// and their udev database entries.
+type deviceNodes interface {
+	Create(props map[string]string) error
+	Remove(props map[string]string) error
+	WriteHwDB(filename string, content []string) error
+	RemoveHwDB(filename string) error
+	// Clear drops every node and entry.
+	Clear() error
+}
+
+// dirNodes writes into volumes the App's containers share: mknod into dev,
+// udev entries into udev.
+type dirNodes struct{ dev, udev string }
+
+func (d dirNodes) Create(props map[string]string) error {
+	return wrapNodeErr(fakeudev.CreateDeviceNode(d.dev, props))
+}
+
+func (d dirNodes) Remove(props map[string]string) error {
+	return wrapNodeErr(fakeudev.RemoveDeviceNode(d.dev, props))
+}
+
+func (d dirNodes) WriteHwDB(filename string, content []string) error {
+	return wrapNodeErr(fakeudev.WriteHwDbEntry(d.udev, filename, content))
+}
+
+func (d dirNodes) RemoveHwDB(filename string) error {
+	return wrapNodeErr(fakeudev.RemoveHwDbEntry(d.udev, filename))
+}
+
+func (d dirNodes) Clear() error {
+	return wrapNodeErr(errors.Join(fakeudev.ClearDir(d.dev), fakeudev.ClearDir(d.udev)))
+}
+
+func wrapNodeErr(err error) error {
+	if err != nil {
+		return fmt.Errorf("device node: %w", err)
+	}
+	return nil
+}
+
+// UseInputBridge publishes device nodes and udev entries through the
+// input-bridge sidecar listening on socket: the App runs in a user-namespaced
+// pod of its own, where a node in a shared volume would not open, and whose
+// root could write any directory it can map (pkg/inputbridge).
+func (a *Agent) UseInputBridge(socket string) {
+	a.bridge = &inputbridge.Client{Socket: socket}
+}
+
+func (a *Agent) nodes() deviceNodes {
+	if a.bridge != nil {
+		return a.bridge
+	}
+	return dirNodes{dev: a.inputDevPath, udev: a.udevDataPath}
 }
 
 // Run handles Wolf's events until ctx ends. Whenever the stream closes or a
@@ -284,10 +346,8 @@ func logEvent(ev *sse.Event) {
 // a 0666 node would open whichever device the kernel gives its minor next,
 // possibly another session's keyboard. A resumed stream plugs anew.
 func (a *Agent) clearDevices() {
-	for _, dir := range []string{a.inputDevPath, a.udevDataPath} {
-		if err := fakeudev.ClearDir(dir); err != nil {
-			utilruntime.HandleError(fmt.Errorf("failed to clear %s: %w", dir, err))
-		}
+	if err := a.nodes().Clear(); err != nil {
+		utilruntime.HandleError(fmt.Errorf("failed to clear devices: %w", err))
 	}
 }
 
@@ -304,7 +364,7 @@ func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
 		if !fakeudev.IsInputDeviceNode(udevEvent) {
 			continue
 		}
-		if err := fakeudev.CreateDeviceNode(a.inputDevPath, udevEvent); err != nil {
+		if err := a.nodes().Create(udevEvent); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to create device node: %w", err))
 		} else {
 			klog.InfoS("Created device node", "devname", udevEvent["DEVNAME"], "session", ev.SessionID)
@@ -320,7 +380,7 @@ func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
 				filename = "c" + maj + ":" + ev.UdevEvents[0]["MINOR"]
 			}
 		}
-		if err := fakeudev.WriteHwDbEntry(a.udevDataPath, filename, entry.Content); err != nil {
+		if err := a.nodes().WriteHwDB(filename, entry.Content); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to write udev hwdb entry %q: %w", filename, err))
 		} else {
 			klog.InfoS("Wrote udev hwdb entry", "file", filename, "session", ev.SessionID)
@@ -334,7 +394,7 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 		if !fakeudev.IsInputDeviceNode(udevEvent) {
 			continue
 		}
-		if err := fakeudev.RemoveDeviceNode(a.inputDevPath, udevEvent); err != nil {
+		if err := a.nodes().Remove(udevEvent); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to remove device node: %w", err))
 		}
 	}
@@ -346,7 +406,7 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 				filename = "c" + maj + ":" + ev.UdevEvents[0]["MINOR"]
 			}
 		}
-		if err := fakeudev.RemoveHwDbEntry(a.udevDataPath, filename); err != nil {
+		if err := a.nodes().RemoveHwDB(filename); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to remove udev hwdb entry %q: %w", filename, err))
 		}
 	}
