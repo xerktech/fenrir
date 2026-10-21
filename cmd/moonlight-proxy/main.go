@@ -36,6 +36,7 @@ func main() {
 	pinTrustedProxies := flag.String("pin-trusted-proxies", "", "Comma-separated CIDRs of the proxy allowed to assert the user via --pin-user-header. Required with --pin-port")
 	pinProxySecretFile := flag.String("pin-proxy-secret-file", "", "File holding the secret the proxy sends in "+moonlight.PinProxySecretHeader+". Required with --pin-port")
 	pinUserHeader := flag.String("pin-user-header", moonlight.DefaultPinUserHeader, "Header carrying the authenticated username; must match a User name")
+	mdns := flag.Bool("mdns", true, "Advertise the HTTP port over mDNS (_nvstream._tcp) on every multicast interface, so LAN Moonlight clients find the host")
 	namespace := flag.String("namespace", os.Getenv("POD_NAMESPACE"), "Namespace to watch")
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -55,6 +56,7 @@ func main() {
 	klog.Info("Launch timeout: ", *launchTimeout)
 	klog.Info("Max concurrent sessions: ", *maxSessions)
 	klog.Info("Namespace: ", *namespace)
+	klog.Info("mDNS: ", *mdns)
 
 	trustedProxies, err := util.ParsePrefixes(*pinTrustedProxies)
 	if err != nil {
@@ -146,6 +148,19 @@ func main() {
 			},
 		},
 	)
+
+	// Discovery is a convenience: clients can still add the host by address,
+	// so a failure here (e.g. 5353 already bound on the node) only warns.
+	if *mdns {
+		hostname, err := os.Hostname()
+		if err != nil {
+			klog.Warningf("mDNS advertisement off: %s", err)
+		} else if mdnsServer, err := moonlight.AdvertiseMDNS(hostname, *port); err != nil {
+			klog.Warningf("mDNS advertisement off: %s", err)
+		} else {
+			defer mdnsServer.Shutdown()
+		}
+	}
 
 	// Run returns once its servers are shut down; its graceful shutdown is
 	// bounded, so this cannot hang the pod stop.

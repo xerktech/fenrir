@@ -150,6 +150,7 @@ to have an `rtsp` URL added to its status by the `operator` to hand back to the 
 | `--pin-proxy-secret-file` | | File holding the secret the proxy must send in `X-Direwolf-Proxy-Secret` (surrounding whitespace trimmed, at least 32 bytes). |
 | `--pin-trusted-proxies` | | Comma-separated CIDRs of the proxy (Authentik outpost) allowed to assert the user. |
 | `--pin-user-header` | `X-Authentik-Username` | Header carrying the authenticated username; must equal a `User` name. |
+| `--mdns` | `true` | Advertise the proxy (`_nvstream._tcp` on `--port`, instance `Direwolf`, host `<node hostname>.local`) over IPv4 mDNS on every up, multicast-capable interface of the node that has an IPv4 address, so Moonlight on the LAN lists the host. Each interface answers with its own addresses only, and only to queriers on its own subnets. If UDP 5353 is already taken on the node it logs a warning and carries on. |
 | `--launch-timeout` | `60s` | How long `/launch` waits for the operator to create a session and expose its stream URL before giving up. The wait is still bounded by the client connection, so a disconnecting Moonlight client cancels it early. Raise this if cold starts (image pull + wolf boot + `wolf-agent` readiness) are getting cancelled with an HTTP 500; lower it to fail faster. |
 
 ## wolf-agent
@@ -224,7 +225,8 @@ tolerations as the operator's `--session-node-selector` and `--session-toleratio
 release namespace to allow it (PodSecurity `privileged`). App templates must not
 declare their own container ports: on the host network they become host ports and
 collide between sessions. Session pods run Wolf without its Moonlight HTTP/HTTPS
-servers or mDNS, so nothing advertises the node on the LAN: add it to Moonlight by address.
+servers or mDNS; `moonlight-proxy` advertises the node over mDNS instead (`--mdns`), so LAN
+clients find it. Clients on other networks add it by address.
 
 #### Alternative Design Idea: Gateway API
 
