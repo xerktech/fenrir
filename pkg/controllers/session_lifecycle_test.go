@@ -1265,6 +1265,10 @@ func TestPodExitReasonNamesFirstExit(t *testing.T) {
 	if got, want := podExitReason(pod), `container wolf exited (code 1, Error): "wolf died"`; got != want {
 		t.Errorf("podExitReason on a tie = %q, want %q", got, want)
 	}
+	pod.Status.ContainerStatuses[2].Name = "wolf-agent"
+	if got := podExitReason(pod); !strings.HasPrefix(got, "container wolf-agent exited") {
+		t.Errorf("podExitReason on a tie with wolf-agent = %q, want wolf-agent named", got)
+	}
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "pulseaudio", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
 	if got := podExitReason(pod); got != "" {
 		t.Errorf("podExitReason with nothing exited = %q, want none", got)
