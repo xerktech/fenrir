@@ -37,6 +37,8 @@ paths:
     node arrives as a mount of its own without nodev (measured: opens from the userns pod).
   - wolf-agent asks it over a unix socket in an emptyDir only the two mount
     (`--input-bridge-socket`); it publishes only major 13 directly in `input/`.
+  - It writes the udev entries too: wolf-agent (drop ALL + MKNOD, no DAC_OVERRIDE) can't write the
+    locked `udev/data/`, so it mounts neither hotplug directory in split mode.
   - It lstat-checks the new node is a char device before bind-mounting it.
   - The bridge unmounts before removing (a mount point unlinks EBUSY) and on exit clears and
     deletes `<dir>/<UID>`. A SIGKILLed bridge leaves that directory (and its mounts) on the node.

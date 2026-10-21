@@ -153,13 +153,23 @@ func (r *recordingNodes) Remove(p map[string]string) error {
 	return nil
 }
 
+func (r *recordingNodes) WriteHwDB(name string, _ []string) error {
+	r.calls = append(r.calls, "hwdb "+name)
+	return nil
+}
+
+func (r *recordingNodes) RemoveHwDB(name string) error {
+	r.calls = append(r.calls, "rm hwdb "+name)
+	return nil
+}
+
 func (r *recordingNodes) Clear() error {
 	r.calls = append(r.calls, "clear")
 	return nil
 }
 
-// With the App in its own pod, nodes go through the input-bridge and nothing
-// is created in /dev/input; udev entries are still written (XERK-1920).
+// With the App in its own pod, nodes and udev entries go through the
+// input-bridge, and the agent writes neither directory itself (XERK-1920).
 func TestAgentPublishesNodesThroughBridge(t *testing.T) {
 	a := hotplugAgent(t, nil)
 	bridge := &recordingNodes{}
@@ -175,11 +185,13 @@ func TestAgentPublishesNodesThroughBridge(t *testing.T) {
 	a.handleDevicePlug(ev)
 	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent(ev))
 	a.clearDevices()
-	want := []string{"create /dev/input/event69", "remove /dev/input/event69", "clear"}
+	want := []string{"create /dev/input/event69", "hwdb c13:69", "remove /dev/input/event69", "rm hwdb c13:69", "clear"}
 	if !slices.Equal(bridge.calls, want) {
 		t.Errorf("bridge calls = %v, want %v", bridge.calls, want)
 	}
-	if entries, _ := os.ReadDir(a.inputDevPath); len(entries) != 0 {
-		t.Errorf("created in /dev/input: %v", entries)
+	for _, dir := range []string{a.inputDevPath, a.udevDataPath} {
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Errorf("wrote into %s: %v", dir, entries)
+		}
 	}
 }

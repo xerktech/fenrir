@@ -32,8 +32,8 @@ func runInputBridge(args []string) {
 		klog.Fatal("--socket and --session-dir are required")
 	}
 
-	server := inputbridge.NewServer(filepath.Join(*sessionDir, "input"))
 	udevDir := filepath.Join(*sessionDir, "udev")
+	server := inputbridge.NewServer(filepath.Join(*sessionDir, "input"), filepath.Join(udevDir, "data"))
 	for _, dir := range []string{server.InputDir, udevDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			klog.Fatalf("creating %s: %v", dir, err)
@@ -73,8 +73,8 @@ func runInputBridge(args []string) {
 }
 
 // resetUdevDir empties the locked udev directory and recreates what libudev
-// and wolf-agent expect in it: the control file (see udevControlPath in the
-// operator) and the data directory, itself locked, which wolf-agent writes.
+// expects in it: the control file (see udevControlPath in the operator) and
+// the data directory, itself locked, where the bridge writes udev entries.
 func resetUdevDir(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

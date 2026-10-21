@@ -20,7 +20,7 @@ type fakeServer struct {
 
 func newFakeServer(t *testing.T) *fakeServer {
 	t.Helper()
-	f := &fakeServer{Server: NewServer(t.TempDir()), mounted: map[string]bool{}}
+	f := &fakeServer{Server: NewServer(t.TempDir(), t.TempDir()), mounted: map[string]bool{}}
 	f.bindSelf = func(path string) error {
 		f.calls = append(f.calls, "bind "+filepath.Base(path))
 		f.mounted[path] = true
@@ -83,7 +83,7 @@ func TestServerCreateReplacesMountedNode(t *testing.T) {
 // Only input nodes, directly in the directory; never another major.
 func TestServerRefusesOtherDevices(t *testing.T) {
 	f := newFakeServer(t)
-	f.createNode = NewServer(f.InputDir).createNode
+	f.createNode = NewServer(f.InputDir, f.UdevDataDir).createNode
 	for _, props := range []map[string]string{
 		event("/dev/hidraw0", "241"),
 		event("/dev/input/../sda", "13"),
@@ -192,5 +192,35 @@ func TestServerRefusesToBindNonDevice(t *testing.T) {
 	}
 	if len(f.mounted) != 0 {
 		t.Errorf("mounted %v", f.mounted)
+	}
+}
+
+// udev entries are written and removed by name, one path element only, and
+// cleared with the nodes.
+func TestServerHwDbEntries(t *testing.T) {
+	f := newFakeServer(t)
+	if err := f.Handle(Request{Op: OpWriteHwDB, Filename: "c13:69", Content: []string{"E:ID_INPUT_JOYSTICK=1"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(f.UdevDataDir, "c13:69"))
+	if err != nil || string(got) != "E:ID_INPUT_JOYSTICK=1" {
+		t.Fatalf("entry = %q, %v", got, err)
+	}
+	for _, name := range []string{"", ".", "..", "../control", "a/b"} {
+		if err := f.Handle(Request{Op: OpWriteHwDB, Filename: name}); err == nil {
+			t.Errorf("wrote entry %q", name)
+		}
+	}
+	if err := f.Handle(Request{Op: OpRemoveHwDB, Filename: "c13:69"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Handle(Request{Op: OpWriteHwDB, Filename: "c13:70"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(f.UdevDataDir); len(entries) != 0 {
+		t.Errorf("left %v", entries)
 	}
 }

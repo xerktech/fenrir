@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -34,16 +35,21 @@ import (
 
 // Request ops.
 const (
-	OpCreate = "create"
-	OpRemove = "remove"
-	OpClear  = "clear"
+	OpCreate     = "create"
+	OpRemove     = "remove"
+	OpWriteHwDB  = "hwdb-write"
+	OpRemoveHwDB = "hwdb-remove"
+	OpClear      = "clear"
 )
 
 // Request is one line a Client sends: an op and, for create and remove, the
-// udev properties of the device (DEVNAME, MAJOR, MINOR).
+// udev properties of the device (DEVNAME, MAJOR, MINOR); for the hwdb ops,
+// the udev database entry's file name and lines.
 type Request struct {
-	Op    string            `json:"op"`
-	Props map[string]string `json:"props,omitempty"`
+	Op       string            `json:"op"`
+	Props    map[string]string `json:"props,omitempty"`
+	Filename string            `json:"filename,omitempty"`
+	Content  []string          `json:"content,omitempty"`
 }
 
 // Response is the bridge's one-line answer; Error is empty on success.
@@ -58,9 +64,12 @@ const inputMajor = "13"
 // hundred bytes.
 const maxRequestBytes = 64 << 10
 
-// Server publishes device nodes in InputDir, the session's input directory.
+// Server publishes device nodes in InputDir, the session's input directory,
+// and their udev entries in UdevDataDir. Both are locked (LockDir): wolf-agent
+// can't write them either, so every write goes through the bridge.
 type Server struct {
-	InputDir string
+	InputDir    string
+	UdevDataDir string
 
 	// Bind-mount a node onto itself, and undo it. Variables so tests run
 	// without CAP_SYS_ADMIN.
@@ -72,14 +81,15 @@ type Server struct {
 	checkNode func(path string) error
 }
 
-// NewServer returns a Server publishing into inputDir.
-func NewServer(inputDir string) *Server {
+// NewServer returns a Server publishing into inputDir and udevDataDir.
+func NewServer(inputDir, udevDataDir string) *Server {
 	return &Server{
-		InputDir:   inputDir,
-		bindSelf:   bindSelf,
-		unmount:    unmount,
-		createNode: fakeudev.CreateDeviceNode,
-		checkNode:  isCharDevice,
+		InputDir:    inputDir,
+		UdevDataDir: udevDataDir,
+		bindSelf:    bindSelf,
+		unmount:     unmount,
+		createNode:  fakeudev.CreateDeviceNode,
+		checkNode:   isCharDevice,
 	}
 }
 
@@ -169,6 +179,22 @@ func (s *Server) Handle(req Request) error {
 		return s.create(req.Props)
 	case OpRemove:
 		return s.remove(req.Props)
+	case OpWriteHwDB:
+		if err := hwdbName(req.Filename); err != nil {
+			return err
+		}
+		if err := fakeudev.WriteHwDbEntry(s.UdevDataDir, req.Filename, req.Content); err != nil {
+			return fmt.Errorf("write udev entry: %w", err)
+		}
+		return nil
+	case OpRemoveHwDB:
+		if err := hwdbName(req.Filename); err != nil {
+			return err
+		}
+		if err := fakeudev.RemoveHwDbEntry(s.UdevDataDir, req.Filename); err != nil {
+			return fmt.Errorf("remove udev entry: %w", err)
+		}
+		return nil
 	case OpClear:
 		return s.Clear()
 	}
@@ -212,9 +238,32 @@ func (s *Server) remove(props map[string]string) error {
 	return nil
 }
 
-// Clear unmounts and removes every node in InputDir. Wolf destroys a
-// stopped stream's devices without unplug events (see Agent.clearDevices).
+// hwdbName refuses a udev entry name that is not one path element.
+func hwdbName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, '/') {
+		return fmt.Errorf("bad udev entry name %q", name)
+	}
+	return nil
+}
+
+// Clear unmounts and removes every node in InputDir and every udev entry.
+// Wolf destroys a stopped stream's devices without unplug events (see
+// Agent.clearDevices).
 func (s *Server) Clear() error {
+	return errors.Join(s.clearNodes(), s.clearUdev())
+}
+
+func (s *Server) clearUdev() error {
+	if s.UdevDataDir == "" {
+		return nil
+	}
+	if err := fakeudev.ClearDir(s.UdevDataDir); err != nil {
+		return fmt.Errorf("clear udev entries: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) clearNodes() error {
 	entries, err := os.ReadDir(s.InputDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -267,7 +316,17 @@ func (c *Client) Remove(props map[string]string) error {
 	return c.do(Request{Op: OpRemove, Props: props})
 }
 
-// Clear withdraws every device node.
+// WriteHwDB publishes a udev database entry.
+func (c *Client) WriteHwDB(filename string, content []string) error {
+	return c.do(Request{Op: OpWriteHwDB, Filename: filename, Content: content})
+}
+
+// RemoveHwDB withdraws a udev database entry.
+func (c *Client) RemoveHwDB(filename string) error {
+	return c.do(Request{Op: OpRemoveHwDB, Filename: filename})
+}
+
+// Clear withdraws every device node and udev entry.
 func (c *Client) Clear() error {
 	return c.do(Request{Op: OpClear})
 }

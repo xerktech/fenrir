@@ -107,13 +107,16 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 		hotplugDevVolume:  hostDir("input"),
 	}
 
-	// wolf-agent publishes nodes through the bridge, not into /dev/input.
+	// wolf-agent publishes nodes and udev entries through the bridge; it
+	// can't write their locked directories anyway.
 	for i := range wolf.Spec.Containers {
 		ctr := &wolf.Spec.Containers[i]
 		if ctr.Name != v1alpha1types.WolfAgentContainerName {
 			continue
 		}
-		ctr.VolumeMounts = slices.DeleteFunc(ctr.VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == hotplugDevVolume })
+		ctr.VolumeMounts = slices.DeleteFunc(ctr.VolumeMounts, func(m corev1.VolumeMount) bool {
+			return m.Name == hotplugDevVolume || m.Name == hotplugUdevVolume
+		})
 		ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: inputBridgeVolume, MountPath: inputBridgeSocketDir})
 		ctr.Args = append(ctr.Args, "--input-bridge-socket="+inputBridgeSocket)
 	}

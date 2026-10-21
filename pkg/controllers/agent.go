@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -67,24 +68,39 @@ func NewAgent(
 }
 
 // deviceNodes publishes the /dev/input nodes of hotplugged devices.
+// and their udev database entries.
 type deviceNodes interface {
 	Create(props map[string]string) error
 	Remove(props map[string]string) error
+	WriteHwDB(filename string, content []string) error
+	RemoveHwDB(filename string) error
+	// Clear drops every node and entry.
 	Clear() error
 }
 
-// dirNodes mknods nodes into dir, a volume the App's containers share.
-type dirNodes struct{ dir string }
+// dirNodes writes into volumes the App's containers share: mknod into dev,
+// udev entries into udev.
+type dirNodes struct{ dev, udev string }
 
 func (d dirNodes) Create(props map[string]string) error {
-	return wrapNodeErr(fakeudev.CreateDeviceNode(d.dir, props))
+	return wrapNodeErr(fakeudev.CreateDeviceNode(d.dev, props))
 }
 
 func (d dirNodes) Remove(props map[string]string) error {
-	return wrapNodeErr(fakeudev.RemoveDeviceNode(d.dir, props))
+	return wrapNodeErr(fakeudev.RemoveDeviceNode(d.dev, props))
 }
 
-func (d dirNodes) Clear() error { return wrapNodeErr(fakeudev.ClearDir(d.dir)) }
+func (d dirNodes) WriteHwDB(filename string, content []string) error {
+	return wrapNodeErr(fakeudev.WriteHwDbEntry(d.udev, filename, content))
+}
+
+func (d dirNodes) RemoveHwDB(filename string) error {
+	return wrapNodeErr(fakeudev.RemoveHwDbEntry(d.udev, filename))
+}
+
+func (d dirNodes) Clear() error {
+	return wrapNodeErr(errors.Join(fakeudev.ClearDir(d.dev), fakeudev.ClearDir(d.udev)))
+}
 
 func wrapNodeErr(err error) error {
 	if err != nil {
@@ -93,9 +109,10 @@ func wrapNodeErr(err error) error {
 	return nil
 }
 
-// UseInputBridge publishes device nodes through the input-bridge sidecar
-// listening on socket: the App runs in a user-namespaced pod of its own,
-// where a node in a shared volume would not open (pkg/inputbridge).
+// UseInputBridge publishes device nodes and udev entries through the
+// input-bridge sidecar listening on socket: the App runs in a user-namespaced
+// pod of its own, where a node in a shared volume would not open, and whose
+// root could write any directory it can map (pkg/inputbridge).
 func (a *Agent) UseInputBridge(socket string) {
 	a.bridge = &inputbridge.Client{Socket: socket}
 }
@@ -104,7 +121,7 @@ func (a *Agent) nodes() deviceNodes {
 	if a.bridge != nil {
 		return a.bridge
 	}
-	return dirNodes{dir: a.inputDevPath}
+	return dirNodes{dev: a.inputDevPath, udev: a.udevDataPath}
 }
 
 // Run handles Wolf's events until ctx ends. Whenever the stream closes or a
@@ -330,10 +347,7 @@ func logEvent(ev *sse.Event) {
 // possibly another session's keyboard. A resumed stream plugs anew.
 func (a *Agent) clearDevices() {
 	if err := a.nodes().Clear(); err != nil {
-		utilruntime.HandleError(fmt.Errorf("failed to clear device nodes: %w", err))
-	}
-	if err := fakeudev.ClearDir(a.udevDataPath); err != nil {
-		utilruntime.HandleError(fmt.Errorf("failed to clear %s: %w", a.udevDataPath, err))
+		utilruntime.HandleError(fmt.Errorf("failed to clear devices: %w", err))
 	}
 }
 
@@ -366,7 +380,7 @@ func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
 				filename = "c" + maj + ":" + ev.UdevEvents[0]["MINOR"]
 			}
 		}
-		if err := fakeudev.WriteHwDbEntry(a.udevDataPath, filename, entry.Content); err != nil {
+		if err := a.nodes().WriteHwDB(filename, entry.Content); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to write udev hwdb entry %q: %w", filename, err))
 		} else {
 			klog.InfoS("Wrote udev hwdb entry", "file", filename, "session", ev.SessionID)
@@ -392,7 +406,7 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 				filename = "c" + maj + ":" + ev.UdevEvents[0]["MINOR"]
 			}
 		}
-		if err := fakeudev.RemoveHwDbEntry(a.udevDataPath, filename); err != nil {
+		if err := a.nodes().RemoveHwDB(filename); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to remove udev hwdb entry %q: %w", filename, err))
 		}
 	}

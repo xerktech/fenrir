@@ -167,7 +167,7 @@ func TestSplitAppPodWiresInputBridge(t *testing.T) {
 	if !slices.Contains(agent.Args, "--input-bridge-socket="+inputBridgeSocket) {
 		t.Errorf("wolf-agent args %v lack the bridge socket", agent.Args)
 	}
-	if m := mountsAt(t, &wolf.Spec, v1alpha1types.WolfAgentContainerName); m[InputDevPath] != "" || m[inputBridgeSocketDir] != inputBridgeVolume {
+	if m := mountsAt(t, &wolf.Spec, v1alpha1types.WolfAgentContainerName); m[InputDevPath] != "" || m["/run/udev"] != "" || m[inputBridgeSocketDir] != inputBridgeVolume {
 		t.Errorf("wolf-agent mounts %v", m)
 	}
 	if !slices.Contains(bridge.Args, "--session-dir="+inputBridgeSessionsPath+"/"+string(sess.UID)) {
