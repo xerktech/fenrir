@@ -215,7 +215,7 @@ func TestWrappedSteamGuardDeletesCEFDebugFlagWhileSteamRuns(t *testing.T) {
 	}
 	wait()
 	d.waitHeroics(1)
-	lock := filepath.Join(d.home, ".local/state/library/cef-flag-guard.lock")
+	lock := filepath.Join(d.home, ".local", "state", "library", "cef-flag-guard.lock")
 	for deadline := time.Now().Add(5 * time.Second); exec.CommandContext(t.Context(), "flock", "-n", lock, "true").Run() != nil; time.Sleep(100 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("the guard outlived Steam")
@@ -290,7 +290,7 @@ func TestWrappedSteamGuardOutlastsSteamShRestartGap(t *testing.T) {
 func TestWrappedSteamGuardWaitsOutLastGuard(t *testing.T) {
 	d := newSteamDesktop(t)
 	d.steamLife, d.heroicLife = "4", "0"
-	lock := filepath.Join(d.home, ".local/state/library/cef-flag-guard.lock")
+	lock := filepath.Join(d.home, ".local", "state", "library", "cef-flag-guard.lock")
 	if err := os.MkdirAll(filepath.Dir(lock), 0o755); err != nil {
 		t.Fatal(err)
 	}
