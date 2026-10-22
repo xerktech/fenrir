@@ -178,16 +178,25 @@ func TestRemoveSessionDirUnmountsFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	stuck := fakeMounts{filepath.Join(dir, "runtime"): true}
-	if err := removeSessionDir(dir, stuck.under, func(string) error { return nil }); err == nil {
+	if _, err := removeSessionDir(dir, stuck.under, func(string) error { return nil }); err == nil {
 		t.Error("no error for a mount still there")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "runtime", "data")); err != nil {
 		t.Errorf("removed through a mount: %v", err)
 	}
-	if err := removeSessionDir(dir, stuck.under, stuck.unmount); err != nil {
-		t.Fatal(err)
+	if removed, err := removeSessionDir(dir, stuck.under, stuck.unmount); err != nil || !removed {
+		t.Fatalf("removed = %v, err = %v", removed, err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("directory kept: %v", err)
+	}
+}
+
+// A directory another bridge's sweep already removed is not reported removed,
+// so bridges starting together log each directory once.
+func TestRemoveSessionDirReportsGoneDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "uid")
+	if removed, err := removeSessionDir(dir, fakeMounts{}.under, fakeMounts{}.unmount); err != nil || removed {
+		t.Errorf("removed = %v, err = %v", removed, err)
 	}
 }

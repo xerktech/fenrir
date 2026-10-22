@@ -30,8 +30,10 @@ func runInputBridge(args []string) {
 	eventsSocket := fs.String("events-socket", "",
 		"Unix socket the App pod's udev-relay reads udev events from; in a directory only it mounts")
 	sessionDir := fs.String("session-dir", "", "The session's host directory, mounted Bidirectional; nodes go in its input/ (required)")
-	liveSessions := fs.String("live-sessions", "",
-		"Comma-separated UIDs of the Sessions the operator knew of; their sibling directories are never swept")
+	var liveSessions []string
+	fs.Func("live-sessions",
+		"UIDs (repeatable, each comma-separated) of the Sessions the operator knew of; their sibling directories are never swept",
+		func(v string) error { liveSessions = append(liveSessions, v); return nil })
 	sweepBefore := fs.String("sweep-before", "",
 		"RFC 3339 time; sibling directories of no live Session last changed before it are removed (empty: no sweep)")
 	klog.InitFlags(fs)
@@ -61,7 +63,7 @@ func runInputBridge(args []string) {
 		klog.Fatal(err)
 	}
 	if *sweepBefore != "" {
-		live, cutoff, err := sweepArgs(*sessionDir, *liveSessions, *sweepBefore)
+		live, cutoff, err := sweepArgs(*sessionDir, liveSessions, *sweepBefore)
 		if err != nil {
 			klog.Fatal(err)
 		}
@@ -109,14 +111,16 @@ func runInputBridge(args []string) {
 
 // sweepArgs parses the sweep's flags. The bridge's own directory is always
 // live, whatever the operator listed.
-func sweepArgs(sessionDir, liveSessions, sweepBefore string) (map[string]bool, time.Time, error) {
+func sweepArgs(sessionDir string, liveSessions []string, sweepBefore string) (map[string]bool, time.Time, error) {
 	cutoff, err := time.Parse(time.RFC3339, sweepBefore)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("--sweep-before: %w", err)
 	}
 	live := map[string]bool{filepath.Base(sessionDir): true}
-	for uid := range strings.SplitSeq(liveSessions, ",") {
-		live[uid] = true
+	for _, v := range liveSessions {
+		for uid := range strings.SplitSeq(v, ",") {
+			live[uid] = true
+		}
 	}
 	return live, cutoff, nil
 }

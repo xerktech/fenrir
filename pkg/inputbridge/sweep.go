@@ -49,8 +49,12 @@ func sweep(root string, live map[string]bool, cutoff time.Time,
 		if !fi.ModTime().Before(cutoff) {
 			continue
 		}
-		if err := removeSessionDir(dir, mounts, unmount); err != nil {
+		removed, err := removeSessionDir(dir, mounts, unmount)
+		if err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		if !removed {
 			continue
 		}
 		klog.Infof("input-bridge: removed leftover session directory %s", dir)
@@ -63,17 +67,24 @@ func sweep(root string, live map[string]bool, cutoff time.Time,
 // mount besides the nodes Clear undoes.
 func RemoveSessionDir(dir string) error {
 	// Clean: mount points are matched by string.
-	return removeSessionDir(filepath.Clean(dir), mountsUnder, unmount)
+	_, err := removeSessionDir(filepath.Clean(dir), mountsUnder, unmount)
+	return err
 }
 
-func removeSessionDir(dir string, mounts func(string) ([]string, error), unmount func(string) error) error {
+// removeSessionDir reports whether it found dir still there to remove: bridges
+// starting together sweep the same directories, and RemoveAll succeeds on one
+// already gone, so each would log removing it.
+func removeSessionDir(dir string, mounts func(string) ([]string, error), unmount func(string) error) (bool, error) {
 	if err := unmountAll(dir, mounts, unmount); err != nil {
-		return err
+		return false, err
+	}
+	if _, err := os.Lstat(dir); os.IsNotExist(err) {
+		return false, nil
 	}
 	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("remove %s: %w", dir, err)
+		return false, fmt.Errorf("remove %s: %w", dir, err)
 	}
-	return nil
+	return true, nil
 }
 
 // unmountAll detaches every mount at or under dir, deepest first, and fails unless
