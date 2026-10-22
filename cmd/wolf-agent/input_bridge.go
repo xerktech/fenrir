@@ -102,7 +102,7 @@ func runInputBridge(args []string) {
 		klog.Errorf("input-bridge: clearing %s: %v", server.InputDir, err)
 		return
 	}
-	if err := os.RemoveAll(*sessionDir); err != nil {
+	if err := inputbridge.RemoveSessionDir(*sessionDir); err != nil {
 		klog.Errorf("input-bridge: removing %s: %v", *sessionDir, err)
 	}
 }

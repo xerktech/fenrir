@@ -4,9 +4,28 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
+
+// fakeMounts is a mount table: the mount points that unmount removes.
+type fakeMounts map[string]bool
+
+func (m fakeMounts) under(dir string) ([]string, error) {
+	var points []string
+	for p := range m {
+		if strings.HasPrefix(p, dir+"/") {
+			points = append(points, p)
+		}
+	}
+	return points, nil
+}
+
+func (m fakeMounts) unmount(path string) error {
+	delete(m, path)
+	return nil
+}
 
 // Sweep removes only directories of Sessions not listed live and older than
 // the cutoff, unmounting their nodes first (XERK-2178).
@@ -34,16 +53,13 @@ func TestSweepRemovesOnlyOldDirsOfGoneSessions(t *testing.T) {
 		}
 	}
 
-	var unmounted []string
-	err := sweep(root, map[string]bool{live: true}, cutoff, func(path string) error {
-		unmounted = append(unmounted, path)
-		return nil
-	})
+	m := fakeMounts{filepath.Join(root, gone, "input", "event3"): true}
+	err := sweep(root, map[string]bool{live: true}, cutoff, m.under, m.unmount)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{filepath.Join(root, gone, "input", "event3")}; !slices.Equal(unmounted, want) {
-		t.Errorf("unmounted %v, want %v", unmounted, want)
+	if len(m) != 0 {
+		t.Errorf("left mounted: %v", m)
 	}
 	if _, err := os.Stat(filepath.Join(root, gone)); !os.IsNotExist(err) {
 		t.Errorf("gone Session's directory still there: %v", err)
@@ -63,7 +79,8 @@ func TestSweepKeepsDirWhoseNodeWontUnmount(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, gone, "input", "event3"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err := sweep(root, nil, time.Now().Add(time.Hour), func(string) error { return os.ErrPermission })
+	m := fakeMounts{filepath.Join(root, gone, "input", "event3"): true}
+	err := sweep(root, nil, time.Now().Add(time.Hour), m.under, func(string) error { return os.ErrPermission })
 	if err == nil {
 		t.Error("no error for a failed unmount")
 	}
@@ -86,7 +103,7 @@ func TestSweepDoesNotFollowInputSymlink(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, gone, "input")); err != nil {
 		t.Fatal(err)
 	}
-	err := sweep(root, nil, time.Now().Add(time.Hour), func(path string) error {
+	err := sweep(root, nil, time.Now().Add(time.Hour), fakeMounts{}.under, func(path string) error {
 		t.Errorf("unmounted %s", path)
 		return nil
 	})
@@ -98,5 +115,79 @@ func TestSweepDoesNotFollowInputSymlink(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(root, gone)); !os.IsNotExist(err) {
 		t.Errorf("dead directory kept: %v", err)
+	}
+}
+
+// Every mount under a dead directory goes, deepest first, not only the nodes
+// in input/: a leftover on talos04 held a tmpfs on runtime/. One that stays
+// keeps the directory, as RemoveAll would empty the mounted filesystem.
+func TestSweepUnmountsEverythingFirst(t *testing.T) {
+	const gone = "0b4c5f0e-6a1d-4e8e-9d0a-1f2e3d4c5b6a"
+	root := t.TempDir()
+	dir := filepath.Join(root, gone)
+	for _, d := range []string{"runtime/sub", "input"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := fakeMounts{
+		filepath.Join(dir, "runtime"):        true,
+		filepath.Join(dir, "runtime", "sub"): true,
+		filepath.Join(dir, "input"):          true,
+	}
+	var order []string
+	unmount := func(p string) error {
+		order = append(order, strings.TrimPrefix(p, dir+"/"))
+		return m.unmount(p)
+	}
+	if err := sweep(root, nil, time.Now().Add(time.Hour), m.under, unmount); err != nil {
+		t.Fatal(err)
+	}
+	if i, j := slices.Index(order, "runtime/sub"), slices.Index(order, "runtime"); i < 0 || j < 0 || i > j {
+		t.Errorf("unmount order %v, want runtime/sub before runtime", order)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("directory kept: %v", err)
+	}
+
+	// A mount that won't go keeps its directory.
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "runtime", "data"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stuck := fakeMounts{filepath.Join(dir, "runtime"): true}
+	err := sweep(root, nil, time.Now().Add(time.Hour), stuck.under, func(string) error { return nil })
+	if err == nil {
+		t.Error("no error for a mount still there")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "runtime", "data")); err != nil {
+		t.Errorf("removed through a mount: %v", err)
+	}
+}
+
+// A session directory with a mount that won't go is kept, its mounted
+// contents untouched; one whose mounts all go is removed.
+func TestRemoveSessionDirUnmountsFirst(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "uid")
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "runtime", "data"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stuck := fakeMounts{filepath.Join(dir, "runtime"): true}
+	if err := removeSessionDir(dir, stuck.under, func(string) error { return nil }); err == nil {
+		t.Error("no error for a mount still there")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "runtime", "data")); err != nil {
+		t.Errorf("removed through a mount: %v", err)
+	}
+	if err := removeSessionDir(dir, stuck.under, stuck.unmount); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("directory kept: %v", err)
 	}
 }
