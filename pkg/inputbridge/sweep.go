@@ -49,11 +49,7 @@ func sweep(root string, live map[string]bool, cutoff time.Time,
 		if !fi.ModTime().Before(cutoff) {
 			continue
 		}
-		if err := unmountAll(dir, mounts, unmount); err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		if err := os.RemoveAll(dir); err != nil {
+		if err := removeSessionDir(dir, mounts, unmount); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -66,7 +62,12 @@ func sweep(root string, live map[string]bool, cutoff time.Time,
 // bridge's own directory on exit goes this way too: its runtime/ may carry a
 // mount besides the nodes Clear undoes.
 func RemoveSessionDir(dir string) error {
-	if err := unmountAll(dir, mountsUnder, unmount); err != nil {
+	// Clean: mount points are matched by string.
+	return removeSessionDir(filepath.Clean(dir), mountsUnder, unmount)
+}
+
+func removeSessionDir(dir string, mounts func(string) ([]string, error), unmount func(string) error) error {
+	if err := unmountAll(dir, mounts, unmount); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(dir); err != nil {

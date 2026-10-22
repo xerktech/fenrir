@@ -166,3 +166,28 @@ func TestSweepUnmountsEverythingFirst(t *testing.T) {
 		t.Errorf("removed through a mount: %v", err)
 	}
 }
+
+// A session directory with a mount that won't go is kept, its mounted
+// contents untouched; one whose mounts all go is removed.
+func TestRemoveSessionDirUnmountsFirst(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "uid")
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "runtime", "data"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stuck := fakeMounts{filepath.Join(dir, "runtime"): true}
+	if err := removeSessionDir(dir, stuck.under, func(string) error { return nil }); err == nil {
+		t.Error("no error for a mount still there")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "runtime", "data")); err != nil {
+		t.Errorf("removed through a mount: %v", err)
+	}
+	if err := removeSessionDir(dir, stuck.under, stuck.unmount); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("directory kept: %v", err)
+	}
+}
