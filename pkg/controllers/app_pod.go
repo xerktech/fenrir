@@ -273,12 +273,8 @@ func (c *SessionController) inputBridgeContainer(session *v1alpha1types.Session)
 		"--socket=" + inputBridgeSocket,
 		"--session-dir=" + path.Join(inputBridgeSessionsPath, string(session.UID)),
 		"--events-socket=" + path.Join(inputBridgeSessionsPath, string(session.UID), "events", udevEventsSocket),
-	}
-	// Without a creation time there is no safe cutoff: no sweep.
-	if !session.CreationTimestamp.IsZero() {
-		args = append(args,
-			"--live-sessions="+strings.Join(live, ","),
-			"--sweep-before="+session.CreationTimestamp.Add(-sweepMargin).UTC().Format(time.RFC3339))
+		"--live-sessions=" + strings.Join(live, ","),
+		"--sweep-before=" + session.CreationTimestamp.Add(-sweepMargin).UTC().Format(time.RFC3339),
 	}
 	return corev1.Container{
 		Name:            v1alpha1types.InputBridgeContainerName,
