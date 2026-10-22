@@ -252,6 +252,14 @@ func TestReadVideoPackets(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("handler on a read error = %d, want 500", rec.Code)
 	}
+
+	// Read-only: other methods are refused before anything is read.
+	rec = httptest.NewRecorder()
+	VideoPacketsHandler(func() (VideoPackets, error) { t.Error("POST read the counts"); return VideoPackets{}, nil }).
+		ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, VideoPacketsPath, http.NoBody))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("handler on a POST = %d, want 405", rec.Code)
+	}
 }
 
 // The pod tells wolf-agent which port to count.

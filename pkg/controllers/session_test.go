@@ -1448,3 +1448,114 @@ func TestExampleAppsMountNoInputDevices(t *testing.T) {
 		}
 	}
 }
+
+// App and User specs that collide with what buildPod adds must end the
+// Session with the reason (errInvalidSpec), not reach the API server as an
+// Invalid pod after the launch's wait (XERK-1675).
+func TestBuildPodRejectsCollisionsWithOperatorAdditions(t *testing.T) {
+	tests := map[string]struct {
+		edit func(*v1alpha1types.App, *v1alpha1types.User)
+		want string
+	}{
+		"App volume named like an operator volume": {
+			func(app *v1alpha1types.App, _ *v1alpha1types.User) {
+				app.Spec.Template.Spec.Volumes = append(app.Spec.Template.Spec.Volumes, corev1.Volume{Name: "wolf-runtime", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+			},
+			`two volumes are named "wolf-runtime"`,
+		},
+		"App mount at the runtime dir": {
+			func(app *v1alpha1types.App, _ *v1alpha1types.User) {
+				spec := &app.Spec.Template.Spec
+				spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "x11", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+				spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "x11", MountPath: "/tmp/.X11-unix/"})
+			},
+			"mounts two volumes at /tmp/.X11-unix",
+		},
+		"App init container mount at the runtime dir": {
+			func(app *v1alpha1types.App, _ *v1alpha1types.User) {
+				spec := &app.Spec.Template.Spec
+				spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "x11", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+				spec.InitContainers = append(spec.InitContainers, corev1.Container{Name: "prep", Image: "busybox", VolumeMounts: []corev1.VolumeMount{
+					{Name: "x11", MountPath: "/x"}, {Name: "x11", MountPath: "/x", SubPath: "y"},
+				}})
+			},
+			`container "prep" mounts two volumes at /x`,
+		},
+		"User wolf policy claims the GPU of an App without spec.gpu": {
+			func(app *v1alpha1types.App, user *v1alpha1types.User) {
+				app.Spec.GPU = nil
+				user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{Wolf: &v1alpha1types.SidecarPolicy{
+					Resources: &corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: appGPUClaim}}},
+				}}
+			},
+			`container "wolf" claims resource "direwolf-gpu", which the pod does not declare`,
+		},
+	}
+	for name, tc := range tests {
+		sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+		// The informers' copies: buildPod reads them back below.
+		user, err := sc.UserInformer.Namespaced(sess.Namespace).Get(sess.Spec.UserReference.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tc.edit(app, user)
+		if _, err := sc.buildPod(sess); !errors.Is(err, errInvalidSpec) || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: buildPod err = %v, want errInvalidSpec containing %q", name, err, tc.want)
+		}
+	}
+}
+
+// A label value the API server refuses (a hand-made App's name is not capped
+// at 63 characters) is caught before the pod is sent.
+func TestValidateBuiltPodRejectsInvalidLabelValue(t *testing.T) {
+	err := validateBuiltPod(&corev1.PodSpec{}, map[string]string{"direwolf/app": strings.Repeat("a", 64)})
+	if err == nil || !strings.Contains(err.Error(), "direwolf/app") {
+		t.Errorf("validateBuiltPod = %v, want the label rejected", err)
+	}
+	if err := validateBuiltPod(&corev1.PodSpec{}, map[string]string{"direwolf/app": strings.Repeat("a", 63)}); err != nil {
+		t.Errorf("validateBuiltPod with a 63-character value = %v", err)
+	}
+}
+
+// A Session deleted since the informer's copy was read (e.g. ended by the
+// previous reconcile) is over, not an error to requeue and log (XERK-1675).
+func TestConfirmFreshTreatsDeletedSessionAsEnded(t *testing.T) {
+	sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+	if err := sc.SessionClient.Delete(context.Background(), sess.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sc.confirmFresh(context.Background(), sess); !errors.Is(err, errSessionEnded) {
+		t.Errorf("confirmFresh of a deleted Session = %v, want errSessionEnded", err)
+	}
+}
+
+// In split mode the Wolf pod gains volumes after buildPod's check; an App
+// volume named like one of them is caught too.
+func TestBuildPodsRejectsCollisionWithSplitVolumes(t *testing.T) {
+	f := newPortsFixture(t)
+	f.sc.AppPodHostDir = testAppPodHostDir
+	sess := podReadySession(f)
+	app, err := f.sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The informer's copy: buildPods reads it back below.
+	app.Spec.Template.Spec.Volumes = append(app.Spec.Template.Spec.Volumes, corev1.Volume{Name: inputBridgeVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+	if _, _, err := f.sc.buildPods(sess, testWolfPodUID); !errors.Is(err, errInvalidSpec) || !strings.Contains(err.Error(), inputBridgeVolume) {
+		t.Errorf("buildPods err = %v, want errInvalidSpec naming %s", err, inputBridgeVolume)
+	}
+}
+
+// Every example User/App pair builds a session pod.
+func TestExamplePairsBuild(t *testing.T) {
+	for _, dir := range []string{"generic_devices", "nvidia_devices", "volume_mounts"} {
+		sc, _, sess, _ := reconcileFixtures(t, "../../examples/"+dir+"/user.yaml", "../../examples/"+dir+"/firefox.yaml")
+		if _, err := sc.buildPod(sess); err != nil {
+			t.Errorf("examples/%s: %v", dir, err)
+		}
+	}
+}

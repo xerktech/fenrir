@@ -562,6 +562,8 @@ func TestSessionPodGPUFromAppSpec(t *testing.T) {
 		switch {
 		case tc.wantCapacity == "" && req.Capacity != nil:
 			t.Errorf("%s: whole card wanted, claim requests %+v", tc.gpu, req.Capacity)
+		case tc.wantCapacity != "" && req.Capacity == nil:
+			t.Errorf("%s: claim requests the whole card, want %s of memory", tc.gpu, tc.wantCapacity)
 		case tc.wantCapacity != "":
 			got := req.Capacity.Requests[gpuClaimMemoryCapacity]
 			if got.Cmp(resource.MustParse(tc.wantCapacity)) != 0 {
@@ -1077,5 +1079,42 @@ func TestAppGPUMemoryMustBePositive(t *testing.T) {
 	app := &v1alpha1types.App{Spec: v1alpha1types.AppSpec{GPU: &v1alpha1types.AppGPU{Memory: &neg}}}
 	if err := addAppGPUClaim(&corev1.PodSpec{}, app, &v1alpha1types.Session{}); err == nil {
 		t.Error("negative gpu.memory accepted")
+	}
+}
+
+// A claim name both the operator and the App or User add (a template
+// container already claiming direwolf-gpu, a User's wolf policy claiming it
+// too) must still be referenced once per container: the API server rejects
+// a duplicate.
+func TestOverlappingGPUClaimsReferencedOnce(t *testing.T) {
+	sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/firefox.yaml")
+	// The informers' copies: buildPod reads them back below.
+	app, err := sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := sc.UserInformer.Namespaced(sess.Namespace).Get(sess.Spec.UserReference.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range app.Spec.Template.Spec.Containers {
+		ctr := &app.Spec.Template.Spec.Containers[i]
+		ctr.Resources.Claims = append(ctr.Resources.Claims, corev1.ResourceClaim{Name: appGPUClaim})
+	}
+	user.Spec.SidecarPolicies = &v1alpha1types.SidecarPolicies{Wolf: &v1alpha1types.SidecarPolicy{
+		Resources: &corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: appGPUClaim}}},
+	}}
+	pod, err := sc.buildPod(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ctr := range pod.Spec.Containers {
+		want := 0
+		if ctr.Name == "app" || ctr.Name == "wolf" {
+			want = 1
+		}
+		if got := gpuClaimRefs(ctr.Resources.Claims); got != want {
+			t.Errorf("container %s claims GPU %d times, want %d", ctr.Name, got, want)
+		}
 	}
 }

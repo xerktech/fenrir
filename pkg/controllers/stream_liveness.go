@@ -61,7 +61,12 @@ func ReadVideoPackets(videoPort int, acctPath, tablePath string) (VideoPackets, 
 
 // VideoPacketsHandler serves read's count as JSON.
 func VideoPacketsHandler(read func() (VideoPackets, error)) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+			return
+		}
 		v, err := read()
 		if err != nil {
 			klog.ErrorS(err, "Counting video packets")

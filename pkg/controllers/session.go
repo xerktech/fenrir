@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation"
 	v1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -807,6 +808,11 @@ func (c *SessionController) writeStatus(ctx context.Context, session *v1alpha1ty
 // write already superseded) would leave Wolf and the recorded status apart.
 func (c *SessionController) confirmFresh(ctx context.Context, session *v1alpha1types.Session) error {
 	live, err := c.SessionClient.Get(ctx, session.Name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		// Deleted since the informer's copy was read (e.g. ended by an
+		// earlier reconcile): nothing left to do, nothing to requeue.
+		return fmt.Errorf("%w: %s/%s is gone", errSessionEnded, session.Namespace, session.Name)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to get session %s/%s: %w", session.Namespace, session.Name, err)
 	}
@@ -1322,7 +1328,6 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 			Command: []string{
 				"sh", "-c", `
 				mkdir -p /mnt/data/wolf/cfg
-				cp /certs/* /mnt/data/wolf/cfg/
 ` + wolfConfigSeedScript + `				chown 1000:1000 /mnt/data/wolf
 				chmod 777 /mnt/data/wolf
 				chown -R 1000:1000 /mnt/data/wolf/cfg
@@ -1788,6 +1793,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		annotations = map[string]string{}
 	}
 	annotations[portBlockAnnotation] = strconv.Itoa(int(session.Status.Ports.HTTP))
+	if err := validateBuiltPod(&podToCreate.Spec, podToCreate.Labels); err != nil {
+		return nil, invalidSpec(err)
+	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        c.podName(session),
@@ -2151,6 +2159,53 @@ func validateNoUserHostPathMounts(spec *corev1.PodSpec, userVolumes []corev1.Vol
 		}
 		return nil
 	})
+}
+
+// validateBuiltPod catches what an App or User spec can make collide with the
+// operator's own additions, which the API server would reject as Invalid only
+// after a launch's wait: a volume name the operator also uses (a template
+// volume named "wolf-runtime"; validateAppConfinement reserves container
+// names), two mounts at one path in a container (an App mounting
+// /tmp/.X11-unix), a container claiming a resource the pod doesn't declare (a
+// User's wolf policy claiming direwolf-gpu for an App without spec.gpu), or a
+// label value the API server refuses (an App name over 63 characters).
+func validateBuiltPod(spec *corev1.PodSpec, podLabels map[string]string) error {
+	for k, v := range podLabels {
+		if errs := validation.IsValidLabelValue(v); len(errs) > 0 {
+			return fmt.Errorf("validation failed: pod label %s=%q: %s", k, v, strings.Join(errs, "; "))
+		}
+	}
+	claims := sets.New[string]()
+	for _, c := range spec.ResourceClaims {
+		claims.Insert(c.Name)
+	}
+	for _, ctrs := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
+		for _, ctr := range ctrs {
+			paths := sets.New[string]()
+			for _, m := range ctr.VolumeMounts {
+				// Cleaned: the API server compares exact strings, so it
+				// would let "/tmp/.X11-unix/" shadow the operator's mount.
+				p := path.Clean(m.MountPath)
+				if paths.Has(p) {
+					return fmt.Errorf("validation failed: container %q mounts two volumes at %s (the operator's own mounts count)", ctr.Name, p)
+				}
+				paths.Insert(p)
+			}
+			for _, c := range ctr.Resources.Claims {
+				if !claims.Has(c.Name) {
+					return fmt.Errorf("validation failed: container %q claims resource %q, which the pod does not declare (an App without spec.gpu gets no %q claim)", ctr.Name, c.Name, appGPUClaim)
+				}
+			}
+		}
+	}
+	volumes := sets.New[string]()
+	for _, v := range spec.Volumes {
+		if volumes.Has(v.Name) {
+			return fmt.Errorf("validation failed: two volumes are named %q; the operator adds its own", v.Name)
+		}
+		volumes.Insert(v.Name)
+	}
+	return nil
 }
 
 // forEachAppVolumeRef calls fn with the name of every volume an App template
