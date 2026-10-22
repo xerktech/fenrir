@@ -82,3 +82,37 @@ func TestAppGoneReasonKeepsCachedApp(t *testing.T) {
 		t.Errorf("appGoneReason = %q, %v for a cached App", reason, err)
 	}
 }
+
+// A Session whose pod exists is kept when its App is gone: its game runs
+// without the App, and kubectl replace --force deletes an App only briefly.
+func TestMissingAppKeepsSessionWithPod(t *testing.T) {
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := podReadySession(f)
+		s.Spec.GameReference.Name = "missing"
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object { return []runtime.Object{readyPod(s)} })
+	reason, err := f.sc.appGoneReason(context.Background(), sess)
+	if err != nil || reason != "" {
+		t.Errorf("appGoneReason = %q, %v for a Session with a pod", reason, err)
+	}
+}
+
+// Reconcile retries an API error confirming the App is gone, keeping the
+// Session.
+func TestMissingAppRetriesAPIError(t *testing.T) {
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := f.session("alex-1", f.user)
+		s.CreationTimestamp = metav1.Now() // not yet reaped as unstarted
+		s.Spec.GameReference.Name = "missing"
+		return s
+	}, nil)
+	f.dw.PrependReactor("get", "apps", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("apiserver restarting")
+	})
+	if err := f.sc.Reconcile(portsTestNS, sess.Name, sess); err == nil {
+		t.Error("API error not returned for retry")
+	}
+	if !f.sessionExists(t, sess.Name) {
+		t.Error("an API error ended the session")
+	}
+}

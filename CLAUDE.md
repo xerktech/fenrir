@@ -114,8 +114,10 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       (keys nested in arrays exceed the cost budget, annotation size). `TestInvalidPodEndsSession`.
     - So does a buildPod error from the App/User spec (wrapped in `errInvalidSpec`); a failed
       informer lookup stays retryable. `TestInvalidSpecEndsSession` (XERK-1782).
-    - So does a Session whose App is missing from the cache and a live GET (`appGoneReason`,
-      XERK-2191); the GET covers an App watch lagging the Session's. `TestMissingApp*`.
+    - So does a Session with no pod whose App is missing from the cache and a live GET
+      (`appGoneReason`, XERK-2191); the GET covers an App watch lagging the Session's.
+      One with a pod is kept: its game runs on, and `replace --force` deletes an App briefly.
+      Tests: `TestMissingApp*`.
     - All three record a Warning Event on the App (the client only sees a failed launch); the
       operator Role needs `events` create/patch.
     - `validateBuiltPod` runs on the finished pod for collisions an App/User spec makes with the
