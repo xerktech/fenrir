@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,5 +35,25 @@ func TestSweepArgsKeepOwnDir(t *testing.T) {
 	}
 	if _, _, err := sweepArgs("/sessions/own", nil, "-0001-11-30T00:00:00Z"); err == nil {
 		t.Error("bad --sweep-before accepted")
+	}
+}
+
+// Every --live-session counts, as does an older operator's comma-separated
+// --live-sessions: a flag keeping only its last value would have the bridge
+// sweep the other live Sessions' directories.
+func TestLiveSessionFlagsAccumulate(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	live := liveSessionFlags(fs)
+	if err := fs.Parse([]string{"--live-session=a", "--live-session=b", "--live-sessions=c,d"}); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := sweepArgs("/sessions/own", *live, "2026-10-21T11:50:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, uid := range []string{"own", "a", "b", "c", "d"} {
+		if !got[uid] {
+			t.Errorf("%s not live in %v", uid, got)
+		}
 	}
 }

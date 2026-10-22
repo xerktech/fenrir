@@ -22,7 +22,16 @@ import (
 // its name is a UID not in live and it was last changed before cutoff, a time
 // before that pod was built: a Session created since isn't in live, but its
 // directory is newer than cutoff.
+//
+// Bridges starting together take turns, holding root's lock: sweeping at
+// once, each logged removing every directory, as RemoveAll succeeds on a path
+// already gone.
 func Sweep(root string, live map[string]bool, cutoff time.Time) error {
+	unlock, err := lockDir(root)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return sweep(root, live, cutoff, mountsUnder, unmount)
 }
 
@@ -49,12 +58,8 @@ func sweep(root string, live map[string]bool, cutoff time.Time,
 		if !fi.ModTime().Before(cutoff) {
 			continue
 		}
-		removed, err := removeSessionDir(dir, mounts, unmount)
-		if err != nil {
+		if err := removeSessionDir(dir, mounts, unmount); err != nil {
 			errs = append(errs, err)
-			continue
-		}
-		if !removed {
 			continue
 		}
 		klog.Infof("input-bridge: removed leftover session directory %s", dir)
@@ -67,24 +72,17 @@ func sweep(root string, live map[string]bool, cutoff time.Time,
 // mount besides the nodes Clear undoes.
 func RemoveSessionDir(dir string) error {
 	// Clean: mount points are matched by string.
-	_, err := removeSessionDir(filepath.Clean(dir), mountsUnder, unmount)
-	return err
+	return removeSessionDir(filepath.Clean(dir), mountsUnder, unmount)
 }
 
-// removeSessionDir reports whether it found dir still there to remove: bridges
-// starting together sweep the same directories, and RemoveAll succeeds on one
-// already gone, so each would log removing it.
-func removeSessionDir(dir string, mounts func(string) ([]string, error), unmount func(string) error) (bool, error) {
+func removeSessionDir(dir string, mounts func(string) ([]string, error), unmount func(string) error) error {
 	if err := unmountAll(dir, mounts, unmount); err != nil {
-		return false, err
-	}
-	if _, err := os.Lstat(dir); os.IsNotExist(err) {
-		return false, nil
+		return err
 	}
 	if err := os.RemoveAll(dir); err != nil {
-		return false, fmt.Errorf("remove %s: %w", dir, err)
+		return fmt.Errorf("remove %s: %w", dir, err)
 	}
-	return true, nil
+	return nil
 }
 
 // unmountAll detaches every mount at or under dir, deepest first, and fails unless

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Only mount points at or under dir count, unescaped (XERK-2178).
@@ -41,5 +42,36 @@ func TestRemoveSessionDir(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("directory kept: %v", err)
+	}
+}
+
+// Sweeps of one root take turns: a second waits until the first unlocks.
+func TestLockDirExcludes(t *testing.T) {
+	dir := t.TempDir()
+	unlock, err := lockDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked := make(chan func())
+	go func() {
+		u, err := lockDir(dir)
+		if err != nil {
+			t.Error(err)
+		}
+		locked <- u
+	}()
+	select {
+	case <-locked:
+		t.Fatal("second lock taken while the first is held")
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case u := <-locked:
+		if u != nil {
+			u()
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second lock not taken after unlock")
 	}
 }

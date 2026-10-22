@@ -331,8 +331,10 @@ func (c *SessionController) inputBridgeContainer(session *v1alpha1types.Session)
 	}
 	// One flag per UID: Linux caps a single argument at 128 KiB
 	// (MAX_ARG_STRLEN), about 3,500 UIDs joined, past which the exec fails.
+	// A new name, not repeated --live-sessions: an older bridge keeps only
+	// the last of those and would sweep the others' live directories.
 	for _, uid := range live {
-		args = append(args, "--live-sessions="+uid)
+		args = append(args, "--live-session="+uid)
 	}
 	return corev1.Container{
 		Name:            v1alpha1types.InputBridgeContainerName,

@@ -30,10 +30,7 @@ func runInputBridge(args []string) {
 	eventsSocket := fs.String("events-socket", "",
 		"Unix socket the App pod's udev-relay reads udev events from; in a directory only it mounts")
 	sessionDir := fs.String("session-dir", "", "The session's host directory, mounted Bidirectional; nodes go in its input/ (required)")
-	var liveSessions []string
-	fs.Func("live-sessions",
-		"UIDs (repeatable, each comma-separated) of the Sessions the operator knew of; their sibling directories are never swept",
-		func(v string) error { liveSessions = append(liveSessions, v); return nil })
+	liveSessions := liveSessionFlags(fs)
 	sweepBefore := fs.String("sweep-before", "",
 		"RFC 3339 time; sibling directories of no live Session last changed before it are removed (empty: no sweep)")
 	klog.InitFlags(fs)
@@ -63,7 +60,7 @@ func runInputBridge(args []string) {
 		klog.Fatal(err)
 	}
 	if *sweepBefore != "" {
-		live, cutoff, err := sweepArgs(*sessionDir, liveSessions, *sweepBefore)
+		live, cutoff, err := sweepArgs(*sessionDir, *liveSessions, *sweepBefore)
 		if err != nil {
 			klog.Fatal(err)
 		}
@@ -107,6 +104,17 @@ func runInputBridge(args []string) {
 	if err := inputbridge.RemoveSessionDir(*sessionDir); err != nil {
 		klog.Errorf("input-bridge: removing %s: %v", *sessionDir, err)
 	}
+}
+
+// liveSessionFlags registers the flags listing the Sessions the operator knew
+// of: --live-session, once per UID, and the older operators' comma-separated
+// --live-sessions. Both accumulate.
+func liveSessionFlags(fs *flag.FlagSet) *[]string {
+	var live []string
+	add := func(v string) error { live = append(live, v); return nil }
+	fs.Func("live-session", "UID of a Session the operator knew of, repeated per Session; its sibling directory is never swept", add)
+	fs.Func("live-sessions", "Comma-separated --live-session UIDs (older operators)", add)
+	return &live
 }
 
 // sweepArgs parses the sweep's flags. The bridge's own directory is always

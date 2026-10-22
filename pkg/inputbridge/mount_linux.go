@@ -84,3 +84,24 @@ func unescapeMountPath(s string) string {
 	}
 	return b.String()
 }
+
+// lockDir takes an exclusive flock on dir, waiting for any holder, until the
+// returned func releases it. The lock is the inode's, so it holds across the
+// node's containers.
+func lockDir(dir string) (func(), error) {
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", dir, err)
+	}
+	for {
+		err = unix.Flock(fd, unix.LOCK_EX)
+		if !errors.Is(err, unix.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("lock %s: %w", dir, err)
+	}
+	return func() { _ = unix.Close(fd) }, nil
+}

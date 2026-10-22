@@ -502,8 +502,8 @@ func TestInputBridgeSweepsOnlyGoneSessions(t *testing.T) {
 		t.Fatal("no input-bridge")
 	}
 	for _, want := range []string{
-		"--live-sessions=" + string(sess.UID),
-		"--live-sessions=" + string(other.UID),
+		"--live-session=" + string(sess.UID),
+		"--live-session=" + string(other.UID),
 		"--sweep-before=2026-10-21T11:50:00Z",
 	} {
 		if !slices.Contains(bridge.Args, want) {
