@@ -30,8 +30,7 @@ func runInputBridge(args []string) {
 	eventsSocket := fs.String("events-socket", "",
 		"Unix socket the App pod's udev-relay reads udev events from; in a directory only it mounts")
 	sessionDir := fs.String("session-dir", "", "The session's host directory, mounted Bidirectional; nodes go in its input/ (required)")
-	liveSessions := fs.String("live-sessions", "",
-		"Comma-separated UIDs of the Sessions the operator knew of; their sibling directories are never swept")
+	liveSessions := liveSessionFlags(fs)
 	sweepBefore := fs.String("sweep-before", "",
 		"RFC 3339 time; sibling directories of no live Session last changed before it are removed (empty: no sweep)")
 	klog.InitFlags(fs)
@@ -107,16 +106,29 @@ func runInputBridge(args []string) {
 	}
 }
 
+// liveSessionFlags registers the flags listing the Sessions the operator knew
+// of: --live-session, once per UID, and the older operators' comma-separated
+// --live-sessions. Both accumulate.
+func liveSessionFlags(fs *flag.FlagSet) *[]string {
+	var live []string
+	add := func(v string) error { live = append(live, v); return nil }
+	fs.Func("live-session", "UID of a Session the operator knew of, repeated per Session; its sibling directory is never swept", add)
+	fs.Func("live-sessions", "Comma-separated --live-session UIDs (older operators)", add)
+	return &live
+}
+
 // sweepArgs parses the sweep's flags. The bridge's own directory is always
 // live, whatever the operator listed.
-func sweepArgs(sessionDir, liveSessions, sweepBefore string) (map[string]bool, time.Time, error) {
+func sweepArgs(sessionDir string, liveSessions []string, sweepBefore string) (map[string]bool, time.Time, error) {
 	cutoff, err := time.Parse(time.RFC3339, sweepBefore)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("--sweep-before: %w", err)
 	}
 	live := map[string]bool{filepath.Base(sessionDir): true}
-	for uid := range strings.SplitSeq(liveSessions, ",") {
-		live[uid] = true
+	for _, v := range liveSessions {
+		for uid := range strings.SplitSeq(v, ",") {
+			live[uid] = true
+		}
 	}
 	return live, cutoff, nil
 }

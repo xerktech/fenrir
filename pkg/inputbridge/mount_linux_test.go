@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Only mount points at or under dir count, unescaped (XERK-2178).
@@ -41,5 +42,72 @@ func TestRemoveSessionDir(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("directory kept: %v", err)
+	}
+}
+
+// Sweeps of one root take turns: a second waits until the first unlocks.
+func TestLockDirExcludes(t *testing.T) {
+	dir := t.TempDir()
+	unlock, err := lockDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked := make(chan func())
+	go func() {
+		u, err := lockDir(dir)
+		if err != nil {
+			t.Error(err)
+		}
+		locked <- u
+	}()
+	select {
+	case <-locked:
+		t.Fatal("second lock taken while the first is held")
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case u := <-locked:
+		if u != nil {
+			u()
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second lock not taken after unlock")
+	}
+}
+
+// Sweep holds root's lock throughout: it removes nothing while another
+// sweep holds it.
+func TestSweepWaitsForRootLock(t *testing.T) {
+	root := t.TempDir()
+	dead := filepath.Join(root, "0b4c5f0e-6a1d-4e8e-9d0a-1f2e3d4c5b6a")
+	if err := os.Mkdir(dead, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error)
+	go func() { done <- Sweep(root, nil, time.Now().Add(time.Hour)) }()
+	select {
+	case err := <-done:
+		t.Fatalf("swept while the lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := os.Stat(dead); err != nil {
+		t.Fatalf("removed while the lock was held: %v", err)
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sweep not run after unlock")
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Errorf("dead dir kept: %v", err)
 	}
 }

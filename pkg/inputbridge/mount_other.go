@@ -11,3 +11,5 @@ func bindSelf(string) error { return errUnsupported }
 func unmount(string) error { return nil }
 
 func mountsUnder(string) ([]string, error) { return nil, errUnsupported }
+
+func lockDir(string) (func(), error) { return nil, errUnsupported }

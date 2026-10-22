@@ -61,15 +61,20 @@ paths:
     deletes `<dir>/<UID>`.
   - Leftovers (a SIGKILLed bridge's dir and mounts; dirs kubelet recreates for an App pod starting
     after its Session ended) are swept by each new bridge (`inputbridge.Sweep`, XERK-2178). It
-    has no API access, so the operator passes `--live-sessions` (every Session in its cache) and
-    `--sweep-before` (its Session's creation less `sweepMargin`): a Session made later is unlisted
+    has no API access, so the operator passes `--live-session` per UID (every Session in its
+    cache) and `--sweep-before` (its Session's creation less `sweepMargin`): a Session made later is unlisted
     but its dir is newer. Hence `<dir>` must not be shared by two operators (namespaces).
   - It unmounts every mount under a dead dir (`/proc/self/mountinfo`, deepest first), not only
     `input/` nodes: a leftover on talos04 held a tmpfs on `runtime/`. Any mount left keeps the dir,
     since `RemoveAll` crosses mounts and would empty the mounted filesystem.
   - The bridge's exit removes its own dir the same way (`RemoveSessionDir`).
+  - One arg per UID: a joined list hits MAX_ARG_STRLEN (128 KiB, ~3,500 UIDs) and the exec fails.
+    Never repeat `--live-sessions` instead: older bridges keep its last value and sweep live dirs.
+  - Sweeps of one `<dir>` take turns under its flock (`lockDir`): bridges starting together each
+    logged removing every dir, as `RemoveAll` succeeds on a path already gone.
   - nri-input was the other candidate; it stays tokenless with every capability dropped.
-  - Tests: `TestSweep*`, `TestParseMountsUnder`, `TestRemoveSessionDir*`, `TestInputBridgeSweepsOnlyGoneSessions`.
+  - Tests: `TestSweep*`, `TestParseMountsUnder`, `TestRemoveSessionDir*`, `TestLockDirExcludes`,
+    `TestInputBridgeSweepsOnlyGoneSessions`.
   - `<dir>` must sit on a mount with shared propagation on the node, or Bidirectional fails.
 - The App pod's own network namespace doesn't hear the node's udevd, so Steam's Big Picture missed
   every pad plugged after it started (games, which enumerate at start, still saw them).

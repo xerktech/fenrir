@@ -22,7 +22,16 @@ import (
 // its name is a UID not in live and it was last changed before cutoff, a time
 // before that pod was built: a Session created since isn't in live, but its
 // directory is newer than cutoff.
+//
+// Bridges starting together take turns, holding root's lock: sweeping at
+// once, each logged removing every directory, as RemoveAll succeeds on a path
+// already gone.
 func Sweep(root string, live map[string]bool, cutoff time.Time) error {
+	unlock, err := lockDir(root)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return sweep(root, live, cutoff, mountsUnder, unmount)
 }
 

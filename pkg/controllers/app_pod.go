@@ -7,7 +7,6 @@ import (
 	"maps"
 	"path"
 	"slices"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -328,8 +327,14 @@ func (c *SessionController) inputBridgeContainer(session *v1alpha1types.Session)
 		"--socket=" + inputBridgeSocket,
 		"--session-dir=" + path.Join(inputBridgeSessionsPath, string(session.UID)),
 		"--events-socket=" + path.Join(inputBridgeSessionsPath, string(session.UID), "events", udevEventsSocket),
-		"--live-sessions=" + strings.Join(live, ","),
 		"--sweep-before=" + session.CreationTimestamp.Add(-sweepMargin).UTC().Format(time.RFC3339),
+	}
+	// One flag per UID: Linux caps a single argument at 128 KiB
+	// (MAX_ARG_STRLEN), about 3,500 UIDs joined, past which the exec fails.
+	// A new name, not repeated --live-sessions: an older bridge keeps only
+	// the last of those and would sweep the others' live directories.
+	for _, uid := range live {
+		args = append(args, "--live-session="+uid)
 	}
 	return corev1.Container{
 		Name:            v1alpha1types.InputBridgeContainerName,
