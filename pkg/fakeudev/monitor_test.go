@@ -8,7 +8,7 @@ import (
 
 // Wolf's fake-udev test vectors (tests/platforms/linux/fake-udev.cpp).
 func TestMonitorMessageMatchesWolfsFakeUdev(t *testing.T) {
-	if got := murmurHash2([]byte("input"), 0); got != 3248653424 {
+	if got := murmurHash2([]byte("input")); got != 3248653424 {
 		t.Errorf(`hash("input") = %d, want 3248653424`, got)
 	}
 	props := map[string]string{
@@ -34,6 +34,10 @@ func TestMonitorMessageMatchesWolfsFakeUdev(t *testing.T) {
 	}
 	if got := binary.BigEndian.Uint32(msg[28:]); got != 0 {
 		t.Errorf("devtype hash = %d, want 0 without DEVTYPE", got)
+	}
+	usb := MonitorMessage(map[string]string{"SUBSYSTEM": "usb", "DEVTYPE": "usb_device"})
+	if got := binary.BigEndian.Uint32(usb[28:]); got == 0 || got != murmurHash2([]byte("usb_device")) {
+		t.Errorf("devtype hash = %d", got)
 	}
 	if string(msg[40:]) != wantBody {
 		t.Errorf("body = %q", msg[40:])

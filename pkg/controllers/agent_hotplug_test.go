@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/r3labs/sse/v2"
 
+	"games-on-whales.github.io/direwolf/pkg/inputbridge"
 	"games-on-whales.github.io/direwolf/pkg/wolfapi"
 )
 
@@ -206,5 +208,50 @@ func TestAgentPublishesNodesThroughBridge(t *testing.T) {
 		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 			t.Errorf("wrote into %s: %v", dir, entries)
 		}
+	}
+}
+
+// Through UseInputBridge the agent's announcements reach the bridge's event
+// stream, which the App pod's udev-relay broadcasts (XERK-1920): without
+// them Big Picture misses pads plugged after Steam started.
+func TestAgentAnnouncesThroughBridge(t *testing.T) {
+	dir, err := os.MkdirTemp("", "ab") //nolint:usetesting // t.TempDir's path is too long for a socket
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	srv := inputbridge.NewServer(filepath.Join(dir, "in"), filepath.Join(dir, "udev"), dir)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	lc := net.ListenConfig{}
+	reqs, err := lc.Listen(ctx, "unix", filepath.Join(dir, "r"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs, err := lc.Listen(ctx, "unix", filepath.Join(dir, "e"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ctx, reqs) }()
+	go func() { _ = srv.ServeEvents(ctx, evs) }()
+
+	a := hotplugAgent(t, nil)
+	a.UseInputBridge(filepath.Join(dir, "r"))
+	a.announce([]map[string]string{{"DEVPATH": "/devices/virtual/input/input9", "SUBSYSTEM": "input"}}, "add")
+
+	got := make(chan map[string]string, 1)
+	go func() {
+		_ = inputbridge.Subscribe(ctx, filepath.Join(dir, "e"), func(ev map[string]string) error {
+			got <- ev
+			return nil
+		})
+	}()
+	select {
+	case ev := <-got:
+		if ev["ACTION"] != "add" || ev["DEVPATH"] != "/devices/virtual/input/input9" {
+			t.Errorf("relayed %v", ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event reached the bridge's stream")
 	}
 }

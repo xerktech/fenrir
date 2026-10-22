@@ -56,7 +56,7 @@ paths:
   - A relay that (re)connects gets an add for every device still announced; Clear announces
     removals, as Wolf destroys a stopped stream's devices without unplug events.
 - nri-input grants by container name, so the App pod (it keeps the session label) still gets
-  `13:*`/`241:*` and the seccomp filter; `input-bridge` is an operator container and gets nothing.
+  `13:*`/`241:*` and the seccomp filter; `input-bridge` and `udev-relay` get no device grants.
 - spec.gpu's claim is a named ResourceClaim both pods reference; a template-generated claim is
   per pod (Wolf would get another card) and is refused when both pods use it.
 - The stream waits for the App pod to be Ready as it waited for the game in one pod

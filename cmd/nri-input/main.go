@@ -169,7 +169,8 @@ func (p *plugin) adjustment(pod *api.PodSandbox, ctrName string) *api.ContainerA
 			&api.LinuxDeviceCgroup{Allow: true, Type: "c", Major: api.Int64(miscMajor), Minor: api.Int64(uinputMinor), Access: deviceRWM},
 		)}
 	case v1alpha1types.WolfAgentContainerName, v1alpha1types.PulseAudioContainerName,
-		v1alpha1types.InitContainerName, v1alpha1types.SteamRelinkContainerName:
+		v1alpha1types.InitContainerName, v1alpha1types.SteamRelinkContainerName,
+		v1alpha1types.InputBridgeContainerName, v1alpha1types.UdevRelayContainerName:
 		return nil
 	default:
 		// The App's containers open the nodes wolf-agent mknods into their

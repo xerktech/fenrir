@@ -391,3 +391,30 @@ func TestSplitAppPodRelaysUdevEvents(t *testing.T) {
 		t.Errorf("bridge args lack %s", want)
 	}
 }
+
+// Every volume the split adds is the operator's: an App container mounting
+// one by name (the udev event socket, the bridge's) would be refused.
+func TestSplitAppPodVolumesAreOperatorVolumes(t *testing.T) {
+	f := newPortsFixture(t)
+	f.sc.AppPodHostDir = testAppPodHostDir
+	sess := podReadySession(f)
+	combined, err := f.sc.buildPod(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := map[string]bool{}
+	for _, v := range combined.Spec.Volumes {
+		before[v.Name] = true
+	}
+	wolf, app, err := f.sc.splitAppPod(sess, combined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pod := range []*corev1.Pod{wolf, app} {
+		for _, v := range pod.Spec.Volumes {
+			if !before[v.Name] && !slices.Contains(operatorVolumes, v.Name) {
+				t.Errorf("%s volume %q is added by the split but not in operatorVolumes", pod.Name, v.Name)
+			}
+		}
+	}
+}

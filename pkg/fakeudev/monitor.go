@@ -49,21 +49,21 @@ func MonitorMessage(props map[string]string) []byte {
 	binary.NativeEndian.PutUint32(msg[16:], monitorHeaderSize)
 	binary.NativeEndian.PutUint32(msg[20:], uint32(body.Len())) //nolint:gosec // a few hundred bytes
 	if s := props["SUBSYSTEM"]; s != "" {
-		binary.BigEndian.PutUint32(msg[24:], murmurHash2([]byte(s), 0))
+		binary.BigEndian.PutUint32(msg[24:], murmurHash2([]byte(s)))
 	}
 	if d := props["DEVTYPE"]; d != "" {
-		binary.BigEndian.PutUint32(msg[28:], murmurHash2([]byte(d), 0))
+		binary.BigEndian.PutUint32(msg[28:], murmurHash2([]byte(d)))
 	}
 	// Tag bloom filter (msg[32:40]) left 0, as Wolf's fake-udev does.
 	return append(msg, body.String()...)
 }
 
 // murmurHash2 is Austin Appleby's MurmurHash2, which libudev uses for its
-// filter hashes (systemd's string_hash32).
-func murmurHash2(data []byte, seed uint32) uint32 {
+// filter hashes (systemd's string_hash32, seed 0).
+func murmurHash2(data []byte) uint32 {
 	const m = 0x5bd1e995
 	const r = 24
-	h := seed ^ uint32(len(data)) //nolint:gosec // short strings
+	h := uint32(len(data)) //nolint:gosec // short strings
 	for len(data) >= 4 {
 		k := binary.LittleEndian.Uint32(data)
 		k *= m
