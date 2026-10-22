@@ -910,7 +910,7 @@ func (c *SessionController) reconcileSessionPod(ctx context.Context, session *v1
 		return c.checkPod(ctx, session, live)
 	}
 
-	pod, _, err := c.buildPods(session)
+	pod, _, err := c.buildPods(session, "")
 	switch {
 	case stderrors.Is(err, errInvalidSpec):
 		// Like an Invalid pod create below: end the Session now rather than

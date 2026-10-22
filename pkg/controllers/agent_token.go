@@ -175,9 +175,11 @@ func (c *SessionController) agentCredentials(ctx context.Context, session *v1alp
 	}, nil
 }
 
-func podReady(pod *corev1.Pod) bool {
+func podReady(pod *corev1.Pod) bool { return podConditionTrue(pod, corev1.PodReady) }
+
+func podConditionTrue(pod *corev1.Pod, typ corev1.PodConditionType) bool {
 	for _, cond := range pod.Status.Conditions {
-		if cond.Type == corev1.PodReady {
+		if cond.Type == typ {
 			return cond.Status == corev1.ConditionTrue
 		}
 	}
