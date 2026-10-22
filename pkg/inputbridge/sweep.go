@@ -62,7 +62,20 @@ func sweep(root string, live map[string]bool, cutoff time.Time,
 	return errors.Join(errs...)
 }
 
-// unmountAll detaches every mount under dir, deepest first, and fails unless
+// RemoveSessionDir unmounts everything at or under dir, then removes it. The
+// bridge's own directory on exit goes this way too: its runtime/ may carry a
+// mount besides the nodes Clear undoes.
+func RemoveSessionDir(dir string) error {
+	if err := unmountAll(dir, mountsUnder, unmount); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove %s: %w", dir, err)
+	}
+	return nil
+}
+
+// unmountAll detaches every mount at or under dir, deepest first, and fails unless
 // none is left. Not only the bridge's node mounts in input/: on talos04 a
 // leftover directory held a tmpfs on runtime/. RemoveAll crosses mounts, so
 // one left would have its filesystem's contents deleted.

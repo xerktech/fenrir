@@ -53,8 +53,9 @@ paths:
   - It unmounts every mount under a dead dir (`/proc/self/mountinfo`, deepest first), not only
     `input/` nodes: a leftover on talos04 held a tmpfs on `runtime/`. Any mount left keeps the dir,
     since `RemoveAll` crosses mounts and would empty the mounted filesystem.
+  - The bridge's exit removes its own dir the same way (`RemoveSessionDir`).
   - nri-input was the other candidate; it stays tokenless with every capability dropped.
-  - Tests: `TestSweep*`, `TestParseMountsUnder`, `TestInputBridgeSweepsOnlyGoneSessions`.
+  - Tests: `TestSweep*`, `TestParseMountsUnder`, `TestRemoveSessionDir`, `TestInputBridgeSweepsOnlyGoneSessions`.
   - `<dir>` must sit on a mount with shared propagation on the node, or Bidirectional fails.
 - The App pod's own network namespace doesn't hear the node's udevd, so Steam's Big Picture missed
   every pad plugged after it started (games, which enumerate at start, still saw them).

@@ -3,12 +3,14 @@
 package inputbridge
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
 
-// Only mount points strictly under dir count, unescaped (XERK-2178).
+// Only mount points at or under dir count, unescaped (XERK-2178).
 func TestParseMountsUnder(t *testing.T) {
 	const info = `76 1 0:40 / /var rw - xfs /dev/sda rw
 3749 76 0:594 / /sessions/4673be1c/runtime rw,nosuid,nodev,relatime shared:543 - tmpfs none rw
@@ -21,8 +23,23 @@ func TestParseMountsUnder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/sessions/4673be1c/runtime", "/sessions/4673be1c/input/event3", "/sessions/4673be1c/a b"}
+	want := []string{"/sessions/4673be1c/runtime", "/sessions/4673be1c/input/event3", "/sessions/4673be1c/a b", "/sessions/4673be1c"}
 	if !slices.Equal(got, want) {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// The bridge's own directory on exit goes through the same unmount-first
+// path; with nothing mounted it is simply removed.
+func TestRemoveSessionDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "uid")
+	if err := os.MkdirAll(filepath.Join(dir, "runtime", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveSessionDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("directory kept: %v", err)
 	}
 }

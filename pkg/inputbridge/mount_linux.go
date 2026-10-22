@@ -35,7 +35,7 @@ func unmount(path string) error {
 	return fmt.Errorf("unmount %s: %w", path, err)
 }
 
-// mountsUnder lists the mount points strictly under dir in this mount
+// mountsUnder lists the mount points at or under dir in this mount
 // namespace, from /proc/self/mountinfo: the kernel's paths, so no symlink in
 // dir is followed to find them.
 func mountsUnder(dir string) ([]string, error) {
@@ -56,7 +56,7 @@ func parseMountsUnder(r io.Reader, dir string) ([]string, error) {
 		if len(fields) < 5 {
 			continue
 		}
-		if p := unescapeMountPath(fields[4]); strings.HasPrefix(p, dir+"/") {
+		if p := unescapeMountPath(fields[4]); p == dir || strings.HasPrefix(p, dir+"/") {
 			points = append(points, p)
 		}
 	}
