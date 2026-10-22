@@ -370,6 +370,12 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	} else if reason != "" {
 		return c.endSession(ctx, newObj, reason)
 	}
+	if reason, err := c.appGoneReason(ctx, newObj); err != nil {
+		return err
+	} else if reason != "" {
+		c.warnApp(newObj, "AppNotFound", reason)
+		return c.endSession(ctx, newObj, reason)
+	}
 	oldStatus := newObj.Status.DeepCopy()
 	portsError := c.allocatePorts(ctx, newObj)
 
@@ -873,6 +879,30 @@ func (c *SessionController) unstreamableReason(ctx context.Context, session *v1a
 		return "", fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
 	}
 	return ipErr.Error(), nil
+}
+
+// appGoneReason says why session must end because its App does not exist
+// (deleted, or misnamed in a hand-made Session), or "" if it must not. Every
+// step needs the App, so without this the Session retries forever (XERK-2191).
+func (c *SessionController) appGoneReason(ctx context.Context, session *v1alpha1types.Session) (string, error) {
+	name := session.Spec.GameReference.Name
+	_, err := c.AppInformer.Namespaced(session.Namespace).Get(name)
+	if err == nil {
+		return "", nil
+	} else if !errors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to get app %s/%s: %w", session.Namespace, name, err)
+	}
+	// The App and Session watches are separate streams, so a Session can
+	// reach our cache before its App does: ask the API server.
+	_, err = c.AppClient.Get(ctx, name, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		return "", nil
+	case errors.IsNotFound(err):
+		return fmt.Sprintf("its app %s does not exist", name), nil
+	default:
+		return "", fmt.Errorf("failed to get app %s/%s: %w", session.Namespace, name, err)
+	}
 }
 
 // reconcilePod ensures the session's pod exists and returns it. The pod runs
