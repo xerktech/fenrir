@@ -1080,3 +1080,45 @@ func waitLobbyState(t *testing.T, a *Agent, state lobbyJoinState) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// A joined stream whose AudioSession carried no AES key is matched by ID
+// alone: while Wolf still lists it, the catch-up must not take it for ended.
+func TestAgentCatchUpKeepsJoinedStreamWithoutKey(t *testing.T) {
+	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	a := hotplugAgent(t, client)
+	a.lobby.settle = 0
+	a.minResubscribeDelay = time.Millisecond
+	go a.Run(t.Context())
+	ch := <-client.subs
+	sendOn(ch, wolfapi.VideoSessionEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	sendOn(ch, wolfapi.AudioSessionEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
+	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
+	client.wantJoin(t)
+	client.mu.Lock()
+	client.listed = []wolfapi.Session{{ClientID: wolfStreamID, AESKey: streamKey, State: wolfapi.SessionStreaming}}
+	client.mu.Unlock()
+	close(ch)
+	ch = <-client.subs
+	// Unbuffered: once taken, the catch-up before it is done.
+	sendOn(ch, "Done", "")
+	if s, _ := a.lobby.joinedStream(); s != wolfStreamID {
+		t.Errorf("joined stream %q after resubscribe, want %s still joined", s, wolfStreamID)
+	}
+}
+
+// reset starts a new stream from nothing: a previous stream's key, setup,
+// pings, join state and held unplugs must not carry over to it.
+func TestLobbyJoinerResetClearsStream(t *testing.T) {
+	j := &lobbyJoiner{
+		stream: "old", key: "k-old", video: true, audio: true, videoPing: true, audioPing: true,
+		state: lobbyJoinDone, attempts: 2, held: []wolfapi.UnplugDeviceEvent{{SessionID: "old"}},
+	}
+	ticket := j.ticket
+	j.reset("new")
+	want := lobbyJoiner{stream: "new", state: lobbyJoinWaiting, ticket: ticket + 1}
+	if j.stream != want.stream || j.key != "" || j.video || j.audio || j.videoPing || j.audioPing ||
+		j.state != want.state || j.attempts != 0 || j.held != nil || j.ticket != want.ticket {
+		t.Errorf("after reset: %+v, want only stream %q and a new ticket", j, want.stream)
+	}
+}

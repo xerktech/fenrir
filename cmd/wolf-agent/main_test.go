@@ -366,11 +366,16 @@ func startServer(t *testing.T, handler http.Handler, tune func(*http.Server)) st
 	return ln.Addr().String()
 }
 
-// assertClosedByServer fails unless the server closes conn: Read returns EOF
-// (or a reset), not our own 5s timeout.
-func assertClosedByServer(t *testing.T, conn net.Conn) {
+// closeSlack is how long past its timeout the server may take to drop a
+// connection, for a loaded -race runner. It must stay well under the timeouts
+// it is added to, or a server dropping far too late still passes.
+const closeSlack = 2 * time.Second
+
+// assertClosedByServer fails unless the server closes conn within timeout
+// (plus closeSlack): Read returns EOF (or a reset), not our own deadline.
+func assertClosedByServer(t *testing.T, conn net.Conn, timeout time.Duration) {
 	t.Helper()
-	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(timeout + closeSlack)); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 4096)
@@ -400,13 +405,14 @@ func dialTLS(t *testing.T, addr string) *tls.Conn {
 // A client that connects and never completes the TLS handshake (no token
 // needed) must be dropped, or connections pile up until fds run out.
 func TestServerDropsSilentConnections(t *testing.T) {
-	addr := startServer(t, http.NotFoundHandler(), func(s *http.Server) { s.ReadHeaderTimeout = 100 * time.Millisecond })
+	const timeout = 100 * time.Millisecond
+	addr := startServer(t, http.NotFoundHandler(), func(s *http.Server) { s.ReadHeaderTimeout = timeout })
 	conn, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	assertClosedByServer(t, conn)
+	assertClosedByServer(t, conn, timeout)
 }
 
 // A request declaring a body it never sends must be dropped too, on any path
@@ -424,7 +430,7 @@ func TestServerDropsWithheldBody(t *testing.T) {
 			if _, err := conn.Write([]byte(req)); err != nil {
 				t.Fatal(err)
 			}
-			assertClosedByServer(t, conn)
+			assertClosedByServer(t, conn, testReadTimeout)
 		})
 	}
 }

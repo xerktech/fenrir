@@ -280,7 +280,7 @@ finally apply it:
 This should add the gpu as a sharable resource that can be used in the next step.
 
 ### Creating a user  
-as of now, alex is the hardcoded user, don't change the name in the `examples/user.yaml` or `examples/user_generic_device_gpu.yaml`
+as of now, alex is the hardcoded user, don't change the name in the `examples/user.yaml` or `examples/generic_devices/user.yaml`
 
 However you can change the resources and volume mounts for the sidecars:
 - wolf: This one requires a gpu for encoding
@@ -289,7 +289,7 @@ However you can change the resources and volume mounts for the sidecars:
 
 
 To create a user:  
-`kubectl apply -f examples/user_generic_device_gpu.yaml`
+`kubectl apply -f examples/generic_devices/user.yaml`
 
 ### Adding an application and pairing with moonlight  
 add the app the to cluster using:  
