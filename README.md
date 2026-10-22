@@ -269,14 +269,14 @@ first check the content of `/dev/dri`:
 $ ls /dev/dri/
 >by-path  card1  renderD128
 ```
-then go to the `examples/generic-devices.yaml` to edit the dri device path to be the same as the desired card.  
+then go to the `examples/generic_devices/generic-devices.yaml` to edit the dri device path to be the same as the desired card.  
 ```
 - path: /dev/dri/renderD128 |->|- path: /dev/dri/renderD128
 - path: /dev/dri/cardX      |->|- path: /dev/dri/card1
 ```
 
 finally apply it:  
-`kubectl apply -f examples/generic-devices.yaml`
+`kubectl apply -f examples/generic_devices/generic-devices.yaml`
 This should add the gpu as a sharable resource that can be used in the next step.
 
 ### Creating a user  

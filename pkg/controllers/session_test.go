@@ -1471,6 +1471,16 @@ func TestBuildPodRejectsCollisionsWithOperatorAdditions(t *testing.T) {
 			},
 			"mounts two volumes at /tmp/.X11-unix",
 		},
+		"App init container mount at the runtime dir": {
+			func(app *v1alpha1types.App, _ *v1alpha1types.User) {
+				spec := &app.Spec.Template.Spec
+				spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "x11", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+				spec.InitContainers = append(spec.InitContainers, corev1.Container{Name: "prep", Image: "busybox", VolumeMounts: []corev1.VolumeMount{
+					{Name: "x11", MountPath: "/x"}, {Name: "x11", MountPath: "/x", SubPath: "y"},
+				}})
+			},
+			`container "prep" mounts two volumes at /x`,
+		},
 		"User wolf policy claims the GPU of an App without spec.gpu": {
 			func(app *v1alpha1types.App, user *v1alpha1types.User) {
 				app.Spec.GPU = nil
@@ -1520,5 +1530,32 @@ func TestConfirmFreshTreatsDeletedSessionAsEnded(t *testing.T) {
 	}
 	if err := sc.confirmFresh(context.Background(), sess); !errors.Is(err, errSessionEnded) {
 		t.Errorf("confirmFresh of a deleted Session = %v, want errSessionEnded", err)
+	}
+}
+
+// In split mode the Wolf pod gains volumes after buildPod's check; an App
+// volume named like one of them is caught too.
+func TestBuildPodsRejectsCollisionWithSplitVolumes(t *testing.T) {
+	f := newPortsFixture(t)
+	f.sc.AppPodHostDir = testAppPodHostDir
+	sess := podReadySession(f)
+	app, err := f.sc.AppInformer.Namespaced(sess.Namespace).Get(sess.Spec.GameReference.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The informer's copy: buildPods reads it back below.
+	app.Spec.Template.Spec.Volumes = append(app.Spec.Template.Spec.Volumes, corev1.Volume{Name: inputBridgeVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+	if _, _, err := f.sc.buildPods(sess, testWolfPodUID); !errors.Is(err, errInvalidSpec) || !strings.Contains(err.Error(), inputBridgeVolume) {
+		t.Errorf("buildPods err = %v, want errInvalidSpec naming %s", err, inputBridgeVolume)
+	}
+}
+
+// Every example User/App pair builds a session pod.
+func TestExamplePairsBuild(t *testing.T) {
+	for _, dir := range []string{"generic_devices", "nvidia_devices", "volume_mounts"} {
+		sc, _, sess, _ := reconcileFixtures(t, "../../examples/"+dir+"/user.yaml", "../../examples/"+dir+"/firefox.yaml")
+		if _, err := sc.buildPod(sess); err != nil {
+			t.Errorf("examples/%s: %v", dir, err)
+		}
 	}
 }

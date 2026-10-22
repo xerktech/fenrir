@@ -386,7 +386,17 @@ func (c *SessionController) buildPods(session *v1alpha1types.Session, wolfUID ty
 	if err != nil || c.AppPodHostDir == "" {
 		return pod, nil, err
 	}
-	return c.splitAppPod(session, pod, wolfUID)
+	wolf, app, err = c.splitAppPod(session, pod, wolfUID)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The split adds volumes of its own, which an App's can collide with.
+	for _, p := range []*corev1.Pod{wolf, app} {
+		if err := validateBuiltPod(&p.Spec, p.Labels); err != nil {
+			return nil, nil, invalidSpec(err)
+		}
+	}
+	return wolf, app, nil
 }
 
 // reconcileAppPod creates or checks the App pod of a split Session, whose

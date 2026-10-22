@@ -32,13 +32,10 @@ spec:
             memory: 4G
         # securityContext:
         #   privileged: true
-        ## These Volumes are defined by the user, no need to re-add them here.
-        # No /dev/input or /dev/uinput: the operator shares a /dev/input holding
-        # only this session's controllers.
-        volumeMounts:
-          - name: host-dri
-            mountPath: /dev/dri/renderD129
-            readOnly: false
+        # No host-dri mount: the squat.ai/dri request above brings the render
+        # node, and an App may not mount the User's hostPath volumes (only its
+        # sidecars may). No /dev/input or /dev/uinput: the operator shares a
+        # /dev/input holding only this session's controllers.
         command:
         - /bin/bash
         - -c
