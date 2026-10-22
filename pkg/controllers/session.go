@@ -370,6 +370,12 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	} else if reason != "" {
 		return c.endSession(ctx, newObj, reason)
 	}
+	if reason, err := c.appGoneReason(ctx, newObj); err != nil {
+		return err
+	} else if reason != "" {
+		c.warnApp(newObj, "AppNotFound", reason)
+		return c.endSession(ctx, newObj, reason)
+	}
 	oldStatus := newObj.Status.DeepCopy()
 	portsError := c.allocatePorts(ctx, newObj)
 
@@ -858,21 +864,59 @@ func (c *SessionController) unstreamableReason(ctx context.Context, session *v1a
 	if ipErr == nil {
 		return "", nil
 	}
+	if hasPod, err := c.hasOwnPod(ctx, session); err != nil || hasPod {
+		return "", err
+	}
+	return ipErr.Error(), nil
+}
+
+// hasOwnPod reports whether session's pod exists, looked up live on a cache
+// miss, as PodCreated can be False or missing while one runs.
+func (c *SessionController) hasOwnPod(ctx context.Context, session *v1alpha1types.Session) (bool, error) {
 	// An earlier same-named Session's pod is not this one's game.
 	podName := c.podName(session)
 	pod, err := c.podController.Informer().Namespaced(session.Namespace).Get(podName)
 	if err == nil && metav1.IsControlledBy(pod, session) {
-		return "", nil
+		return true, nil
 	} else if err != nil && !errors.IsNotFound(err) {
-		return "", fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
+		return false, fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
 	}
 	pod, err = c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, podName, metav1.GetOptions{})
 	if err == nil && metav1.IsControlledBy(pod, session) {
-		return "", nil
+		return true, nil
 	} else if err != nil && !errors.IsNotFound(err) {
-		return "", fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
+		return false, fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, podName, err)
 	}
-	return ipErr.Error(), nil
+	return false, nil
+}
+
+// appGoneReason says why session must end before it gets a pod because its
+// App does not exist (deleted, or misnamed in a hand-made Session), or "" if
+// it must not. Building the pod needs the App, so without this the Session
+// retries until the unstarted reaper (XERK-2191). A Session with a pod is
+// kept: its game runs without the App, which may only be being replaced.
+func (c *SessionController) appGoneReason(ctx context.Context, session *v1alpha1types.Session) (string, error) {
+	name := session.Spec.GameReference.Name
+	_, err := c.AppInformer.Namespaced(session.Namespace).Get(name)
+	if err == nil {
+		return "", nil
+	} else if !errors.IsNotFound(err) {
+		return "", fmt.Errorf("failed to get app %s/%s: %w", session.Namespace, name, err)
+	}
+	if hasPod, podErr := c.hasOwnPod(ctx, session); podErr != nil || hasPod {
+		return "", podErr
+	}
+	// The App and Session watches are separate streams, so a Session can
+	// reach our cache before its App does: ask the API server.
+	_, err = c.AppClient.Get(ctx, name, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		return "", nil
+	case errors.IsNotFound(err):
+		return fmt.Sprintf("its app %s does not exist", name), nil
+	default:
+		return "", fmt.Errorf("failed to get app %s/%s: %w", session.Namespace, name, err)
+	}
 }
 
 // reconcilePod ensures the session's pod exists and returns it. The pod runs
