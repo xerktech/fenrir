@@ -73,7 +73,8 @@ paths:
   - Sweeps of one `<dir>` take turns under its flock (`lockDir`): bridges starting together each
     logged removing every dir, as `RemoveAll` succeeds on a path already gone.
   - nri-input was the other candidate; it stays tokenless with every capability dropped.
-  - Tests: `TestSweep*`, `TestParseMountsUnder`, `TestRemoveSessionDir*`, `TestInputBridgeSweepsOnlyGoneSessions`.
+  - Tests: `TestSweep*`, `TestParseMountsUnder`, `TestRemoveSessionDir*`, `TestLockDirExcludes`,
+    `TestInputBridgeSweepsOnlyGoneSessions`.
   - `<dir>` must sit on a mount with shared propagation on the node, or Bidirectional fails.
 - The App pod's own network namespace doesn't hear the node's udevd, so Steam's Big Picture missed
   every pad plugged after it started (games, which enumerate at start, still saw them).

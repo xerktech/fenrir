@@ -75,3 +75,39 @@ func TestLockDirExcludes(t *testing.T) {
 		t.Fatal("second lock not taken after unlock")
 	}
 }
+
+// Sweep holds root's lock throughout: it removes nothing while another
+// sweep holds it.
+func TestSweepWaitsForRootLock(t *testing.T) {
+	root := t.TempDir()
+	dead := filepath.Join(root, "0b4c5f0e-6a1d-4e8e-9d0a-1f2e3d4c5b6a")
+	if err := os.Mkdir(dead, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error)
+	go func() { done <- Sweep(root, nil, time.Now().Add(time.Hour)) }()
+	select {
+	case err := <-done:
+		t.Fatalf("swept while the lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := os.Stat(dead); err != nil {
+		t.Fatalf("removed while the lock was held: %v", err)
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sweep not run after unlock")
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Errorf("dead dir kept: %v", err)
+	}
+}
