@@ -5,6 +5,7 @@ go 1.26.9
 require (
 	github.com/containerd/nri v0.12.3
 	github.com/google/go-cmp v0.7.0
+	github.com/google/uuid v1.6.0
 	github.com/miekg/dns v1.1.73
 	github.com/r3labs/sse/v2 v2.10.0
 	github.com/stretchr/testify v1.12.1
@@ -62,7 +63,6 @@ require (
 	github.com/gobuffalo/flect v1.0.3 // indirect
 	github.com/google/cel-go v0.29.2 // indirect
 	github.com/google/gnostic-models v0.7.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

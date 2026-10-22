@@ -418,3 +418,39 @@ func TestSplitAppPodVolumesAreOperatorVolumes(t *testing.T) {
 		}
 	}
 }
+
+// The bridge is told every Session the operator knows of, its own first, and
+// sweeps only directories older than its Session less sweepMargin (XERK-2178).
+func TestInputBridgeSweepsOnlyGoneSessions(t *testing.T) {
+	f := newPortsFixture(t)
+	f.sc.AppPodHostDir = testAppPodHostDir
+	other := f.session("blair-1", f.user)
+	if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Create(context.Background(), other, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	f.waitInformer(t, other.Name, true)
+	sess := podReadySession(f)
+	sess.CreationTimestamp = metav1.NewTime(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
+
+	wolf, _, err := f.sc.buildPods(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bridge *corev1.Container
+	for i := range wolf.Spec.Containers {
+		if wolf.Spec.Containers[i].Name == v1alpha1types.InputBridgeContainerName {
+			bridge = &wolf.Spec.Containers[i]
+		}
+	}
+	if bridge == nil {
+		t.Fatal("no input-bridge")
+	}
+	for _, want := range []string{
+		"--live-sessions=" + string(sess.UID) + "," + string(other.UID),
+		"--sweep-before=2026-10-21T11:50:00Z",
+	} {
+		if !slices.Contains(bridge.Args, want) {
+			t.Errorf("bridge args %v lack %s", bridge.Args, want)
+		}
+	}
+}

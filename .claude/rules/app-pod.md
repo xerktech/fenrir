@@ -44,7 +44,14 @@ paths:
     locked `udev/data/`, so it mounts neither hotplug directory in split mode.
   - It lstat-checks the new node is a char device before bind-mounting it.
   - The bridge unmounts before removing (a mount point unlinks EBUSY) and on exit clears and
-    deletes `<dir>/<UID>`. A SIGKILLed bridge leaves that directory (and its mounts) on the node.
+    deletes `<dir>/<UID>`.
+  - Leftovers (a SIGKILLed bridge's dir and mounts; dirs kubelet recreates for an App pod starting
+    after its Session ended) are swept by each new bridge (`inputbridge.Sweep`, XERK-2178). It
+    has no API access, so the operator passes `--live-sessions` (every Session in its cache) and
+    `--sweep-before` (its Session's creation less `sweepMargin`): a Session made later is unlisted
+    but its dir is newer. Hence `<dir>` must not be shared by two operators (namespaces).
+  - nri-input was the other candidate; it stays tokenless with every capability dropped.
+  - Tests: `TestSweep*`, `TestInputBridgeSweepsOnlyGoneSessions`.
   - `<dir>` must sit on a mount with shared propagation on the node, or Bidirectional fails.
 - The App pod's own network namespace doesn't hear the node's udevd, so Steam's Big Picture missed
   every pad plugged after it started (games, which enumerate at start, still saw them).

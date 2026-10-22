@@ -51,7 +51,8 @@ func main() {
 		"Comma-separated taints (key[=value]:Effect) session pods tolerate, e.g. nvidia.com/gpu=present:NoSchedule")
 	appPodHostDir := flag.String("app-pod-host-dir", "",
 		"Absolute node directory under which each Session's App runs in a user-namespaced pod of its own, apart from Wolf "+
-			"(must be on a mount with shared propagation); empty runs the App in the session pod")
+			"(must be on a mount with shared propagation, and used by this operator alone: it removes the directories of "+
+			"Sessions it doesn't know); empty runs the App in the session pod")
 	disconnectGracePeriod := flag.Duration("disconnect-grace-period", 10*time.Minute,
 		"How long a session's pod is kept after its Moonlight client disconnects, so /resume can re-attach")
 	libraryPort := flag.Int("library-port", 0,
