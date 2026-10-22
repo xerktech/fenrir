@@ -27,6 +27,10 @@ func main() {
 		runInputBridge(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == udevRelayCommand {
+		runUdevRelay(os.Args[2:])
+		return
+	}
 	appContext, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
 

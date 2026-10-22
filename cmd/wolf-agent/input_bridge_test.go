@@ -12,8 +12,11 @@ import (
 // resetUdevDir empties the directory and leaves control and data locked
 // against the App (XERK-1920). Needs root to chown.
 func TestResetUdevDirLocksControlAndData(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("chown needs root")
+	// Root, and not in a user namespace that leaves LockedOwner unmapped.
+	if probe, err := os.CreateTemp(t.TempDir(), "probe"); err != nil {
+		t.Fatal(err)
+	} else if err := probe.Chown(inputbridge.LockedOwner, inputbridge.LockedOwner); err != nil {
+		t.Skipf("can't chown to LockedOwner here: %v", err)
 	}
 	dir := t.TempDir()
 	if err := os.Symlink("/", filepath.Join(dir, "planted")); err != nil {

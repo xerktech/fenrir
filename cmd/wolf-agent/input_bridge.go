@@ -25,6 +25,8 @@ const inputBridgeCommand = "input-bridge"
 func runInputBridge(args []string) {
 	fs := flag.NewFlagSet(inputBridgeCommand, flag.ExitOnError)
 	socket := fs.String("socket", "", "Unix socket wolf-agent sends requests to (required)")
+	eventsSocket := fs.String("events-socket", "",
+		"Unix socket the App pod's udev-relay reads udev events from; in a directory only it mounts")
 	sessionDir := fs.String("session-dir", "", "The session's host directory, mounted Bidirectional; nodes go in its input/ (required)")
 	klog.InitFlags(fs)
 	_ = fs.Parse(args)
@@ -58,6 +60,21 @@ func runInputBridge(args []string) {
 	l, err := (&net.ListenConfig{}).Listen(ctx, "unix", *socket)
 	if err != nil {
 		klog.Fatalf("listening on %s: %v", *socket, err)
+	}
+	if *eventsSocket != "" {
+		if err := os.MkdirAll(filepath.Dir(*eventsSocket), 0o755); err != nil {
+			klog.Fatalf("creating %s: %v", filepath.Dir(*eventsSocket), err)
+		}
+		_ = os.Remove(*eventsSocket)
+		el, err := (&net.ListenConfig{}).Listen(ctx, "unix", *eventsSocket)
+		if err != nil {
+			klog.Fatalf("listening on %s: %v", *eventsSocket, err)
+		}
+		go func() {
+			if err := server.ServeEvents(ctx, el); err != nil {
+				klog.Errorf("input-bridge: events: %v", err)
+			}
+		}()
 	}
 	klog.Infof("input-bridge: serving %s on %s", server.InputDir, *socket)
 	if err := server.Serve(ctx, l); err != nil {

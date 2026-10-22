@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -74,6 +75,10 @@ type deviceNodes interface {
 	Remove(props map[string]string) error
 	WriteHwDB(filename string, content []string) error
 	RemoveHwDB(filename string) error
+	// Announce broadcasts a udev event where the App hears it, once its node
+	// and entry are published. A no-op in one session pod: the App shares the
+	// node's network namespace, where its udevd announces Wolf's devices.
+	Announce(props map[string]string) error
 	// Clear drops every node and entry.
 	Clear() error
 }
@@ -98,6 +103,8 @@ func (d dirNodes) RemoveHwDB(filename string) error {
 	return wrapNodeErr(fakeudev.RemoveHwDbEntry(d.udev, filename))
 }
 
+func (d dirNodes) Announce(map[string]string) error { return nil }
+
 func (d dirNodes) Clear() error {
 	return wrapNodeErr(errors.Join(fakeudev.ClearDir(d.dev), fakeudev.ClearDir(d.udev)))
 }
@@ -114,8 +121,13 @@ func wrapNodeErr(err error) error {
 // pod of its own, where a node in a shared volume would not open, and whose
 // root could write any directory it can map (pkg/inputbridge).
 func (a *Agent) UseInputBridge(socket string) {
-	a.bridge = &inputbridge.Client{Socket: socket}
+	a.bridge = &bridgeNodes{inputbridge.Client{Socket: socket}}
 }
+
+// bridgeNodes is the input-bridge client as deviceNodes.
+type bridgeNodes struct{ inputbridge.Client }
+
+func (b *bridgeNodes) Announce(props map[string]string) error { return wrapNodeErr(b.Uevent(props)) }
 
 func (a *Agent) nodes() deviceNodes {
 	if a.bridge != nil {
@@ -386,6 +398,19 @@ func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
 			klog.InfoS("Wrote udev hwdb entry", "file", filename, "session", ev.SessionID)
 		}
 	}
+	a.announce(ev.UdevEvents, "add")
+}
+
+// announce passes Wolf's udev events for one device on, in Wolf's order (the
+// parent input device, then its nodes), as action.
+func (a *Agent) announce(events []map[string]string, action string) {
+	for _, udevEvent := range events {
+		props := maps.Clone(udevEvent)
+		props["ACTION"] = action
+		if err := a.nodes().Announce(props); err != nil {
+			utilruntime.HandleError(fmt.Errorf("failed to announce udev event %q: %w", props["DEVPATH"], err))
+		}
+	}
 }
 
 func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
@@ -410,4 +435,5 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 			utilruntime.HandleError(fmt.Errorf("failed to remove udev hwdb entry %q: %w", filename, err))
 		}
 	}
+	a.announce(ev.UdevEvents, "remove")
 }

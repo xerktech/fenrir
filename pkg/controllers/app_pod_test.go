@@ -56,8 +56,8 @@ func volumeNamed(spec *corev1.PodSpec, name string) *corev1.Volume {
 func TestSplitAppPodSeparatesTheApp(t *testing.T) {
 	sess, wolf, app := splitPods(t)
 
-	if got := containerNames(&app.Spec); !slices.Equal(got, []string{"app"}) {
-		t.Errorf("App pod containers = %v, want [app]", got)
+	if got := containerNames(&app.Spec); !slices.Equal(got, []string{"app", v1alpha1types.UdevRelayContainerName}) {
+		t.Errorf("App pod containers = %v, want [app udev-relay]", got)
 	}
 	if got := containerNames(&wolf.Spec); slices.Contains(got, "app") || !slices.Contains(got, v1alpha1types.InputBridgeContainerName) {
 		t.Errorf("Wolf pod containers = %v", got)
@@ -347,5 +347,47 @@ func TestStreamWaitsForAppPod(t *testing.T) {
 	err = f.sc.reconcileActiveStreams(context.Background(), sess, wolf)
 	if err == nil || !strings.Contains(err.Error(), "app pod") {
 		t.Errorf("reconcileActiveStreams = %v, want app pod not ready", err)
+	}
+}
+
+// The App pod's own udev-relay announces hotplugged pads there: its network
+// namespace doesn't hear the node's udevd. It alone mounts the bridge's event
+// socket, and holds NET_ADMIN only (the pod user namespace's).
+func TestSplitAppPodRelaysUdevEvents(t *testing.T) {
+	sess, wolf, app := splitPods(t)
+	var relay *corev1.Container
+	for i := range app.Spec.Containers {
+		if app.Spec.Containers[i].Name == v1alpha1types.UdevRelayContainerName {
+			relay = &app.Spec.Containers[i]
+		}
+	}
+	if relay == nil {
+		t.Fatal("no udev-relay in the App pod")
+	}
+	sc := relay.SecurityContext
+	if sc == nil || sc.Capabilities == nil || !slices.Equal(sc.Capabilities.Add, []corev1.Capability{"NET_ADMIN"}) ||
+		!slices.Equal(sc.Capabilities.Drop, []corev1.Capability{"ALL"}) || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+		t.Errorf("udev-relay securityContext = %+v", sc)
+	}
+	v := volumeNamed(&app.Spec, udevEventsVolume)
+	if v == nil || v.HostPath == nil || v.HostPath.Path != testAppPodHostDir+"/"+string(sess.UID)+"/events" {
+		t.Errorf("events volume = %+v", v)
+	}
+	for _, c := range app.Spec.Containers {
+		for _, m := range c.VolumeMounts {
+			if m.Name == udevEventsVolume && c.Name != v1alpha1types.UdevRelayContainerName {
+				t.Errorf("container %s mounts the udev event socket", c.Name)
+			}
+		}
+	}
+	var bridge *corev1.Container
+	for i := range wolf.Spec.Containers {
+		if wolf.Spec.Containers[i].Name == v1alpha1types.InputBridgeContainerName {
+			bridge = &wolf.Spec.Containers[i]
+		}
+	}
+	want := "--events-socket=" + inputBridgeSessionsPath + "/" + string(sess.UID) + "/events/" + udevEventsSocket
+	if bridge == nil || !slices.Contains(bridge.Args, want) {
+		t.Errorf("bridge args lack %s", want)
 	}
 }

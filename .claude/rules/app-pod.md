@@ -46,6 +46,15 @@ paths:
   - The bridge unmounts before removing (a mount point unlinks EBUSY) and on exit clears and
     deletes `<dir>/<UID>`. A SIGKILLed bridge leaves that directory (and its mounts) on the node.
   - `<dir>` must sit on a mount with shared propagation on the node, or Bidirectional fails.
+- The App pod's own network namespace doesn't hear the node's udevd, so Steam's Big Picture missed
+  every pad plugged after it started (games, which enumerate at start, still saw them).
+  - wolf-agent passes each udev event to the bridge (`uevent` op) after its node and entry exist;
+    the bridge streams them on `<dir>/<UID>/events/events.sock` to the App pod's `udev-relay`,
+    which broadcasts libudev monitor messages there (`fakeudev.MonitorMessage`, Wolf's format).
+  - The relay alone mounts that socket; its NET_ADMIN (needed to send to the udev group, EPERM
+    without it, measured) is the pod user namespace's, so it reaches only the pod's own network.
+  - A relay that (re)connects gets an add for every device still announced; Clear announces
+    removals, as Wolf destroys a stopped stream's devices without unplug events.
 - nri-input grants by container name, so the App pod (it keeps the session label) still gets
   `13:*`/`241:*` and the seccomp filter; `input-bridge` is an operator container and gets nothing.
 - spec.gpu's claim is a named ResourceClaim both pods reference; a template-generated claim is

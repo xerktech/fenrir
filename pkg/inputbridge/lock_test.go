@@ -11,9 +11,7 @@ import (
 // read-only mounts writable): directories and entries must end up owned by
 // LockedOwner, directories 0755. Needs root to chown.
 func TestLockOwnsDirsAndEntries(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("chown needs root")
-	}
+	requireLockable(t)
 	// Outside the App pod's idmap of 65536 IDs, whatever the constant says.
 	if LockedOwner < 1<<16 {
 		t.Fatalf("LockedOwner %d is an ID the App pod's idmap maps", LockedOwner)
@@ -42,5 +40,19 @@ func TestLockOwnsDirsAndEntries(t *testing.T) {
 		if fi.Mode() != wantMode {
 			t.Errorf("%s mode %v, want %v", path, fi.Mode(), wantMode)
 		}
+	}
+}
+
+// requireLockable skips t unless this process can chown to LockedOwner: root,
+// and not in a user namespace that leaves LockedOwner unmapped (EINVAL).
+func requireLockable(t *testing.T) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := f.Chown(LockedOwner, LockedOwner); err != nil {
+		t.Skipf("can't chown to LockedOwner here: %v", err)
 	}
 }

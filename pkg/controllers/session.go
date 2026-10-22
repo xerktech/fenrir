@@ -2120,6 +2120,7 @@ var operatorVolumes = []string{
 	"wolf-agent-token",
 	inputBridgeVolume,
 	appPodSessionsVolume,
+	udevEventsVolume,
 }
 
 // validateNoOperatorVolumeMounts rejects App template containers (init too)

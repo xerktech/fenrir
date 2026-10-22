@@ -87,9 +87,10 @@ paths:
   Tests: `TestSetNodeModeRefusesSwappedNode`.
 - CI runs tests non-root, so mknod EPERMs there: logic tests stub `makeCharNode`, or a refusal
   test passes for the wrong reason.
-- No synthetic udev netlink event: under hostNetwork it needs CAP_NET_ADMIN on the host netns and
-  then reaches every hostNetwork process on the node. The App hears the node's udevd instead
-  (XERK-1337, measured on talos04):
+- No synthetic udev netlink event in one session pod: under hostNetwork it needs CAP_NET_ADMIN on
+  the host netns and then reaches every hostNetwork process on the node. The App hears the node's
+  udevd instead (XERK-1337, measured on talos04). A split App pod has its own netns, so its
+  `udev-relay` does send them (`app-pod.md`):
   - libudev subscribes to udev events only if `/run/udev/control` exists; without it SDL2 missed
     every pad plugged after it started. The `init` init container creates it in the udev volume, as
     libudev checks once, at monitor creation. Tests: `TestSessionPodCreatesUdevControl`.
