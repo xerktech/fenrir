@@ -7,12 +7,15 @@ import (
 	"maps"
 	"path"
 	"slices"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
@@ -65,6 +68,9 @@ const (
 	inputBridgeSocket    = inputBridgeSocketDir + "/bridge.sock"
 	// Where the bridge mounts AppPodHostDir.
 	inputBridgeSessionsPath = "/sessions"
+	// How much older than its Session a leftover directory must be for the
+	// bridge to sweep it (inputBridgeContainer).
+	sweepMargin = 10 * time.Minute
 )
 
 func (c *SessionController) appPodName(session *v1alpha1types.Session) string {
@@ -126,7 +132,11 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 		ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: inputBridgeVolume, MountPath: inputBridgeSocketDir})
 		ctr.Args = append(ctr.Args, "--input-bridge-socket="+inputBridgeSocket)
 	}
-	wolf.Spec.Containers = append(wolf.Spec.Containers, c.inputBridgeContainer(session))
+	bridge, err := c.inputBridgeContainer(session)
+	if err != nil {
+		return nil, nil, err
+	}
+	wolf.Spec.Containers = append(wolf.Spec.Containers, bridge)
 	wolf.Spec.Volumes = append(wolf.Spec.Volumes,
 		corev1.Volume{Name: inputBridgeVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		corev1.Volume{Name: appPodSessionsVolume, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
@@ -239,7 +249,25 @@ func (c *SessionController) udevRelayContainer() corev1.Container {
 // inputBridgeContainer is the Wolf pod's privileged sidecar publishing device
 // nodes into the App pod (pkg/inputbridge). Privileged for the Bidirectional
 // mount and mount(2); it talks only to wolf-agent, over inputBridgeVolume.
-func (c *SessionController) inputBridgeContainer(session *v1alpha1types.Session) corev1.Container {
+//
+// On start it also sweeps the directories of Sessions that are gone
+// (inputbridge.Sweep, XERK-2178): those of no Session listed here, last
+// changed sweepMargin before this one was created. A Session created later
+// isn't listed, but its directory, made for a pod built after this one, is
+// newer than that; the margin absorbs clock skew between the API server and
+// the node.
+func (c *SessionController) inputBridgeContainer(session *v1alpha1types.Session) (corev1.Container, error) {
+	sessions, err := c.SessionInformer.List(labels.Everything())
+	if err != nil {
+		return corev1.Container{}, fmt.Errorf("failed to list sessions: %w", err)
+	}
+	live := []string{string(session.UID)}
+	for _, s := range sessions {
+		if s.UID != session.UID {
+			live = append(live, string(s.UID))
+		}
+	}
+	slices.Sort(live[1:])
 	return corev1.Container{
 		Name:            v1alpha1types.InputBridgeContainerName,
 		Image:           c.WolfAgentImage,
@@ -249,6 +277,8 @@ func (c *SessionController) inputBridgeContainer(session *v1alpha1types.Session)
 			"--socket=" + inputBridgeSocket,
 			"--session-dir=" + path.Join(inputBridgeSessionsPath, string(session.UID)),
 			"--events-socket=" + path.Join(inputBridgeSessionsPath, string(session.UID), "events", udevEventsSocket),
+			"--live-sessions=" + strings.Join(live, ","),
+			"--sweep-before=" + session.CreationTimestamp.Add(-sweepMargin).UTC().Format(time.RFC3339),
 		},
 		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("10m"),
@@ -263,7 +293,7 @@ func (c *SessionController) inputBridgeContainer(session *v1alpha1types.Session)
 				MountPropagation: new(corev1.MountPropagationBidirectional),
 			},
 		},
-	}
+	}, nil
 }
 
 // podUsesVolume reports whether a container of spec (init too) mounts or

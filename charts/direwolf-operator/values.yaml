@@ -46,7 +46,8 @@ controllers:
           - --session-tolerations=nvidia.com/gpu=present:NoSchedule
           - --session-port-range=20000-20999
           # Each Session's App in a user-namespaced pod of its own (XERK-1920), off
-          # unless set. The directory must be on a shared-propagation mount:
+          # unless set. The directory must be on a shared-propagation mount and
+          # belong to this operator alone (it sweeps Sessions it doesn't know):
           #   --app-pod-host-dir=/var/lib/direwolf/sessions
           # The Library (on-demand Steam + Heroic desktop) is off unless
           # --library-port is set; enabling it needs, with service.library:

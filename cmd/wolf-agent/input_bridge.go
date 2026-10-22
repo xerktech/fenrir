@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 
 	"k8s.io/klog/v2"
 
@@ -28,6 +30,10 @@ func runInputBridge(args []string) {
 	eventsSocket := fs.String("events-socket", "",
 		"Unix socket the App pod's udev-relay reads udev events from; in a directory only it mounts")
 	sessionDir := fs.String("session-dir", "", "The session's host directory, mounted Bidirectional; nodes go in its input/ (required)")
+	liveSessions := fs.String("live-sessions", "",
+		"Comma-separated UIDs of the Sessions the operator knew of; their sibling directories are never swept")
+	sweepBefore := fs.String("sweep-before", "",
+		"RFC 3339 time; sibling directories of no live Session last changed before it are removed (empty: no sweep)")
 	klog.InitFlags(fs)
 	_ = fs.Parse(args)
 	if *socket == "" || *sessionDir == "" {
@@ -53,6 +59,22 @@ func runInputBridge(args []string) {
 	}
 	if err := resetUdevDir(udevDir, *sessionDir); err != nil {
 		klog.Fatal(err)
+	}
+	if *sweepBefore != "" {
+		cutoff, err := time.Parse(time.RFC3339, *sweepBefore)
+		if err != nil {
+			klog.Fatalf("--sweep-before: %v", err)
+		}
+		live := map[string]bool{filepath.Base(*sessionDir): true}
+		for uid := range strings.SplitSeq(*liveSessions, ",") {
+			live[uid] = true
+		}
+		// In the background: it is housekeeping the session never waits on.
+		go func() {
+			if err := inputbridge.Sweep(filepath.Dir(*sessionDir), live, cutoff); err != nil {
+				klog.Errorf("input-bridge: sweeping leftover session directories: %v", err)
+			}
+		}()
 	}
 	_ = os.Remove(*socket)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
