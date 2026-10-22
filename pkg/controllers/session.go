@@ -2183,10 +2183,13 @@ func validateBuiltPod(spec *corev1.PodSpec, podLabels map[string]string) error {
 		for _, ctr := range ctrs {
 			paths := sets.New[string]()
 			for _, m := range ctr.VolumeMounts {
-				if paths.Has(m.MountPath) {
-					return fmt.Errorf("validation failed: container %q mounts two volumes at %s; the operator mounts its own there", ctr.Name, m.MountPath)
+				// Cleaned: the API server compares exact strings, so it
+				// would let "/tmp/.X11-unix/" shadow the operator's mount.
+				p := path.Clean(m.MountPath)
+				if paths.Has(p) {
+					return fmt.Errorf("validation failed: container %q mounts two volumes at %s; the operator mounts its own there", ctr.Name, p)
 				}
-				paths.Insert(m.MountPath)
+				paths.Insert(p)
 			}
 			for _, c := range ctr.Resources.Claims {
 				if !claims.Has(c.Name) {

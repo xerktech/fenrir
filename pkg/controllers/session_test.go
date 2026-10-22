@@ -1467,7 +1467,7 @@ func TestBuildPodRejectsCollisionsWithOperatorAdditions(t *testing.T) {
 			func(app *v1alpha1types.App, _ *v1alpha1types.User) {
 				spec := &app.Spec.Template.Spec
 				spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "x11", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
-				spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "x11", MountPath: "/tmp/.X11-unix"})
+				spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "x11", MountPath: "/tmp/.X11-unix/"})
 			},
 			"mounts two volumes at /tmp/.X11-unix",
 		},
