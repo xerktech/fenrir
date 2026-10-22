@@ -8,6 +8,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 
@@ -114,5 +115,21 @@ func TestMissingAppRetriesAPIError(t *testing.T) {
 	}
 	if !f.sessionExists(t, sess.Name) {
 		t.Error("an API error ended the session")
+	}
+}
+
+// An API error looking up the pod is retried, not taken as no pod.
+func TestMissingAppRetriesPodLookupError(t *testing.T) {
+	f := newPortsFixture(t)
+	client := k8sfake.NewClientset()
+	client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("apiserver restarting")
+	})
+	f.sc.K8sClient = client
+	s := f.session("alex-1", f.user)
+	s.Spec.GameReference.Name = "missing"
+	reason, err := f.sc.appGoneReason(context.Background(), s)
+	if err == nil || reason != "" {
+		t.Errorf("appGoneReason = %q, %v, want a retryable error", reason, err)
 	}
 }
