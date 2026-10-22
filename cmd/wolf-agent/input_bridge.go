@@ -61,13 +61,9 @@ func runInputBridge(args []string) {
 		klog.Fatal(err)
 	}
 	if *sweepBefore != "" {
-		cutoff, err := time.Parse(time.RFC3339, *sweepBefore)
+		live, cutoff, err := sweepArgs(*sessionDir, *liveSessions, *sweepBefore)
 		if err != nil {
-			klog.Fatalf("--sweep-before: %v", err)
-		}
-		live := map[string]bool{filepath.Base(*sessionDir): true}
-		for uid := range strings.SplitSeq(*liveSessions, ",") {
-			live[uid] = true
+			klog.Fatal(err)
 		}
 		// In the background: it is housekeeping the session never waits on.
 		go func() {
@@ -109,6 +105,20 @@ func runInputBridge(args []string) {
 	if err := os.RemoveAll(*sessionDir); err != nil {
 		klog.Errorf("input-bridge: removing %s: %v", *sessionDir, err)
 	}
+}
+
+// sweepArgs parses the sweep's flags. The bridge's own directory is always
+// live, whatever the operator listed.
+func sweepArgs(sessionDir, liveSessions, sweepBefore string) (map[string]bool, time.Time, error) {
+	cutoff, err := time.Parse(time.RFC3339, sweepBefore)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("--sweep-before: %w", err)
+	}
+	live := map[string]bool{filepath.Base(sessionDir): true}
+	for uid := range strings.SplitSeq(liveSessions, ",") {
+		live[uid] = true
+	}
+	return live, cutoff, nil
 }
 
 // resetUdevDir empties the locked udev directory and recreates what libudev

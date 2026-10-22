@@ -47,11 +47,15 @@ func sweep(root string, live map[string]bool, cutoff time.Time, unmount func(str
 			continue
 		}
 		// The only mounts a bridge makes are its nodes in input/, which
-		// Clear undoes; a mount point would not unlink.
-		s := &Server{InputDir: filepath.Join(dir, "input"), unmount: unmount}
-		if err := s.clearNodes(); err != nil {
-			errs = append(errs, err)
-			continue
+		// Clear undoes; a mount point would not unlink. Not through a
+		// symlink: RemoveAll removes the link, never what it points at.
+		input := filepath.Join(dir, "input")
+		if fi, err := os.Lstat(input); err == nil && fi.IsDir() {
+			s := &Server{InputDir: input, unmount: unmount}
+			if err := s.clearNodes(); err != nil {
+				errs = append(errs, err)
+				continue
+			}
 		}
 		if err := os.RemoveAll(dir); err != nil {
 			errs = append(errs, err)

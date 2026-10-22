@@ -71,3 +71,32 @@ func TestSweepKeepsDirWhoseNodeWontUnmount(t *testing.T) {
 		t.Errorf("directory removed despite its mount: %v", err)
 	}
 }
+
+// A dead directory whose input/ is a symlink is removed without clearing
+// what the link points at.
+func TestSweepDoesNotFollowInputSymlink(t *testing.T) {
+	const gone = "0b4c5f0e-6a1d-4e8e-9d0a-1f2e3d4c5b6a"
+	root, outside := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "event3"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, gone), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, gone, "input")); err != nil {
+		t.Fatal(err)
+	}
+	err := sweep(root, nil, time.Now().Add(time.Hour), func(path string) error {
+		t.Errorf("unmounted %s", path)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "event3")); err != nil {
+		t.Errorf("followed the link: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, gone)); !os.IsNotExist(err) {
+		t.Errorf("dead directory kept: %v", err)
+	}
+}

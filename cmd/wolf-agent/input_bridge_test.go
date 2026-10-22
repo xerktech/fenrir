@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"games-on-whales.github.io/direwolf/pkg/inputbridge"
 )
@@ -53,5 +54,23 @@ func TestResetUdevDirStagesOutsideTheApp(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 		t.Errorf("made %v in place", entries)
+	}
+}
+
+// The bridge never sweeps its own directory, even if the operator left it
+// out of --live-sessions (XERK-2178).
+func TestSweepArgsKeepOwnDir(t *testing.T) {
+	live, cutoff, err := sweepArgs("/sessions/own", "a,b", "2026-10-21T11:50:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !live["own"] || !live["a"] || !live["b"] || len(live) != 3 {
+		t.Errorf("live = %v", live)
+	}
+	if cutoff.Format(time.RFC3339) != "2026-10-21T11:50:00Z" {
+		t.Errorf("cutoff = %v", cutoff)
+	}
+	if _, _, err := sweepArgs("/sessions/own", "", "-0001-11-30T00:00:00Z"); err == nil {
+		t.Error("bad --sweep-before accepted")
 	}
 }
