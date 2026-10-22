@@ -114,11 +114,11 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       (keys nested in arrays exceed the cost budget, annotation size). `TestInvalidPodEndsSession`.
     - So does a buildPod error from the App/User spec (wrapped in `errInvalidSpec`); a failed
       informer lookup stays retryable. `TestInvalidSpecEndsSession` (XERK-1782).
+    - Both record a Warning Event on the App (the client only sees a failed launch); the
+      operator Role needs `events` create/patch.
     - `validateBuiltPod` runs on the finished pod for collisions an App/User spec makes with the
       operator's additions (volume names, mount paths, undeclared claims, label values), so the
       reason is logged up front. `TestBuildPodRejectsCollisionsWithOperatorAdditions` (XERK-1675).
-    - Both record a Warning Event on the App (the client only sees a failed launch); the
-      operator Role needs `events` create/patch.
     - A Session whose `spec.pairingReference` Pairing is gone (client revoked) is ended; Pairing
       deletes end their Sessions directly. The cache miss is confirmed with a live GET first, as the
       Pairing watch can lag the Session's. Tests: `session_pairing_test.go`.
