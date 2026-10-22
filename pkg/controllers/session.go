@@ -2187,7 +2187,7 @@ func validateBuiltPod(spec *corev1.PodSpec, podLabels map[string]string) error {
 				// would let "/tmp/.X11-unix/" shadow the operator's mount.
 				p := path.Clean(m.MountPath)
 				if paths.Has(p) {
-					return fmt.Errorf("validation failed: container %q mounts two volumes at %s; the operator mounts its own there", ctr.Name, p)
+					return fmt.Errorf("validation failed: container %q mounts two volumes at %s (the operator's own mounts count)", ctr.Name, p)
 				}
 				paths.Insert(p)
 			}
