@@ -23,7 +23,7 @@ paths:
 - Mode is per Session: the Session pod's `direwolf/app-pod` annotation, not the flag, says it is
   split, so a flag flip leaves running Sessions alone. The App pod is never recreated either:
   `AppPodCreated` True and no pod ends the Session. Tests: `TestFinishedAppPodEndsSession`.
-- The pods share per-Session host dirs `<dir>/<session UID>/{runtime,udev,input}` (UID, not name:
+- The pods share per-Session host dirs `<dir>/<session UID>/{udev,input}` (UID, not name:
   a new Session of the same name must not see old nodes). The App mounts udev and input read-only.
   - Read-only is not the boundary: the App's idmapped hostPath mounts aren't locked, so its root
     remounts them rw and wrote into both (QA on talos04). The bridge chowns `input/`, `udev/` and
@@ -33,6 +33,20 @@ paths:
   - Files there (udev entries, `control`) are staged in `<dir>/<UID>` (no App mount) and renamed
     in already locked: created in place they are briefly the App root's, and an fd it opens then
     outlives the chown (QA won 48/50). `WriteLockedFile`; tests `TestLock*` need root (CI skips).
+- The runtime dir (`XDG_RUNTIME_DIR`) is the Wolf pod's 64Mi memory emptyDir; the App pod mounts
+  it as hostPath `/var/lib/kubelet/pods/<Wolf pod UID>/volumes/kubernetes.io~empty-dir/wolf-runtime`
+  (type Directory). It shares sockets idmapped and stops at ENOSPC (measured on talos04).
+  - Never a hostPath on the node's disk (XERK-2177): kubelet counts no hostPath write toward
+    ephemeral-storage, so an App wrote 64Mi past a 20Mi limit into `/var` unevicted.
+  - Both pods mount it by subPath `xdg`: once the Wolf pod is gone, containerd recreates a missing
+    hostPath source on `/var` for each new App container (QA wrote 100MiB there), while kubelet
+    refuses a container whose subPath's volume is missing (CreateContainerConfigError, measured).
+  - Kubelet owns the tmpfs, so it is unmounted however the Wolf pod ends. A tmpfs the operator
+    mounted itself leaked when the pod died before the bridge's exit cleanup ran (QA).
+  - The App pod is created only once the Wolf pod is `Initialized` (its volumes set up), or its
+    mount fails and backs off. Tests: `TestAppPodWaitsForWolfPodInit`,
+    `TestSplitAppPodSharesRuntimeInMemory`.
+  - Assumes kubelet's root dir is `/var/lib/kubelet` (`kubeletPodsDir`).
 - A user-namespaced pod's volumes are all mounted `nodev` (PVC, hostPath, emptyDir; measured), and
   mknod is refused there, so a node in a shared volume never opens in the App pod.
   - The `input-bridge` sidecar (privileged, `<dir>` mounted Bidirectional) mknods each node into

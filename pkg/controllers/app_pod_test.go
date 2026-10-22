@@ -9,13 +9,18 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
 
-const testAppPodHostDir = "/var/lib/direwolf/sessions"
+const (
+	testAppPodHostDir = "/var/lib/direwolf/sessions"
+	testWolfPodUID    = "wolf-pod-uid"
+)
 
 // splitPods renders the example Steam Session's Wolf pod and App pod.
 func splitPods(t *testing.T) (sess *v1alpha1types.Session, wolf, app *corev1.Pod) {
@@ -23,7 +28,7 @@ func splitPods(t *testing.T) (sess *v1alpha1types.Session, wolf, app *corev1.Pod
 	f := newPortsFixture(t)
 	f.sc.AppPodHostDir = testAppPodHostDir
 	sess = podReadySession(f)
-	wolf, app, err := f.sc.buildPods(sess)
+	wolf, app, err := f.sc.buildPods(sess, testWolfPodUID)
 	if err != nil {
 		t.Fatalf("buildPods: %v", err)
 	}
@@ -113,7 +118,6 @@ func TestSplitAppPodSharesHostDirectories(t *testing.T) {
 		volume, sub string
 		pods        []*corev1.Pod
 	}{
-		{"wolf-runtime", "runtime", []*corev1.Pod{wolf, app}},
 		{hotplugUdevVolume, "udev", []*corev1.Pod{wolf, app}},
 		{hotplugDevVolume, "input", []*corev1.Pod{app}},
 	} {
@@ -213,7 +217,7 @@ func TestSplitAppPodRefusesSharedTemplateClaim(t *testing.T) {
 			c.Resources.Claims = append(c.Resources.Claims, corev1.ResourceClaim{Name: "nic"})
 		}
 	}
-	if _, _, err := f.sc.splitAppPod(sess, pod); !errors.Is(err, errInvalidSpec) {
+	if _, _, err := f.sc.splitAppPod(sess, pod, testWolfPodUID); !errors.Is(err, errInvalidSpec) {
 		t.Errorf("splitAppPod = %v, want errInvalidSpec", err)
 	}
 }
@@ -222,7 +226,7 @@ func TestSplitAppPodRefusesSharedTemplateClaim(t *testing.T) {
 func TestBuildPodsWithoutHostDirKeepsOnePod(t *testing.T) {
 	f := newPortsFixture(t)
 	sess := podReadySession(f)
-	wolf, app, err := f.sc.buildPods(sess)
+	wolf, app, err := f.sc.buildPods(sess, testWolfPodUID)
 	if err != nil || app != nil || !slices.Contains(containerNames(&wolf.Spec), "app") {
 		t.Fatalf("buildPods = %v, %v, %v", wolf, app, err)
 	}
@@ -247,6 +251,7 @@ func TestReconcilePodCreatesAppPod(t *testing.T) {
 	f, sess := lifecycleFixture(t, podReadySession, func(s *v1alpha1types.Session) []runtime.Object {
 		p := readyPod(s)
 		p.Annotations[appPodAnnotation] = s.Name + "-app"
+		p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{Type: corev1.PodInitialized, Status: corev1.ConditionTrue})
 		return []runtime.Object{p}
 	})
 	f.sc.AppPodHostDir = testAppPodHostDir
@@ -264,6 +269,57 @@ func TestReconcilePodCreatesAppPod(t *testing.T) {
 	}
 	if !conditionTrue(sess, appPodCreatedCondition) {
 		t.Error("AppPodCreated not recorded")
+	}
+}
+
+// Until kubelet has set up the Wolf pod's runtime emptyDir, the App pod's
+// mount of it would fail and back off.
+func TestAppPodWaitsForWolfPodInit(t *testing.T) {
+	f, sess := lifecycleFixture(t, podReadySession, func(s *v1alpha1types.Session) []runtime.Object {
+		p := readyPod(s)
+		p.Annotations[appPodAnnotation] = s.Name + "-app"
+		p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{Type: corev1.PodInitialized, Status: corev1.ConditionFalse})
+		return []runtime.Object{p}
+	})
+	f.sc.AppPodHostDir = testAppPodHostDir
+	waitPod(t, f, sess.Name)
+
+	if _, err := f.sc.reconcilePod(context.Background(), sess); err != nil {
+		t.Fatalf("reconcilePod: %v", err)
+	}
+	if _, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Get(context.Background(), sess.Name+"-app", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("App pod created before the Wolf pod initialized: %v", err)
+	}
+	if conditionTrue(sess, appPodCreatedCondition) {
+		t.Error("AppPodCreated recorded")
+	}
+}
+
+// The runtime directory is the Wolf pod's size-limited memory emptyDir, not
+// a directory on the node's disk the App could fill (XERK-2177); the App pod
+// reaches it through kubelet's directory for it, which must already exist.
+func TestSplitAppPodSharesRuntimeInMemory(t *testing.T) {
+	_, wolf, app := splitPods(t)
+	v := volumeNamed(&wolf.Spec, wolfRuntimeVolume)
+	if v == nil || v.EmptyDir == nil || v.EmptyDir.Medium != corev1.StorageMediumMemory ||
+		v.EmptyDir.SizeLimit == nil || v.EmptyDir.SizeLimit.Cmp(resource.MustParse(runtimeSizeLimit)) != 0 {
+		t.Errorf("Wolf runtime volume = %+v, want a %s memory emptyDir", v, runtimeSizeLimit)
+	}
+	want := "/var/lib/kubelet/pods/" + testWolfPodUID + "/volumes/kubernetes.io~empty-dir/" + wolfRuntimeVolume
+	v = volumeNamed(&app.Spec, wolfRuntimeVolume)
+	if v == nil || v.HostPath == nil || v.HostPath.Path != want || v.HostPath.Type == nil || *v.HostPath.Type != corev1.HostPathDirectory {
+		t.Errorf("App runtime volume = %+v, want hostPath Directory %s", v, want)
+	}
+	for _, pod := range []*corev1.Pod{wolf, app} {
+		for _, ctrs := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+			for _, c := range ctrs {
+				for _, m := range c.VolumeMounts {
+					if m.Name == wolfRuntimeVolume && m.SubPath != runtimeSubPath {
+						t.Errorf("%s/%s mounts the runtime volume at subPath %q, want %q", pod.Name, c.Name, m.SubPath, runtimeSubPath)
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -406,7 +462,7 @@ func TestSplitAppPodVolumesAreOperatorVolumes(t *testing.T) {
 	for _, v := range combined.Spec.Volumes {
 		before[v.Name] = true
 	}
-	wolf, app, err := f.sc.splitAppPod(sess, combined)
+	wolf, app, err := f.sc.splitAppPod(sess, combined, testWolfPodUID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +488,7 @@ func TestInputBridgeSweepsOnlyGoneSessions(t *testing.T) {
 	sess := podReadySession(f)
 	sess.CreationTimestamp = metav1.NewTime(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
 
-	wolf, _, err := f.sc.buildPods(sess)
+	wolf, _, err := f.sc.buildPods(sess, testWolfPodUID)
 	if err != nil {
 		t.Fatal(err)
 	}

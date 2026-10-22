@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
@@ -32,7 +33,9 @@ import (
 // which Moonlight's port-only redirect needs, and a user-namespaced Wolf could
 // not open /dev/uinput (0660 root:996 on the node). The pods share, through
 // per-Session host directories under AppPodHostDir:
-//   - runtime: XDG_RUNTIME_DIR (Wolf's Wayland and pulseaudio sockets),
+//   - runtime: XDG_RUNTIME_DIR (Wolf's Wayland and pulseaudio sockets), the
+//     Wolf pod's size-limited memory emptyDir, which the App pod reaches
+//     through kubelet's directory for it (appRuntimeVolume),
 //   - udev: /run/udev, written by wolf-agent, read-only in the App pod,
 //   - input: /dev/input, read-only in the App pod with HostToContainer
 //     propagation. The runtime mounts a user-namespaced pod's volumes nodev,
@@ -71,6 +74,14 @@ const (
 	// How much older than its Session a leftover directory must be for the
 	// bridge to sweep it (inputBridgeContainer).
 	sweepMargin = 10 * time.Minute
+	// runtimeSizeLimit caps the runtime directory, which holds sockets and
+	// lock files.
+	runtimeSizeLimit = "64Mi"
+	// kubeletPodsDir is where kubelet keeps each pod's volumes.
+	kubeletPodsDir = "/var/lib/kubelet/pods"
+	// runtimeSubPath is the runtime directory within its volume: see
+	// appRuntimeVolume.
+	runtimeSubPath = "xdg"
 )
 
 func (c *SessionController) appPodName(session *v1alpha1types.Session) string {
@@ -97,8 +108,9 @@ func isWolfPodContainer(name string) bool {
 }
 
 // splitAppPod splits the single session pod buildPod renders into the Wolf
-// pod and the App pod.
-func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined *corev1.Pod) (wolf, app *corev1.Pod, err error) {
+// pod and the App pod, for the Wolf pod with UID wolfUID ("" before it
+// exists; the App pod is then unusable).
+func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined *corev1.Pod, wolfUID types.UID) (wolf, app *corev1.Pod, err error) {
 	wolf = combined.DeepCopy()
 	app = combined.DeepCopy()
 
@@ -114,7 +126,6 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 		}}
 	}
 	shared := map[string]corev1.VolumeSource{
-		wolfRuntimeVolume: hostDir("runtime"),
 		hotplugUdevVolume: hostDir("udev"),
 		hotplugDevVolume:  hostDir("input"),
 	}
@@ -145,6 +156,19 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 		}}},
 	)
 
+	// Both pods use the same subdirectory of the runtime volume.
+	for _, pod := range []*corev1.Pod{wolf, app} {
+		for _, ctrs := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+			for i := range ctrs {
+				for j := range ctrs[i].VolumeMounts {
+					if m := &ctrs[i].VolumeMounts[j]; m.Name == wolfRuntimeVolume {
+						m.SubPath = runtimeSubPath
+					}
+				}
+			}
+		}
+	}
+
 	// The App only reads the hotplug directories; wolf-agent and the bridge
 	// write them. Read-only is a hint, not the boundary: the App can remount
 	// them writable from its user namespace, so the bridge gives them an
@@ -166,6 +190,10 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 
 	for _, pod := range []*corev1.Pod{wolf, app} {
 		pod.Spec.Volumes = slices.DeleteFunc(pod.Spec.Volumes, func(v corev1.Volume) bool { return !podUsesVolume(&pod.Spec, v.Name) })
+		shared[wolfRuntimeVolume] = wolfRuntimeVolumeSource()
+		if pod == app {
+			shared[wolfRuntimeVolume] = appRuntimeVolume(wolfUID)
+		}
 		for i := range pod.Spec.Volumes {
 			if src, ok := shared[pod.Spec.Volumes[i].Name]; ok {
 				pod.Spec.Volumes[i].VolumeSource = src
@@ -215,6 +243,33 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 		TopologyKey: corev1.LabelHostname,
 	})
 	return wolf, app, nil
+}
+
+// wolfRuntimeVolumeSource is the Wolf pod's runtime directory: in memory and
+// size-limited, as on the node's disk (a hostPath) the App could fill /var,
+// whose writes kubelet counts toward no pod's ephemeral-storage, and get
+// every pod on the node evicted (XERK-2177). Its pages are charged to the
+// writer's memory cgroup. Kubelet unmounts it with the Wolf pod, however
+// that pod ends.
+func wolfRuntimeVolumeSource() corev1.VolumeSource {
+	return corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+		Medium:    corev1.StorageMediumMemory,
+		SizeLimit: new(resource.MustParse(runtimeSizeLimit)),
+	}}
+}
+
+// appRuntimeVolume is the App pod's runtime directory: the Wolf pod's own,
+// through kubelet's directory for that pod's emptyDir on the shared node.
+// Directory, not DirectoryOrCreate, and mounted by runtimeSubPath: the App
+// must never get a directory on the node's disk. Once the Wolf pod is gone,
+// the runtime recreates a missing hostPath on the node's disk for each new
+// container, but kubelet refuses a container whose subPath's volume is
+// missing (both measured on talos04).
+func appRuntimeVolume(wolfUID types.UID) corev1.VolumeSource {
+	return corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+		Path: path.Join(kubeletPodsDir, string(wolfUID), "volumes/kubernetes.io~empty-dir", wolfRuntimeVolume),
+		Type: new(corev1.HostPathDirectory),
+	}}
 }
 
 // udevRelayContainer is the App pod's sidecar announcing hotplugged devices
@@ -325,13 +380,13 @@ func podUsesClaim(spec *corev1.PodSpec, name string) bool {
 }
 
 // buildPods renders the session's pods: the one session pod, or with
-// AppPodHostDir the Wolf pod and the App pod.
-func (c *SessionController) buildPods(session *v1alpha1types.Session) (wolf, app *corev1.Pod, err error) {
+// AppPodHostDir the Wolf pod and the App pod (see splitAppPod for wolfUID).
+func (c *SessionController) buildPods(session *v1alpha1types.Session, wolfUID types.UID) (wolf, app *corev1.Pod, err error) {
 	pod, err := c.buildPod(session)
 	if err != nil || c.AppPodHostDir == "" {
 		return pod, nil, err
 	}
-	return c.splitAppPod(session, pod)
+	return c.splitAppPod(session, pod, wolfUID)
 }
 
 // reconcileAppPod creates or checks the App pod of a split Session, whose
@@ -359,8 +414,14 @@ func (c *SessionController) reconcileAppPod(ctx context.Context, session *v1alph
 		_, err = c.checkPodContainers(ctx, session, live)
 		return err
 	}
+	// Kubelet sets up the Wolf pod's runtime emptyDir before its init
+	// containers; until then the App pod's mount of it would fail and back
+	// off. The Wolf pod's status update requeues the Session.
+	if !podConditionTrue(wolfPod, corev1.PodInitialized) {
+		return nil
+	}
 
-	_, pod, err := c.buildPods(session)
+	_, pod, err := c.buildPods(session, wolfPod.UID)
 	switch {
 	case stderrors.Is(err, errInvalidSpec):
 		if staleErr := c.specCacheCurrent(ctx, session); staleErr != nil {
