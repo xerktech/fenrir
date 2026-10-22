@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,6 +39,7 @@ func main() {
 	pinProxySecretFile := flag.String("pin-proxy-secret-file", "", "File holding the secret the proxy sends in "+moonlight.PinProxySecretHeader+". Required with --pin-port")
 	pinUserHeader := flag.String("pin-user-header", moonlight.DefaultPinUserHeader, "Header carrying the authenticated username; must match a User name")
 	mdns := flag.Bool("mdns", true, "Advertise the HTTP port over mDNS (_nvstream._tcp) on every multicast interface, so LAN Moonlight clients find the host")
+	mdnsAddress := flag.String("mdns-address", "", "IPv4 address to advertise over mDNS instead of the node's own, e.g. a LoadBalancer IP in front of the proxy; only links whose subnet holds it answer, as host "+strings.ToLower(moonlight.ServerName)+".local")
 	namespace := flag.String("namespace", os.Getenv("POD_NAMESPACE"), "Namespace to watch")
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -46,6 +49,12 @@ func main() {
 	}
 	if *maxSessions == 0 || *maxSessions < -1 {
 		klog.Fatal("--max-concurrent-sessions must be >= 1, or -1 for unlimited")
+	}
+	var mdnsIP net.IP
+	if *mdnsAddress != "" {
+		if mdnsIP = net.ParseIP(*mdnsAddress).To4(); mdnsIP == nil {
+			klog.Fatalf("--mdns-address %q is not an IPv4 address", *mdnsAddress)
+		}
 	}
 
 	klog.Info("Starting moonlight-proxy")
@@ -57,6 +66,7 @@ func main() {
 	klog.Info("Max concurrent sessions: ", *maxSessions)
 	klog.Info("Namespace: ", *namespace)
 	klog.Info("mDNS: ", *mdns)
+	klog.Info("mDNS address: ", *mdnsAddress)
 
 	trustedProxies, err := util.ParsePrefixes(*pinTrustedProxies)
 	if err != nil {
@@ -153,9 +163,14 @@ func main() {
 	// so a failure here (e.g. 5353 already bound on the node) only warns.
 	if *mdns {
 		hostname, err := os.Hostname()
+		// The advertised address is not the node's, so it is not the node's
+		// name either: a LAN talos04.local must not resolve to it.
+		if mdnsIP != nil {
+			hostname, err = strings.ToLower(moonlight.ServerName), nil
+		}
 		if err != nil {
 			klog.Warningf("mDNS advertisement off: %s", err)
-		} else if mdnsServer, err := moonlight.AdvertiseMDNS(hostname, *port); err != nil {
+		} else if mdnsServer, err := moonlight.AdvertiseMDNS(hostname, *port, mdnsIP); err != nil {
 			klog.Warningf("mDNS advertisement off: %s", err)
 		} else {
 			defer mdnsServer.Shutdown()

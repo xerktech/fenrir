@@ -104,6 +104,60 @@ func TestMDNSReplyCarriesOnlyReceivingLinkAddresses(t *testing.T) {
 	}
 }
 
+// With an advertised address, a link holding it hands out that address alone,
+// never its own, and a link that does not hold it answers nothing.
+func TestMDNSReplyCarriesOnlyAdvertisedAddress(t *testing.T) {
+	a := testAdvertiser()
+	a.addr = net.IPv4(10, 10, 10, 57).To4()
+	lan := advertisedNets(testNets(t, "10.10.10.34/24"), a.addr)
+	reply, _ := a.reply(query(q("talos04.local.", dns.TypeA)), false, lan)
+	if got := aRecords(reply.Answer); len(got) != 1 || got[0] != "10.10.10.57" {
+		t.Errorf("A = %v, want [10.10.10.57] only", got)
+	}
+	browse, _ := a.reply(query(q(mdnsService, dns.TypePTR)), false, lan)
+	if got := aRecords(browse.Extra); len(got) != 1 || got[0] != "10.10.10.57" {
+		t.Errorf("browse extra A = %v, want [10.10.10.57] only", got)
+	}
+	pods := advertisedNets(testNets(t, "10.244.3.1/24"), a.addr)
+	if reply, _ := a.reply(query(q(mdnsService, dns.TypePTR)), false, pods); reply != nil {
+		t.Errorf("link without the address replied: %v", reply)
+	}
+	a.addrsOf = func(net.Interface) ([]net.Addr, error) {
+		return []net.Addr{testNets(t, "10.244.3.1/24")[0]}, nil
+	}
+	if msg := a.unsolicited(net.Interface{}, mdnsTTL); msg != nil {
+		t.Errorf("announced on a link without the address: %v", msg)
+	}
+	a.addrsOf = func(net.Interface) ([]net.Addr, error) {
+		return []net.Addr{testNets(t, "10.10.10.34/24")[0]}, nil
+	}
+	if got := aRecords(a.unsolicited(net.Interface{}, mdnsTTL).Answer); len(got) != 1 || got[0] != "10.10.10.57" {
+		t.Errorf("announcement A = %v, want [10.10.10.57] only", got)
+	}
+}
+
+// A link's network or broadcast address, or a /32 of its own, is no host to
+// advertise.
+func TestMDNSAdvertisedNetsNeedsAHostAddress(t *testing.T) {
+	lan := testNets(t, "10.10.10.34/24")
+	for _, ip := range []string{"10.10.10.0", "10.10.10.255", "10.10.11.57"} {
+		if got := advertisedNets(lan, net.ParseIP(ip).To4()); got != nil {
+			t.Errorf("%s advertised as %v, want nothing", ip, got)
+		}
+	}
+	if got := advertisedNets(testNets(t, "10.10.10.57/32"), net.IPv4(10, 10, 10, 57).To4()); got != nil {
+		t.Errorf("/32 dummy advertised %v, want nothing", got)
+	}
+	for _, ip := range []string{"10.10.30.0", "10.10.30.1"} {
+		if got := advertisedNets(testNets(t, "10.10.30.1/31"), net.ParseIP(ip).To4()); len(got) != 1 {
+			t.Errorf("%s on a /31 advertised %v, want it (both are hosts)", ip, got)
+		}
+	}
+	if got := advertisedNets(lan, net.IPv4(10, 10, 10, 57).To4()); len(got) != 1 || got[0].IP.String() != "10.10.10.57" {
+		t.Errorf("advertised %v, want 10.10.10.57", got)
+	}
+}
+
 // However many questions a datagram holds, it gets one reply holding each
 // record at most once: the responder is no amplifier.
 func TestMDNSReplyIsBoundedPerQuery(t *testing.T) {
@@ -252,7 +306,7 @@ func TestMDNSAdvertiserServeAndShutdown(t *testing.T) {
 		n.IP = net.IPv4(192, 168, 50, 1)
 		return []net.Addr{n}, nil
 	}
-	adv := newMDNSAdvertiser(conn, map[int]net.Interface{lan.Index: lan}, addrsOf, "talos04", 47989)
+	adv := newMDNSAdvertiser(conn, map[int]net.Interface{lan.Index: lan}, addrsOf, "talos04", 47989, nil)
 
 	m := new(dns.Msg)
 	m.SetQuestion("talos04.local.", dns.TypeA)
@@ -294,7 +348,7 @@ func TestMDNSAdvertiserServeAndShutdown(t *testing.T) {
 // `dig -p 5353 @224.0.0.251` sends, is answered by unicast with the address of
 // the link it went out on.
 func TestAdvertiseMDNSAnswersQueries(t *testing.T) {
-	adv, err := AdvertiseMDNS("direwolf-test", 39989)
+	adv, err := AdvertiseMDNS("direwolf-test", 39989, nil)
 	if err != nil {
 		// Another responder (avahi) holding 5353 makes the bind fail.
 		t.Skipf("no mDNS socket on this host: %s", err)
@@ -345,5 +399,66 @@ func TestAdvertiseMDNSAnswersQueries(t *testing.T) {
 			t.Errorf("A = %v, want [%s]", got, ip)
 		}
 		return
+	}
+}
+
+// Through serve and Shutdown with an advertised address: the LAN link answers
+// and says goodbye with that address alone, and a pod link answers nothing.
+func TestMDNSAdvertiserServesAdvertisedAddress(t *testing.T) {
+	conn := newFakeMDNSConn()
+	lan := net.Interface{Index: 7, Name: "br0"}
+	pods := net.Interface{Index: 8, Name: "cni0"}
+	addrsOf := func(ifi net.Interface) ([]net.Addr, error) {
+		cidr := "10.10.10.34/24"
+		if ifi.Index == pods.Index {
+			cidr = "10.244.3.1/24"
+		}
+		return []net.Addr{testNets(t, cidr)[0]}, nil
+	}
+	ifaces := map[int]net.Interface{lan.Index: lan, pods.Index: pods}
+	adv := newMDNSAdvertiser(conn, ifaces, addrsOf, "direwolf", 47989, net.IPv4(10, 10, 10, 57))
+
+	m := new(dns.Msg)
+	m.SetQuestion("direwolf.local.", dns.TypeA)
+	buf, err := m.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	podClient := &net.UDPAddr{IP: net.IPv4(10, 244, 3, 9), Port: 40000}
+	lanClient := &net.UDPAddr{IP: net.IPv4(10, 10, 10, 100), Port: 40000}
+	// In order: the pod query is dealt with before the LAN reply is sent.
+	conn.in <- mdnsPacket{buf: buf, cm: &ipv4.ControlMessage{IfIndex: pods.Index}, to: podClient}
+	conn.in <- mdnsPacket{buf: buf, cm: &ipv4.ControlMessage{IfIndex: lan.Index}, to: lanClient}
+	p := conn.nextUnicast(t)
+	if p.to.String() != lanClient.String() {
+		t.Fatalf("reply went to %s, want only %s (the pod link has no host)", p.to, lanClient)
+	}
+	reply := new(dns.Msg)
+	if err := reply.Unpack(p.buf); err != nil {
+		t.Fatal(err)
+	}
+	if got := aRecords(reply.Answer); len(got) != 1 || got[0] != "10.10.10.57" {
+		t.Errorf("A = %v, want [10.10.10.57] only", got)
+	}
+
+	adv.Shutdown()
+	var goodbye []string
+	for len(conn.out) > 0 {
+		p := <-conn.out
+		msg := new(dns.Msg)
+		if msg.Unpack(p.buf) != nil || p.cm == nil {
+			continue
+		}
+		if p.cm.IfIndex == pods.Index {
+			t.Errorf("multicast on the pod link: %v", msg)
+		}
+		for _, rr := range msg.Answer {
+			if a, ok := rr.(*dns.A); ok && a.Hdr.Ttl == 0 {
+				goodbye = append(goodbye, a.A.String())
+			}
+		}
+	}
+	if len(goodbye) != 1 || goodbye[0] != "10.10.10.57" {
+		t.Errorf("goodbye A = %v, want [10.10.10.57] only", goodbye)
 	}
 }

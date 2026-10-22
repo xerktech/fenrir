@@ -45,7 +45,9 @@ var mdnsGroup = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
 //
 // Each reply carries only the addresses of the interface its query arrived on,
 // so a LAN client never learns the node's pod-network or other internal
-// addresses. Queries from sources off that interface's subnets are dropped
+// addresses. With an advertised address (a LoadBalancer IP in front of the
+// proxy), that address replaces the link's own, and only links whose subnet
+// holds it answer at all. Queries from sources off that interface's subnets are dropped
 // (RFC 6762 §11), and a query gets at most one reply however many questions
 // it holds, so the responder is no amplifier.
 type MDNSAdvertiser struct {
@@ -55,6 +57,7 @@ type MDNSAdvertiser struct {
 	instance string // e.g. Direwolf._nvstream._tcp.local.
 	host     string // e.g. talos04.local.
 	port     uint16
+	addr     net.IP // advertised instead of the links' own addresses; nil for those
 
 	shutdown sync.Once
 	wg       sync.WaitGroup
@@ -68,17 +71,24 @@ type mdnsConn interface {
 	Close() error
 }
 
-// AdvertiseMDNS starts advertising host (the node's host name) and port. Call
-// Shutdown on the result to withdraw the advertisement.
-func AdvertiseMDNS(host string, port int) (*MDNSAdvertiser, error) {
+// AdvertiseMDNS starts advertising host and port at addr, or at each link's own
+// addresses when addr is nil. Call Shutdown on the result to withdraw the
+// advertisement.
+func AdvertiseMDNS(host string, port int, addr net.IP) (*MDNSAdvertiser, error) {
 	if port < 1 || port > 65535 {
 		return nil, fmt.Errorf("port %d out of range", port)
 	}
-	ifaces, err := mdnsInterfaces()
+	if addr != nil && addr.To4() == nil {
+		return nil, fmt.Errorf("advertised address %s is not IPv4", addr)
+	}
+	ifaces, err := mdnsInterfaces(addr)
 	if err != nil {
 		return nil, err
 	}
 	if len(ifaces) == 0 {
+		if addr != nil {
+			return nil, fmt.Errorf("no up, multicast-capable interface has %s as a host address of its subnet", addr)
+		}
 		return nil, errors.New("no up, multicast-capable interface has an IPv4 address")
 	}
 
@@ -115,7 +125,7 @@ func AdvertiseMDNS(host string, port int) (*MDNSAdvertiser, error) {
 	}
 
 	addrsOf := func(ifi net.Interface) ([]net.Addr, error) { return ifi.Addrs() }
-	a := newMDNSAdvertiser(conn, joined, addrsOf, host, uint16(port))
+	a := newMDNSAdvertiser(conn, joined, addrsOf, host, uint16(port), addr)
 	for _, ifi := range joined {
 		klog.Infof("mDNS: advertising %s (%s) on %s", a.instance, a.host, ifi.Name)
 	}
@@ -124,7 +134,7 @@ func AdvertiseMDNS(host string, port int) (*MDNSAdvertiser, error) {
 
 // newMDNSAdvertiser starts answering on conn, which has joined the mDNS group
 // on ifaces.
-func newMDNSAdvertiser(conn mdnsConn, ifaces map[int]net.Interface, addrsOf func(net.Interface) ([]net.Addr, error), host string, port uint16) *MDNSAdvertiser {
+func newMDNSAdvertiser(conn mdnsConn, ifaces map[int]net.Interface, addrsOf func(net.Interface) ([]net.Addr, error), host string, port uint16, addr net.IP) *MDNSAdvertiser {
 	a := &MDNSAdvertiser{
 		conn:     conn,
 		ifaces:   ifaces,
@@ -132,6 +142,7 @@ func newMDNSAdvertiser(conn mdnsConn, ifaces map[int]net.Interface, addrsOf func
 		instance: dns.Fqdn(ServerName + "." + mdnsService),
 		host:     mdnsHostName(host),
 		port:     port,
+		addr:     addr.To4(),
 		done:     make(chan struct{}),
 	}
 	a.wg.Add(2)
@@ -158,8 +169,9 @@ func (a *MDNSAdvertiser) Shutdown() {
 // mdnsInterfaces lists the interfaces to answer on. One with no IPv4 address
 // (e.g. a pod's host-side veth) has nothing to advertise, and skipping it
 // keeps the joins under the kernel's per-socket membership limit
-// (net.ipv4.igmp_max_memberships, often 20).
-func mdnsInterfaces() ([]net.Interface, error) {
+// (net.ipv4.igmp_max_memberships, often 20). With addr set, so is every link
+// whose subnets do not hold it: addr is unreachable from there.
+func mdnsInterfaces(addr net.IP) ([]net.Interface, error) {
 	all, err := net.Interfaces()
 	if err != nil {
 		return nil, fmt.Errorf("listing interfaces: %w", err)
@@ -169,7 +181,7 @@ func mdnsInterfaces() ([]net.Interface, error) {
 		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagMulticast == 0 || ifi.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		if addrs, err := ifi.Addrs(); err == nil && len(ipv4Nets(addrs)) > 0 {
+		if addrs, err := ifi.Addrs(); err == nil && len(advertisedNets(ipv4Nets(addrs), addr)) > 0 {
 			ifaces = append(ifaces, ifi)
 		}
 	}
@@ -239,7 +251,7 @@ func (a *MDNSAdvertiser) serve() {
 		if err := query.Unpack(buf[:n]); err != nil {
 			continue
 		}
-		reply, unicast := a.reply(query, udpSrc.Port != mdnsPort, nets)
+		reply, unicast := a.reply(query, udpSrc.Port != mdnsPort, advertisedNets(nets, a.addr))
 		if reply == nil {
 			continue
 		}
@@ -257,6 +269,10 @@ func (a *MDNSAdvertiser) serve() {
 // IPv4 networks, the only addresses the reply may carry.
 func (a *MDNSAdvertiser) reply(query *dns.Msg, legacy bool, nets []*net.IPNet) (*dns.Msg, bool) {
 	if query.Response || query.Opcode != dns.OpcodeQuery || len(query.Question) == 0 {
+		return nil, false
+	}
+	// The advertised address is not on this link: it has no host to offer.
+	if a.addr != nil && len(nets) == 0 {
 		return nil, false
 	}
 	var wantPTR, wantSRV, wantTXT, wantA, unicast bool
@@ -330,13 +346,17 @@ func (a *MDNSAdvertiser) unsolicited(ifi net.Interface, ttl uint32) *dns.Msg {
 	if err != nil {
 		return nil
 	}
+	nets := advertisedNets(ipv4Nets(addrs), a.addr)
+	if a.addr != nil && len(nets) == 0 {
+		return nil
+	}
 	msg := new(dns.Msg)
 	msg.Response = true
 	msg.Authoritative = true
 	msg.Answer = append(msg.Answer, a.ptr(ttl)...)
 	msg.Answer = append(msg.Answer, a.srv(ttl, mdnsCacheFlush)...)
 	msg.Answer = append(msg.Answer, a.txt(ttl, mdnsCacheFlush)...)
-	msg.Answer = append(msg.Answer, a.addrs(ttl, mdnsCacheFlush, ipv4Nets(addrs))...)
+	msg.Answer = append(msg.Answer, a.addrs(ttl, mdnsCacheFlush, nets)...)
 	return msg
 }
 
@@ -407,6 +427,30 @@ func ipv4Nets(addrs []net.Addr) []*net.IPNet {
 		}
 	}
 	return nets
+}
+
+// advertisedNets is what a link with nets advertises: nets themselves, or with
+// addr set, addr alone if one of nets holds it as a host address and nothing
+// otherwise. A subnet's network or broadcast address is no host (on a /31 both
+// are, RFC 3021), and a /32 (kube-proxy's IPVS dummy holding a LoadBalancer
+// IP) has none to offer.
+func advertisedNets(nets []*net.IPNet, addr net.IP) []*net.IPNet {
+	if addr == nil {
+		return nets
+	}
+	for _, n := range nets {
+		network := n.IP.Mask(n.Mask)
+		broadcast := make(net.IP, len(network))
+		for i := range network {
+			broadcast[i] = network[i] | ^n.Mask[i]
+		}
+		ones, bits := n.Mask.Size()
+		pointToPoint := bits-ones == 1
+		if n.Contains(addr) && bits-ones > 0 && (pointToPoint || (!addr.Equal(network) && !addr.Equal(broadcast))) {
+			return []*net.IPNet{{IP: addr, Mask: n.Mask}}
+		}
+	}
+	return nil
 }
 
 // onLink reports whether src sits on one of the receiving interface's

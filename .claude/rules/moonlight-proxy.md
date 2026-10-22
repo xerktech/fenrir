@@ -80,6 +80,9 @@ paths:
   - A reply carries only the receiving link's addresses; a fixed IP list sends pod-network
     addresses to the LAN. Tests: `TestMDNSReplyCarriesOnlyReceivingLinkAddresses`.
   - Off-link sources get nothing; a query gets one bounded reply (`TestMDNSReplyIsBoundedPerQuery`).
+  - `--mdns-address` (a LoadBalancer IP in front of the proxy) replaces the link's addresses with
+    that one, as host `direwolf.local`, never the node's name; links whose subnet lacks it are not
+    joined. Tests: `TestMDNSReplyCarriesOnlyAdvertisedAddress`.
   - IPv4 only: the proxy refuses non-IPv4 streams, so no AAAA may steer a client to IPv6.
   - It joins only links that have an IPv4 address: the kernel caps one socket's group joins
     (`igmp_max_memberships`, 20 on talos04), and talos04 has 30+ links, most pod veths.
