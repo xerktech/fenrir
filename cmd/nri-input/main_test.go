@@ -71,6 +71,8 @@ func TestAdjustmentOperatorSidecarsGetNothing(t *testing.T) {
 		v1alpha1types.PulseAudioContainerName,
 		v1alpha1types.InitContainerName,
 		v1alpha1types.SteamRelinkContainerName,
+		v1alpha1types.InputBridgeContainerName,
+		v1alpha1types.UdevRelayContainerName,
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Nil(t, (&plugin{}).adjustment(sessionPod("games"), name))

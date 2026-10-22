@@ -1086,6 +1086,13 @@ func TestBuildPodRejectsAppHostDevices(t *testing.T) {
 		"all, seccomp unset": func(_ *corev1.PodSpec, ctr *corev1.Container) {
 			ctr.SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"ALL"}}}
 		},
+		// nri-input would treat it as the operator's and skip its seccomp filter.
+		"operator container name": func(_ *corev1.PodSpec, ctr *corev1.Container) {
+			ctr.Name = v1alpha1types.InputBridgeContainerName
+		},
+		"operator relay name": func(_ *corev1.PodSpec, ctr *corev1.Container) {
+			ctr.Name = v1alpha1types.UdevRelayContainerName
+		},
 		// Both expose wolf-agent's /proc/<pid>/root (XERK-1781).
 		"host pid": func(spec *corev1.PodSpec, _ *corev1.Container) { spec.HostPID = true },
 		"share process namespace": func(spec *corev1.PodSpec, _ *corev1.Container) {

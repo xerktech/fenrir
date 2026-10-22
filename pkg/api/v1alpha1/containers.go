@@ -23,4 +23,7 @@ const (
 	// InputBridgeContainerName publishes device nodes into a user-namespaced
 	// App pod (pkg/inputbridge). It is privileged, so it needs no grant.
 	InputBridgeContainerName = "input-bridge"
+	// UdevRelayContainerName announces hotplugged devices in a user-namespaced
+	// App pod (pkg/inputbridge); it opens no device nodes.
+	UdevRelayContainerName = "udev-relay"
 )

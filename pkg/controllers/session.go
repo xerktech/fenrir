@@ -2120,6 +2120,7 @@ var operatorVolumes = []string{
 	"wolf-agent-token",
 	inputBridgeVolume,
 	appPodSessionsVolume,
+	udevEventsVolume,
 }
 
 // validateNoOperatorVolumeMounts rejects App template containers (init too)
@@ -2210,6 +2211,12 @@ func validateAppConfinement(spec *corev1.PodSpec) error {
 	}
 	for _, ctrs := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
 		for _, ctr := range ctrs {
+			// cmd/nri-input tells the App's containers from the operator's by
+			// name alone: one named like a sidecar the operator doesn't add
+			// to this pod would skip the node's seccomp filter.
+			if slices.Contains(operatorContainerNames, ctr.Name) {
+				return fmt.Errorf("validation failed: container %q in the App template has a name reserved for the operator", ctr.Name)
+			}
 			if sc := ctr.SecurityContext; sc != nil && sc.Privileged != nil && *sc.Privileged {
 				return fmt.Errorf("validation failed: container %q in the App template is privileged", ctr.Name)
 			}
@@ -2220,6 +2227,15 @@ func validateAppConfinement(spec *corev1.PodSpec) error {
 		}
 	}
 	return nil
+}
+
+// operatorContainerNames are the names of every container the operator adds
+// to a session's pods (pkg/api/v1alpha1/containers.go).
+var operatorContainerNames = []string{
+	v1alpha1types.WolfContainerName, v1alpha1types.WolfAgentContainerName,
+	v1alpha1types.PulseAudioContainerName, v1alpha1types.InitContainerName,
+	v1alpha1types.SteamRelinkContainerName, v1alpha1types.InputBridgeContainerName,
+	v1alpha1types.UdevRelayContainerName,
 }
 
 // defaultProfileHoleCapability returns the first added capability with which

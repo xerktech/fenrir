@@ -39,6 +39,7 @@ const (
 	OpRemove     = "remove"
 	OpWriteHwDB  = "hwdb-write"
 	OpRemoveHwDB = "hwdb-remove"
+	OpUevent     = "uevent"
 	OpClear      = "clear"
 )
 
@@ -85,6 +86,8 @@ type Server struct {
 	TmpDir string
 	// Gives a file being written to LockedOwner; fchownLocked outside tests.
 	chown func(f *os.File) error
+
+	events eventHub
 }
 
 // NewServer returns a Server publishing into inputDir and udevDataDir,
@@ -241,6 +244,8 @@ func (s *Server) Handle(req Request) error {
 			return fmt.Errorf("remove udev entry: %w", err)
 		}
 		return nil
+	case OpUevent:
+		return s.uevent(req.Props)
 	case OpClear:
 		return s.Clear()
 	}
@@ -296,6 +301,7 @@ func hwdbName(name string) error {
 // Wolf destroys a stopped stream's devices without unplug events (see
 // Agent.clearDevices).
 func (s *Server) Clear() error {
+	s.events.removeAll()
 	return errors.Join(s.clearNodes(), s.clearUdev())
 }
 
@@ -370,6 +376,11 @@ func (c *Client) WriteHwDB(filename string, content []string) error {
 // RemoveHwDB withdraws a udev database entry.
 func (c *Client) RemoveHwDB(filename string) error {
 	return c.do(Request{Op: OpRemoveHwDB, Filename: filename})
+}
+
+// Uevent announces one udev event (ACTION add or remove) in the App pod.
+func (c *Client) Uevent(props map[string]string) error {
+	return c.do(Request{Op: OpUevent, Props: props})
 }
 
 // Clear withdraws every device node and udev entry.

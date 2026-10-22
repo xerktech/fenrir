@@ -55,6 +55,12 @@ const (
 	inputBridgeVolume    = "direwolf-input-bridge"
 	appPodSessionsVolume = "direwolf-sessions"
 	wolfRuntimeVolume    = "wolf-runtime"
+	// The bridge's udev event socket, in <dir>/<UID>/events; only the
+	// udev-relay mounts it.
+	allCapabilities      = "ALL"
+	udevEventsVolume     = "direwolf-udev-events"
+	udevEventsSocket     = "events.sock"
+	udevRelayEventsDir   = "/run/direwolf-udev-events"
 	inputBridgeSocketDir = "/run/direwolf-input-bridge"
 	inputBridgeSocket    = inputBridgeSocketDir + "/bridge.sock"
 	// Where the bridge mounts AppPodHostDir.
@@ -172,6 +178,10 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 	app.Name = c.appPodName(session)
 	app.Labels[podRoleLabel] = podRoleApp
 	delete(app.Annotations, portBlockAnnotation)
+	app.Spec.Containers = append(app.Spec.Containers, c.udevRelayContainer())
+	app.Spec.Volumes = append(app.Spec.Volumes, corev1.Volume{Name: udevEventsVolume, VolumeSource: corev1.VolumeSource{
+		HostPath: &corev1.HostPathVolumeSource{Path: c.sessionHostDir(session, "events"), Type: new(corev1.HostPathDirectoryOrCreate)},
+	}})
 	app.Spec.HostUsers = new(false)
 	app.Spec.HostNetwork = false
 	app.Spec.HostIPC = false
@@ -197,6 +207,35 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 	return wolf, app, nil
 }
 
+// udevRelayContainer is the App pod's sidecar announcing hotplugged devices
+// there (pkg/inputbridge events.go): the App pod's network namespace is its
+// own, so the node's udevd isn't heard, and Steam's Big Picture missed every
+// pad plugged after it started. NET_ADMIN, which sending to the udev group
+// needs, is the pod user namespace's: it covers only the pod's own network.
+func (c *SessionController) udevRelayContainer() corev1.Container {
+	return corev1.Container{
+		Name:            v1alpha1types.UdevRelayContainerName,
+		Image:           c.WolfAgentImage,
+		ImagePullPolicy: corev1.PullAlways,
+		Args:            []string{"udev-relay", "--events-socket=" + path.Join(udevRelayEventsDir, udevEventsSocket)},
+		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("10m"),
+			corev1.ResourceMemory: resource.MustParse("16Mi"),
+		}},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                new(int64(0)),
+			AllowPrivilegeEscalation: new(false),
+			ReadOnlyRootFilesystem:   new(true),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{allCapabilities},
+				Add:  []corev1.Capability{"NET_ADMIN"},
+			},
+			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		},
+		VolumeMounts: []corev1.VolumeMount{{Name: udevEventsVolume, MountPath: udevRelayEventsDir}},
+	}
+}
+
 // inputBridgeContainer is the Wolf pod's privileged sidecar publishing device
 // nodes into the App pod (pkg/inputbridge). Privileged for the Bidirectional
 // mount and mount(2); it talks only to wolf-agent, over inputBridgeVolume.
@@ -209,6 +248,7 @@ func (c *SessionController) inputBridgeContainer(session *v1alpha1types.Session)
 			"input-bridge",
 			"--socket=" + inputBridgeSocket,
 			"--session-dir=" + path.Join(inputBridgeSessionsPath, string(session.UID)),
+			"--events-socket=" + path.Join(inputBridgeSessionsPath, string(session.UID), "events", udevEventsSocket),
 		},
 		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("10m"),
