@@ -1171,3 +1171,40 @@ func TestParseNexusSortsByID(t *testing.T) {
 		t.Errorf("parseNexus = %+v, %v; want both games, lowest ID first", games, err)
 	}
 }
+
+// Nexus inlines each game's logo in its state (coverDataUrl, pretty-printed by
+// JSON.stringify). A state far over the store cap because of them still scans,
+// and an over-cap state without them still fails it.
+func TestCatalogueScanStripsNexusInlineCovers(t *testing.T) {
+	const stateRel = "home/.config/xodus-nexus/launcher-state.json"
+	logo := `"data:image/png;base64,` + strings.Repeat("A", catalogueMaxStoreBytes/2) + `"`
+	state := `{
+  "games": [
+    {
+      "id": "3f2a9c1e7b4d5a60",
+      "title": "Minecraft Dungeons",
+      "coverDataUrl": ` + logo + `,
+      "installState": "ready"
+    },
+    {
+      "id": "0b1c2d3e4f5a6b7c",
+      "title": "Forza",
+      "coverDataUrl": ` + logo + `,
+      "installState": "ready"
+    }
+  ]
+}`
+	dir := t.TempDir()
+	writeFixture(t, dir, map[string]string{"games/.keep": "", stateRel: state})
+	games := scanFixture(t, dir)
+	if len(games) != 2 || games[0].ID != "0b1c2d3e4f5a6b7c" || games[1].Title != "Minecraft Dungeons" {
+		t.Errorf("games = %+v, want both Nexus games", games)
+	}
+
+	dir = t.TempDir()
+	padded := `{"games": [], "title": "` + strings.Repeat("A", catalogueMaxStoreBytes) + `"}`
+	writeFixture(t, dir, map[string]string{"games/.keep": "", stateRel: padded})
+	if err := scanFixtureErr(t, dir); err == nil {
+		t.Error("over-cap Nexus state without inline covers: scan succeeded")
+	}
+}

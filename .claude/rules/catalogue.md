@@ -47,6 +47,9 @@ paths:
     It reads each game back from its App; the ID annotation goes into a shell line, so it is
     checked as a scan would and must still give the App's name. It creates/deletes nothing.
     Tests: `catalogue_refresh_test.go`.
+  - `Catalogue.BaseAppChanges` watches the names from `baseApps`, the list `bases` syncs from:
+    a launcher added to `CatalogueOptions` but not there fails
+    `TestCatalogueBaseAppChangesWatchesEveryBase`.
   - Refresh lists in pages (`catalogueRefreshPageSize`): every App carries its cover, and one
     LIST of 300 with 200 KB covers held ~140 MiB at once, beside the App informer's copy
     (256Mi operator limit).
@@ -76,6 +79,9 @@ paths:
     and quits when it exits, ending the session.
   - Covers come from `coverUrl`/`heroUrl` (Microsoft Store CDN, often scheme-relative `//`).
     `coverDataUrl` (an inline data: URL) is ignored: art is only ever fetched from `artHosts`.
+  - The scan archives a copy of the state with each `coverDataUrl` blanked: Nexus inlines logos
+    up to ~4 MB of base64, so a few dozen games pass `catalogueMaxStoreBytes`, and an over-cap
+    file fails the scan for every store. Tests: `TestCatalogueScanStripsNexusInlineCovers`.
 - The CRD rejects an empty `appAssetWebP` (the fake clientset doesn't): a catalogue App shows
   the base App's cover until its own is fetched.
 - A name held by a hand-made App is never overwritten; that game is skipped, with an error.

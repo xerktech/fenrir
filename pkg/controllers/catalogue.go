@@ -283,6 +283,7 @@ func (c *Catalogue) Scan(ctx context.Context, pod *corev1.Pod, artBudget time.Du
 // read, so a torn read fails the scan rather than parsing as fewer games.
 // Symlinks are followed (-h; tar would otherwise archive an empty entry); a
 // dangling one, an unreadable one, or a file over its size cap fails the scan.
+// Nexus's state is archived from a copy without its inline covers.
 func catalogueScanCommand(gamesPath string) []string {
 	// As the desktop user (exec runs as root): -h follows symlinks that user
 	// planted, which must not reach files only root can read.
@@ -303,7 +304,8 @@ reachable() {
     echo "$p is not readable by $(id -un)" >&2; exit 1
   fi
 }
-max_manifest=$1 max_store=$2 home=$3 games=$4; shift 4
+# $5, Nexus's state, stays in "$@" with the other stores.
+max_manifest=$1 max_store=$2 home=$3 games=$4 nexus=$5; shift 4
 for f in "$@" "$home/.local/share/Steam/steamapps/x" "$games/x" "$games/steamapps/x"; do reachable "$f"; done
 # Only folders Steam lists as libraries must be readable: an unrelated one
 # (ext4's root-only lost+found) is none of the scan's business.
@@ -334,14 +336,27 @@ for f do
     continue
   fi
   case $f in *.acf) max=$max_manifest ;; *) max=$max_store ;; esac
+  if [ "$f" = "$nexus" ]; then
+    # Nexus inlines each game's logo (coverDataUrl, up to ~4 MB of base64),
+    # which a few dozen games take past the store cap. The scan never reads
+    # it, so blank it in a copy and archive that; the copy keeps the path's
+    # tail, which is how the operator finds the file. Only a value with no
+    # quote or escape is blanked, so the JSON stays as valid as it was.
+    tmp=$(mktemp -d) || exit 1
+    trap 'rm -rf "$tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
+    mkdir -p "$tmp/.config/xodus-nexus" || exit 1
+    sed 's/"coverDataUrl":\([[:space:]]*\)"[^"\\]*"/"coverDataUrl":\1""/g' "$f" > "$tmp/.config/xodus-nexus/launcher-state.json" || exit 1
+    f=$tmp/.config/xodus-nexus/launcher-state.json
+  fi
   n=$(wc -c < "$f") || exit 1
   [ "$n" -gt "$max" ] && { echo "$f is $n bytes, over $max" >&2; exit 1; }
   set -- "$@" "$f"
 done
 [ $# -eq 0 ] && exit 0
-exec tar -chf - -- "$@"
+tar -chf - -- "$@"
 `, "sh", strconv.Itoa(catalogueMaxManifestBytes), strconv.Itoa(catalogueMaxStoreBytes), libraryHome, gamesPath,
-		heroicLegendaryInstalled, heroicGOGInstalled, heroicLegendaryLibrary, heroicGOGLibrary, nexusState}
+		nexusState, heroicLegendaryInstalled, heroicGOGInstalled, heroicLegendaryLibrary, heroicGOGLibrary}
 }
 
 // readTar returns the archive's files by name (tar drops the leading /).
@@ -840,20 +855,30 @@ func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame, artBudget t
 	return errors.Join(errs...)
 }
 
+// baseApps is every launcher's base App name (empty: not configured) and the
+// stores copied from it. Both bases and BaseAppChanges read it, so a launcher
+// added here is both synced and watched.
+func (o CatalogueOptions) baseApps() []struct {
+	name   string
+	stores []string
+} {
+	return []struct {
+		name   string
+		stores []string
+	}{
+		{o.SteamBaseApp, []string{v1alpha1types.CatalogueStoreSteam}},
+		{o.HeroicBaseApp, []string{v1alpha1types.CatalogueStoreEpic, v1alpha1types.CatalogueStoreGOG}},
+		{o.RomMBaseApp, []string{v1alpha1types.CatalogueStoreRomM}},
+		{o.NexusBaseApp, []string{v1alpha1types.CatalogueStoreNexus}},
+	}
+}
+
 // bases reads each configured launcher's base App, by store. A launcher whose
 // base App is missing or unusable is left out, with an error.
 func (c *Catalogue) bases(ctx context.Context) (map[string]*v1alpha1types.App, []error) {
 	bases := map[string]*v1alpha1types.App{}
 	var errs []error
-	for _, b := range []struct {
-		name   string
-		stores []string
-	}{
-		{c.SteamBaseApp, []string{v1alpha1types.CatalogueStoreSteam}},
-		{c.HeroicBaseApp, []string{v1alpha1types.CatalogueStoreEpic, v1alpha1types.CatalogueStoreGOG}},
-		{c.RomMBaseApp, []string{v1alpha1types.CatalogueStoreRomM}},
-		{c.NexusBaseApp, []string{v1alpha1types.CatalogueStoreNexus}},
-	} {
+	for _, b := range c.baseApps() {
 		if b.name == "" {
 			continue
 		}
@@ -1010,8 +1035,18 @@ func (c *Catalogue) RunRefresh(ctx context.Context, changed <-chan struct{}) {
 }
 
 // BaseAppChanges signals (coalesced, never blocking the informer) when one of
-// the named Apps is added or its spec changes.
-func BaseAppChanges(informer cache.SharedIndexInformer, names ...string) (<-chan struct{}, error) {
+// the Catalogue's base Apps is added or its spec changes.
+func (c *Catalogue) BaseAppChanges(informer cache.SharedIndexInformer) (<-chan struct{}, error) {
+	var names []string
+	for _, b := range c.baseApps() {
+		if b.name != "" {
+			names = append(names, b.name)
+		}
+	}
+	return baseAppChanges(informer, names...)
+}
+
+func baseAppChanges(informer cache.SharedIndexInformer, names ...string) (<-chan struct{}, error) {
 	changed := make(chan struct{}, 1)
 	signal := func(obj any) {
 		if app, ok := obj.(*v1alpha1types.App); ok && slices.Contains(names, app.Name) {
