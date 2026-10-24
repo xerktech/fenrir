@@ -149,8 +149,8 @@ func TestCatalogueScanCorruptStoreFails(t *testing.T) {
 		{"/config/.config/heroic/gog_store/installed.json", `{"installed": [`},
 		{"/games/steamapps/appmanifest_1.acf", `"AppState" { "appid" "1" `},
 		{"/games/steamapps/appmanifest_2.acf", `"AppState" { "appid" "abc" "name" "x" "StateFlags" "4" }`},
-		{"/config/.config/Xodus Nexus/launcher-state.json", `{"games": [`},
-		{"/config/.config/Xodus Nexus/launcher-state.json", `{"downloads": []}`},
+		{"/config/.config/xodus-nexus/launcher-state.json", `{"games": [`},
+		{"/config/.config/xodus-nexus/launcher-state.json", `{"downloads": []}`},
 	} {
 		if _, err := parseInstalls(map[string][]byte{tc.name: []byte(tc.data)}); err == nil {
 			t.Errorf("%s: parsed %q without error", tc.name, tc.data)
@@ -1132,8 +1132,42 @@ func TestOverlappingGPUClaimsReferencedOnce(t *testing.T) {
 // Nexus writes its state atomically and always with a games list, so an empty
 // list is no games installed, not a torn read.
 func TestParseNexusEmptyGamesList(t *testing.T) {
-	games, err := parseNexus(map[string][]byte{"/config/.config/Xodus Nexus/launcher-state.json": []byte(`{"games": []}`)})
+	games, err := parseNexus(map[string][]byte{"/config/.config/xodus-nexus/launcher-state.json": []byte(`{"games": []}`)})
 	if err != nil || len(games) != 0 {
 		t.Errorf("parseNexus(empty list) = %v, %v; want no games, no error", games, err)
+	}
+}
+
+// With a Nexus base App, a ready Nexus game becomes a Moonlight App that
+// launches through `xodus-nexus --launch-game`, with its Store box art.
+func TestCatalogueSyncNexusGame(t *testing.T) {
+	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil), baseApp("nexus-base", nil))
+	f.catalogue.NexusBaseApp = "nexus-base"
+	f.scan(t)
+
+	name := catalogueAppName(v1alpha1types.CatalogueStoreNexus, "3f2a9c1e7b4d5a60")
+	app := f.app(t, name)
+	if app.Labels[v1alpha1types.CatalogueLabel] != v1alpha1types.CatalogueStoreNexus || app.Spec.Title != "Minecraft Dungeons" || app.Spec.Hidden {
+		t.Errorf("%s labels %v title %q hidden %v", name, app.Labels, app.Spec.Title, app.Spec.Hidden)
+	}
+	env := app.Spec.Template.Spec.Containers[0].Env
+	if got := env[len(env)-1]; got.Name != LaunchCommandEnv || got.Value != "xodus-nexus --launch-game 3f2a9c1e7b4d5a60" {
+		t.Errorf("%s launch env = %+v", name, got)
+	}
+	if len(app.Spec.AppAssetWebP) == 0 || bytes.Equal(app.Spec.AppAssetWebP, []byte("base-art")) {
+		t.Errorf("%s has no cover of its own", name)
+	}
+	if !slices.Contains(f.fetched, "https://store-images.s-microsoft.com/image/apps.12345.dungeons-boxart") {
+		t.Errorf("Store box art not fetched; fetched %v", f.fetched)
+	}
+}
+
+// parseNexus returns games in ID order, so a scan's App writes are stable.
+func TestParseNexusSortsByID(t *testing.T) {
+	games, err := parseNexus(map[string][]byte{"/config/.config/xodus-nexus/launcher-state.json": []byte(
+		`{"games": [{"id": "ffffffffffffffff", "title": "B", "installState": "ready"},
+		            {"id": "0000000000000000", "title": "A", "installState": "ready"}]}`)})
+	if err != nil || len(games) != 2 || games[0].ID != "0000000000000000" {
+		t.Errorf("parseNexus = %+v, %v; want both games, lowest ID first", games, err)
 	}
 }

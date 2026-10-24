@@ -25,7 +25,10 @@ RUN set -eu; \
   test -x /tmp/squashfs-root/AppRun; \
   # Drop the setuid sandbox helper: xodus-nexus uses user namespaces or --no-sandbox.
   chmod 0755 /tmp/squashfs-root/chrome-sandbox 2>/dev/null || true; \
-  chmod -R go-w /tmp/squashfs-root; \
+  # --appimage-extract makes its directories 0700 root: the desktop user
+  # must read them, and nobody but root may write.
+  chmod -R u=rwX,go=rX /tmp/squashfs-root; \
+  test -z "$(find /tmp/squashfs-root ! -type l \( ! -perm -o=r -o -perm /022 \))"; \
   mv /tmp/squashfs-root /opt/xodus-nexus
 
 FROM lscr.io/linuxserver/steam:latest@sha256:d1c9f2c6d522169f6dcede9b17076c0e31ddbc5f9c4a102562cecddfe2d4ecdb

@@ -66,7 +66,8 @@ paths:
   - The art client dials public addresses only (`publicAddressOnly`), and covers are capped at
     4096px a side (moonlight-proxy decodes them on every request).
 - Xodus Nexus (`--catalogue-nexus-app`, store `nexus`): the scan reads
-  `~/.config/Xodus Nexus/launcher-state.json` (Electron userData for productName "Xodus Nexus").
+  `~/.config/xodus-nexus/launcher-state.json`. Electron names userData after the packaged
+  app.asar's package.json `name`; it has no `productName`, so not "Xodus Nexus" (seen at runtime).
   - Only `installState: "ready"` games get an App; `incomplete` is a download in progress.
   - A missing file is no games; a file with no `games` list fails the scan. An empty list is
     no games: Nexus writes the file atomically (temp + rename), so it is never torn.

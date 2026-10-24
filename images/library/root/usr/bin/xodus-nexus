@@ -47,4 +47,7 @@ if ! bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid /bin/true >/dev/n
   NEXUS_ARGS+=(--no-sandbox)
 fi
 
+# AppRun works out its own directory by testing "$dir/$1" when APPDIR is
+# unset, so any argument (--launch-game, --no-sandbox) sends it to /xodus-nexus.
+export APPDIR=/opt/xodus-nexus
 exec /opt/xodus-nexus/AppRun "${NEXUS_ARGS[@]}" "$@"

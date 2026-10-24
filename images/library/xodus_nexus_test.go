@@ -33,13 +33,16 @@ func runXodusNexus(t *testing.T, home, games string, secretsOwned bool, args ...
 	t.Helper()
 	dir := t.TempDir()
 	log := filepath.Join(dir, "log")
-	writeStub(t, filepath.Join(dir, "AppRun"), `echo "nexus $*" >>"$LOG"; echo "keyring ${GNOME_KEYRING_CONTROL:-unset}" >>"$LOG"`)
+	writeStub(t, filepath.Join(dir, "AppRun"), `echo "nexus $*" >>"$LOG"; echo "keyring ${GNOME_KEYRING_CONTROL:-unset}" >>"$LOG"; echo "appdir ${APPDIR:-unset}" >>"$LOG"`)
 	owned := "false"
 	if secretsOwned {
 		owned = "true"
 	}
 	writeStub(t, filepath.Join(dir, "dbus-send"), `echo "   boolean `+owned+`"`)
-	writeStub(t, filepath.Join(dir, "gnome-keyring-daemon"), `echo "gnome-keyring-daemon $*" >>"$LOG"; echo "GNOME_KEYRING_CONTROL=/run/keyring"`)
+	// The --start call must see the daemon --unlock started (its control
+	// socket), or it starts a second, locked daemon: log what it was given.
+	writeStub(t, filepath.Join(dir, "gnome-keyring-daemon"), `echo "gnome-keyring-daemon $* control=${GNOME_KEYRING_CONTROL:-unset}" >>"$LOG"
+case "$*" in *--unlock*) echo "GNOME_KEYRING_CONTROL=/run/keyring" ;; esac`)
 	writeStub(t, filepath.Join(dir, "bwrap"), `exit 1`)
 	src, err := os.ReadFile(xodusNexus)
 	if err != nil {
@@ -50,10 +53,10 @@ func runXodusNexus(t *testing.T, home, games string, secretsOwned bool, args ...
 		t.Fatal("xodus-nexus no longer runs /opt/xodus-nexus/AppRun")
 	}
 	script := filepath.Join(dir, "xodus-nexus")
-	if err := os.WriteFile(script, []byte(patched), 0o700); err != nil {
+	if err = os.WriteFile(script, []byte(patched), 0o600); err != nil { //nolint:gosec // script is under t.TempDir
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", append([]string{script}, args...)...)
+	cmd := exec.CommandContext(t.Context(), "bash", append([]string{script}, args...)...) //nolint:gosec // the wrapper under test
 	cmd.Env = []string{
 		"PATH=" + dir + ":/usr/bin:/bin",
 		"HOME=" + home,
@@ -61,7 +64,8 @@ func runXodusNexus(t *testing.T, home, games string, secretsOwned bool, args ...
 		"DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent",
 		"XODUS_NEXUS_GAMES=" + games,
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("xodus-nexus: %v\n%s", err, out)
 	}
 	data, err := os.ReadFile(log)
@@ -80,10 +84,11 @@ func TestXodusNexusStartsKeyringAndLinksGames(t *testing.T) {
 	}
 	log := runXodusNexus(t, home, games, false, "--launch-game", "3f2a9c1e7b4d5a60")
 	for _, want := range []string{
-		"gnome-keyring-daemon --unlock --components=secrets",
-		"gnome-keyring-daemon --start --components=secrets",
+		"gnome-keyring-daemon --unlock --components=secrets control=unset",
+		"gnome-keyring-daemon --start --components=secrets control=/run/keyring",
 		"nexus --no-sandbox --launch-game 3f2a9c1e7b4d5a60",
 		"keyring /run/keyring",
+		"appdir /opt/xodus-nexus", // AppRun's own lookup breaks on any argument
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log lacks %q:\n%s", want, log)

@@ -106,9 +106,10 @@ const (
 )
 
 // nexusState is Xodus Nexus's launcher state (installed games, downloads,
-// settings): Electron's userData for its productName, written atomically
-// (temp file + rename).
-const nexusState = libraryHome + "/.config/Xodus Nexus/launcher-state.json"
+// settings), written atomically (temp file + rename). The directory is
+// Electron's userData, named after the packaged app.asar's package.json
+// "name" (xodus-nexus): it has no productName, so not "Xodus Nexus".
+const nexusState = libraryHome + "/.config/xodus-nexus/launcher-state.json"
 
 // nexusGameID is what a Nexus game ID must look like to be launched: it goes
 // into a shell line. Nexus itself accepts exactly this for --launch-game

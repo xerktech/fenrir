@@ -109,7 +109,10 @@ RUN set -eu; \
   test -x /tmp/squashfs-root/AppRun; \
   # Drop the setuid sandbox helper: xodus-nexus uses user namespaces or --no-sandbox.
   chmod 0755 /tmp/squashfs-root/chrome-sandbox 2>/dev/null || true; \
-  chmod -R go-w /tmp/squashfs-root; \
+  # --appimage-extract makes its directories 0700 root: the desktop user
+  # must read them, and nobody but root may write.
+  chmod -R u=rwX,go=rX /tmp/squashfs-root; \
+  test -z "$(find /tmp/squashfs-root ! -type l \( ! -perm -o=r -o -perm /022 \))"; \
   mv /tmp/squashfs-root /opt/xodus-nexus
 
 # Sessions of Microsoft Store games installed with Xodus Nexus (catalogue

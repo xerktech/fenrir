@@ -71,6 +71,11 @@ paths:
   - Installs go to the games volume: `init-xodus-nexus` (root) makes `/games/xodus-nexus` owned
     by abc, never following an existing link; the wrapper links `~/Games/Xodus Nexus` to it.
   - Nexus downloads its backend and runtime into the home on demand (Settings), unpinned.
+  - The wrapper exports `APPDIR`: AppRun otherwise finds its directory by testing `"$dir/$1"`,
+    so any argument sends it to `/xodus-nexus`. The build makes the unpacked tree world-readable
+    (`--appimage-extract` leaves 0700 root dirs) and fails if any entry is not.
+  - The Library's selkies-desktop menu lists only `.desktop` files; the openbox `menu.xml` item
+    reaches a home only when it has no `~/.config/labwc/menu.xml`, so ship both.
 - `wrapped-steam` checks for a running Steam again under a per-pod `flock`, held until it
   execs Steam: two cold launches at once would otherwise both start Steam and Heroic.
   - No child may inherit the lock fd (`9>&-`): Heroic outlives the script, and every later cold
