@@ -65,6 +65,17 @@ paths:
     which kills the whole operator, not just the scan.
   - The art client dials public addresses only (`publicAddressOnly`), and covers are capped at
     4096px a side (moonlight-proxy decodes them on every request).
+- Xodus Nexus (`--catalogue-nexus-app`, store `nexus`): the scan reads
+  `~/.config/xodus-nexus/launcher-state.json`. Electron names userData after the packaged
+  app.asar's package.json `name`; it has no `productName`, so not "Xodus Nexus" (seen at runtime).
+  - Only `installState: "ready"` games get an App; `incomplete` is a download in progress.
+  - A missing file is no games; a file with no `games` list fails the scan. An empty list is
+    no games: Nexus writes the file atomically (temp + rename), so it is never torn.
+  - IDs must match `nexusGameID` (16 lowercase hex, Nexus's own `validId`): they go into the
+    launch line `xodus-nexus --launch-game <id>`, which runs the game with no launcher window
+    and quits when it exits, ending the session.
+  - Covers come from `coverUrl`/`heroUrl` (Microsoft Store CDN, often scheme-relative `//`).
+    `coverDataUrl` (an inline data: URL) is ignored: art is only ever fetched from `artHosts`.
 - The CRD rejects an empty `appAssetWebP` (the fake clientset doesn't): a catalogue App shows
   the base App's cover until its own is fetched.
 - A name held by a hand-made App is never overwritten; that game is skipped, with an error.

@@ -1,0 +1,53 @@
+#! /bin/bash
+
+# Starts Xodus Nexus (Microsoft Store / Xbox PC games): from the Library
+# desktop, and in game sessions as `xodus-nexus --launch-game <id>`, which
+# runs the game without the launcher window and quits when it exits.
+# The same file ships in images/library and images/gow-nvidia32 (target
+# nexus); a test keeps the two copies identical.
+
+# Nexus keeps the Microsoft account in a Secret Service keyring, and neither
+# image runs one: start gnome-keyring's secrets component on a session bus.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+  exec dbus-run-session -- "$0" "$@"
+fi
+if ! dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+    org.freedesktop.DBus.NameHasOwner string:org.freedesktop.secrets 2>/dev/null | grep -q 'boolean true'; then
+  # The login keyring is in the shared home (~/.local/share/keyrings), so a
+  # sign-in in the Library reaches game sessions. It is unlocked with an empty
+  # password, so gnome-keyring stores it unencrypted: the same protection as
+  # Steam's and Heroic's tokens in that home (readable by the desktop user).
+  # The second call must see the first daemon's GNOME_KEYRING_CONTROL, or it
+  # starts another daemon whose login keyring is locked (it then prompts, and
+  # there is no prompter). Verified on Debian trixie's gnome-keyring.
+  mkdir -p "${HOME}/.local/share/keyrings"
+  eval "$(printf '\n' | gnome-keyring-daemon --unlock --components=secrets)"
+  export GNOME_KEYRING_CONTROL
+  eval "$(gnome-keyring-daemon --start --components=secrets)"
+  export GNOME_KEYRING_CONTROL
+fi
+
+# Games install on the shared games volume, not in the home: Nexus installs
+# into ~/Games/Xodus Nexus, so point that at the volume's directory (made by
+# the Library's init-xodus-nexus). An existing directory or link is left alone.
+games="${XODUS_NEXUS_GAMES:-/games/xodus-nexus}"
+link="${HOME}/Games/Xodus Nexus"
+if [ -d "${games}" ] && [ ! -e "${link}" ] && [ ! -L "${link}" ]; then
+  mkdir -p "${HOME}/Games" && ln -s "${games}" "${link}" ||
+    echo "xodus-nexus: could not link ${link} to ${games}" >&2
+fi
+
+NEXUS_ARGS=()
+if [ "${PIXELFLUX_WAYLAND,,}" == "true" ]; then
+  NEXUS_ARGS+=(--ozone-platform=wayland)
+fi
+# Electron's sandbox needs unprivileged user namespaces, which a default
+# container seccomp profile denies.
+if ! bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid /bin/true >/dev/null 2>&1; then
+  NEXUS_ARGS+=(--no-sandbox)
+fi
+
+# AppRun works out its own directory by testing "$dir/$1" when APPDIR is
+# unset, so any argument (--launch-game, --no-sandbox) sends it to /xodus-nexus.
+export APPDIR=/opt/xodus-nexus
+exec /opt/xodus-nexus/AppRun "${NEXUS_ARGS[@]}" "$@"

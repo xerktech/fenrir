@@ -280,3 +280,26 @@ func TestCatalogueRunRefreshOnSignal(t *testing.T) {
 	}
 	waitFor("a refresh on the change signal", imageIs("steam:3"))
 }
+
+// A Nexus App's ID goes into its launch line, so a refresh accepts only what
+// a scan would: 16 lowercase hex digits, matching the App's name.
+func TestCatalogueGameOfNexusID(t *testing.T) {
+	app := func(name, id string) *v1alpha1types.App {
+		a := baseApp(name, nil)
+		a.Labels = map[string]string{v1alpha1types.CatalogueLabel: v1alpha1types.CatalogueStoreNexus}
+		a.Annotations = map[string]string{catalogueIDAnnotation: id}
+		return a
+	}
+	if _, err := catalogueGameOf(app("nexus-3f2a9c1e7b4d5a60", "3f2a9c1e7b4d5a60")); err != nil {
+		t.Errorf("valid Nexus App rejected: %v", err)
+	}
+	for _, tc := range []struct{ name, id string }{
+		{catalogueAppName("nexus", "3f2a;reboot"), "3f2a;reboot"},
+		{catalogueAppName("nexus", "3F2A9C1E7B4D5A60"), "3F2A9C1E7B4D5A60"},
+		{"nexus-0000000000000000", "3f2a9c1e7b4d5a60"},
+	} {
+		if _, err := catalogueGameOf(app(tc.name, tc.id)); err == nil {
+			t.Errorf("forged Nexus App %s (ID %q) accepted", tc.name, tc.id)
+		}
+	}
+}

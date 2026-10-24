@@ -1,0 +1,30 @@
+{
+  "games": [
+    {
+      "id": "3f2a9c1e7b4d5a60",
+      "title": "Minecraft Dungeons",
+      "path": "/config/Games/Xodus Nexus/Minecraft Dungeons",
+      "storeId": "9P8MK4NC0LJB",
+      "coverUrl": "//store-images.s-microsoft.com/image/apps.12345.dungeons-boxart",
+      "heroUrl": "https://store-images.s-microsoft.com/image/apps.12345.dungeons-hero",
+      "installState": "ready",
+      "addedAt": "2026-10-24T17:00:00.000Z"
+    },
+    {
+      "id": "0b1c2d3e4f5a6b7c",
+      "title": "Still Downloading",
+      "path": "/config/Games/Xodus Nexus/Still Downloading",
+      "installState": "incomplete",
+      "addedAt": "2026-10-24T17:05:00.000Z"
+    },
+    {
+      "id": "x'; rm -rf / #",
+      "title": "Hostile ID",
+      "path": "/config/Games/Xodus Nexus/Hostile",
+      "installState": "ready",
+      "addedAt": "2026-10-24T17:06:00.000Z"
+    }
+  ],
+  "downloads": [],
+  "settings": { "installRoot": "/config/Games/Xodus Nexus", "market": "neutral" }
+}

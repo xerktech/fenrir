@@ -108,6 +108,10 @@ jobs:
           - app: heroic
             context: images/gow-nvidia32
             target: heroic
+          # Heroic's session image plus Xodus Nexus (Microsoft Store games).
+          - app: nexus
+            context: images/gow-nvidia32
+            target: nexus
           # Go binary plus a C shim: repo-root context, own Dockerfile.
           - app: nri-nvenc-fix
             file: cmd/nri-nvenc-fix/Dockerfile

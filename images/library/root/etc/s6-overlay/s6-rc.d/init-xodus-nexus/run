@@ -1,0 +1,25 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Makes Xodus Nexus's install directory on the shared games volume, owned by
+# the desktop user (the volume's root is root's). xodus-nexus links
+# ~/Games/Xodus Nexus to it, and game sessions mount the same volume.
+#
+# The volume is writable by the desktop user (Steam libraries live there), so
+# an existing entry that is not a plain directory (a planted link) is left
+# alone rather than followed by root.
+#
+# Never exits non-zero: a failed oneshot stops s6 starting the desktop and
+# leaves the pod Running but never Ready, which would hold the Steam lock.
+
+dir="${XODUS_NEXUS_GAMES:-/games/xodus-nexus}"
+[[ -d "${dir%/*}" ]] || { echo "init-xodus-nexus: ${dir%/*} is not mounted; skipping" >&2; exit 0; }
+if [[ -L "${dir}" || ( -e "${dir}" && ! -d "${dir}" ) ]]; then
+  echo "init-xodus-nexus: ${dir} is not a plain directory; leaving it" >&2
+  exit 0
+fi
+if [[ ! -d "${dir}" ]]; then
+  mkdir -m 0755 "${dir}" || { echo "init-xodus-nexus: cannot create ${dir}" >&2; exit 0; }
+fi
+chown -h abc:abc "${dir}" || echo "init-xodus-nexus: cannot hand ${dir} to abc" >&2
+exit 0

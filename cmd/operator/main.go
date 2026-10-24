@@ -74,6 +74,8 @@ func main() {
 		"App copied for each installed Steam game (its pod template runs $"+controllers.LaunchCommandEnv+"). Empty: Steam games are not catalogued. Needs --library-port")
 	catalogueHeroicApp := flag.String("catalogue-heroic-app", "",
 		"App copied for each installed Epic/GOG game, launched through Heroic. Empty: Heroic games are not catalogued. Needs --library-port")
+	catalogueNexusApp := flag.String("catalogue-nexus-app", "",
+		"App copied for each Microsoft Store game installed with Xodus Nexus. Empty: Nexus games are not catalogued. Needs --library-port")
 	rommURL := flag.String("romm-url", "",
 		"RomM's base URL, e.g. http://romm.games.svc:8080; its token is read from $ROMM_TOKEN. Empty: ROMs are not catalogued")
 	rommApp := flag.String("romm-app", "",
@@ -130,8 +132,8 @@ func main() {
 	if pathErr := controllers.ValidateLibraryGamesPath(*libraryGamesPath); *libraryPort != 0 && pathErr != nil {
 		klog.Fatalf("--library-games-path: %v", pathErr)
 	}
-	if *libraryPort == 0 && (*catalogueSteamApp != "" || *catalogueHeroicApp != "") {
-		klog.Fatal("--catalogue-steam-app and --catalogue-heroic-app need --library-port: the catalogue is read from the Library")
+	if *libraryPort == 0 && (*catalogueSteamApp != "" || *catalogueHeroicApp != "" || *catalogueNexusApp != "") {
+		klog.Fatal("--catalogue-steam-app, --catalogue-heroic-app and --catalogue-nexus-app need --library-port: the catalogue is read from the Library")
 	}
 	if *libraryIdleTimeout <= 0 {
 		klog.Fatalf("--library-idle-timeout must be positive, got %s", *libraryIdleTimeout)
@@ -259,14 +261,14 @@ func main() {
 				MaxRuntime:   *libraryMaxRuntime,
 			},
 		)
-		if *catalogueSteamApp != "" || *catalogueHeroicApp != "" {
+		if *catalogueSteamApp != "" || *catalogueHeroicApp != "" || *catalogueNexusApp != "" {
 			libraryController.Catalogue = controllers.NewCatalogue(
 				direwolfClient.DirewolfV1alpha1().Apps(*namespace),
 				libraryController.Exec,
 				*libraryGamesPath,
-				controllers.CatalogueOptions{SteamBaseApp: *catalogueSteamApp, HeroicBaseApp: *catalogueHeroicApp},
+				controllers.CatalogueOptions{SteamBaseApp: *catalogueSteamApp, HeroicBaseApp: *catalogueHeroicApp, NexusBaseApp: *catalogueNexusApp},
 			)
-			catalogueBaseChanged, err = controllers.BaseAppChanges(appInformer, *catalogueSteamApp, *catalogueHeroicApp)
+			catalogueBaseChanged, err = controllers.BaseAppChanges(appInformer, *catalogueSteamApp, *catalogueHeroicApp, *catalogueNexusApp)
 			if err != nil {
 				klog.Fatalf("Catalogue: %v", err)
 			}

@@ -88,3 +88,44 @@ RUN ldconfig && ldconfig -p | grep -q 'libGLX_nvidia.so.0 (libc6)' \
   && gosu nobody sh -c 'cd /usr/lib/nvidia/wine && test -r nvngx.dll -a -r _nvngx.dll -a -r nvngx_dlssg.dll'
 RUN d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin' \
   && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
+
+# Xodus Nexus (Microsoft Store / Xbox PC games, github.com/domsvoboda/xodus-nexus),
+# unpacked from its AppImage: pods have no FUSE to mount one. Run unpacked, it
+# never self-updates (Nexus updates only a running AppImage), so the version
+# moves only with this pin.
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS nexus-app
+# renovate: datasource=github-releases depName=domsvoboda/xodus-nexus
+ARG NEXUS_VERSION=v0.3.11
+# Must be updated by hand with the version (the release's .sha512sum asset): a
+# Renovate bump without it fails the build closed.
+ARG NEXUS_SHA512=0d6ef2d254aa26eb80565653c3b08d4b1c66e77ac0c62360fbb0725079a91cef209e33123fecd995783374fdc1d4c4af39595c3a529a6f1d31aaaadab0759c99
+RUN set -eu; \
+  apt-get update; apt-get install -y --no-install-recommends ca-certificates curl; \
+  curl -fsSL -o /tmp/nexus.AppImage \
+    "https://github.com/domsvoboda/xodus-nexus/releases/download/${NEXUS_VERSION}/Xodus-Nexus-${NEXUS_VERSION#v}-x86_64.AppImage"; \
+  echo "${NEXUS_SHA512}  /tmp/nexus.AppImage" | sha512sum -c -; \
+  chmod +x /tmp/nexus.AppImage; \
+  cd /tmp && ./nexus.AppImage --appimage-extract >/dev/null; \
+  test -x /tmp/squashfs-root/AppRun; \
+  # Drop the setuid sandbox helper: xodus-nexus uses user namespaces or --no-sandbox.
+  chmod 0755 /tmp/squashfs-root/chrome-sandbox 2>/dev/null || true; \
+  # --appimage-extract makes its directories 0700 root: the desktop user
+  # must read them, and nobody but root may write.
+  chmod -R u=rwX,go=rX /tmp/squashfs-root; \
+  test -z "$(find /tmp/squashfs-root ! -type l \( ! -perm -o=r -o -perm /022 \))"; \
+  mv /tmp/squashfs-root /opt/xodus-nexus
+
+# Sessions of Microsoft Store games installed with Xodus Nexus (catalogue
+# store "nexus"): the heroic target (Electron's libraries, NVIDIA lib32) plus
+# Nexus, its keyring, and a startup that runs $DIREWOLF_LAUNCH_COMMAND.
+FROM heroic AS nexus
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends gnome-keyring libsecret-1-0 dbus \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=nexus-app /opt/xodus-nexus /opt/xodus-nexus
+COPY --chmod=755 root/usr/bin/xodus-nexus /usr/bin/xodus-nexus
+COPY --chmod=755 root/opt/direwolf/launch-nexus /opt/direwolf/launch-nexus
+COPY --chmod=755 root/opt/gow/nexus-startup-app.sh /opt/gow/startup-app.sh
+RUN test -x /opt/xodus-nexus/AppRun && command -v gnome-keyring-daemon dbus-run-session dbus-send >/dev/null \
+  && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/xodus-nexus' \
+  && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
