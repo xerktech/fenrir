@@ -104,10 +104,11 @@ func TestCatalogueScanFixtures(t *testing.T) {
 		got[g.Store+"/"+g.ID] = g
 	}
 	want := map[string]string{
-		"steam/570":      "Dota 2",
-		"steam/1245620":  `ELDEN RING "Shadow" Edition`, // StateFlags 6: installed, update pending
-		"epic/Quail":     "Hades",
-		"gog/1207658924": "Unreal Tournament 2004",
+		"steam/570":              "Dota 2",
+		"steam/1245620":          `ELDEN RING "Shadow" Edition`, // StateFlags 6: installed, update pending
+		"epic/Quail":             "Hades",
+		"gog/1207658924":         "Unreal Tournament 2004",
+		"nexus/3f2a9c1e7b4d5a60": "Minecraft Dungeons", // not the incomplete one, nor the unusable ID
 	}
 	if len(got) != len(want) {
 		t.Errorf("scanned %d games, want %d: %+v", len(got), len(want), games)
@@ -119,6 +120,9 @@ func TestCatalogueScanFixtures(t *testing.T) {
 	}
 	if art := got["epic/Quail"].ArtURL; len(art) == 0 || art[0] != "https://cdn1.epicgames.com/quail/hades-tall.jpg" {
 		t.Errorf("Hades art = %v, want the tall cover first", art)
+	}
+	if art := got["nexus/3f2a9c1e7b4d5a60"].ArtURL; len(art) != 2 || art[0] != "https://store-images.s-microsoft.com/image/apps.12345.dungeons-boxart" {
+		t.Errorf("Minecraft Dungeons art = %v, want the scheme-fixed box art, then the hero image", art)
 	}
 	if art := got["steam/570"].ArtURL; len(art) == 0 || !strings.HasSuffix(art[0], "/570/library_600x900.jpg") {
 		t.Errorf("Dota 2 art = %v, want the 600x900 library cover first", art)
@@ -145,6 +149,8 @@ func TestCatalogueScanCorruptStoreFails(t *testing.T) {
 		{"/config/.config/heroic/gog_store/installed.json", `{"installed": [`},
 		{"/games/steamapps/appmanifest_1.acf", `"AppState" { "appid" "1" `},
 		{"/games/steamapps/appmanifest_2.acf", `"AppState" { "appid" "abc" "name" "x" "StateFlags" "4" }`},
+		{"/config/.config/Xodus Nexus/launcher-state.json", `{"games": [`},
+		{"/config/.config/Xodus Nexus/launcher-state.json", `{"downloads": []}`},
 	} {
 		if _, err := parseInstalls(map[string][]byte{tc.name: []byte(tc.data)}); err == nil {
 			t.Errorf("%s: parsed %q without error", tc.name, tc.data)
@@ -216,6 +222,7 @@ func TestLaunchCommand(t *testing.T) {
 		{catalogueGame{Store: v1alpha1types.CatalogueStoreSteam, ID: "570"}, "steam -applaunch 570"},
 		{catalogueGame{Store: v1alpha1types.CatalogueStoreEpic, ID: "Quail"}, "heroic 'heroic://launch?appName=Quail&runner=legendary'"},
 		{catalogueGame{Store: v1alpha1types.CatalogueStoreGOG, ID: "1207658924"}, "heroic 'heroic://launch?appName=1207658924&runner=gog'"},
+		{catalogueGame{Store: v1alpha1types.CatalogueStoreNexus, ID: "3f2a9c1e7b4d5a60"}, "xodus-nexus --launch-game 3f2a9c1e7b4d5a60"},
 	} {
 		if got := launchCommand(&tc.game); got != tc.want {
 			t.Errorf("launchCommand(%+v) = %q, want %q", tc.game, got, tc.want)
@@ -229,6 +236,9 @@ func TestCheckArtURL(t *testing.T) {
 		"https://cdn1.epicgames.com/x.jpg":                                          true,
 		"https://images.gog-statics.com/x.jpg":                                      true,
 		"https://images.gog-statics.com:443/x.jpg":                                  true,
+		"https://store-images.s-microsoft.com/image/apps.1.boxart":                  true,
+		"https://images-eds-ssl.xboxlive.com/image?url=x":                           true,
+		"https://s-microsoft.com.evil.example/x.jpg":                                false,
 		"http://cdn.cloudflare.steamstatic.com/x.jpg":                               false,
 		"https://steamstatic.com.evil.example/x.jpg":                                false,
 		"https://evilsteamstatic.com/x.jpg":                                         false,
@@ -1116,5 +1126,14 @@ func TestOverlappingGPUClaimsReferencedOnce(t *testing.T) {
 		if got := gpuClaimRefs(ctr.Resources.Claims); got != want {
 			t.Errorf("container %s claims GPU %d times, want %d", ctr.Name, got, want)
 		}
+	}
+}
+
+// Nexus writes its state atomically and always with a games list, so an empty
+// list is no games installed, not a torn read.
+func TestParseNexusEmptyGamesList(t *testing.T) {
+	games, err := parseNexus(map[string][]byte{"/config/.config/Xodus Nexus/launcher-state.json": []byte(`{"games": []}`)})
+	if err != nil || len(games) != 0 {
+		t.Errorf("parseNexus(empty list) = %v, %v; want no games, no error", games, err)
 	}
 }

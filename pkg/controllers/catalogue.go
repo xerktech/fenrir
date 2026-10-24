@@ -105,6 +105,16 @@ const (
 	heroicGOGLibrary         = libraryHome + "/.config/heroic/store_cache/gog_library.json"
 )
 
+// nexusState is Xodus Nexus's launcher state (installed games, downloads,
+// settings): Electron's userData for its productName, written atomically
+// (temp file + rename).
+const nexusState = libraryHome + "/.config/Xodus Nexus/launcher-state.json"
+
+// nexusGameID is what a Nexus game ID must look like to be launched: it goes
+// into a shell line. Nexus itself accepts exactly this for --launch-game
+// (game-shortcuts.ts validId).
+var nexusGameID = regexp.MustCompile(`^[a-f0-9]{16}$`)
+
 // heroicAppName is what a Heroic appName may look like to be launched: it is
 // put into a shell command line and a heroic:// URL.
 var heroicAppName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
@@ -122,10 +132,11 @@ const steamFullyInstalled = 4
 // write, so anything else would let them point the operator at in-cluster
 // services and read the reply back as an App's box art.
 // RomM's covers come from its metadata sources (IGDB, SteamGridDB, libretro
-// thumbnails, MobyGames).
+// thumbnails, MobyGames); Nexus's from the Microsoft Store and Xbox image CDNs.
 var artHosts = []string{
 	"steamstatic.com", "akamaihd.net", "epicgames.com", "unrealengine.com", "gog-statics.com", "gog.com",
 	"igdb.com", "steamgriddb.com", "libretro.com", "mobygames.com",
+	"s-microsoft.com", "xboxlive.com",
 }
 
 type CatalogueOptions struct {
@@ -135,6 +146,9 @@ type CatalogueOptions struct {
 	// existing catalogue Apps are left alone.
 	SteamBaseApp  string
 	HeroicBaseApp string
+	// NexusBaseApp names the App Xodus Nexus (Microsoft Store) games are
+	// copied from.
+	NexusBaseApp string
 	// RomMBaseApp names the App RomM ROM entries are copied from. Only ever
 	// set on RomM's own Catalogue: a Catalogue syncs every store it has a
 	// base for, so the Library's would delete every RomM App as uninstalled.
@@ -144,7 +158,7 @@ type CatalogueOptions struct {
 // catalogueGame is one installed game found in the Library.
 type catalogueGame struct {
 	Store  string // v1alpha1types.CatalogueStore*
-	ID     string // Steam appid or Heroic appName
+	ID     string // Steam appid, Heroic appName or Nexus game ID
 	Title  string
 	ArtURL []string // tried in order
 	// Launch is the launch command line of a RomM game (core and ROM path);
@@ -262,7 +276,8 @@ func (c *Catalogue) Scan(ctx context.Context, pod *corev1.Pod, artBudget time.Du
 
 // catalogueScanCommand tars every appmanifest in the default Steam library
 // and in library folders on the games volume (as steamDownloadsCommand looks
-// for downloads), plus Heroic's installed-games and library stores. tar frames
+// for downloads), plus Heroic's installed-games and library stores and Nexus's
+// launcher state. tar frames
 // each file with its size, and fails (exit 1) on a file that changed while
 // read, so a torn read fails the scan rather than parsing as fewer games.
 // Symlinks are followed (-h; tar would otherwise archive an empty entry); a
@@ -325,7 +340,7 @@ done
 [ $# -eq 0 ] && exit 0
 exec tar -chf - -- "$@"
 `, "sh", strconv.Itoa(catalogueMaxManifestBytes), strconv.Itoa(catalogueMaxStoreBytes), libraryHome, gamesPath,
-		heroicLegendaryInstalled, heroicGOGInstalled, heroicLegendaryLibrary, heroicGOGLibrary}
+		heroicLegendaryInstalled, heroicGOGInstalled, heroicLegendaryLibrary, heroicGOGLibrary, nexusState}
 }
 
 // readTar returns the archive's files by name (tar drops the leading /).
@@ -382,6 +397,11 @@ func parseInstalls(files map[string][]byte) ([]catalogueGame, error) {
 		return nil, err
 	}
 	games = append(games, heroic...)
+	nexus, err := parseNexus(files)
+	if err != nil {
+		return nil, err
+	}
+	games = append(games, nexus...)
 	if len(games) > catalogueMaxGames {
 		return nil, fmt.Errorf("the Library reports %d games, more than the %d catalogued", len(games), catalogueMaxGames)
 	}
@@ -630,6 +650,55 @@ func parseHeroic(files map[string][]byte) ([]catalogueGame, error) {
 	return games, nil
 }
 
+// parseNexus reads the games Xodus Nexus has installed from its launcher
+// state. No state file means no Nexus games; one without a games list fails
+// the scan (Nexus always writes the list, even empty). Only fully installed
+// games ("ready") get an App: "incomplete" is a download in progress.
+func parseNexus(files map[string][]byte) ([]catalogueGame, error) {
+	data, ok := heroicFile(files, nexusState)
+	if !ok {
+		return nil, nil
+	}
+	var state struct {
+		Games *[]struct {
+			ID           string `json:"id"`
+			Title        string `json:"title"`
+			InstallState string `json:"installState"`
+			CoverURL     string `json:"coverUrl"`
+			HeroURL      string `json:"heroUrl"`
+		} `json:"games"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", nexusState, err)
+	}
+	if state.Games == nil {
+		return nil, fmt.Errorf("parsing %s: no games list", nexusState)
+	}
+	var games []catalogueGame
+	for _, g := range *state.Games {
+		if g.InstallState != "ready" {
+			continue
+		}
+		if !nexusGameID.MatchString(g.ID) {
+			klog.Warningf("Catalogue: skipping Nexus game with unusable ID %q", g.ID)
+			continue
+		}
+		c := catalogueGame{Store: v1alpha1types.CatalogueStoreNexus, ID: g.ID, Title: firstNonEmpty(g.Title, g.ID)}
+		for _, u := range []string{g.CoverURL, g.HeroURL} {
+			// The Store's image URLs are often scheme-relative.
+			if strings.HasPrefix(u, "//") {
+				u = "https:" + u
+			}
+			if u != "" {
+				c.ArtURL = append(c.ArtURL, u)
+			}
+		}
+		games = append(games, c)
+	}
+	sort.Slice(games, func(i, j int) bool { return games[i].ID < games[j].ID })
+	return games, nil
+}
+
 // heroicFile finds a Heroic store among the scanned files by its path below
 // the home directory (tar keeps the path relative to /).
 func heroicFile(files map[string][]byte, store string) ([]byte, bool) {
@@ -682,13 +751,17 @@ func catalogueMoonlightID(store, id string) int {
 }
 
 // launchCommand is the shell command line that starts the game. IDs are
-// checked (numeric, heroicAppName) before they get here.
+// checked (numeric, heroicAppName, nexusGameID) before they get here.
 func launchCommand(game *catalogueGame) string {
 	switch game.Store {
 	case v1alpha1types.CatalogueStoreRomM:
 		return game.Launch
 	case v1alpha1types.CatalogueStoreSteam:
 		return "steam -applaunch " + game.ID
+	case v1alpha1types.CatalogueStoreNexus:
+		// Starts the game without the launcher window; Nexus quits when the
+		// game exits, which ends the session.
+		return "xodus-nexus --launch-game " + game.ID
 	}
 	runner := "legendary"
 	if game.Store == v1alpha1types.CatalogueStoreGOG {
@@ -778,6 +851,7 @@ func (c *Catalogue) bases(ctx context.Context) (map[string]*v1alpha1types.App, [
 		{c.SteamBaseApp, []string{v1alpha1types.CatalogueStoreSteam}},
 		{c.HeroicBaseApp, []string{v1alpha1types.CatalogueStoreEpic, v1alpha1types.CatalogueStoreGOG}},
 		{c.RomMBaseApp, []string{v1alpha1types.CatalogueStoreRomM}},
+		{c.NexusBaseApp, []string{v1alpha1types.CatalogueStoreNexus}},
 	} {
 		if b.name == "" {
 			continue
@@ -887,6 +961,10 @@ func catalogueGameOf(app *v1alpha1types.App) (catalogueGame, error) {
 	case v1alpha1types.CatalogueStoreSteam, v1alpha1types.CatalogueStoreRomM:
 		if n, err := strconv.ParseUint(game.ID, 10, 32); err != nil || n == 0 || strconv.FormatUint(n, 10) != game.ID {
 			return game, errors.New("its catalogue ID is not a canonical non-zero number")
+		}
+	case v1alpha1types.CatalogueStoreNexus:
+		if !nexusGameID.MatchString(game.ID) {
+			return game, errors.New("its catalogue ID is not a valid Nexus game ID")
 		}
 	default:
 		if !heroicAppName.MatchString(game.ID) {

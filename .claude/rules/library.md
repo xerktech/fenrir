@@ -59,6 +59,18 @@ paths:
   - Tests: `images/library/init_heroic_update_test.go` (real script, stubbed curl/dpkg).
     Stubs never reach a host package tool: TrueNAS's dpkg is a wrapper that refuses to run,
     so the dpkg stub compares versions itself (XERK-2008).
+- Xodus Nexus (Microsoft Store games) is pinned by `NEXUS_VERSION` + `NEXUS_SHA512` and unpacked
+  from its AppImage (no FUSE in pods). Unpacked it never self-updates (Nexus updates only a
+  running AppImage), so the pin is the version; bump both together.
+  - `xodus-nexus` (identical in `images/gow-nvidia32`, `TestXodusNexusWrapperMatchesSessionImage`)
+    starts gnome-keyring's secrets component: Nexus keeps the Microsoft account in a Secret
+    Service keyring and neither image runs one. Export `GNOME_KEYRING_CONTROL` between the
+    `--unlock` and `--start` calls, or the second starts a locked daemon that prompts.
+  - The login keyring is in the shared home with an empty password, so it is stored unencrypted,
+    like Steam's and Heroic's tokens there. Never print or copy `~/.local/share/keyrings`.
+  - Installs go to the games volume: `init-xodus-nexus` (root) makes `/games/xodus-nexus` owned
+    by abc, never following an existing link; the wrapper links `~/Games/Xodus Nexus` to it.
+  - Nexus downloads its backend and runtime into the home on demand (Settings), unpinned.
 - `wrapped-steam` checks for a running Steam again under a per-pod `flock`, held until it
   execs Steam: two cold launches at once would otherwise both start Steam and Heroic.
   - No child may inherit the lock fd (`9>&-`): Heroic outlives the script, and every later cold

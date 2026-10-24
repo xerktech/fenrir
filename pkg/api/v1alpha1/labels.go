@@ -38,4 +38,7 @@ const (
 	// CatalogueStoreRomM marks an App made from a RomM ROM entry (a RetroArch
 	// session); synced from RomM's API, not the Library.
 	CatalogueStoreRomM = "romm"
+	// CatalogueStoreNexus marks an App made from a Microsoft Store (Xbox PC)
+	// game installed with Xodus Nexus in the Library.
+	CatalogueStoreNexus = "nexus"
 )
