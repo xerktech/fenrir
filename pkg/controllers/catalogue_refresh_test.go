@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"reflect"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -186,7 +187,7 @@ func TestBaseAppChanges(t *testing.T) {
 	dw := dwfake.NewSimpleClientset(baseApp("steam-base", nil), baseApp("firefox", nil))
 	factory := generatedinformers.NewSharedInformerFactory(dw, 0)
 	informer := factory.Direwolf().V1alpha1().Apps().Informer()
-	changed, err := BaseAppChanges(informer, "steam-base", "")
+	changed, err := baseAppChanges(informer, "steam-base", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,5 +302,31 @@ func TestCatalogueGameOfNexusID(t *testing.T) {
 		if _, err := catalogueGameOf(app(tc.name, tc.id)); err == nil {
 			t.Errorf("forged Nexus App %s (ID %q) accepted", tc.name, tc.id)
 		}
+	}
+}
+
+// A Catalogue watches every base App it syncs from: one left out would reach
+// its games only on the periodic refresh. Each CatalogueOptions field is set
+// alone, so a launcher added to the struct but not to baseApps fails here.
+func TestCatalogueBaseAppChangesWatchesEveryBase(t *testing.T) {
+	fields := reflect.VisibleFields(reflect.TypeFor[CatalogueOptions]())
+	for _, field := range fields {
+		t.Run(field.Name, func(t *testing.T) {
+			var options CatalogueOptions
+			reflect.ValueOf(&options).Elem().FieldByIndex(field.Index).SetString("the-base")
+			dw := dwfake.NewSimpleClientset(baseApp("the-base", nil))
+			factory := generatedinformers.NewSharedInformerFactory(dw, 0)
+			informer := factory.Direwolf().V1alpha1().Apps().Informer()
+			changed, err := NewCatalogue(dw.DirewolfV1alpha1().Apps(libraryTestNS), nil, "", options).BaseAppChanges(informer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			factory.Start(t.Context().Done())
+			select {
+			case <-changed:
+			case <-time.After(2 * time.Second):
+				t.Errorf("no signal for the App named by %s", field.Name)
+			}
+		})
 	}
 }

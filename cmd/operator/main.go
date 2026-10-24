@@ -268,7 +268,7 @@ func main() {
 				*libraryGamesPath,
 				controllers.CatalogueOptions{SteamBaseApp: *catalogueSteamApp, HeroicBaseApp: *catalogueHeroicApp, NexusBaseApp: *catalogueNexusApp},
 			)
-			catalogueBaseChanged, err = controllers.BaseAppChanges(appInformer, *catalogueSteamApp, *catalogueHeroicApp, *catalogueNexusApp)
+			catalogueBaseChanged, err = libraryController.Catalogue.BaseAppChanges(appInformer)
 			if err != nil {
 				klog.Fatalf("Catalogue: %v", err)
 			}
@@ -297,7 +297,7 @@ func main() {
 		if err != nil {
 			klog.Fatalf("RomM: %v", err)
 		}
-		rommBaseChanged, err = controllers.BaseAppChanges(appInformer, *rommApp)
+		rommBaseChanged, err = romm.Catalogue.BaseAppChanges(appInformer)
 		if err != nil {
 			klog.Fatalf("RomM: %v", err)
 		}

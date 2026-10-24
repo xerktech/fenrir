@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1169,5 +1170,67 @@ func TestParseNexusSortsByID(t *testing.T) {
 		            {"id": "0000000000000000", "title": "A", "installState": "ready"}]}`)})
 	if err != nil || len(games) != 2 || games[0].ID != "0000000000000000" {
 		t.Errorf("parseNexus = %+v, %v; want both games, lowest ID first", games, err)
+	}
+}
+
+// Nexus inlines each game's logo in its state (coverDataUrl, pretty-printed by
+// JSON.stringify). A state far over the store cap because of them still scans,
+// and an over-cap state without them still fails it.
+func TestCatalogueScanStripsNexusInlineCovers(t *testing.T) {
+	const stateRel = "home/.config/xodus-nexus/launcher-state.json"
+	logo := `"data:image/png;base64,` + strings.Repeat("A", catalogueMaxStoreBytes/2) + `"`
+	state := `{
+  "games": [
+    {
+      "id": "3f2a9c1e7b4d5a60",
+      "title": "Minecraft Dungeons",
+      "coverDataUrl": ` + logo + `,
+      "installState": "ready"
+    },
+    {
+      "id": "0b1c2d3e4f5a6b7c",
+      "title": "Forza",
+      "coverDataUrl": ` + logo + `,
+      "installState": "ready"
+    }
+  ]
+}`
+	dir := t.TempDir()
+	writeFixture(t, dir, map[string]string{"games/.keep": "", stateRel: state})
+	games := scanFixture(t, dir)
+	if len(games) != 2 || games[0].ID != "0b1c2d3e4f5a6b7c" || games[1].Title != "Minecraft Dungeons" {
+		t.Errorf("games = %+v, want both Nexus games", games)
+	}
+
+	dir = t.TempDir()
+	padded := `{"games": [], "title": "` + strings.Repeat("A", catalogueMaxStoreBytes) + `"}`
+	writeFixture(t, dir, map[string]string{"games/.keep": "", stateRel: padded})
+	// The error names the state, not the deleted temp copy.
+	if err := scanFixtureErr(t, dir); err == nil || !strings.Contains(err.Error(), filepath.Join(dir, stateRel)+" is ") {
+		t.Errorf("over-cap Nexus state without inline covers: scan err = %v, want one naming the state", err)
+	}
+	// GNU sed under the image's UTF-8 locale took ~20s on 40 covers at the
+	// cap (the scan has 25); the fixture here is too small to show it.
+	if script := catalogueScanCommand("/games")[6]; !strings.Contains(script, "LC_ALL=C sed") {
+		t.Error("the cover filter's sed does not run under LC_ALL=C")
+	}
+}
+
+// A directory or FIFO planted at a store path fails the scan: read as no
+// games, it would delete that store's Apps.
+func TestCatalogueScanStoreNotRegularFileFails(t *testing.T) {
+	const stateRel = "home/.config/xodus-nexus/launcher-state.json"
+	for name, plant := range map[string]func(string) error{
+		"directory": func(p string) error { return os.Mkdir(p, 0o755) },
+		"fifo":      func(p string) error { return syscall.Mkfifo(p, 0o600) },
+	} {
+		dir := t.TempDir()
+		writeFixture(t, dir, map[string]string{"games/.keep": "", "home/.config/xodus-nexus/.keep": ""})
+		if err := plant(filepath.Join(dir, stateRel)); err != nil {
+			t.Fatal(err)
+		}
+		if err := scanFixtureErr(t, dir); err == nil {
+			t.Errorf("%s at the Nexus state path: scan succeeded", name)
+		}
 	}
 }
