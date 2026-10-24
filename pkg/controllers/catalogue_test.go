@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1206,5 +1207,24 @@ func TestCatalogueScanStripsNexusInlineCovers(t *testing.T) {
 	writeFixture(t, dir, map[string]string{"games/.keep": "", stateRel: padded})
 	if err := scanFixtureErr(t, dir); err == nil {
 		t.Error("over-cap Nexus state without inline covers: scan succeeded")
+	}
+}
+
+// A directory or FIFO planted at a store path fails the scan: read as no
+// games, it would delete that store's Apps.
+func TestCatalogueScanStoreNotRegularFileFails(t *testing.T) {
+	const stateRel = "home/.config/xodus-nexus/launcher-state.json"
+	for name, plant := range map[string]func(string) error{
+		"directory": func(p string) error { return os.Mkdir(p, 0o755) },
+		"fifo":      func(p string) error { return syscall.Mkfifo(p, 0o600) },
+	} {
+		dir := t.TempDir()
+		writeFixture(t, dir, map[string]string{"games/.keep": "", "home/.config/xodus-nexus/.keep": ""})
+		if err := plant(filepath.Join(dir, stateRel)); err != nil {
+			t.Fatal(err)
+		}
+		if err := scanFixtureErr(t, dir); err == nil {
+			t.Errorf("%s at the Nexus state path: scan succeeded", name)
+		}
 	}
 }

@@ -81,7 +81,8 @@ paths:
     `coverDataUrl` (an inline data: URL) is ignored: art is only ever fetched from `artHosts`.
   - The scan archives a copy of the state with each `coverDataUrl` blanked: Nexus inlines logos
     up to ~4 MB of base64, so a few dozen games pass `catalogueMaxStoreBytes`, and an over-cap
-    file fails the scan for every store. Tests: `TestCatalogueScanStripsNexusInlineCovers`.
+    file fails the scan for every store. `LC_ALL=C` and no capture group keep the sed within the
+    scan timeout. Tests: `TestCatalogueScanStripsNexusInlineCovers`.
 - The CRD rejects an empty `appAssetWebP` (the fake clientset doesn't): a catalogue App shows
   the base App's cover until its own is fetched.
 - A name held by a hand-made App is never overwritten; that game is skipped, with an error.

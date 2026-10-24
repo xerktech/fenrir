@@ -333,6 +333,8 @@ for f do
   shift
   if [ ! -f "$f" ]; then
     [ -L "$f" ] && { echo "$f is a dangling symlink" >&2; exit 1; }
+    # A FIFO or directory planted at a store path is not "no games".
+    [ -e "$f" ] && { echo "$f is not a regular file" >&2; exit 1; }
     continue
   fi
   case $f in *.acf) max=$max_manifest ;; *) max=$max_store ;; esac
@@ -346,12 +348,16 @@ for f do
     trap 'rm -rf "$tmp"' EXIT
     trap 'exit 1' HUP INT TERM
     mkdir -p "$tmp/.config/xodus-nexus" || exit 1
-    sed 's/"coverDataUrl":\([[:space:]]*\)"[^"\\]*"/"coverDataUrl":\1""/g' "$f" > "$tmp/.config/xodus-nexus/launcher-state.json" || exit 1
-    f=$tmp/.config/xodus-nexus/launcher-state.json
+    # LC_ALL=C and no capture group: GNU sed under the image's UTF-8 locale
+    # took ~20s on 40 covers at the cap, and the scan has 25.
+    LC_ALL=C sed 's/"coverDataUrl":[[:space:]]*"[^"\\]*"/"coverDataUrl": ""/g' "$f" > "$tmp/.config/xodus-nexus/launcher-state.json" || exit 1
+    archived=$tmp/.config/xodus-nexus/launcher-state.json
+  else
+    archived=$f
   fi
-  n=$(wc -c < "$f") || exit 1
+  n=$(wc -c < "$archived") || exit 1
   [ "$n" -gt "$max" ] && { echo "$f is $n bytes, over $max" >&2; exit 1; }
-  set -- "$@" "$f"
+  set -- "$@" "$archived"
 done
 [ $# -eq 0 ] && exit 0
 tar -chf - -- "$@"
