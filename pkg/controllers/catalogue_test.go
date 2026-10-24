@@ -1205,8 +1205,14 @@ func TestCatalogueScanStripsNexusInlineCovers(t *testing.T) {
 	dir = t.TempDir()
 	padded := `{"games": [], "title": "` + strings.Repeat("A", catalogueMaxStoreBytes) + `"}`
 	writeFixture(t, dir, map[string]string{"games/.keep": "", stateRel: padded})
-	if err := scanFixtureErr(t, dir); err == nil {
-		t.Error("over-cap Nexus state without inline covers: scan succeeded")
+	// The error names the state, not the deleted temp copy.
+	if err := scanFixtureErr(t, dir); err == nil || !strings.Contains(err.Error(), filepath.Join(dir, stateRel)+" is ") {
+		t.Errorf("over-cap Nexus state without inline covers: scan err = %v, want one naming the state", err)
+	}
+	// GNU sed under the image's UTF-8 locale took ~20s on 40 covers at the
+	// cap (the scan has 25); the fixture here is too small to show it.
+	if script := catalogueScanCommand("/games")[6]; !strings.Contains(script, "LC_ALL=C sed") {
+		t.Error("the cover filter's sed does not run under LC_ALL=C")
 	}
 }
 
