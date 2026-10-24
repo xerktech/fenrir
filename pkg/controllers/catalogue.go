@@ -350,7 +350,9 @@ for f do
     mkdir -p "$tmp/.config/xodus-nexus" || exit 1
     # LC_ALL=C and no capture group: GNU sed under the image's UTF-8 locale
     # took ~20s on 40 covers at the cap, and the scan has 25.
-    LC_ALL=C sed 's/"coverDataUrl":[[:space:]]*"[^"\\]*"/"coverDataUrl": ""/g' "$f" > "$tmp/.config/xodus-nexus/launcher-state.json" || exit 1
+    # head: a state still over the cap fails below without first filling
+    # the pod's /tmp. A sed that fails leaves a cut copy, which fails to parse.
+    LC_ALL=C sed 's/"coverDataUrl":[[:space:]]*"[^"\\]*"/"coverDataUrl": ""/g' "$f" | head -c $((max + 1)) > "$tmp/.config/xodus-nexus/launcher-state.json" || exit 1
     archived=$tmp/.config/xodus-nexus/launcher-state.json
   else
     archived=$f
