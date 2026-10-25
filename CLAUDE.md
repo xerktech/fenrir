@@ -28,6 +28,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     a mismatch its cont-init hook deletes them (CPU fallback, not a crash).
   - It also ships NVIDIA's NGX Wine DLLs in `/usr/lib/nvidia/wine` (XERK-2073): Proton enables
     DLSS only if `nvngx.dll` sits in `<dir of libGLX_nvidia.so.0>/nvidia/wine`; CDI injects none.
+  - Session Apps (`steam`, `heroic`, `nexus` targets) are pinned by digest in xerktech/ArgoCD
+    `streaming/direwolf/app-*.yaml` and bumped there by hand: the chart release moves only the
+    operator, Library and moonlight-proxy. A merged change here reaches sessions only after that
+    PR (`crane digest ghcr.io/xerktech/fenrir/<target>:main`; check its revision label).
   - Its steam target keeps GoW's NetworkManager off the node's links (XERK-1867): session pods
     are hostNetwork and Steam added NET_ADMIN, so stock NM ran DHCP on every new pod veth.
     It manages only loopback and bridges: with nothing managed it reports "disconnected".
