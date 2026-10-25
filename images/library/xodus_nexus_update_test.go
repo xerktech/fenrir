@@ -34,7 +34,15 @@ func TestXodusNexusUpdateMatchesSessionImage(t *testing.T) {
 // network, another user or root-only ownership. Each logs its call.
 var nexusStubs = map[string]string{
 	"curl": `for a; do [ "$prev" = -o ] && out=$a; [ "$prev" = --max-filesize ] && max=$a; prev=$a; done
-[ -z "$out" ] && { echo "releases $*" >>"$LOG"; exec cat "$FAKE_RELEASES"; }
+if [ -z "$out" ]; then
+  echo "releases $*" >>"$LOG"
+  # As GitHub: a tag's URL serves that one release object, not a list.
+  case "$*" in */releases/tags/*) exec python3 -I -c 'import json, sys
+tag = sys.argv[1].rsplit("/", 1)[1]
+r = [r for r in json.load(open(sys.argv[2])) if r["tag_name"] == tag]
+print(json.dumps(r[0])) if r else sys.exit(22)' "${*##* }" "$FAKE_RELEASES";; esac
+  exec cat "$FAKE_RELEASES"
+fi
 echo "download $*" >>"$LOG"
 [ "${max:-0}" -gt 0 ] && [ "$(wc -c <"$FAKE_APP")" -gt "$max" ] && exit 63
 cp "$FAKE_APP" "$out"`,
@@ -193,7 +201,7 @@ func TestXodusNexusUpdateInstallsNewerRelease(t *testing.T) {
 	}
 	calls := p.run(releases, app)
 	// The cache is read and written as the desktop user; root owns what it installs.
-	for _, want := range []string{"as-abc [ -f", "download", "as-abc rm -rf", "as-abc cd", "chown -R 0:0 ", "updated Xodus Nexus 0.3.11 -> 0.3.12"} {
+	for _, want := range []string{"releases?per_page=100", "as-abc [ -f", "download", "as-abc rm -rf", "as-abc cd", "chown -R 0:0 ", "updated Xodus Nexus 0.3.11 -> 0.3.12"} {
 		if !strings.Contains(calls, want) {
 			t.Errorf("calls lack %q:\n%s", want, calls)
 		}
@@ -303,9 +311,10 @@ func TestXodusNexusUpdateOfflineKeepsInstalled(t *testing.T) {
 	}
 }
 
-// A cache entry that is not a plain, bounded file (here /dev/zero, endless)
-// is read no further than the asset's size; the release is downloaded.
-func TestXodusNexusUpdateBoundsCacheRead(t *testing.T) {
+// A cache entry that is not a regular file (here /dev/zero, endless) is never
+// read; the release is downloaded. The size cap on a regular file only bounds
+// time and disk, which these tests don't observe.
+func TestXodusNexusUpdateRefusesNonFileCache(t *testing.T) {
 	p := newNexusPod(t, "0.3.11")
 	if err := os.MkdirAll(filepath.Dir(p.cachedApp()), 0o755); err != nil {
 		t.Fatal(err)
@@ -347,5 +356,22 @@ func TestXodusNexusUpdateRestoresOnFailedInstall(t *testing.T) {
 	}
 	if v, runs := p.installed(); v != "0.3.11" || runs != "image" {
 		t.Errorf("installed %q running %q, want the image's 0.3.11 restored", v, runs)
+	}
+}
+
+// With several cached AppImages (only planted: the Library keeps one), a
+// session takes the highest version, compared as versions, not text.
+func TestXodusNexusUpdateCachedOnlyTakesHighestVersion(t *testing.T) {
+	p := newNexusPod(t, "0.3.8")
+	app := nexusApp("v0.3.12")
+	p.run([]nexusRelease{launcherRelease("0.3.12", app)}, app)
+	old := nexusApp("v0.3.9")
+	if err := os.WriteFile(filepath.Join(filepath.Dir(p.cachedApp()), "Xodus-Nexus-0.3.9-x86_64.AppImage"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.reset("0.3.8")
+	p.run([]nexusRelease{launcherRelease("0.3.12", app), launcherRelease("0.3.9", old)}, app, "--cached-only")
+	if v, runs := p.installed(); v != "0.3.12" || runs != "v0.3.12" {
+		t.Errorf("installed %q running %q, want 0.3.12", v, runs)
 	}
 }
