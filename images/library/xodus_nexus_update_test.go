@@ -175,7 +175,7 @@ func (p *nexusPod) installed() (version, runs string) {
 
 // cachedApp is where the Library caches the tests' 0.3.12 AppImage.
 func (p *nexusPod) cachedApp() string {
-	return filepath.Join(p.home, ".cache/direwolf-xodus-nexus/Xodus-Nexus-0.3.12-x86_64.AppImage")
+	return filepath.Join(p.home, ".cache", "direwolf-xodus-nexus", "Xodus-Nexus-0.3.12-x86_64.AppImage")
 }
 
 // A newer launcher release is downloaded, cached as the desktop user,
