@@ -1,0 +1,4 @@
+# Nexus games run under Proton, whose windows carry the X11 class
+# steam_proton. GoW's sway config fullscreens only Steam's (steam_app_*), so
+# a Nexus game was tiled under waybar (XERK-2290). Fullscreen hides the bar.
+for_window [class="steam_proton"] fullscreen enable
