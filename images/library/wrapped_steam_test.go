@@ -1,6 +1,7 @@
 package library
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,10 @@ func newSteamDesktop(t *testing.T) *steamDesktop {
 		t.Skipf("a real Steam or Heroic runs on this host: %s", out)
 	}
 	d := &steamDesktop{t: t, dir: t.TempDir(), steamLife: "3", heroicLife: "3"}
+	// Runs before t.TempDir's cleanup. A setsid'd guard or stub can still be
+	// starting after the test ends, and a guard's flock recreates its lock
+	// file mid-RemoveAll ("directory not empty", seen in CI under -race).
+	t.Cleanup(func() { killUnder(t, d.dir) })
 	d.home = filepath.Join(d.dir, "home")
 	d.log = filepath.Join(d.dir, "log")
 	bin := filepath.Join(d.dir, "bin")
@@ -64,6 +69,24 @@ else echo "handoff $*" >>"$LOG"; fi`)
 		t.Fatal(err)
 	}
 	return d
+}
+
+// killUnder kills every process whose command line names a path under dir,
+// until none is left.
+func killUnder(t *testing.T, dir string) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		// t.Context() is already cancelled when cleanups run.
+		_ = exec.CommandContext(context.Background(), "pkill", "-KILL", "-f", dir).Run()
+		if exec.CommandContext(context.Background(), "pgrep", "-f", dir).Run() != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("processes under %s outlived the test", dir)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // start runs wrapped-steam with args, returning a wait func.

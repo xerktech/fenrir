@@ -698,6 +698,7 @@ func joinedOnFreshSubscription(t *testing.T, client *resubClient, beforeResubscr
 	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
 	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
 	client.wantJoin(t)
+	waitJoined(t, a, wolfStreamID, streamKey)
 	entry = deviceEntry(t, a)
 	close(ch)
 	// Wolf's events while the agent waits to resubscribe are lost.
@@ -832,9 +833,23 @@ func TestAgentJoinsStreamStartedWhileResubscribing(t *testing.T) {
 	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
 	sendOn(ch, wolfapi.RTPAudioPingEventType, `{}`)
 	client.wantJoin(t)
-	sendOn(ch, "Done", "")
-	if s, k := a.lobby.joinedStream(); s != wolfStreamID || k != "resumed" {
-		t.Errorf("joined stream %q key %q, want %s key resumed", s, k, wolfStreamID)
+	waitJoined(t, a, wolfStreamID, "resumed")
+}
+
+// waitJoined waits for the lobby to record stream (with key) as joined. The
+// join is recorded on its own goroutine after JoinLobby returns, so seeing the
+// call (wantJoin) or an unbuffered "Done" does not mean it is recorded yet.
+func waitJoined(t *testing.T, a *Agent, stream, key string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		s, k := a.lobby.joinedStream()
+		if s == stream && k == key {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("joined stream %q key %q, want %s key %s", s, k, stream, key)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
