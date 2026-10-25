@@ -1,0 +1,122 @@
+#!/bin/bash
+# shellcheck shell=bash
+
+# Installs Xodus Nexus's Wine runtime (Xodus Proton) when Nexus has none.
+# Nexus installs its backend by itself on first run, but not the runtime:
+# until someone clicks "Install Xodus Runtime" in its Settings, every game
+# launch, including from Moonlight, fails with "Select a Wine/Xodus Proton
+# binary in Settings." (XERK-2289).
+#
+# Run as the desktop user by init-xodus-nexus-runtime, before the desktop
+# starts. It does what Nexus's own installNexus (src/main/runtime.ts) does:
+# the newest release carrying xodus-nexus-runtime-*-x86_64.tar.xz, checked
+# against GitHub's published SHA256 and the release's .sha512sum, unpacked
+# into <runtimeRoot>/releases/<name>, then pointed at by current.json, which
+# Nexus reads at start. Paths are absolute under /config; sessions mount the
+# home there too.
+#
+# Install-if-missing only: runtime releases are near-daily and ~1.4 GB
+# unpacked, so updates stay with Nexus's Settings.
+#
+# Never exits non-zero: any failure leaves Nexus asking for its runtime.
+
+releases_url="https://api.github.com/repos/domsvoboda/xodus-nexus/releases?per_page=100"
+
+give_up() {
+  echo "xodus-nexus-runtime: $*; Nexus will ask for its runtime in Settings" >&2
+  exit 0
+}
+
+# Nexus's runtimeRoot setting, else its default.
+root="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["settings"]["runtimeRoot"])' \
+  "${HOME}/.config/xodus-nexus/launcher-state.json" 2>/dev/null)"
+[[ "${root}" == /* ]] || root="${HOME}/.local/share/xodus-nexus/runtimes"
+
+# Nexus validates a runtime by running its wine with --version.
+valid_wine() {
+  [[ -x "$1" ]] && timeout 60 "$1" --version 2>/dev/null | grep -qi wine
+}
+
+wine="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["winePath"])' "${root}/current.json" 2>/dev/null)"
+if valid_wine "${wine}"; then
+  echo "xodus-nexus-runtime: Nexus's runtime is installed"
+  exit 0
+fi
+
+releases="$(curl -fsSL --max-time 30 "${releases_url}")" || give_up "cannot read the releases"
+# The newest release (by publication: runtime tags don't sort) with a runtime
+# archive and its .sha512sum. Prints the archive's name, the tag, its URL, size
+# and SHA256, and the checksum file's URL, tab-separated.
+fields="$(python3 -I -c '
+import json, re, sys
+best = None
+for r in json.load(sys.stdin):
+    if r.get("draft") or r.get("prerelease") or not re.fullmatch(r"[A-Za-z0-9._-]+", r.get("tag_name") or ""):
+        continue
+    assets = {a.get("name"): a for a in r.get("assets") or []}
+    for name, a in assets.items():
+        if not re.fullmatch(r"xodus-nexus-runtime-[A-Za-z0-9._-]+-x86_64\.tar\.xz", name or ""):
+            continue
+        s = assets.get(name.removesuffix(".tar.xz") + ".sha512sum")
+        url, size, digest = a.get("browser_download_url") or "", a.get("size"), a.get("digest") or ""
+        if not s or not (s.get("browser_download_url") or "").startswith("https://github.com/"):
+            continue
+        if not url.startswith("https://github.com/") or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            continue
+        if type(size) is not int or not 0 < size < 4 << 30:
+            continue
+        key = r.get("published_at") or ""
+        if best is None or key > best[0]:
+            best = (key, name, r["tag_name"], url, size, digest.removeprefix("sha256:"), s["browser_download_url"])
+print(*best[1:], sep="\t")
+' <<<"${releases}" 2>/dev/null)" || give_up "cannot find a verifiable runtime release"
+IFS=$'\t' read -r name tag url size sha sum_url <<<"${fields}"
+release="${name%-x86_64.tar.xz}"
+
+mkdir -p "${root}/releases" || give_up "cannot create ${root}"
+staging="$(mktemp -d "${root}/.staging-direwolf-XXXXXX")" || give_up "cannot make a staging directory"
+trap 'rm -rf "${staging}"' EXIT
+archive="${staging}/${name}"
+
+echo "xodus-nexus-runtime: downloading ${name}"
+curl -fsSL --max-time 1500 --max-filesize "${size}" -o "${archive}" "${url}" || give_up "cannot download ${name}"
+echo "${sha}  ${archive}" | sha256sum -c --status - || give_up "${name} does not match its published SHA256"
+# As Nexus checks it: one line naming exactly this archive.
+sum="$(curl -fsSL --max-time 30 --max-filesize 4096 "${sum_url}")" || give_up "cannot download ${name}'s .sha512sum"
+sum="$(sed -nE "s/^([a-fA-F0-9]{128})[ \t]+\*?(.+)\$/\1 \2/p" <<<"${sum}")"
+[[ "${sum#* }" == "${name}" ]] || give_up "the .sha512sum does not name ${name}"
+echo "${sum%% *}  ${archive}" | sha512sum -c --status - || give_up "${name} does not match its .sha512sum"
+
+# One top-level directory named like a runtime; no absolute or .. paths.
+top="$(tar -tJf "${archive}" 2>/dev/null | python3 -I -c '
+import re, sys
+entries = [e for e in sys.stdin.read().split("\n") if e]
+tops = {e.split("/")[0] for e in entries}
+if not entries or len(tops) != 1 or any(e.startswith("/") or ".." in e.split("/") for e in entries):
+    sys.exit(1)
+top = tops.pop()
+if not re.fullmatch(r"(proton-xodus-|xodus-nexus-runtime-)[A-Za-z0-9._-]+", top):
+    sys.exit(1)
+print(top)
+')" || give_up "${name} has an unexpected layout"
+
+echo "xodus-nexus-runtime: unpacking ${name}"
+{ mkdir "${staging}/x" && tar -xJf "${archive}" --no-same-owner -C "${staging}/x"; } || give_up "cannot unpack ${name}"
+valid_wine "${staging}/x/${top}/files/bin/wine" || give_up "the unpacked wine fails --version"
+if [[ ! -e "${root}/releases/${release}" ]]; then
+  mv "${staging}/x/${top}" "${root}/releases/${release}" || give_up "cannot install ${release}"
+fi
+wine="${root}/releases/${release}/files/bin/wine"
+valid_wine "${wine}" || give_up "the installed wine fails --version"
+
+# Written whole, then renamed over, as Nexus writes it.
+python3 -I -c '
+import datetime, json, os, sys
+release, wine, tag, path = sys.argv[1:]
+fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump({"name": release, "winePath": wine, "commit": tag,
+               "installedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}, f, indent=2)
+os.replace(path + ".tmp", path)
+' "${release}" "${wine}" "${tag}" "${root}/current.json" || give_up "cannot write current.json"
+echo "xodus-nexus-runtime: installed ${release}"
