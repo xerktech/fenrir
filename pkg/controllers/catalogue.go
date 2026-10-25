@@ -94,6 +94,7 @@ const (
 	// this much later; the reply is capped at storeCatalogMaxBytes.
 	storeCatalogTTL      = 24 * time.Hour
 	storeCatalogMaxBytes = 4 << 20
+	storeArtMaxURLs      = 4
 	// catalogueScanTimeout ends the scan script in the pod (coreutils
 	// timeout), inside libraryExecTimeout.
 	catalogueScanTimeout = "25"
@@ -208,8 +209,9 @@ type Catalogue struct {
 	now       func() time.Time
 	lastScan  time.Time
 	artFailed map[string]time.Time
-	// storeArt caches StoreArt per product: its URLs and when they were
-	// looked up (nil URLs: the lookup failed, retried after catalogueArtRetry).
+	// storeArt caches StoreArt per product: its last good URLs and when to
+	// look again (storeCatalogTTL after a success, catalogueArtRetry after a
+	// failure, which keeps the last good URLs).
 	storeArt map[string]storeArtEntry
 	// mu serialises Sync and Refresh (artFailed, storeArt, and their App writes).
 	mu sync.Mutex
@@ -232,7 +234,7 @@ func NewCatalogue(apps v1alpha1client.AppInterface, exec PodExecutor, gamesPath 
 
 type storeArtEntry struct {
 	urls []string
-	at   time.Time
+	next time.Time
 }
 
 // nonPublicPrefixes are routable-looking ranges that are not the public
@@ -1231,31 +1233,28 @@ func (c *Catalogue) art(ctx context.Context, game *catalogueGame, fetchedFrom st
 
 // storeArtURLs returns a Store product's portrait art URLs from the cache, or
 // looks them up (none on failure: the game keeps its other art).
+//
+// A failed lookup keeps the last good URLs: dropping them would put the
+// square cover back on every App until the next lookup, then the poster again.
 func (c *Catalogue) storeArtURLs(ctx context.Context, storeID string) []string {
-	if e, ok := c.storeArt[storeID]; ok {
-		ttl := storeCatalogTTL
-		if e.urls == nil {
-			ttl = catalogueArtRetry
-		}
-		if c.now().Sub(e.at) < ttl {
-			return e.urls
-		}
+	e, ok := c.storeArt[storeID]
+	if ok && c.now().Before(e.next) {
+		return e.urls
 	}
 	if ctx.Err() != nil {
-		return nil
+		return e.urls
 	}
 	urls, err := c.StoreArt(ctx, storeID)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil // out of budget, not the lookup's fault
-		}
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return e.urls // out of budget, not the lookup's fault
+	case err != nil:
 		klog.V(2).Infof("Catalogue: no Store catalog art for %s: %v", storeID, err)
-		urls = nil
-	} else if urls == nil {
-		urls = []string{}
+		c.storeArt[storeID] = storeArtEntry{urls: e.urls, next: c.now().Add(catalogueArtRetry)}
+	default:
+		c.storeArt[storeID] = storeArtEntry{urls: urls, next: c.now().Add(storeCatalogTTL)}
 	}
-	c.storeArt[storeID] = storeArtEntry{urls: urls, at: c.now()}
-	return urls
+	return c.storeArt[storeID].urls
 }
 
 // storeArt looks a product up in the Store catalog and returns its
@@ -1305,6 +1304,7 @@ func parseStoreArt(data []byte, storeID string) ([]string, error) {
 		return nil, fmt.Errorf("parsing the Store catalog reply: %w", err)
 	}
 	var urls []string
+	seen := map[string]bool{}
 	for _, p := range reply.Products {
 		if p.ProductID != storeID {
 			continue
@@ -1319,12 +1319,18 @@ func parseStoreArt(data []byte, storeID string) ([]string, error) {
 					if strings.HasPrefix(u, "//") {
 						u = "https:" + u
 					}
+					// No query or fragment of its own: want.query is appended.
 					parsed, err := url.Parse(u)
-					if err != nil || checkArtURL(parsed) != nil || parsed.RawQuery != "" {
+					if err != nil || checkArtURL(parsed) != nil || strings.ContainsAny(u, "?# ") {
 						continue
 					}
-					if u += want.query; !slices.Contains(urls, u) {
+					if u += want.query; !seen[u] {
+						seen[u] = true
 						urls = append(urls, u)
+					}
+					// art tries these in turn within the scan's art budget.
+					if len(urls) == storeArtMaxURLs {
+						return urls, nil
 					}
 				}
 			}

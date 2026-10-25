@@ -1308,6 +1308,9 @@ func TestParseStoreArt(t *testing.T) {
 	    {"ImagePurpose": "Poster", "Uri": "//evil.example/image/poster"},
 	    {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/q?x=1"},
 	    {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/poster"},
+	    {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/frag#f"},
+	    {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/empty?"},
+	    {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/a b"},
 	    {"ImagePurpose": "Poster", "Uri": "http://store-images.s-microsoft.com/image/plain"}]}]}]}`
 	got, err := parseStoreArt([]byte(reply), "9P8MK4NC0LJB")
 	want := []string{
@@ -1352,5 +1355,44 @@ func TestStoreArtRequestAndLimits(t *testing.T) {
 	status, body = http.StatusOK, strings.Repeat(" ", storeCatalogMaxBytes+1)
 	if _, err := storeArt(ctx, client, "9P8MK4NC0LJB"); err == nil {
 		t.Error("storeArt accepted an oversized reply")
+	}
+}
+
+// Once the cache expires, a failed lookup keeps the poster rather than
+// putting the square cover back until the next lookup.
+func TestCatalogueNexusKeepsPosterWhenLookupFails(t *testing.T) {
+	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil), baseApp("nexus-base", nil))
+	f.catalogue.NexusBaseApp = "nexus-base"
+	f.storeArt = map[string][]string{"9P8MK4NC0LJB": {dungeonsPoster}}
+	f.scan(t)
+	f.storeArtErr = errors.New("catalog down")
+	f.catalogue.now = func() time.Time { return libraryTestNow.Add(storeCatalogTTL) }
+	f.scan(t)
+	name := catalogueAppName(v1alpha1types.CatalogueStoreNexus, "3f2a9c1e7b4d5a60")
+	if from := f.app(t, name).Annotations[catalogueArtAnnotation]; from != dungeonsPoster || len(f.storeLookups) != 2 {
+		t.Errorf("art from %q after a failed lookup (lookups %v), want the poster kept", from, f.storeLookups)
+	}
+}
+
+// A lookup cut off by the art budget is not cached as a failure.
+func TestStoreArtURLsBudgetCutNotCached(t *testing.T) {
+	f := newCatalogueFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	f.catalogue.StoreArt = func(context.Context, string) ([]string, error) {
+		cancel()
+		return nil, context.Canceled
+	}
+	f.catalogue.storeArtURLs(ctx, "9P8MK4NC0LJB")
+	if _, cached := f.catalogue.storeArt["9P8MK4NC0LJB"]; cached {
+		t.Error("a budget-cut lookup was cached")
+	}
+}
+
+// Only a Store product ID goes into the catalog lookup.
+func TestParseNexusValidatesStoreID(t *testing.T) {
+	games, err := parseNexus(map[string][]byte{"/config/.config/xodus-nexus/launcher-state.json": []byte(
+		`{"games": [{"id": "0000000000000000", "title": "A", "installState": "ready", "storeId": "9p8mk4nc0ljb&x=1"}]}`)})
+	if err != nil || len(games) != 1 || games[0].StoreID != "" {
+		t.Errorf("parseNexus = %+v, %v; want the game without its Store ID", games, err)
 	}
 }
