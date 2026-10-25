@@ -1,0 +1,15 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Installs Xodus Nexus's Wine runtime when it has none, before the desktop
+# starts; see xodus-nexus-runtime. It works only in the desktop user's home,
+# so it runs as that user. The first install downloads ~370 MB.
+#
+# Never exits non-zero: a failed oneshot stops s6 starting the desktop and
+# leaves the pod Running but never Ready, which would hold the Steam lock.
+
+home="$(getent passwd abc | cut -d: -f6)"
+[[ -n "${home}" ]] || { echo "init-xodus-nexus-runtime: cannot find abc's home" >&2; exit 0; }
+HOME="${home}" timeout 1800 s6-setuidgid abc /usr/local/bin/xodus-nexus-runtime ||
+  echo "init-xodus-nexus-runtime: timed out or failed; Nexus will ask for its runtime in Settings" >&2
+exit 0

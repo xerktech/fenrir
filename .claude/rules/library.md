@@ -79,7 +79,12 @@ paths:
     like Steam's and Heroic's tokens there. Never print or copy `~/.local/share/keyrings`.
   - Installs go to the games volume: `init-xodus-nexus` (root) makes `/games/xodus-nexus` owned
     by abc, never following an existing link; the wrapper links `~/Games/Xodus Nexus` to it.
-  - Nexus downloads its backend and runtime into the home on demand (Settings), unpinned.
+  - Nexus keeps its backend and runtime in the home (absolute `/config/...` paths), unpinned.
+  - Nexus installs its backend itself on first run, but never its runtime: without one every
+    launch fails "Select a Wine/Xodus Proton binary". `init-xodus-nexus-runtime` (as abc) installs
+    the newest runtime release when `<runtimeRoot>/current.json` has no working wine, the way
+    Nexus's `installNexus` does (XERK-2289). Install-if-missing only; updates stay in Settings.
+    Tests: `images/library/xodus_nexus_runtime_test.go`.
   - The wrapper exports `APPDIR`: AppRun otherwise finds its directory by testing `"$dir/$1"`,
     so any argument sends it to `/xodus-nexus`. The build makes the unpacked tree world-readable
     (`--appimage-extract` leaves 0700 root dirs) and fails if any entry is not.
