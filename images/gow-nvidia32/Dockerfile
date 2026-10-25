@@ -130,8 +130,10 @@ COPY --chmod=755 root/opt/direwolf/launch-nexus /opt/direwolf/launch-nexus
 COPY --chmod=755 root/opt/gow/nexus-startup-app.sh /opt/gow/startup-app.sh
 COPY --chmod=755 root/usr/local/bin/xodus-nexus-update /usr/local/bin/xodus-nexus-update
 COPY --chmod=755 root/etc/cont-init.d/30-xodus-nexus-update.sh /etc/cont-init.d/
-# GoW's sway config includes /etc/sway/config.d/*.
-COPY --chmod=644 root/etc/sway/config.d/60-direwolf-nexus-fullscreen /etc/sway/config.d/
+# launch-comp.sh copies /cfg/sway/config into the home at every start; the
+# include goes last so its rule runs after GoW's own for_window rules.
+COPY --chmod=644 root/cfg/sway/direwolf-nexus.conf /cfg/sway/direwolf-nexus.conf
+RUN echo 'include /cfg/sway/direwolf-nexus.conf' >>/cfg/sway/config
 RUN test -x /opt/xodus-nexus/AppRun && command -v gnome-keyring-daemon dbus-run-session dbus-send >/dev/null \
   && command -v python3 curl sha256sum gosu timeout >/dev/null \
   && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/xodus-nexus' \
