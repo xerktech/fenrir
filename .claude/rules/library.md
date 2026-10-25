@@ -65,7 +65,8 @@ paths:
   - `xodus-nexus-update` (identical in `images/gow-nvidia32`, XERK-2288) installs the newest
     launcher release at Library start (`init-xodus-nexus-update`), like `init-heroic-update`:
     cached in the home, trusted only by GitHub's published SHA256, home touched only as abc.
-  - The repo also publishes `backend-v*` and `runtime-*` releases: never use `releases/latest`.
+  - The repo also publishes `backend-v*` and `runtime-*` releases (about three per launcher
+    release): never use `releases/latest`; a cached version is fetched by its tag, not paged for.
   - The AppImage is unpacked as the desktop user, then chowned to root and made world-readable.
   - Sessions run it `--cached-only` (cont-init `30-xodus-nexus-update.sh`): the Library's verified
     copy, never a download at launch, so a session runs the Library's version.

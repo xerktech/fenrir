@@ -26,7 +26,9 @@
 # pod would hold the Steam lock), and a session's cont-init runs under set -e.
 # Any failure keeps the installed Nexus.
 
-releases_url="https://api.github.com/repos/domsvoboda/xodus-nexus/releases?per_page=30"
+# The newest 100 releases; a cached version is looked up by its tag instead,
+# as the repo publishes about three releases per launcher release.
+releases_url="https://api.github.com/repos/domsvoboda/xodus-nexus/releases?per_page=100"
 opt=/opt/xodus-nexus
 
 give_up() {
@@ -60,8 +62,9 @@ want=
 if [[ -n "${cached_only}" ]]; then
   # shellcheck disable=SC2016 # expanded by the inner sh
   want="$(as_user 30 sh -c 'cd "$1" 2>/dev/null && ls -1' sh "${cache}" |
-    sed -n 's/^Xodus-Nexus-\([0-9]*\.[0-9]*\.[0-9]*\)-x86_64\.AppImage$/\1/p' | head -n1)"
+    sed -n 's/^Xodus-Nexus-\([0-9]*\.[0-9]*\.[0-9]*\)-x86_64\.AppImage$/\1/p' | sort -V | tail -n1)"
   [[ -n "${want}" ]] || { echo "xodus-nexus-update: nothing cached; Xodus Nexus ${installed} is kept"; exit 0; }
+  releases_url="https://api.github.com/repos/domsvoboda/xodus-nexus/releases/tags/v${want}"
 fi
 
 releases="$(curl -fsSL --max-time 30 "${releases_url}")" || give_up "cannot read the releases"
@@ -76,7 +79,8 @@ installed, want = sys.argv[1], sys.argv[2]
 def key(v):
     return tuple(int(n) for n in v.split("."))
 best = None
-for r in json.load(sys.stdin):
+releases = json.load(sys.stdin)
+for r in [releases] if isinstance(releases, dict) else releases:
     if r.get("draft") or r.get("prerelease"):
         continue
     m = re.fullmatch(r"v([0-9]+\.[0-9]+\.[0-9]+)", r.get("tag_name") or "")

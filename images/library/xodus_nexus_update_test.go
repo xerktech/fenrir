@@ -34,14 +34,16 @@ func TestXodusNexusUpdateMatchesSessionImage(t *testing.T) {
 // network, another user or root-only ownership. Each logs its call.
 var nexusStubs = map[string]string{
 	"curl": `for a; do [ "$prev" = -o ] && out=$a; [ "$prev" = --max-filesize ] && max=$a; prev=$a; done
-[ -z "$out" ] && { echo releases >>"$LOG"; exec cat "$FAKE_RELEASES"; }
+[ -z "$out" ] && { echo "releases $*" >>"$LOG"; exec cat "$FAKE_RELEASES"; }
 echo "download $*" >>"$LOG"
 [ "${max:-0}" -gt 0 ] && [ "$(wc -c <"$FAKE_APP")" -gt "$max" ] && exit 63
 cp "$FAKE_APP" "$out"`,
 	"getent": `[ "$2" = abc ] && echo "abc:x:1000:1000::$FAKE_HOME:/bin/bash"`,
 	// Logs that the home and the unpack ran as the desktop user, never as root.
 	"s6-setuidgid": `[ "$1" = abc ] || exit 111; shift; echo "as-abc $3" >>"$LOG"; exec "$@"`,
-	"chown":        `echo "chown $1" >>"$LOG"`,
+	"chown":        `echo "chown $*" >>"$LOG"`,
+	// FAKE_MV_FAIL: installing the unpacked tree fails.
+	"mv": `case "$FAKE_MV_FAIL:$1" in 1:*squashfs-root) exit 1;; esac; exec /bin/mv "$@"`,
 }
 
 // nexusApp is a fake AppImage that unpacks to a tree whose AppRun prints body,
@@ -94,6 +96,7 @@ func (p *nexusPod) reset(installed string) {
 
 type nexusRelease struct {
 	tag, asset, app, digest string
+	prerelease              bool
 }
 
 func launcherRelease(version, app string) nexusRelease {
@@ -104,11 +107,16 @@ func launcherRelease(version, app string) nexusRelease {
 // run runs the real script against releases (listed in this order) and
 // returns the stubs' calls and its output. Every download serves app.
 func (p *nexusPod) run(releases []nexusRelease, app string, args ...string) string {
+	return p.runEnv(releases, app, nil, args...)
+}
+
+// runEnv is run with extra environment for the stubs.
+func (p *nexusPod) runEnv(releases []nexusRelease, app string, env []string, args ...string) string {
 	t := p.t
 	t.Helper()
 	list := make([]map[string]any, 0, len(releases))
 	for _, r := range releases {
-		list = append(list, map[string]any{"tag_name": r.tag, "assets": []map[string]any{
+		list = append(list, map[string]any{"tag_name": r.tag, "prerelease": r.prerelease, "assets": []map[string]any{
 			{"name": r.asset, "browser_download_url": "https://github.com/x/" + r.asset, "size": len(r.app), "digest": r.digest},
 		}})
 	}
@@ -139,6 +147,7 @@ func (p *nexusPod) run(releases []nexusRelease, app string, args ...string) stri
 		"PATH="+filepath.Join(p.dir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"LOG="+p.log, "FAKE_HOME="+p.home,
 		"FAKE_RELEASES="+filepath.Join(p.dir, "releases.json"), "FAKE_APP="+filepath.Join(p.dir, "app"))
+	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("xodus-nexus-update must never fail (a failed oneshot hangs the pod): %v\n%s", err, out)
@@ -164,8 +173,9 @@ func (p *nexusPod) installed() (version, runs string) {
 	return strings.TrimSpace(string(v)), strings.TrimSpace(string(out))
 }
 
-func (p *nexusPod) cachedApp(version string) string {
-	return filepath.Join(p.home, ".cache/direwolf-xodus-nexus/Xodus-Nexus-"+version+"-x86_64.AppImage")
+// cachedApp is where the Library caches the tests' 0.3.12 AppImage.
+func (p *nexusPod) cachedApp() string {
+	return filepath.Join(p.home, ".cache/direwolf-xodus-nexus/Xodus-Nexus-0.3.12-x86_64.AppImage")
 }
 
 // A newer launcher release is downloaded, cached as the desktop user,
@@ -176,11 +186,14 @@ func TestXodusNexusUpdateInstallsNewerRelease(t *testing.T) {
 	app := nexusApp("v0.3.12")
 	releases := []nexusRelease{
 		{tag: "backend-v0.2.12", asset: "xodus-backend.tar.zst", app: "x", digest: "sha256:" + sha256Hex("x")},
+		{tag: "v0.4.0", asset: "Xodus-Nexus-0.4.0-x86_64.AppImage", app: "pre", digest: "sha256:" + sha256Hex("pre"), prerelease: true},
+		{tag: "v0.4.1-rc1", asset: "Xodus-Nexus-0.4.1-rc1-x86_64.AppImage", app: "rc", digest: "sha256:" + sha256Hex("rc")},
 		launcherRelease("0.3.12", app),
 		launcherRelease("0.3.11", nexusApp("v0.3.11")),
 	}
 	calls := p.run(releases, app)
-	for _, want := range []string{"download", "as-abc rm -rf", "as-abc cd", "chown -R", "updated Xodus Nexus 0.3.11 -> 0.3.12"} {
+	// The cache is read and written as the desktop user; root owns what it installs.
+	for _, want := range []string{"as-abc [ -f", "download", "as-abc rm -rf", "as-abc cd", "chown -R 0:0 ", "updated Xodus Nexus 0.3.11 -> 0.3.12"} {
 		if !strings.Contains(calls, want) {
 			t.Errorf("calls lack %q:\n%s", want, calls)
 		}
@@ -191,7 +204,7 @@ func TestXodusNexusUpdateInstallsNewerRelease(t *testing.T) {
 	if fi, err := os.Stat(filepath.Join(p.opt, "resources")); err != nil || fi.Mode().Perm() != 0o755 {
 		t.Errorf("unpacked tree not made world-readable: %v %v", fi, err)
 	}
-	if b, err := os.ReadFile(p.cachedApp("0.3.12")); err != nil || string(b) != app {
+	if b, err := os.ReadFile(p.cachedApp()); err != nil || string(b) != app {
 		t.Errorf("AppImage not cached: %v", err)
 	}
 	if matches, _ := filepath.Glob(p.opt + ".update.*"); len(matches) != 0 {
@@ -253,15 +266,15 @@ func TestXodusNexusUpdateCachedOnly(t *testing.T) {
 	p.reset("0.3.11")
 	newer := nexusApp("v0.3.13")
 	calls = p.run([]nexusRelease{launcherRelease("0.3.13", newer), launcherRelease("0.3.12", app)}, newer, "--cached-only")
-	if strings.Contains(calls, "download") {
-		t.Errorf("session downloaded:\n%s", calls)
+	if strings.Contains(calls, "download") || !strings.Contains(calls, "releases/tags/v0.3.12") {
+		t.Errorf("want the cached release looked up by its tag, and no download:\n%s", calls)
 	}
 	if v, runs := p.installed(); v != "0.3.12" || runs != "v0.3.12" {
 		t.Errorf("installed %q running %q, want the Library's 0.3.12", v, runs)
 	}
 
 	// A tampered cache is refused, not replaced by a download.
-	if err := os.WriteFile(p.cachedApp("0.3.12"), []byte(nexusApp("evil")), 0o600); err != nil {
+	if err := os.WriteFile(p.cachedApp(), []byte(nexusApp("evil")), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	p.reset("0.3.11")
@@ -287,5 +300,52 @@ func TestXodusNexusUpdateOfflineKeepsInstalled(t *testing.T) {
 	}
 	if v, runs := p.installed(); v != "0.3.11" || runs != "image" {
 		t.Errorf("installed %q running %q, want the image's 0.3.11", v, runs)
+	}
+}
+
+// A cache entry that is not a plain, bounded file (here /dev/zero, endless)
+// is read no further than the asset's size; the release is downloaded.
+func TestXodusNexusUpdateBoundsCacheRead(t *testing.T) {
+	p := newNexusPod(t, "0.3.11")
+	if err := os.MkdirAll(filepath.Dir(p.cachedApp()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/zero", p.cachedApp()); err != nil {
+		t.Fatal(err)
+	}
+	app := nexusApp("v0.3.12")
+	calls := p.run([]nexusRelease{launcherRelease("0.3.12", app)}, app)
+	if !strings.Contains(calls, "download") {
+		t.Errorf("want a download:\n%s", calls)
+	}
+	if v, _ := p.installed(); v != "0.3.12" {
+		t.Errorf("installed %q, want 0.3.12", v)
+	}
+}
+
+// A tree that would keep a setuid/setgid entry is never installed.
+func TestXodusNexusUpdateRefusesSetIDEntries(t *testing.T) {
+	p := newNexusPod(t, "0.3.11")
+	// chmod -R u=rwX,go=rX keeps a directory's setgid bit.
+	app := nexusApp("v0.3.12") + "chmod 2755 squashfs-root/resources\n"
+	calls := p.run([]nexusRelease{launcherRelease("0.3.12", app)}, app)
+	if !strings.Contains(calls, "unsafe permissions") {
+		t.Errorf("want the tree refused:\n%s", calls)
+	}
+	if v, runs := p.installed(); v != "0.3.11" || runs != "image" {
+		t.Errorf("installed %q running %q, want the image's 0.3.11", v, runs)
+	}
+}
+
+// A failed install puts the image's Nexus back.
+func TestXodusNexusUpdateRestoresOnFailedInstall(t *testing.T) {
+	p := newNexusPod(t, "0.3.11")
+	app := nexusApp("v0.3.12")
+	calls := p.runEnv([]nexusRelease{launcherRelease("0.3.12", app)}, app, []string{"FAKE_MV_FAIL=1"})
+	if !strings.Contains(calls, "cannot install") {
+		t.Errorf("calls:\n%s", calls)
+	}
+	if v, runs := p.installed(); v != "0.3.11" || runs != "image" {
+		t.Errorf("installed %q running %q, want the image's 0.3.11 restored", v, runs)
 	}
 }
