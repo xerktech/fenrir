@@ -1,0 +1,6 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Updates Xodus Nexus at Library start, before the desktop (and so Nexus)
+# starts; see xodus-nexus-update. It never exits non-zero.
+exec /usr/local/bin/xodus-nexus-update abc

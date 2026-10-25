@@ -29,7 +29,9 @@ RUN set -eu; \
   # must read them, and nobody but root may write.
   chmod -R u=rwX,go=rX /tmp/squashfs-root; \
   test -z "$(find /tmp/squashfs-root ! -type l \( ! -perm -o=r -o -perm /022 \))"; \
-  mv /tmp/squashfs-root /opt/xodus-nexus
+  mv /tmp/squashfs-root /opt/xodus-nexus; \
+  # xodus-nexus-update compares releases against this.
+  echo "${NEXUS_VERSION#v}" >/opt/xodus-nexus/.direwolf-version
 
 FROM lscr.io/linuxserver/steam:latest@sha256:d1c9f2c6d522169f6dcede9b17076c0e31ddbc5f9c4a102562cecddfe2d4ecdb
 
