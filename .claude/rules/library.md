@@ -74,9 +74,9 @@ paths:
   - The wrapper exports `APPDIR`: AppRun otherwise finds its directory by testing `"$dir/$1"`,
     so any argument sends it to `/xodus-nexus`. The build makes the unpacked tree world-readable
     (`--appimage-extract` leaves 0700 root dirs) and fails if any entry is not.
-  - The wrapper runs Nexus on X11 via the desktop's rootless Xwayland (`DISPLAY=:0`; the
-    desktop's `DISPLAY=:1` has no server): under Wayland its sign-in window (created hidden,
-    shown on `ready-to-show`) never appeared and sign-in hung (XERK-2287).
+  - The wrapper runs Nexus on X11 via the desktop's rootless Xwayland: under Wayland its sign-in
+    window (created hidden, shown on `ready-to-show`) never appeared and sign-in hung (XERK-2287).
+    labwc's children get `DISPLAY=:0`; `kubectl exec` and startwm carry a dead `:1`.
   - `wrapped-steam` (the labwc autostart hook) starts it beside Heroic, unless `xodus-nexus.bin`
     already runs. Tests: `TestWrappedSteamKeepsRunningNexus`.
   - The Library's selkies-desktop menu lists only `.desktop` files; the openbox `menu.xml` item

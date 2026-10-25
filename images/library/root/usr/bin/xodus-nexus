@@ -40,10 +40,9 @@ fi
 NEXUS_ARGS=()
 # Nexus creates its Microsoft sign-in window hidden and shows it once it has
 # rendered; on the Library's Wayland desktop it never appeared and sign-in hung.
-# Run it on X11 through the desktop's rootless Xwayland, which listens on :0
-# (the desktop's own DISPLAY=:1 has no X server).
+# Run it on X11 through the desktop's rootless Xwayland (labwc gives its
+# children DISPLAY=:0; only startwm and kubectl exec carry a dead :1).
 if [ "${PIXELFLUX_WAYLAND,,}" == "true" ]; then
-  export DISPLAY=:0
   NEXUS_ARGS+=(--ozone-platform=x11)
 fi
 # Electron's sandbox needs unprivileged user namespaces, which a default

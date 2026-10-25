@@ -83,13 +83,14 @@ func TestXodusNexusStartsKeyringAndLinksGames(t *testing.T) {
 	if err := os.Mkdir(games, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	log := runXodusNexus(t, home, games, false, nil, "--launch-game", "3f2a9c1e7b4d5a60")
+	log := runXodusNexus(t, home, games, false, []string{"DISPLAY=:7"}, "--launch-game", "3f2a9c1e7b4d5a60")
 	for _, want := range []string{
 		"gnome-keyring-daemon --unlock --components=secrets control=unset",
 		"gnome-keyring-daemon --start --components=secrets control=/run/keyring",
 		"nexus --no-sandbox --launch-game 3f2a9c1e7b4d5a60",
 		"keyring /run/keyring",
 		"appdir /opt/xodus-nexus", // AppRun's own lookup breaks on any argument
+		"display :7",
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log lacks %q:\n%s", want, log)
@@ -120,11 +121,11 @@ func TestXodusNexusKeepsRunningKeyringAndExistingInstallDir(t *testing.T) {
 	}
 }
 
-// On the Library's Wayland desktop Nexus runs on X11 through Xwayland (:0):
-// under Wayland its Microsoft sign-in window never appeared.
+// On the Library's Wayland desktop Nexus runs on X11 through Xwayland, on the
+// DISPLAY labwc gave it: under Wayland its sign-in window never appeared.
 func TestXodusNexusUsesXwaylandOnWaylandDesktop(t *testing.T) {
 	home, games := t.TempDir(), filepath.Join(t.TempDir(), "xodus-nexus")
-	log := runXodusNexus(t, home, games, true, []string{"PIXELFLUX_WAYLAND=true", "DISPLAY=:1"})
+	log := runXodusNexus(t, home, games, true, []string{"PIXELFLUX_WAYLAND=true", "DISPLAY=:0"})
 	for _, want := range []string{"nexus --ozone-platform=x11 --no-sandbox", "display :0"} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log lacks %q:\n%s", want, log)
