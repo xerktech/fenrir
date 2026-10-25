@@ -38,8 +38,12 @@ if [ -d "${games}" ] && [ ! -e "${link}" ] && [ ! -L "${link}" ]; then
 fi
 
 NEXUS_ARGS=()
+# Nexus creates its Microsoft sign-in window hidden and shows it once it has
+# rendered; on the Library's Wayland desktop it never appeared and sign-in hung.
+# Run it on X11 through the desktop's rootless Xwayland (labwc gives its
+# children DISPLAY=:0; only startwm and kubectl exec carry a dead :1).
 if [ "${PIXELFLUX_WAYLAND,,}" == "true" ]; then
-  NEXUS_ARGS+=(--ozone-platform=wayland)
+  NEXUS_ARGS+=(--ozone-platform=x11)
 fi
 # Electron's sandbox needs unprivileged user namespaces, which a default
 # container seccomp profile denies.
