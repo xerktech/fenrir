@@ -90,6 +90,11 @@ const (
 	// none: it runs while the Library holds the Steam lock.
 	catalogueArtBudget  = 20 * time.Second
 	catalogueArtTimeout = 10 * time.Second
+	// A Nexus game's Store catalog entry (its image list) is looked up again
+	// this much later; the reply is capped at storeCatalogMaxBytes.
+	storeCatalogTTL      = 24 * time.Hour
+	storeCatalogMaxBytes = 4 << 20
+	storeArtMaxURLs      = 4
 	// catalogueScanTimeout ends the scan script in the pod (coreutils
 	// timeout), inside libraryExecTimeout.
 	catalogueScanTimeout = "25"
@@ -115,6 +120,23 @@ const nexusState = libraryHome + "/.config/xodus-nexus/launcher-state.json"
 // into a shell line. Nexus itself accepts exactly this for --launch-game
 // (game-shortcuts.ts validId).
 var nexusGameID = regexp.MustCompile(`^[a-f0-9]{16}$`)
+
+// storeProductID is a Microsoft Store product ID (9P8MK4NC0LJB). It goes into
+// the Store catalog lookup's query string.
+var storeProductID = regexp.MustCompile(`^[0-9A-Z]{12}$`)
+
+// storeCatalogURL is the public Microsoft Store catalog; %s is a product ID.
+const storeCatalogURL = "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=%s&market=US&languages=en-us"
+
+// storeArtPurposes are the Store catalog image kinds used for a Nexus game's
+// Moonlight art, best first. Nexus's own cover is the square BoxArt, which
+// Moonlight's portrait tiles squash; Poster is 2:3 and BrandedKeyArt ~3:4.
+// Poster is asked for at 600x900 (the image service scales on request): full
+// size can exceed catalogueMaxArtBytes.
+var storeArtPurposes = []struct{ purpose, query string }{
+	{"Poster", "?w=600&h=900"},
+	{"BrandedKeyArt", ""},
+}
 
 // heroicAppName is what a Heroic appName may look like to be launched: it is
 // put into a shell command line and a heroic:// URL.
@@ -162,6 +184,9 @@ type catalogueGame struct {
 	ID     string // Steam appid, Heroic appName or Nexus game ID
 	Title  string
 	ArtURL []string // tried in order
+	// StoreID is a Nexus game's Store product ID: its Store catalog art is
+	// tried ahead of ArtURL.
+	StoreID string
 	// Launch is the launch command line of a RomM game (core and ROM path);
 	// the other stores' are derived from Store and ID.
 	Launch string
@@ -176,12 +201,19 @@ type Catalogue struct {
 	GamesPath string
 	// FetchArt returns the image at url; fetchArt by default.
 	FetchArt func(ctx context.Context, url string) ([]byte, error)
+	// StoreArt returns a Store product's portrait art URLs, best first;
+	// storeArt by default.
+	StoreArt func(ctx context.Context, storeID string) ([]string, error)
 	CatalogueOptions
 
 	now       func() time.Time
 	lastScan  time.Time
 	artFailed map[string]time.Time
-	// mu serialises Sync and Refresh (artFailed, and their App writes).
+	// storeArt caches StoreArt per product: its last good URLs and when to
+	// look again (storeCatalogTTL after a success, catalogueArtRetry after a
+	// failure, which keeps the last good URLs).
+	storeArt map[string]storeArtEntry
+	// mu serialises Sync and Refresh (artFailed, storeArt, and their App writes).
 	mu sync.Mutex
 }
 
@@ -192,10 +224,17 @@ func NewCatalogue(apps v1alpha1client.AppInterface, exec PodExecutor, gamesPath 
 		Exec:             exec,
 		GamesPath:        gamesPath,
 		FetchArt:         func(ctx context.Context, u string) ([]byte, error) { return fetchArt(ctx, client, u) },
+		StoreArt:         func(ctx context.Context, id string) ([]string, error) { return storeArt(ctx, client, id) },
 		CatalogueOptions: options,
 		now:              time.Now,
 		artFailed:        map[string]time.Time{},
+		storeArt:         map[string]storeArtEntry{},
 	}
+}
+
+type storeArtEntry struct {
+	urls []string
+	next time.Time
 }
 
 // nonPublicPrefixes are routable-looking ranges that are not the public
@@ -690,6 +729,7 @@ func parseNexus(files map[string][]byte) ([]catalogueGame, error) {
 			InstallState string `json:"installState"`
 			CoverURL     string `json:"coverUrl"`
 			HeroURL      string `json:"heroUrl"`
+			StoreID      string `json:"storeId"`
 		} `json:"games"`
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
@@ -708,6 +748,9 @@ func parseNexus(files map[string][]byte) ([]catalogueGame, error) {
 			continue
 		}
 		c := catalogueGame{Store: v1alpha1types.CatalogueStoreNexus, ID: g.ID, Title: firstNonEmpty(g.Title, g.ID)}
+		if storeProductID.MatchString(g.StoreID) {
+			c.StoreID = g.StoreID
+		}
 		for _, u := range []string{g.CoverURL, g.HeroURL} {
 			// The Store's image URLs are often scheme-relative.
 			if strings.HasPrefix(u, "//") {
@@ -1156,7 +1199,11 @@ func (c *Catalogue) syncApp(ctx, artCtx context.Context, base *v1alpha1types.App
 // every URL failing (retried after catalogueArtRetry), or ctx (the scan's
 // art budget) done.
 func (c *Catalogue) art(ctx context.Context, game *catalogueGame, fetchedFrom string) (art []byte, from string) {
-	for _, u := range game.ArtURL {
+	candidates := game.ArtURL
+	if game.StoreID != "" {
+		candidates = append(c.storeArtURLs(ctx, game.StoreID), game.ArtURL...)
+	}
+	for _, u := range candidates {
 		if u == fetchedFrom {
 			return nil, ""
 		}
@@ -1182,6 +1229,114 @@ func (c *Catalogue) art(ctx context.Context, game *catalogueGame, fetchedFrom st
 		return data, u
 	}
 	return nil, ""
+}
+
+// storeArtURLs returns a Store product's portrait art URLs from the cache, or
+// looks them up (none on failure: the game keeps its other art).
+//
+// A failed lookup keeps the last good URLs: dropping them would put the
+// square cover back on every App until the next lookup, then the poster again.
+func (c *Catalogue) storeArtURLs(ctx context.Context, storeID string) []string {
+	e, ok := c.storeArt[storeID]
+	if ok && c.now().Before(e.next) {
+		return e.urls
+	}
+	if ctx.Err() != nil {
+		return e.urls
+	}
+	urls, err := c.StoreArt(ctx, storeID)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return e.urls // out of budget, not the lookup's fault
+	case err != nil:
+		klog.V(2).Infof("Catalogue: no Store catalog art for %s: %v", storeID, err)
+		c.storeArt[storeID] = storeArtEntry{urls: e.urls, next: c.now().Add(catalogueArtRetry)}
+	default:
+		c.storeArt[storeID] = storeArtEntry{urls: urls, next: c.now().Add(storeCatalogTTL)}
+	}
+	return c.storeArt[storeID].urls
+}
+
+// storeArt looks a product up in the Store catalog and returns its
+// storeArtPurposes images' URLs, best first. Only URLs checkArtURL allows are
+// returned; the images are then fetched like any other box art.
+func storeArt(ctx context.Context, client *http.Client, storeID string) ([]string, error) {
+	if !storeProductID.MatchString(storeID) {
+		return nil, fmt.Errorf("invalid Store product ID %q", storeID)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(storeCatalogURL, storeID), http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("building Store catalog request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("querying the Store catalog: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("querying the Store catalog: %s", resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, storeCatalogMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading the Store catalog: %w", err)
+	}
+	if len(data) > storeCatalogMaxBytes {
+		return nil, fmt.Errorf("the Store catalog reply is over %d bytes", storeCatalogMaxBytes)
+	}
+	return parseStoreArt(data, storeID)
+}
+
+// parseStoreArt picks storeID's storeArtPurposes image URLs out of a Store
+// catalog reply.
+func parseStoreArt(data []byte, storeID string) ([]string, error) {
+	var reply struct {
+		Products []struct {
+			ProductID           string `json:"ProductId"`
+			LocalizedProperties []struct {
+				Images []struct {
+					ImagePurpose string `json:"ImagePurpose"`
+					URI          string `json:"Uri"`
+				} `json:"Images"`
+			} `json:"LocalizedProperties"`
+		} `json:"Products"`
+	}
+	if err := json.Unmarshal(data, &reply); err != nil {
+		return nil, fmt.Errorf("parsing the Store catalog reply: %w", err)
+	}
+	var urls []string
+	seen := map[string]bool{}
+	for _, p := range reply.Products {
+		if p.ProductID != storeID {
+			continue
+		}
+		for _, want := range storeArtPurposes {
+			for _, lp := range p.LocalizedProperties {
+				for _, img := range lp.Images {
+					if img.ImagePurpose != want.purpose {
+						continue
+					}
+					u := img.URI
+					if strings.HasPrefix(u, "//") {
+						u = "https:" + u
+					}
+					// No query or fragment of its own: want.query is appended.
+					parsed, err := url.Parse(u)
+					if err != nil || checkArtURL(parsed) != nil || strings.ContainsAny(u, "?# ") {
+						continue
+					}
+					if u += want.query; !seen[u] {
+						seen[u] = true
+						urls = append(urls, u)
+					}
+					// art tries these in turn within the scan's art budget.
+					if len(urls) == storeArtMaxURLs {
+						return urls, nil
+					}
+				}
+			}
+		}
+	}
+	return urls, nil
 }
 
 // setEnv sets name=value in env, replacing any earlier value.

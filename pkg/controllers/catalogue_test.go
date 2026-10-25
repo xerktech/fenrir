@@ -122,6 +122,9 @@ func TestCatalogueScanFixtures(t *testing.T) {
 	if art := got["epic/Quail"].ArtURL; len(art) == 0 || art[0] != "https://cdn1.epicgames.com/quail/hades-tall.jpg" {
 		t.Errorf("Hades art = %v, want the tall cover first", art)
 	}
+	if id := got["nexus/3f2a9c1e7b4d5a60"].StoreID; id != "9P8MK4NC0LJB" {
+		t.Errorf("Nexus game Store ID %q, want 9P8MK4NC0LJB", id)
+	}
 	if art := got["nexus/3f2a9c1e7b4d5a60"].ArtURL; len(art) != 2 || art[0] != "https://store-images.s-microsoft.com/image/apps.12345.dungeons-boxart" {
 		t.Errorf("Minecraft Dungeons art = %v, want the scheme-fixed box art, then the hero image", art)
 	}
@@ -352,6 +355,11 @@ type catalogueFixture struct {
 	dw        *dwfake.Clientset
 	catalogue *Catalogue
 	fetched   []string
+	// storeArt is what the Store catalog lists per product (none by
+	// default); storeArtErr fails every lookup; storeLookups records them.
+	storeArt     map[string][]string
+	storeArtErr  error
+	storeLookups []string
 }
 
 func newCatalogueFixture(t *testing.T, objs ...runtime.Object) *catalogueFixture {
@@ -367,6 +375,10 @@ func newCatalogueFixture(t *testing.T, objs ...runtime.Object) *catalogueFixture
 			return nil, errors.New("404")
 		}
 		return pngData, nil
+	}
+	f.catalogue.StoreArt = func(_ context.Context, id string) ([]string, error) {
+		f.storeLookups = append(f.storeLookups, id)
+		return f.storeArt[id], f.storeArtErr
 	}
 	return f
 }
@@ -1232,5 +1244,186 @@ func TestCatalogueScanStoreNotRegularFileFails(t *testing.T) {
 		if err := scanFixtureErr(t, dir); err == nil {
 			t.Errorf("%s at the Nexus state path: scan succeeded", name)
 		}
+	}
+}
+
+const dungeonsPoster = "https://store-images.s-microsoft.com/image/apps.2957.dungeons-poster?w=600&h=900"
+
+// A Nexus game's Moonlight art is its Store catalog poster (portrait) when
+// there is one, ahead of Nexus's square cover; the lookup is cached.
+func TestCatalogueNexusUsesStorePoster(t *testing.T) {
+	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil), baseApp("nexus-base", nil))
+	f.catalogue.NexusBaseApp = "nexus-base"
+	f.storeArt = map[string][]string{"9P8MK4NC0LJB": {dungeonsPoster}}
+	f.scan(t)
+	name := catalogueAppName(v1alpha1types.CatalogueStoreNexus, "3f2a9c1e7b4d5a60")
+	if from := f.app(t, name).Annotations[catalogueArtAnnotation]; from != dungeonsPoster {
+		t.Errorf("art from %q, want the Store poster", from)
+	}
+	if slices.Contains(f.fetched, "https://store-images.s-microsoft.com/image/apps.12345.dungeons-boxart") {
+		t.Errorf("square cover fetched although the poster worked: %v", f.fetched)
+	}
+	f.scan(t)
+	if !slices.Equal(f.storeLookups, []string{"9P8MK4NC0LJB"}) {
+		t.Errorf("Store lookups %v, want one (cached)", f.storeLookups)
+	}
+}
+
+// An App whose art came from Nexus's square cover gets the poster on the next
+// scan once the Store lists one; a failed lookup keeps the cover.
+func TestCatalogueNexusUpgradesToStorePoster(t *testing.T) {
+	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil), baseApp("nexus-base", nil))
+	f.catalogue.NexusBaseApp = "nexus-base"
+	f.storeArtErr = errors.New("catalog down")
+	f.scan(t)
+	name := catalogueAppName(v1alpha1types.CatalogueStoreNexus, "3f2a9c1e7b4d5a60")
+	cover := "https://store-images.s-microsoft.com/image/apps.12345.dungeons-boxart"
+	if from := f.app(t, name).Annotations[catalogueArtAnnotation]; from != cover {
+		t.Fatalf("art from %q, want Nexus's cover when the catalog fails", from)
+	}
+
+	// A failed lookup is retried after catalogueArtRetry, not every scan.
+	f.storeArtErr = nil
+	f.storeArt = map[string][]string{"9P8MK4NC0LJB": {dungeonsPoster}}
+	f.scan(t)
+	if len(f.storeLookups) != 1 {
+		t.Errorf("Store lookups %v, want the failure cached", f.storeLookups)
+	}
+	f.catalogue.now = func() time.Time { return libraryTestNow.Add(catalogueArtRetry) }
+	f.scan(t)
+	if from := f.app(t, name).Annotations[catalogueArtAnnotation]; from != dungeonsPoster {
+		t.Errorf("art from %q, want the poster once the catalog answers", from)
+	}
+}
+
+// parseStoreArt takes only this product's Poster then BrandedKeyArt, from
+// allowed hosts, without a query of their own, with the Poster scaled.
+func TestParseStoreArt(t *testing.T) {
+	reply := `{"Products": [
+	  {"ProductId": "OTHERPRODUCT", "LocalizedProperties": [{"Images": [
+	    {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/other"}]}]},
+	  {"ProductId": "9P8MK4NC0LJB", "LocalizedProperties": [{"Images": [
+	    {"ImagePurpose": "BoxArt", "Uri": "//store-images.s-microsoft.com/image/box"},
+	    {"ImagePurpose": "BrandedKeyArt", "Uri": "//store-images.s-microsoft.com/image/key"},
+	    {"ImagePurpose": "Poster", "Uri": "//evil.example/image/poster"},
+	    {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/q?x=1"},
+	    {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/poster"},
+	    {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/frag#f"},
+	    {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/empty?"},
+	    {"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/a b"},
+	    {"ImagePurpose": "Poster", "Uri": "http://store-images.s-microsoft.com/image/plain"}]}]}]}`
+	got, err := parseStoreArt([]byte(reply), "9P8MK4NC0LJB")
+	want := []string{
+		"https://store-images.s-microsoft.com/image/poster?w=600&h=900",
+		"https://store-images.s-microsoft.com/image/key",
+	}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("parseStoreArt = %q, %v; want %q", got, err, want)
+	}
+	if _, err := parseStoreArt([]byte("not json"), "9P8MK4NC0LJB"); err == nil {
+		t.Error("parseStoreArt accepted a corrupt reply")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// storeArt asks only the fixed catalog URL, for a valid product ID, and
+// refuses an error status or an oversized reply.
+func TestStoreArtRequestAndLimits(t *testing.T) {
+	var asked []string
+	body, status := `{"Products": []}`, http.StatusOK
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		asked = append(asked, r.URL.String())
+		return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	ctx := context.Background()
+	if urls, err := storeArt(ctx, client, "9P8MK4NC0LJB"); err != nil || len(urls) != 0 {
+		t.Errorf("storeArt = %v, %v", urls, err)
+	}
+	if want := fmt.Sprintf(storeCatalogURL, "9P8MK4NC0LJB"); !slices.Equal(asked, []string{want}) {
+		t.Errorf("asked %v, want %s", asked, want)
+	}
+	if _, err := storeArt(ctx, client, "9P8MK4NC0LJB&x=1"); err == nil || len(asked) != 1 {
+		t.Errorf("an invalid product ID was looked up (%v): %v", err, asked)
+	}
+	status = http.StatusNotFound
+	if _, err := storeArt(ctx, client, "9P8MK4NC0LJB"); err == nil {
+		t.Error("storeArt accepted a 404")
+	}
+	status, body = http.StatusOK, strings.Repeat(" ", storeCatalogMaxBytes+1)
+	if _, err := storeArt(ctx, client, "9P8MK4NC0LJB"); err == nil {
+		t.Error("storeArt accepted an oversized reply")
+	}
+}
+
+// Once the cache expires, a failed lookup keeps the poster rather than
+// putting the square cover back until the next lookup.
+func TestCatalogueNexusKeepsPosterWhenLookupFails(t *testing.T) {
+	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil), baseApp("nexus-base", nil))
+	f.catalogue.NexusBaseApp = "nexus-base"
+	f.storeArt = map[string][]string{"9P8MK4NC0LJB": {dungeonsPoster}}
+	f.scan(t)
+	f.storeArtErr = errors.New("catalog down")
+	f.catalogue.now = func() time.Time { return libraryTestNow.Add(storeCatalogTTL) }
+	f.scan(t)
+	name := catalogueAppName(v1alpha1types.CatalogueStoreNexus, "3f2a9c1e7b4d5a60")
+	if from := f.app(t, name).Annotations[catalogueArtAnnotation]; from != dungeonsPoster || len(f.storeLookups) != 2 {
+		t.Errorf("art from %q after a failed lookup (lookups %v), want the poster kept", from, f.storeLookups)
+	}
+}
+
+// A lookup cut off by the art budget is not cached as a failure.
+func TestStoreArtURLsBudgetCutNotCached(t *testing.T) {
+	f := newCatalogueFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	f.catalogue.StoreArt = func(context.Context, string) ([]string, error) {
+		cancel()
+		return nil, context.Canceled
+	}
+	f.catalogue.storeArtURLs(ctx, "9P8MK4NC0LJB")
+	if _, cached := f.catalogue.storeArt["9P8MK4NC0LJB"]; cached {
+		t.Error("a budget-cut lookup was cached")
+	}
+}
+
+// Only a Store product ID goes into the catalog lookup.
+func TestParseNexusValidatesStoreID(t *testing.T) {
+	games, err := parseNexus(map[string][]byte{"/config/.config/xodus-nexus/launcher-state.json": []byte(
+		`{"games": [{"id": "0000000000000000", "title": "A", "installState": "ready", "storeId": "9p8mk4nc0ljb&x=1"}]}`)})
+	if err != nil || len(games) != 1 || games[0].StoreID != "" {
+		t.Errorf("parseNexus = %+v, %v; want the game without its Store ID", games, err)
+	}
+}
+
+// A URI listed twice counts once, and at most storeArtMaxURLs are kept, best
+// first.
+func TestParseStoreArtDedupesAndCaps(t *testing.T) {
+	img := func(n int) string {
+		return fmt.Sprintf(`{"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/p%d"}`, n)
+	}
+	reply := `{"Products": [{"ProductId": "9P8MK4NC0LJB", "LocalizedProperties": [{"Images": [` +
+		img(1) + "," + img(1) + "," + img(2) + "," + img(3) + "," + img(4) + "," + img(5) + `]}]}]}`
+	got, err := parseStoreArt([]byte(reply), "9P8MK4NC0LJB")
+	var want []string
+	for n := 1; n <= storeArtMaxURLs; n++ {
+		want = append(want, fmt.Sprintf("https://store-images.s-microsoft.com/image/p%d?w=600&h=900", n))
+	}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("parseStoreArt = %q, %v; want %q", got, err, want)
+	}
+}
+
+// A successful lookup is reused for storeCatalogTTL, longer than a failure's
+// catalogueArtRetry.
+func TestStoreArtURLsCachesSuccessForTTL(t *testing.T) {
+	f := newCatalogueFixture(t)
+	f.storeArt = map[string][]string{"9P8MK4NC0LJB": {dungeonsPoster}}
+	f.catalogue.storeArtURLs(context.Background(), "9P8MK4NC0LJB")
+	f.catalogue.now = func() time.Time { return libraryTestNow.Add(storeCatalogTTL - time.Minute) }
+	f.catalogue.storeArtURLs(context.Background(), "9P8MK4NC0LJB")
+	if len(f.storeLookups) != 1 {
+		t.Errorf("lookups %v within storeCatalogTTL, want 1", f.storeLookups)
 	}
 }
