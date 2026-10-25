@@ -1,0 +1,165 @@
+#!/bin/bash
+# shellcheck shell=bash
+
+# Updates Xodus Nexus in /opt/xodus-nexus to its latest GitHub release, but
+# only when that is newer than the installed one. Unpacked from its AppImage
+# (no FUSE in pods), Nexus never updates itself, and the image's copy only
+# moves when its NEXUS_VERSION is bumped.
+#
+# Usage: xodus-nexus-update USER [--cached-only]
+#   USER          the desktop user whose home holds the download cache.
+#   --cached-only never download: install only a cached AppImage. Game
+#                 sessions use this, so a launch never waits on a 130 MB
+#                 download and runs the Nexus the Library last fetched.
+#
+# The same file ships in images/library (run by init-xodus-nexus-update) and
+# images/gow-nvidia32 (run by its cont-init hook); a test keeps them identical.
+#
+# The root filesystem resets with every pod, so the AppImage is kept in the
+# shared home and reused. The home is user-writable (and the desktop runs user
+# code), so a cached copy is trusted only once its SHA256 matches the digest
+# GitHub publishes for the asset, and only the desktop user reads or writes
+# there: root would follow links planted in it. The AppImage is unpacked by
+# the desktop user too; root only takes ownership of the result.
+#
+# Never exits non-zero: the Library's oneshot failing stops the desktop (the
+# pod would hold the Steam lock), and a session's cont-init runs under set -e.
+# Any failure keeps the installed Nexus.
+
+# The newest 100 releases; a cached version is looked up by its tag instead,
+# as the repo publishes about three releases per launcher release.
+releases_url="https://api.github.com/repos/domsvoboda/xodus-nexus/releases?per_page=100"
+opt=/opt/xodus-nexus
+
+give_up() {
+  echo "xodus-nexus-update: $*; keeping Xodus Nexus ${installed:-as installed}" >&2
+  exit 0
+}
+
+user="$1"
+cached_only=
+[[ "${2:-}" == --cached-only ]] && cached_only=1
+[[ -n "${user}" ]] || give_up "no desktop user given"
+entry="$(getent passwd "${user}")" || give_up "no user ${user}"
+IFS=: read -r _ _ uid gid _ home _ <<<"${entry}"
+[[ -n "${home}" && "${uid}" =~ ^[0-9]+$ && "${gid}" =~ ^[0-9]+$ ]] || give_up "cannot read ${user}'s home"
+cache="${home}/.cache/direwolf-xodus-nexus"
+
+# s6-setuidgid in the Library, gosu in GoW session images.
+as_user() {
+  if command -v s6-setuidgid >/dev/null; then
+    timeout "$1" s6-setuidgid "${user}" "${@:2}"
+  else
+    timeout "$1" gosu "${user}" "${@:2}"
+  fi
+}
+
+installed="$(cat "${opt}/.direwolf-version" 2>/dev/null)"
+[[ "${installed}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || give_up "cannot read the installed version"
+
+# In --cached-only mode, the cached AppImage's version is the target.
+want=
+if [[ -n "${cached_only}" ]]; then
+  # shellcheck disable=SC2016 # expanded by the inner sh
+  want="$(as_user 30 sh -c 'cd "$1" 2>/dev/null && ls -1' sh "${cache}" |
+    sed -n 's/^Xodus-Nexus-\([0-9]*\.[0-9]*\.[0-9]*\)-x86_64\.AppImage$/\1/p' | sort -V | tail -n1)"
+  [[ -n "${want}" ]] || { echo "xodus-nexus-update: nothing cached; Xodus Nexus ${installed} is kept"; exit 0; }
+  releases_url="https://api.github.com/repos/domsvoboda/xodus-nexus/releases/tags/v${want}"
+fi
+
+releases="$(curl -fsSL --max-time 30 "${releases_url}")" || give_up "cannot read the releases"
+# The newest launcher release (tag vX.Y.Z: the repo also publishes backend-v*
+# and runtime-* releases, so releases/latest may not be the launcher), or the
+# one named by want. Prints its AppImage's name, version, URL, size and SHA256,
+# tab-separated, or "current" when it is not newer than the installed one.
+# Anything unexpected (no such asset, no digest) fails here.
+fields="$(python3 -I -c '
+import json, re, sys
+installed, want = sys.argv[1], sys.argv[2]
+def key(v):
+    return tuple(int(n) for n in v.split("."))
+best = None
+releases = json.load(sys.stdin)
+for r in [releases] if isinstance(releases, dict) else releases:
+    if r.get("draft") or r.get("prerelease"):
+        continue
+    m = re.fullmatch(r"v([0-9]+\.[0-9]+\.[0-9]+)", r.get("tag_name") or "")
+    if not m or (want and m[1] != want):
+        continue
+    if best is None or key(m[1]) > key(best[0]):
+        best = (m[1], r)
+version, r = best
+if key(version) <= key(installed):
+    print("current", version, sep="\t")
+    sys.exit()
+name = f"Xodus-Nexus-{version}-x86_64.AppImage"
+asset = next(a for a in r["assets"] if a["name"] == name)
+url, size, digest = asset["browser_download_url"], asset["size"], asset["digest"] or ""
+if not url.startswith("https://github.com/") or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+    sys.exit(1)
+if type(size) is not int or not 0 < size < 1 << 30:
+    sys.exit(1)
+print(name, version, url, size, digest.removeprefix("sha256:"), sep="\t")
+' "${installed}" "${want}" <<<"${releases}" 2>/dev/null)" || give_up "cannot find a verifiable AppImage${want:+ for the cached ${want}}"
+IFS=$'\t' read -r name latest url size sha <<<"${fields}"
+if [[ "${name}" == current ]]; then
+  echo "xodus-nexus-update: Xodus Nexus ${installed} is up to date (latest ${latest})"
+  exit 0
+fi
+
+# Beside /opt/xodus-nexus, so the swap below is a rename on one filesystem.
+tmp="$(mktemp -d "${opt}.update.XXXXXX")" || give_up "cannot make a temporary directory"
+trap 'rm -rf "${tmp}"' EXIT
+chmod 0755 "${tmp}"
+app="${tmp}/${name}"
+
+verified() {
+  echo "${sha}  $1" | sha256sum -c --status -
+}
+
+# Copied out before the check, so the file unpacked is the file checked.
+# Only a regular file, and no more than the asset's size: a planted FIFO would
+# block the start, and /dev/zero or a sparse file would fill the node's disk.
+# shellcheck disable=SC2016 # expanded by the inner sh
+if as_user 60 sh -c '[ -f "$1" ] && exec head -c "$2" -- "$1"' sh "${cache}/${name}" "$((size + 1))" >"${app}" 2>/dev/null &&
+  verified "${app}"; then
+  echo "xodus-nexus-update: using the cached ${name}"
+elif [[ -n "${cached_only}" ]]; then
+  give_up "the cached ${name} does not match its published SHA256"
+else
+  echo "xodus-nexus-update: downloading ${name}"
+  curl -fsSL --max-time 600 --max-filesize "${size}" -o "${app}" "${url}" || give_up "cannot download ${name}"
+  verified "${app}" || give_up "${name} does not match its published SHA256"
+  chmod 0644 "${app}"
+  # Only the latest is kept. A failure here just means the next start downloads again.
+  # shellcheck disable=SC2016 # expanded by the inner sh
+  as_user 60 sh -c 'rm -rf -- "$1" && mkdir -p -- "$1" && cp -- "$2" "$1/"' sh "${cache}" "${app}" ||
+    echo "xodus-nexus-update: cannot cache ${name}; the next start downloads it again" >&2
+fi
+
+# Unpacked by the desktop user in a directory of its own; root then owns the
+# tree, so the desktop user (who runs Nexus) cannot change what root installed.
+chmod 0755 "${app}"
+work="${tmp}/work"
+{ mkdir "${work}" && chown "${uid}:${gid}" "${work}"; } || give_up "cannot make an unpack directory"
+# shellcheck disable=SC2016 # expanded by the inner sh
+as_user 300 sh -c 'cd "$1" && exec "$2" --appimage-extract' sh "${work}" "${app}" >/dev/null ||
+  give_up "cannot unpack ${name}"
+new="${work}/squashfs-root"
+[[ -x "${new}/AppRun" && ! -L "${new}" ]] || give_up "${name} unpacked without an AppRun"
+# As the image build does: world-readable (the desktop user runs it), writable
+# by nobody but root, and no setuid sandbox helper (user namespaces or
+# --no-sandbox, see xodus-nexus).
+{ chown -R 0:0 "${new}" && chmod -R u=rwX,go=rX "${new}"; } || give_up "cannot take ownership of ${name}"
+[[ -z "$(find "${new}" ! -type l \( ! -perm -o=r -o -perm /022 -o -perm /6000 \) -print -quit)" ]] ||
+  give_up "${name} unpacked with unsafe permissions"
+{ echo "${latest}" >"${new}/.direwolf-version" && chmod 0644 "${new}/.direwolf-version"; } ||
+  give_up "cannot record the version"
+
+# Nothing runs Nexus yet (before the desktop, or before the session's app).
+mv "${opt}" "${tmp}/old" || give_up "cannot move the installed Nexus aside"
+if ! mv "${new}" "${opt}"; then
+  mv "${tmp}/old" "${opt}"
+  give_up "cannot install ${name}"
+fi
+echo "xodus-nexus-update: updated Xodus Nexus ${installed} -> ${latest}"

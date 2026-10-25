@@ -113,7 +113,9 @@ RUN set -eu; \
   # must read them, and nobody but root may write.
   chmod -R u=rwX,go=rX /tmp/squashfs-root; \
   test -z "$(find /tmp/squashfs-root ! -type l \( ! -perm -o=r -o -perm /022 \))"; \
-  mv /tmp/squashfs-root /opt/xodus-nexus
+  mv /tmp/squashfs-root /opt/xodus-nexus; \
+  # xodus-nexus-update compares releases against this.
+  echo "${NEXUS_VERSION#v}" >/opt/xodus-nexus/.direwolf-version
 
 # Sessions of Microsoft Store games installed with Xodus Nexus (catalogue
 # store "nexus"): the heroic target (Electron's libraries, NVIDIA lib32) plus
@@ -126,6 +128,9 @@ COPY --from=nexus-app /opt/xodus-nexus /opt/xodus-nexus
 COPY --chmod=755 root/usr/bin/xodus-nexus /usr/bin/xodus-nexus
 COPY --chmod=755 root/opt/direwolf/launch-nexus /opt/direwolf/launch-nexus
 COPY --chmod=755 root/opt/gow/nexus-startup-app.sh /opt/gow/startup-app.sh
+COPY --chmod=755 root/usr/local/bin/xodus-nexus-update /usr/local/bin/xodus-nexus-update
+COPY --chmod=755 root/etc/cont-init.d/30-xodus-nexus-update.sh /etc/cont-init.d/
 RUN test -x /opt/xodus-nexus/AppRun && command -v gnome-keyring-daemon dbus-run-session dbus-send >/dev/null \
+  && command -v python3 curl sha256sum gosu timeout >/dev/null \
   && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/xodus-nexus' \
   && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
