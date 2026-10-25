@@ -1396,3 +1396,34 @@ func TestParseNexusValidatesStoreID(t *testing.T) {
 		t.Errorf("parseNexus = %+v, %v; want the game without its Store ID", games, err)
 	}
 }
+
+// A URI listed twice counts once, and at most storeArtMaxURLs are kept, best
+// first.
+func TestParseStoreArtDedupesAndCaps(t *testing.T) {
+	img := func(n int) string {
+		return fmt.Sprintf(`{"ImagePurpose": "Poster", "Uri": "//store-images.s-microsoft.com/image/p%d"}`, n)
+	}
+	reply := `{"Products": [{"ProductId": "9P8MK4NC0LJB", "LocalizedProperties": [{"Images": [` +
+		img(1) + "," + img(1) + "," + img(2) + "," + img(3) + "," + img(4) + "," + img(5) + `]}]}]}`
+	got, err := parseStoreArt([]byte(reply), "9P8MK4NC0LJB")
+	var want []string
+	for n := 1; n <= storeArtMaxURLs; n++ {
+		want = append(want, fmt.Sprintf("https://store-images.s-microsoft.com/image/p%d?w=600&h=900", n))
+	}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("parseStoreArt = %q, %v; want %q", got, err, want)
+	}
+}
+
+// A successful lookup is reused for storeCatalogTTL, longer than a failure's
+// catalogueArtRetry.
+func TestStoreArtURLsCachesSuccessForTTL(t *testing.T) {
+	f := newCatalogueFixture(t)
+	f.storeArt = map[string][]string{"9P8MK4NC0LJB": {dungeonsPoster}}
+	f.catalogue.storeArtURLs(context.Background(), "9P8MK4NC0LJB")
+	f.catalogue.now = func() time.Time { return libraryTestNow.Add(storeCatalogTTL - time.Minute) }
+	f.catalogue.storeArtURLs(context.Background(), "9P8MK4NC0LJB")
+	if len(f.storeLookups) != 1 {
+		t.Errorf("lookups %v within storeCatalogTTL, want 1", f.storeLookups)
+	}
+}
