@@ -32,9 +32,11 @@ root="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["set
   "${HOME}/.config/xodus-nexus/launcher-state.json" 2>/dev/null)"
 [[ "${root}" == /* ]] || root="${HOME}/.local/share/xodus-nexus/runtimes"
 
-# Nexus validates a runtime by running its wine with --version.
+# As Nexus validates a runtime: its wine run with --version exits 0 and says
+# "wine" on stdout or stderr (Nexus reads both).
 valid_wine() {
-  [[ -x "$1" ]] && timeout 60 "$1" --version 2>/dev/null | grep -qi wine
+  local out
+  [[ -x "$1" ]] && out="$(timeout 60 "$1" --version 2>&1)" && grep -qi wine <<<"${out}"
 }
 
 wine="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["winePath"])' "${root}/current.json" 2>/dev/null)"

@@ -21,14 +21,26 @@ const runtimeName = "xodus-nexus-runtime-11.0-20261022-gf4adc821"
 // files/bin/wine prints version, and returns its bytes.
 func runtimeArchive(t *testing.T, top, version string) []byte {
 	t.Helper()
+	return runtimeArchiveWith(t, top, `[ "$1" = --version ] && echo `+version)
+}
+
+// runtimeArchiveWith is runtimeArchive with wine's script body given, and
+// extra tar arguments (members renamed, more directories) after it.
+func runtimeArchiveWith(t *testing.T, top, wine string, tarArgs ...string) []byte {
+	t.Helper()
 	dir := t.TempDir()
 	bin := filepath.Join(dir, top, "files", "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeStub(t, filepath.Join(bin, "wine"), `[ "$1" = --version ] && echo `+version)
+	writeStub(t, filepath.Join(bin, "wine"), wine)
+	if err := os.Mkdir(filepath.Join(dir, "xodus-nexus-runtime-other"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	out := filepath.Join(t.TempDir(), "rt.tar.xz")
-	if b, err := exec.CommandContext(t.Context(), "tar", "-cJf", out, "-C", dir, top).CombinedOutput(); err != nil {
+	args := append([]string{"-cJf", out, "-C", dir}, tarArgs...)
+	args = append(args, top)
+	if b, err := exec.CommandContext(t.Context(), "tar", args...).CombinedOutput(); err != nil {
 		t.Fatalf("tar: %v\n%s", err, b)
 	}
 	data, err := os.ReadFile(out)
@@ -193,7 +205,24 @@ func TestXodusNexusRuntimeRefusesUnverified(t *testing.T) {
 	name := runtimeName + "-x86_64.tar.xz"
 	for test, tc := range map[string]struct {
 		top, version, sum, digest, want string
+		archive                         func(*testing.T) []byte
 	}{
+		"wine exits non-zero": {want: "fails --version", archive: func(t *testing.T) []byte {
+			t.Helper()
+			return runtimeArchiveWith(t, runtimeName, `echo wine-11.0; exit 1`)
+		}},
+		"member outside the top directory": {want: "unexpected layout", archive: func(t *testing.T) []byte {
+			t.Helper()
+			return runtimeArchiveWith(t, runtimeName, `echo wine-11.0`, "-P", "--transform", "s,/files/bin,/../../escape,")
+		}},
+		"absolute member": {want: "unexpected layout", archive: func(t *testing.T) []byte {
+			t.Helper()
+			return runtimeArchiveWith(t, runtimeName, `echo wine-11.0`, "-P", "--transform", "s,^"+runtimeName+"/files/bin,/tmp/escape,")
+		}},
+		"two top directories": {want: "unexpected layout", archive: func(t *testing.T) []byte {
+			t.Helper()
+			return runtimeArchiveWith(t, runtimeName, `echo wine-11.0`, "xodus-nexus-runtime-other")
+		}},
 		"digest mismatch":          {digest: "sha256:" + strings.Repeat("1", 64), want: "published SHA256"},
 		"sha512 mismatch":          {sum: strings.Repeat("a", 128) + "  " + name + "\n", want: "does not match its .sha512sum"},
 		"sum names another file":   {sum: strings.Repeat("a", 128) + "  other.tar.xz\n", want: "does not name"},
@@ -209,7 +238,11 @@ func TestXodusNexusRuntimeRefusesUnverified(t *testing.T) {
 				version = tc.version
 			}
 			h := newRuntimeHost(t)
-			h.publish(runtimeArchive(t, top, version), tc.sum, tc.digest)
+			archive := runtimeArchive
+			if tc.archive != nil {
+				archive = func(t *testing.T, _, _ string) []byte { t.Helper(); return tc.archive(t) }
+			}
+			h.publish(archive(t, top, version), tc.sum, tc.digest)
 			if calls := h.run(); !strings.Contains(calls, tc.want) {
 				t.Errorf("want %q:\n%s", tc.want, calls)
 			}
