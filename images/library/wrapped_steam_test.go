@@ -40,7 +40,10 @@ func newSteamDesktop(t *testing.T) *steamDesktop {
 	writeStub(t, filepath.Join(bin, "steam"), `if [ -n "$LD_PRELOAD" ]; then echo cold >>"$LOG"; sleep "$STEAM_LIFE"
 else echo "handoff $*" >>"$LOG"; fi`)
 	writeStub(t, filepath.Join(bin, "wrapped-heroic"), `echo heroic >>"$LOG"; sleep "$HEROIC_LIFE"`)
-	writeStub(t, filepath.Join(bin, "xodus-nexus"), `echo nexus >>"$LOG"`)
+	// Logs Steam's preloads or the launch lock if it inherited either.
+	writeStub(t, filepath.Join(bin, "xodus-nexus"), `echo nexus >>"$LOG"
+[ -n "$LD_PRELOAD" ] && echo nexus-preload >>"$LOG"
+[ -e /proc/self/fd/9 ] && echo nexus-lock >>"$LOG"; exit 0`)
 	// The user-namespace probe, slowed so two launches overlap in it.
 	writeStub(t, filepath.Join(bin, "bwrap"), `sleep 1; exit 1`)
 	src, err := os.ReadFile(wrappedSteam)
@@ -131,8 +134,8 @@ func TestWrappedSteamConcurrentColdLaunchesStartSteamOnce(t *testing.T) {
 		t.Errorf("calls %q: want Steam and Heroic started once, the other launch handed to the running client", calls)
 	}
 	d.waitStarts("nexus", 1)
-	if calls = d.calls(); count(calls, "nexus") != 1 {
-		t.Errorf("calls %q: want Nexus started once", calls)
+	if calls = d.calls(); count(calls, "nexus") != 1 || count(calls, "nexus-preload") != 0 || count(calls, "nexus-lock") != 0 {
+		t.Errorf("calls %q: want Nexus started once, without Steam's preloads or the launch lock", calls)
 	}
 }
 
