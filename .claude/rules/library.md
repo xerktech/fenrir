@@ -77,6 +77,8 @@ paths:
   - The wrapper runs Nexus on X11 via the desktop's rootless Xwayland (`DISPLAY=:0`; the
     desktop's `DISPLAY=:1` has no server): under Wayland its sign-in window (created hidden,
     shown on `ready-to-show`) never appeared and sign-in hung (XERK-2287).
+  - `wrapped-steam` (the labwc autostart hook) starts it beside Heroic, unless `xodus-nexus.bin`
+    already runs. Tests: `TestWrappedSteamKeepsRunningNexus`.
   - The Library's selkies-desktop menu lists only `.desktop` files; the openbox `menu.xml` item
     reaches a home only when it has no `~/.config/labwc/menu.xml`, so ship both.
 - `wrapped-steam` checks for a running Steam again under a per-pod `flock`, held until it

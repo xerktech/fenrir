@@ -4,8 +4,8 @@
 # Steam inside a full-screen terminal (`foot -e steam` on Wayland), which
 # covers the labwc desktop: minimising Steam leaves its log in the way, so the
 # right-click menu, the only way to open Heroic, cannot be reached. Here Steam
-# runs without a terminal, its output goes to a log, and Heroic starts beside
-# it. This file is the hook because the labwc autostart, copied to the shared
+# runs without a terminal, its output goes to a log, and Heroic and Xodus
+# Nexus start beside it. This file is the hook because the labwc autostart, copied to the shared
 # home on first run and never refreshed, calls only /usr/bin/wrapped-steam.
 
 LOG_DIR="${HOME}/.local/state/library"
@@ -81,6 +81,10 @@ fi
 # its stdout); wrapped-heroic sets its own preloads.
 if ! pgrep -x heroic >/dev/null; then
   setsid -f /usr/bin/wrapped-heroic >"${LOG_DIR}/heroic.log" 2>&1 </dev/null 9>&-
+fi
+# Xodus Nexus (Microsoft Store games) starts beside them the same way.
+if ! pgrep -x xodus-nexus.bin >/dev/null; then
+  setsid -f /usr/bin/xodus-nexus >"${LOG_DIR}/xodus-nexus.log" 2>&1 </dev/null 9>&-
 fi
 
 # Steam restarts itself in place (exit 42: a self-update or a settings
