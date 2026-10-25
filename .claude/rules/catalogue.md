@@ -79,6 +79,12 @@ paths:
     and quits when it exits, ending the session.
   - Covers come from `coverUrl`/`heroUrl` (Microsoft Store CDN, often scheme-relative `//`).
     `coverDataUrl` (an inline data: URL) is ignored: art is only ever fetched from `artHosts`.
+  - `coverUrl` is the Store's square BoxArt, which Moonlight's portrait tiles squash. So the
+    game's `storeId` is looked up in the public Store catalog (`storeCatalogURL`, a fixed host;
+    reply capped) for its Poster (asked at 600x900: full size can pass 1 MiB), then
+    BrandedKeyArt, tried ahead of Nexus's own (XERK-2296). Lookups are cached per product
+    (`storeCatalogTTL`; a failure for `catalogueArtRetry`). Tests: `TestCatalogueNexus*Poster`,
+    `TestParseStoreArt`, `TestStoreArtRequestAndLimits`.
   - The scan archives a copy of the state with each `coverDataUrl` blanked: Nexus inlines logos
     up to ~4 MB of base64, so a few dozen games pass `catalogueMaxStoreBytes`, and an over-cap
     file fails the scan for every store. `LC_ALL=C` and no capture group keep the sed within the
