@@ -127,6 +127,13 @@ RUN apt-get update \
 COPY --from=nexus-app /opt/xodus-nexus /opt/xodus-nexus
 COPY --chmod=755 root/usr/bin/xodus-nexus /usr/bin/xodus-nexus
 COPY --chmod=755 root/opt/direwolf/launch-nexus /opt/direwolf/launch-nexus
+# Easy Anti-Cheat games need CAP_SYS_PTRACE under Talos' ptrace_scope=2 (see
+# run-as-user, XERK-2349): the entrypoint drops to the user through it instead
+# of gosu. The grep fails the build if a GoW bump changes that line.
+COPY --chmod=755 root/opt/direwolf/run-as-user /opt/direwolf/run-as-user
+RUN grep -qx 'exec gosu "${UNAME}" /opt/gow/startup.sh' /entrypoint.sh \
+  && sed -i 's|^exec gosu "${UNAME}" /opt/gow/startup.sh$|exec /opt/direwolf/run-as-user /opt/gow/startup.sh|' /entrypoint.sh \
+  && grep -qx 'exec /opt/direwolf/run-as-user /opt/gow/startup.sh' /entrypoint.sh
 COPY --chmod=755 root/opt/gow/nexus-startup-app.sh /opt/gow/startup-app.sh
 COPY --chmod=755 root/usr/local/bin/xodus-nexus-update /usr/local/bin/xodus-nexus-update
 COPY --chmod=755 root/etc/cont-init.d/30-xodus-nexus-update.sh /etc/cont-init.d/
