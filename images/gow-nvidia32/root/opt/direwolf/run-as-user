@@ -1,0 +1,20 @@
+#!/bin/bash
+# Replaces the GoW entrypoint's final `exec gosu "${UNAME}" ...` in Nexus
+# sessions (XERK-2349). Easy Anti-Cheat's Linux module ptrace-attaches inside
+# its own process tree, which Talos' kernel.yama.ptrace_scope=2 allows only
+# with CAP_SYS_PTRACE; without it the bootstrapper exits with 210
+# 'Unexpected error. (#1)'. The desktop user keeps that one capability as
+# ambient, so Wine and the game inherit it without a secure-exec (Wine's
+# LD_LIBRARY_PATH still applies). App pods run in their own user namespace
+# (hostUsers: false), so it reaches only processes in this pod.
+# Without SYS_PTRACE in the container's bounding set this is plain gosu.
+set -eu
+bounding="$(awk '/^CapBnd:/ {print $2}' /proc/self/status)"
+if (( (16#${bounding} >> 19) & 1 )); then  # 19 = CAP_SYS_PTRACE
+  # What gosu would set: the user's home directory and groups.
+  HOME="$(getent passwd "${UNAME}" | cut -d: -f6)"
+  export HOME
+  exec setpriv --reuid="${UNAME}" --regid="$(id -g "${UNAME}")" --init-groups \
+    --inh-caps=+sys_ptrace --ambient-caps=+sys_ptrace -- "$@"
+fi
+exec gosu "${UNAME}" "$@"
