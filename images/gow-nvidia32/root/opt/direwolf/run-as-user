@@ -11,10 +11,20 @@
 set -eu
 bounding="$(awk '/^CapBnd:/ {print $2}' /proc/self/status)"
 if (( (16#${bounding} >> 19) & 1 )); then  # 19 = CAP_SYS_PTRACE
-  # What gosu would set: the user's home directory and groups.
+  # What gosu would set: the user's home directory and groups. gosu's
+  # supplementary groups are the /etc/group entries naming the user; unlike
+  # --init-groups, they leave out the primary group unless it names them too.
   HOME="$(getent passwd "${UNAME}" | cut -d: -f6)"
   export HOME
-  exec setpriv --reuid="${UNAME}" --regid="$(id -g "${UNAME}")" --init-groups \
+  groups="$(getent group | awk -F: -v u="${UNAME}" \
+    '{ n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == u) print $3 }' |
+    paste -sd,)"
+  if [[ -n "${groups}" ]]; then
+    group_opt="--groups=${groups}"
+  else
+    group_opt=--clear-groups
+  fi
+  exec setpriv --reuid="${UNAME}" --regid="$(id -g "${UNAME}")" "${group_opt}" \
     --inh-caps=+sys_ptrace --ambient-caps=+sys_ptrace -- "$@"
 fi
 exec gosu "${UNAME}" "$@"
