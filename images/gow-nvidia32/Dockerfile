@@ -21,8 +21,8 @@
 # own zstd): not a GoW image, which the heroic leg would pull just for this,
 # and which builder.yml's mode=max cache would store once more per leg.
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS driver
-ARG NVIDIA_VERSION=595.71.05
-ARG NVIDIA_SHA256=36203b8960b7e49c8a42f6ba1f5863cde34a05e93d2b24b798af06dd846f6b82
+ARG NVIDIA_VERSION=595.91.07
+ARG NVIDIA_SHA256=ca23c88dd24b07a191644e1e11cfb7bcdd7537305749af40f980018b095e6313
 ADD --checksum=sha256:${NVIDIA_SHA256} \
   https://download.nvidia.com/XFree86/Linux-x86_64/${NVIDIA_VERSION}/NVIDIA-Linux-x86_64-${NVIDIA_VERSION}.run /tmp/nvidia.run
 # Only the client libraries graphics needs (no CUDA/NVENC/OpenCL), and not the
