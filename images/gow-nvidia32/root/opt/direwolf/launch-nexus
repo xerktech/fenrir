@@ -11,4 +11,8 @@ if [ -n "${game}" ] && [ -z "${VKD3D_SHADER_CACHE_PATH:-}" ]; then
     export VKD3D_SHADER_CACHE_PATH="${cache}"
   fi
 fi
+# NVIDIA's driver empties its shader cache at start-up once it passes its size
+# cap, which one UE5 game exceeds (Gears of War: E-Day reached about 1.2 GB), so
+# every launch recompiled. Steam sets this for the same reason.
+export __GL_SHADER_DISK_CACHE_SKIP_CLEANUP="${__GL_SHADER_DISK_CACHE_SKIP_CLEANUP:-1}"
 exec sh -c "${DIREWOLF_LAUNCH_COMMAND:-xodus-nexus}"

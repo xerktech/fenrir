@@ -31,6 +31,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - Nexus games run from a temporary launch view, so `launch-nexus` sets a per-game
     `VKD3D_SHADER_CACHE_PATH` in `~/.cache/vkd3d-proton/<id>`; without it vkd3d-proton caches in
     that view and every launch recompiles shaders (XERK-2349). Tests: `launch_nexus_test.go`.
+  - It also sets `__GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1`: NVIDIA empties its cache at start-up once
+    past its cap, and Gears' alone reached about 1.2 GB.
   - Its nexus target drops to the desktop user via `/opt/direwolf/run-as-user`, not gosu, keeping
     CAP_SYS_PTRACE ambient (XERK-2349): talos04 has `kernel.yama.ptrace_scope=2`, and Easy
     Anti-Cheat's Linux module ptrace-attaches in its own tree, so without it EAC exits 210

@@ -14,7 +14,7 @@ const launchNexus = "root/opt/direwolf/launch-nexus"
 // cache path the game would inherit.
 func runLaunchNexus(t *testing.T, home string, env ...string) string {
 	t.Helper()
-	cmd := exec.Command("sh", launchNexus)
+	cmd := exec.CommandContext(t.Context(), "sh", launchNexus)
 	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}, env...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -55,5 +55,15 @@ func TestLaunchNexusKeepsAnExplicitShaderCache(t *testing.T) {
 		`DIREWOLF_LAUNCH_COMMAND=printf %s "$VKD3D_SHADER_CACHE_PATH" # --launch-game 96b3e5b429ea88ce`)
 	if got != "/user/cache" {
 		t.Fatalf("VKD3D_SHADER_CACHE_PATH = %q, want the caller's", got)
+	}
+}
+
+func TestLaunchNexusKeepsTheNVIDIAShaderCache(t *testing.T) {
+	launch := `DIREWOLF_LAUNCH_COMMAND=printf %s "$__GL_SHADER_DISK_CACHE_SKIP_CLEANUP"`
+	if got := runLaunchNexus(t, t.TempDir(), launch); got != "1" {
+		t.Fatalf("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP = %q, want 1", got)
+	}
+	if got := runLaunchNexus(t, t.TempDir(), "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP=0", launch); got != "0" {
+		t.Fatalf("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP = %q, want the caller's", got)
 	}
 }
