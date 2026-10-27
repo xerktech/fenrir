@@ -562,6 +562,9 @@ func TestLibraryEnsurePodStartsLibrary(t *testing.T) {
 	if env["SELKIES_DESKTOP"] != "true" {
 		t.Errorf("Library SELKIES_DESKTOP = %q, want true (the taskbar)", env["SELKIES_DESKTOP"])
 	}
+	if env["BATTLENET_GAMES"] != "/games/battlenet" {
+		t.Errorf("Library BATTLENET_GAMES = %q, want the games volume's /games/battlenet", env["BATTLENET_GAMES"])
+	}
 	if env["PUID"] != "1000" || env["PGID"] != "1000" {
 		t.Errorf("Library runs as PUID %q PGID %q, want the sessions' 1000:1000", env["PUID"], env["PGID"])
 	}

@@ -18,10 +18,11 @@ paths:
     (the build checks), so it runs read-only. `user_settings.py` in the prefix is imported as
     code: run Proton only as abc, never root.
   - The installer's versioned URL 404s once Blizzard retires it: bump version + SHA256 together.
-  - `init-battlenet` (root) makes `/games/battlenet` for abc, never following a link, then runs
+  - The operator sets `BATTLENET_GAMES` to `<--library-games-path>/battlenet` in the Library pod.
+  - `init-battlenet` (root) makes `$BATTLENET_GAMES` for abc, never following a link, then runs
     `battlenet --prepare` as abc: creates the prefix and sets `UseTakeFocus=N`.
   - Each start with no client running forces `Client.HardwareAcceleration` off and, if unset,
-    `Client.Install.DefaultInstallPath` to `Z:/games/battlenet/`. That key name is unverified
+    `Client.Install.DefaultInstallPath` to `Z:$BATTLENET_GAMES/`. That key name is unverified
     against Battle.net; if it ignores it, pick the folder in the install dialog.
   - The Library's labwc maximizes every window (`/defaults/labwc.xml`, rebuilt into rc.xml at each
     start). The fixed-size "Battle.net Login" window then fights the resize and its page never
