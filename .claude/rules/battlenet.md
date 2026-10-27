@@ -53,6 +53,10 @@ paths:
   and the Library pod gets no `WOW_ADDONS`. `null` reads as none (helm renders an empty value so).
 - ConsolePort: `seblindfors/ConsolePort`, asset `ConsolePort-<version>.zip`, one zip for every
   flavor (multi-interface TOCs).
+- A swap whose own rollback fails (`RollbackIncomplete`) keeps the claim, not the old entry.
+  Tests: `TestWoWAddonsSurvivesInterruptedSwap` (kills or fails each rename in turn).
+- Go caches these tests' results without seeing the script (python reads it, not the test):
+  mutation-test the script with `go test -count=1`, or every mutant "passes".
 - Tests: `images/library/wow_addons_update_test.go` (real script, stubbed curl);
   `TestParseWoWAddons*` in `pkg/controllers/library_wow_addons_test.go`.
 

@@ -51,6 +51,10 @@ class Refused(Exception):
     pass
 
 
+class RollbackIncomplete(Exception):
+    """A failed swap could not put every folder back."""
+
+
 def log(msg):
     print(f"wow-addons-update: {msg}", flush=True)
 
@@ -180,12 +184,16 @@ def swap_in(addons_dir, staged, new_folders, old_folders, trash):
             if f in new_folders:
                 os.rename(os.path.join(staged, f), live)
                 done.append((os.path.join(staged, f), live))
-    except BaseException:
+    except BaseException as failure:
+        restored = True
         for src, dst in reversed(done):
             try:
                 os.rename(dst, src)
             except OSError as e:
+                restored = False
                 log(f"cannot restore {src}: {e}")
+        if not restored:
+            raise RollbackIncomplete(str(failure)) from failure
         raise
 
 
@@ -265,6 +273,10 @@ class Flavor:
             try:
                 save_manifest(self.manifest_path, self.manifest)
                 swap_in(self.addons, staged, new, old, trash)
+            except RollbackIncomplete:
+                # New and old folders may both be live: the claim, which names
+                # them all, stays, and the next run reinstalls.
+                raise
             except BaseException:
                 # The old folders are back in place: so is their record.
                 if previous is None:
@@ -344,7 +356,7 @@ def main():
             for fl in stale:
                 try:
                     fl.install(name, archive, tag, sha)
-                except (OSError, zipfile.BadZipFile, RuntimeError, ValueError, Refused) as e:
+                except (OSError, zipfile.BadZipFile, RuntimeError, ValueError, Refused, RollbackIncomplete) as e:
                     log(f"cannot install {name} {tag} into {fl.addons}: {e}; keeping what is installed")
 
 

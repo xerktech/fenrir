@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +147,12 @@ func (p *wowPod) publish(version string, asset []byte, digest string) {
 // run runs the real script as the Library's service would, with WOW_ADDONS
 // set to list (unset if list is nil), and returns the downloads it made.
 func (p *wowPod) run(list *string, env ...string) (downloads, out string) {
+	p.t.Helper()
+	return p.runArgs(list, []string{wowAddonsUpdate}, false, env...)
+}
+
+// runArgs runs python3 -I args; mayFail allows a non-zero exit (a kill).
+func (p *wowPod) runArgs(list *string, args []string, mayFail bool, env ...string) (downloads, out string) {
 	t := p.t
 	t.Helper()
 	for f, b := range map[string][]byte{"release.json": p.release, "asset": p.assetZip, "log": nil} {
@@ -155,7 +162,7 @@ func (p *wowPod) run(list *string, env ...string) (downloads, out string) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "python3", "-I", wowAddonsUpdate)
+	cmd := exec.CommandContext(ctx, "python3", append([]string{"-I"}, args...)...) //nolint:gosec // the script under test, or its fault driver
 	cmd.Env = append(os.Environ(),
 		"PATH="+filepath.Join(p.dir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"LOG="+p.log, "BATTLENET_GAMES="+p.games,
@@ -166,7 +173,7 @@ func (p *wowPod) run(list *string, env ...string) (downloads, out string) {
 	}
 	b, err := cmd.CombinedOutput()
 	t.Logf("output:\n%s", b)
-	if err != nil {
+	if err != nil && !mayFail {
 		t.Fatalf("wow-addons-update must never fail: %v", err)
 	}
 	calls, err := os.ReadFile(p.log)
@@ -477,5 +484,61 @@ func TestWoWAddonsFailedSwapRollsBack(t *testing.T) {
 	p.run(new(consolePortList))
 	if got := p.read(filepath.Join(p.retail, "ConsolePort_Bar", "ConsolePort_Bar.toc")); got != "ConsolePort_Bar 3.4.0" {
 		t.Errorf("ConsolePort_Bar = %q, want it still managed and updated to 3.4.0", got)
+	}
+}
+
+// renameFaults runs the real script with its Nth os.rename failing: "kill"
+// SIGKILLs it there (a pod deleted mid-swap), "double" raises, and so does
+// the rename after it (the rollback's first restore).
+const renameFaults = `import importlib.machinery, importlib.util, os, signal, sys
+script, mode, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+loader = importlib.machinery.SourceFileLoader("wow_addons_update", script)
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+loader.exec_module(m)
+real, calls = os.rename, [0]
+def rename(a, b):
+    calls[0] += 1
+    if calls[0] == n and mode == "kill":
+        os.kill(os.getpid(), signal.SIGKILL)
+    if calls[0] in (n, n + 1):
+        raise OSError("injected")
+    return real(a, b)
+os.rename = rename
+m.main()
+`
+
+// However an update dies or fails mid-swap, the next run updates the addon:
+// its folders are never left looking hand-installed.
+func TestWoWAddonsSurvivesInterruptedSwap(t *testing.T) {
+	driver := filepath.Join(t.TempDir(), "faults.py")
+	if err := os.WriteFile(driver, []byte(renameFaults), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"kill", "double"} {
+		// v1 to v2 makes 5 renames: ConsolePort out and in, ConsolePort_Bar
+		// out, ConsolePort_Menu in, ConsolePort_World in.
+		for n := 1; n <= 5; n++ {
+			t.Run(fmt.Sprintf("%s at rename %d", mode, n), func(t *testing.T) {
+				p := newWoWPod(t)
+				p.publish("3.3.12", consolePortZip(t, "3.3.12", "ConsolePort", "ConsolePort_Bar"), "")
+				p.run(new(consolePortList))
+				// Two new folders: one is live before the other moves in.
+				p.publish("3.4.0", consolePortZip(t, "3.4.0", "ConsolePort", "ConsolePort_Menu", "ConsolePort_World"), "")
+				p.runArgs(new(consolePortList), []string{driver, wowAddonsUpdate, mode, strconv.Itoa(n)}, true)
+				_, out := p.run(new(consolePortList))
+				if strings.Contains(out, "not installed by direwolf") {
+					t.Fatalf("the interrupted update left folders unrecorded, output:\n%s", out)
+				}
+				for _, f := range []string{"ConsolePort/ConsolePort.toc", "ConsolePort_Menu/ConsolePort_Menu.toc", "ConsolePort_World/ConsolePort_World.toc"} {
+					if got := p.read(filepath.Join(p.retail, f)); !strings.HasSuffix(got, " 3.4.0") {
+						t.Errorf("%s = %q, want 3.4.0's", f, got)
+					}
+				}
+				if p.exists(filepath.Join(p.retail, "ConsolePort_Bar")) {
+					t.Error("ConsolePort_Bar, dropped by 3.4.0, is still installed")
+				}
+				p.assertHandInstalledKept()
+			})
+		}
 	}
 }
