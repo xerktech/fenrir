@@ -46,6 +46,11 @@ RUN set -eu; \
 # ldconfig creates each library's soname link (libGLX_nvidia.so.0, which the
 # Vulkan ICD manifest names) and the cache entry pressure-vessel resolves from.
 FROM ghcr.io/games-on-whales/steam:edge@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632 AS steam
+# GoW's images set UMASK=000 (10-setup_user.sh applies it before the entrypoint
+# drops to the user), so sessions left world-writable files in the shared home
+# and /games, e.g. ~/.cache/vkd3d-proton 0777 (XERK-2351). Sessions and Library
+# all write them as uid 1000, so group/other write is never needed.
+ENV UMASK=022
 COPY --from=driver /out/ /
 COPY --chmod=755 root/etc/cont-init.d/05-nvidia-lib32.sh /etc/cont-init.d/
 RUN ldconfig && ldconfig -p | grep -q 'libGLX_nvidia.so.0 (libc6)' \
@@ -82,6 +87,8 @@ RUN d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin' \
   && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
 
 FROM ghcr.io/games-on-whales/heroic-games-launcher:edge@sha256:a207a39367801a8a8bf24b68dac2c9945052d3117cb03b061b27bd6672aab62f AS heroic
+# As in steam: it writes the same home and /games. nexus inherits it.
+ENV UMASK=022
 COPY --from=driver /out/ /
 COPY --chmod=755 root/etc/cont-init.d/05-nvidia-lib32.sh /etc/cont-init.d/
 RUN ldconfig && ldconfig -p | grep -q 'libGLX_nvidia.so.0 (libc6)' \
@@ -130,11 +137,6 @@ ENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
 RUN apt-get update \
   && apt-get install -y --no-install-recommends gnome-keyring libsecret-1-0 dbus \
   && rm -rf /var/lib/apt/lists/*
-# GoW's images set UMASK=000 (10-setup_user.sh applies it before the entrypoint
-# drops to the user), so the session left world-writable files in the shared
-# home, e.g. ~/.cache/vkd3d-proton 0777 (XERK-2351). Session and Library both
-# write that home as uid 1000, so group/other write is never needed.
-ENV UMASK=022
 COPY --from=nexus-app /opt/xodus-nexus /opt/xodus-nexus
 COPY --chmod=755 root/usr/bin/xodus-nexus /usr/bin/xodus-nexus
 COPY --chmod=755 root/opt/direwolf/launch-nexus /opt/direwolf/launch-nexus
