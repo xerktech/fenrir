@@ -40,6 +40,9 @@ paths:
     `BATTLENET_LAUNCH_TIMEOUT` (300s) with Battle.net's window on screen meanwhile.
   - It resends `--exec="launch <code>"` every `BATTLENET_RESEND_INTERVAL` until the game appears:
     when the client is ready to take it is unmeasured.
+    Each send runs in the background: whether its `proton run` returns is unmeasured.
+  - Under sway, GoW's launcher kills sway only on exit 0 (`<cmd> && killall sway`), so each failure
+    runs `killall sway` itself; otherwise the session sits on an empty desktop.
   - The game is matched by Wine's argv[0] from the drive letter (`^X:\...\Wow.exe .*-uid wow`):
     other processes' command lines (a shell, an agent) mention the path too.
   - It refuses the host user namespace (identity `uid_map`): only the App pod

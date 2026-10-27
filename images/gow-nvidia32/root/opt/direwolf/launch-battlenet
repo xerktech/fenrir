@@ -23,6 +23,17 @@ resend="${BATTLENET_RESEND_INTERVAL:-15}"
 
 log() { echo "launch-battlenet: $*" >&2; }
 
+# GoW's launcher runs `<this> && killall sway` under sway: a failure would
+# leave the session on an empty desktop. End it here instead (XERK-2363 QA).
+end_session() {
+  local status=$?
+  if [ "${status}" -ne 0 ] && [ "${SWAY_STOP_ON_APP_EXIT:-}" = yes ]; then
+    killall sway
+  fi
+  return "${status}"
+}
+trap end_session EXIT
+
 product="${1:-${BATTLENET_PRODUCT:-}}"
 # Only games known to launch this way: the code goes into Battle.net's command
 # line, the product into a process pattern. Each: --exec code, executable.
@@ -43,8 +54,9 @@ done
 # Battle.net serves its WebServer and Agent on 127.0.0.1 (XERK-2362): run only
 # off the host network. Its App needs spec.requireAppPod, which puts it in the
 # user-namespaced App pod; the host user namespace maps every ID to itself.
-read -r inside outside count <"${UID_MAP}" || count=""
-if [ "${inside}-${outside}-${count}" = "0-0-4294967295" ]; then
+# An unreadable map counts as the host's.
+if ! read -r inside outside count <"${UID_MAP}" ||
+  [ "${inside}-${outside}-${count}" = "0-0-4294967295" ]; then
   log "refusing to run in the host user namespace: its pod may be host-networked," \
     "where Battle.net's listeners would be the node's loopback; set spec.requireAppPod"
   exit 2
@@ -106,7 +118,9 @@ until game_running; do
     exit 1
   fi
   if ((SECONDS >= next_send)); then
-    timeout 60 "${PROTON}" run "${client}" --exec="launch ${code}"
+    # In the background: if this wrapper stays up too, it must not hold the
+    # loop. wineserver -k ends it with the rest.
+    "${PROTON}" run "${client}" --exec="launch ${code}" &
     next_send=$((SECONDS + resend))
   fi
   sleep 1

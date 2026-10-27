@@ -1,29 +1,34 @@
 package gownvidia32
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const launchBattlenet = "root/opt/direwolf/launch-battlenet"
 
 // stubProton stands in for Proton: `run <client>` stays up as the client until
 // wineserver -k, and `run <client> --exec=...` starts a fake game process whose
-// command line is Wine's for WoW, for $GAME_SECONDS (none if unset).
+// command line is Wine's for WoW, for $GAME_SECONDS (none if unset). Like a
+// client still starting up, it ignores the first launch.
 const stubProton = `#!/bin/sh
 echo "proton $*" >>"$STUB_LOG"
 case "$*" in
 *--exec=*)
-  if [ -n "${GAME_SECONDS:-}" ]; then
+  if [ -f "$STUB_DIR/ready" ] && [ -n "${GAME_SECONDS:-}" ]; then
     # Wine's argv[0] is the game's Windows path with its arguments.
     bash -c 'exec -a "$0" sleep "$1"' 'Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe -launcherlogin -uid wow' "$GAME_SECONDS" &
     echo $! >"$STUB_DIR/game.pid"
-  fi ;;
+  fi
+  touch "$STUB_DIR/ready" ;;
 *)
   echo "client VKD3D_SHADER_CACHE_PATH=${VKD3D_SHADER_CACHE_PATH:-} DXVK_STATE_CACHE_PATH=${DXVK_STATE_CACHE_PATH:-}" >>"$STUB_LOG"
   [ -n "${CLIENT_EXITS:-}" ] && exit 0
@@ -37,6 +42,10 @@ echo "wineserver $* WINEPREFIX=$WINEPREFIX" >>"$STUB_LOG"
 [ -f "$STUB_DIR/client.pid" ] && kill "$(cat "$STUB_DIR/client.pid")"
 [ -f "$STUB_DIR/game.pid" ] && kill "$(cat "$STUB_DIR/game.pid")" 2>/dev/null
 exit 0
+`
+
+const stubKillall = `#!/bin/sh
+echo "killall $*" >>"$STUB_LOG"
 `
 
 type battlenetRun struct {
@@ -53,13 +62,17 @@ func runLaunchBattlenet(t *testing.T, install bool, args []string, env ...string
 	if err := os.MkdirAll(filepath.Join(stub, "files", "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for name, body := range map[string]string{"proton": stubProton, "files/bin/wineserver": stubWineserver} {
-		if err := os.WriteFile(filepath.Join(stub, name), []byte(body), 0o755); err != nil {
+	stubs := map[string]string{"proton": stubProton, "files/bin/wineserver": stubWineserver, "bin/killall": stubKillall}
+	if err := os.MkdirAll(filepath.Join(stub, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range stubs {
+		if err := os.WriteFile(filepath.Join(stub, name), []byte(body), 0o755); err != nil { //nolint:gosec // test stubs must be executable
 			t.Fatal(err)
 		}
 	}
 	uidMap := filepath.Join(stub, "uid_map")
-	if err := os.WriteFile(uidMap, []byte("         0     100000      65536\n"), 0o644); err != nil {
+	if err := os.WriteFile(uidMap, []byte("         0     100000      65536\n"), 0o644); err != nil { //nolint:gosec // test fixture
 		t.Fatal(err)
 	}
 	home := t.TempDir()
@@ -70,15 +83,20 @@ func runLaunchBattlenet(t *testing.T, install bool, args []string, env ...string
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "Battle.net.exe"), nil, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "Battle.net.exe"), nil, 0o644); err != nil { //nolint:gosec // test fixture
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.CommandContext(t.Context(), "bash", append([]string{launchBattlenet}, args...)...)
-	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + home,
+	// A script that leaves the stub client up would otherwise hang the test.
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", append([]string{launchBattlenet}, args...)...) //nolint:gosec // the script under test
+	cmd.WaitDelay = time.Second
+	cmd.Env = append([]string{"PATH=" + filepath.Join(stub, "bin") + ":" + os.Getenv("PATH"), "HOME=" + home,
+		"SWAY_STOP_ON_APP_EXIT=yes",
 		"STUB_LOG=" + r.log, "STUB_DIR=" + stub,
 		"BATTLENET_PROTON=" + filepath.Join(stub, "proton"), "BATTLENET_UID_MAP=" + uidMap,
-		"BATTLENET_RESEND_INTERVAL=1", "BATTLENET_LAUNCH_TIMEOUT=20"}, env...)
+		"BATTLENET_RESEND_INTERVAL=2", "BATTLENET_LAUNCH_TIMEOUT=20"}, env...)
 	out, err := cmd.CombinedOutput()
 	r.out = string(out)
 	var exitErr *exec.ExitError
@@ -87,6 +105,9 @@ func runLaunchBattlenet(t *testing.T, install bool, args []string, env ...string
 		r.code = exitErr.ExitCode()
 	case err != nil:
 		t.Fatalf("launch-battlenet: %v\n%s", err, out)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("launch-battlenet did not exit\n%s", out)
 	}
 	return r
 }
@@ -116,6 +137,7 @@ func TestLaunchBattlenetPlaysTheGameThenStopsBattlenet(t *testing.T) {
 		"proton run " + client,
 		"client VKD3D_SHADER_CACHE_PATH=" + vkd3d + " DXVK_STATE_CACHE_PATH=" + dxvk,
 		"proton run " + client + " --exec=launch WoW",
+		"proton run " + client + " --exec=launch WoW",
 		"wineserver -k WINEPREFIX=" + filepath.Join(r.prefix, "pfx"),
 	}
 	if len(calls) != len(want) {
@@ -141,8 +163,8 @@ func TestLaunchBattlenetEndsWhenTheGameNeverStarts(t *testing.T) {
 		t.Fatalf("exit %d, want 1\n%s", r.code, r.out)
 	}
 	calls := r.calls(t)
-	if last := calls[len(calls)-1]; !strings.HasPrefix(last, "wineserver -k ") {
-		t.Errorf("last call %q, want wineserver -k", last)
+	if n := len(calls); n < 2 || !strings.HasPrefix(calls[n-2], "wineserver -k ") || calls[n-1] != "killall sway" {
+		t.Errorf("calls %q, want wineserver -k then killall sway", calls)
 	}
 	if !strings.Contains(r.out, "did not start within 3s") {
 		t.Errorf("output does not say why:\n%s", r.out)
@@ -154,6 +176,27 @@ func TestLaunchBattlenetEndsWhenBattlenetExits(t *testing.T) {
 	if r.code != 1 || !strings.Contains(r.out, "Battle.net exited before wow started") {
 		t.Fatalf("exit %d, want 1 for the client exiting\n%s", r.code, r.out)
 	}
+	if calls := r.calls(t); calls[len(calls)-1] != "killall sway" {
+		t.Errorf("calls %q, want the session ended", calls)
+	}
+}
+
+// Other processes whose command lines name the game, or another product's
+// game, are not the game (with no game started, the launch times out).
+func TestLaunchBattlenetIgnoresLookalikeProcesses(t *testing.T) {
+	path := `Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe`
+	for _, argv0 := range []string{"bash " + path + " -launcherlogin -uid wow",
+		path + " -launcherlogin -uid wow_classic", `Z:\games\WowB.exe -uid wow`} {
+		decoy := exec.CommandContext(t.Context(), "bash", "-c", `exec -a "$0" sleep 30`, argv0)
+		if err := decoy.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = decoy.Process.Kill(); _ = decoy.Wait() })
+	}
+	r := runLaunchBattlenet(t, true, []string{"wow"}, "BATTLENET_LAUNCH_TIMEOUT=3")
+	if r.code != 1 {
+		t.Fatalf("exit %d, want 1: a lookalike counted as the game\n%s", r.code, r.out)
+	}
 }
 
 func TestLaunchBattlenetNeedsBattlenetInstalled(t *testing.T) {
@@ -161,8 +204,8 @@ func TestLaunchBattlenetNeedsBattlenetInstalled(t *testing.T) {
 	if r.code != 1 || !strings.Contains(r.out, "install it from the Library") {
 		t.Fatalf("exit %d, want 1 for a missing install\n%s", r.code, r.out)
 	}
-	if calls := r.calls(t); calls != nil {
-		t.Errorf("ran %q", calls)
+	if calls := r.calls(t); !slices.Equal(calls, []string{"killall sway"}) {
+		t.Errorf("calls %q, want only the session ended", calls)
 	}
 }
 
@@ -173,8 +216,8 @@ func TestLaunchBattlenetRefusesUnknownProducts(t *testing.T) {
 		if r.code != 2 {
 			t.Errorf("product %q: exit %d, want 2\n%s", product, r.code, r.out)
 		}
-		if calls := r.calls(t); calls != nil {
-			t.Errorf("product %q: ran %q", product, calls)
+		if calls := r.calls(t); !slices.Equal(calls, []string{"killall sway"}) {
+			t.Errorf("product %q: calls %q, want only the session ended", product, calls)
 		}
 	}
 }
@@ -190,17 +233,20 @@ func TestLaunchBattlenetRefusesBadTimings(t *testing.T) {
 
 // In the host user namespace the pod may be host-networked, where Battle.net's
 // 127.0.0.1 listeners would be the node's (XERK-2362).
+// An unreadable map counts as the host's.
 func TestLaunchBattlenetRefusesTheHostUserNamespace(t *testing.T) {
 	hostMap := filepath.Join(t.TempDir(), "uid_map")
-	if err := os.WriteFile(hostMap, []byte("         0          0 4294967295\n"), 0o644); err != nil {
+	if err := os.WriteFile(hostMap, []byte("         0          0 4294967295\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r := runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3", "BATTLENET_UID_MAP="+hostMap)
-	if r.code != 2 || !strings.Contains(r.out, "requireAppPod") {
-		t.Fatalf("exit %d, want 2 naming requireAppPod\n%s", r.code, r.out)
-	}
-	if calls := r.calls(t); calls != nil {
-		t.Errorf("ran %q", calls)
+	for _, uidMap := range []string{hostMap, filepath.Join(t.TempDir(), "missing")} {
+		r := runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3", "BATTLENET_UID_MAP="+uidMap)
+		if r.code != 2 || !strings.Contains(r.out, "requireAppPod") {
+			t.Fatalf("%s: exit %d, want 2 naming requireAppPod\n%s", uidMap, r.code, r.out)
+		}
+		if calls := r.calls(t); !slices.Equal(calls, []string{"killall sway"}) {
+			t.Errorf("%s: calls %q, want only the session ended", uidMap, calls)
+		}
 	}
 }
 

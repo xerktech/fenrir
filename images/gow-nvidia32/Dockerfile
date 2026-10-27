@@ -199,6 +199,6 @@ COPY --chmod=755 root/opt/gow/battlenet-startup-app.sh /opt/gow/startup-app.sh
 RUN for lib in libfreetype.so.6 libfontconfig.so.1 libldap.so.2; do \
     ldconfig -p | grep -q "${lib} (libc6)" || { echo "no i386 ${lib}" >&2; exit 1; }; \
   done \
-  && command -v pgrep timeout >/dev/null \
+  && command -v pgrep killall >/dev/null \
   && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/proton-cachyos' \
   && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
