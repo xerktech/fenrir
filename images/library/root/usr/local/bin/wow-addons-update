@@ -257,19 +257,30 @@ class Flavor:
                 os.mkdir(staged)
                 os.mkdir(trash)
                 unpack(zf, staged)
-            swap_in(self.addons, staged, new, old, trash)
-            self.manifest[name] = {"folders": sorted(new), "sha256": sha, "version": tag}
+            previous = self.manifest.get(name)
+            # Claimed before the swap, with no SHA256 (so the next run
+            # reinstalls): if this run dies mid-swap, folders already moved
+            # in are recorded as direwolf's, never mistaken for the user's.
+            self.manifest[name] = {"folders": sorted(old | new), "sha256": "", "version": tag}
             try:
                 save_manifest(self.manifest_path, self.manifest)
+                swap_in(self.addons, staged, new, old, trash)
             except BaseException:
-                # Unrecorded folders would look hand-installed: put the old ones back.
-                for f in sorted(new):
-                    remove(os.path.join(self.addons, f))
-                for f in sorted(old):
-                    if os.path.lexists(os.path.join(trash, f)):
-                        os.rename(os.path.join(trash, f), os.path.join(self.addons, f))
-                del self.manifest[name]
+                # The old folders are back in place: so is their record.
+                if previous is None:
+                    del self.manifest[name]
+                else:
+                    self.manifest[name] = previous
+                try:
+                    save_manifest(self.manifest_path, self.manifest)
+                except OSError as e:
+                    # The claim stands; it names only folders this script owns.
+                    log(f"cannot restore the manifest: {e}")
                 raise
+            self.manifest[name] = {"folders": sorted(new), "sha256": sha, "version": tag}
+            # A failure here leaves the claim: the new folders stay recorded,
+            # and the next run reinstalls.
+            save_manifest(self.manifest_path, self.manifest)
         finally:
             shutil.rmtree(work, ignore_errors=True)
         log(f"installed {name} {tag} into {self.addons}")

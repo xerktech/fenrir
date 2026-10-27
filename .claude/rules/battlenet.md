@@ -45,7 +45,12 @@ paths:
 - Only GitHub releases, installed only when the asset matches GitHub's published SHA256. Zips are
   hostile: no absolute, `..`, backslash, link or root-level entries; capped size and entry count.
 - Unpacked into `Interface/.direwolf-addons-*` (same filesystem), then swapped in by rename; a
-  failed swap or manifest write puts the old folders back. Flavor dirs are never created.
+  failed swap puts the old folders and their manifest entry back.
+  - The manifest claims old + new folders (no SHA256) before the swap: a run killed mid-swap
+    must not leave folders that look hand-installed, which would block every later update.
+- Only installed flavors are touched: `_retail_` etc. are never created (`Interface/AddOns` is).
+- An unreadable `--library-wow-addons` is logged, not fatal (it must not stop game sessions),
+  and the Library pod gets no `WOW_ADDONS`. `null` reads as none (helm renders an empty value so).
 - ConsolePort: `seblindfors/ConsolePort`, asset `ConsolePort-<version>.zip`, one zip for every
   flavor (multi-interface TOCs).
 - Tests: `images/library/wow_addons_update_test.go` (real script, stubbed curl);

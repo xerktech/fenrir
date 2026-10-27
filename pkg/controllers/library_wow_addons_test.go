@@ -49,6 +49,10 @@ func TestParseWoWAddonsRejects(t *testing.T) {
 		"unknown flavor":   strings.Replace(consolePortAddon, `["retail"]`, `["_retail_"]`, 1),
 		"traversal flavor": strings.Replace(consolePortAddon, `["retail"]`, `["../retail"]`, 1),
 	} {
+		// Every case but the first three is one entry of a list.
+		if !strings.HasPrefix(s, "[") && name != "not json" && name != "not a list" {
+			s = "[" + s + "]"
+		}
 		if addons, err := ParseWoWAddons(s); err == nil {
 			t.Errorf("%s: ParseWoWAddons(%s) = %+v, want an error", name, s, addons)
 		}

@@ -445,3 +445,37 @@ func TestWoWAddonsServiceRunsAsDesktopUser(t *testing.T) {
 		}
 	}
 }
+
+// A swap that fails partway puts every old folder back and keeps the addon
+// recorded as direwolf's, so a later release still updates it.
+func TestWoWAddonsFailedSwapRollsBack(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root renames a read-only folder anyway")
+	}
+	p := newWoWPod(t)
+	p.publish("3.3.12", consolePortZip(t, "3.3.12", "ConsolePort", "ConsolePort_Bar"), "")
+	p.run(new(consolePortList))
+	// Moving a folder to another parent needs write access to it: ConsolePort
+	// is swapped out, then ConsolePort_Bar fails.
+	bar := filepath.Join(p.retail, "ConsolePort_Bar")
+	if err := os.Chmod(bar, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bar, 0o755) })
+	p.publish("3.4.0", consolePortZip(t, "3.4.0", "ConsolePort", "ConsolePort_Bar"), "")
+	if _, out := p.run(new(consolePortList)); !strings.Contains(out, "keeping what is installed") {
+		t.Fatalf("want the swap to fail, output:\n%s", out)
+	}
+	for _, f := range []string{"ConsolePort/ConsolePort.toc", "ConsolePort_Bar/ConsolePort_Bar.toc"} {
+		if got := p.read(filepath.Join(p.retail, f)); got != strings.Split(f, "/")[0]+" 3.3.12" {
+			t.Errorf("%s = %q after a failed swap, want 3.3.12's", f, got)
+		}
+	}
+	if err := os.Chmod(bar, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p.run(new(consolePortList))
+	if got := p.read(filepath.Join(p.retail, "ConsolePort_Bar", "ConsolePort_Bar.toc")); got != "ConsolePort_Bar 3.4.0" {
+		t.Errorf("ConsolePort_Bar = %q, want it still managed and updated to 3.4.0", got)
+	}
+}
