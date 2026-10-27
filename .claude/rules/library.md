@@ -95,6 +95,7 @@ paths:
     already runs. Tests: `TestWrappedSteamKeepsRunningNexus`.
   - The Library's selkies-desktop menu lists only `.desktop` files; the openbox `menu.xml` item
     reaches a home only when it has no `~/.config/labwc/menu.xml`, so ship both.
+- Battle.net (`/usr/bin/battlenet`, `init-battlenet`) is in `.claude/rules/battlenet.md`.
 - `wrapped-steam` checks for a running Steam again under a per-pod `flock`, held until it
   execs Steam: two cold launches at once would otherwise both start Steam and Heroic.
   - No child may inherit the lock fd (`9>&-`): Heroic outlives the script, and every later cold

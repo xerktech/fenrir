@@ -9,6 +9,29 @@ paths:
 
 # Battle.net (XERK-2359 epic; from the XERK-2360 hand-run spike, talos04, 2026-10-27)
 
+## In the Library image (XERK-2361)
+
+- `/usr/bin/battlenet` runs it with the image's `/opt/proton-cachyos` (pinned with its .sha512sum,
+  root-owned) in the prefix `~/.local/share/battlenet`; its first start runs the image's
+  hash-pinned `/opt/battlenet/Battle.net-Setup.exe`. Tests: `images/library/battlenet_test.go`.
+  - Proton writes into its own dir only to build a missing `default_pfx`; the release ships one
+    (the build checks), so it runs read-only. `user_settings.py` in the prefix is imported as
+    code: run Proton only as abc, never root.
+  - The installer's versioned URL 404s once Blizzard retires it: bump version + SHA256 together.
+  - The operator sets `BATTLENET_GAMES` to `<--library-games-path>/battlenet` in the Library pod.
+  - `init-battlenet` (root) makes `$BATTLENET_GAMES` for abc, never following a link, then runs
+    `battlenet --prepare` as abc: creates the prefix and sets `UseTakeFocus=N`.
+  - Each start with no client running forces `Client.HardwareAcceleration` off and, if unset,
+    `Client.Install.DefaultInstallPath` to `Z:$BATTLENET_GAMES/`. That key name is unverified
+    against Battle.net; if it ignores it, pick the folder in the install dialog.
+  - The Library's labwc maximizes every window (`/defaults/labwc.xml`, rebuilt into rc.xml at each
+    start). The fixed-size "Battle.net Login" window then fights the resize and its page never
+    renders, so the image adds an UnMaximize rule for that title. Its class `steam_proton` is
+    every Proton window's: never unmaximize by class alone.
+  - `PROTON_FSR4_UPGRADE=0`: this Proton otherwise downloads a 65 MB DLL, outside the image's
+    pin, into the prefix on every run.
+  - No autostart beside Heroic: nothing needs the client running, and its CEF costs CPU.
+
 ## Running it under Proton
 
 - umu-run fails in the Library: pressure-vessel's bwrap can't create a user namespace there

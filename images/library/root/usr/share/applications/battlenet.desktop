@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Battle.net
+Comment=Blizzard games
+Exec=/usr/bin/battlenet
+Icon=applications-games
+Categories=Game;
+Terminal=false

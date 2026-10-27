@@ -775,6 +775,9 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 					// none, so a window covering the screen had no way out
 					// (XERK-1878).
 					{Name: "SELKIES_DESKTOP", Value: "true"},
+					// Where the image's Battle.net installs games: on the games
+					// volume, which steam-backup-saves does not copy.
+					{Name: "BATTLENET_GAMES", Value: path.Join(c.GamesPath, "battlenet")},
 					{Name: "PASSWORD", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: libraryAuthSecret},
 						Key:                  libraryAuthKey,
