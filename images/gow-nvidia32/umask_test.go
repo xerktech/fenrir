@@ -1,6 +1,8 @@
 package gownvidia32
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -39,5 +41,27 @@ func TestSessionImagesUseUmask022(t *testing.T) {
 	}
 	if !strings.Contains(string(dockerfile), "\nFROM heroic AS nexus\n") {
 		t.Error("nexus no longer builds on heroic, so it no longer inherits its UMASK")
+	}
+}
+
+// GoW's entrypoint sources cont-init.d as root before dropping to the user, so
+// a umask in any script this image copies in would override the ENV.
+func TestImageScriptsLeaveUmaskAlone(t *testing.T) {
+	root := os.DirFS("root")
+	err := fs.WalkDir(root, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := fs.ReadFile(root, path)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", path, err)
+		}
+		if strings.Contains(strings.ToLower(string(b)), "umask") {
+			t.Errorf("root/%s mentions umask; set it only with ENV UMASK=022 in the Dockerfile", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
