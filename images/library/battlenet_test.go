@@ -32,7 +32,7 @@ func newBattlenetHost(t *testing.T) *battlenetHost {
 			t.Fatal(err)
 		}
 	}
-	writeStub(t, filepath.Join(h.proton, "proton"), `echo "proton $* xalia=$PROTON_USE_XALIA client=$STEAM_COMPAT_CLIENT_INSTALL_PATH" >>"$LOG"
+	writeStub(t, filepath.Join(h.proton, "proton"), `echo "proton $* xalia=$PROTON_USE_XALIA fsr4=$PROTON_FSR4_UPGRADE client=$STEAM_COMPAT_CLIENT_INSTALL_PATH" >>"$LOG"
 [ -n "$PROTON_FAIL" ] && exit 1
 if [ "$2" = reg ]; then mkdir -p "$STEAM_COMPAT_DATA_PATH/pfx" && echo '"UseTakeFocus"="N"' >>"$STEAM_COMPAT_DATA_PATH/pfx/user.reg"; fi
 exit 0`)
@@ -116,7 +116,7 @@ func TestBattlenetPrepareCreatesPrefixOnce(t *testing.T) {
 	h := newBattlenetHost(t)
 	calls := h.run(nil, "--prepare")
 	for _, want := range []string{
-		`proton run reg add HKCU\Software\Wine\X11 Driver /v UseTakeFocus /d N /f xalia=0 client=` + filepath.Join(h.home, ".local", "share", "Steam"),
+		`proton run reg add HKCU\Software\Wine\X11 Driver /v UseTakeFocus /d N /f xalia=0 fsr4=0 client=` + filepath.Join(h.home, ".local", "share", "Steam"),
 		"wineserver -w " + filepath.Join(h.prefix(), "pfx"),
 		"prefix ready",
 	} {

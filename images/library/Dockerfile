@@ -110,7 +110,7 @@ RUN \
   # login window then fights the resize forever and its page never renders
   # (XERK-2361 QA). Its class, steam_proton, is every Proton window's.
   sed -i 's|<windowRule identifier="\*"><action name="Maximize" /></windowRule>|&\n    <windowRule identifier="steam_proton" title="Battle.net Login"><action name="UnMaximize" /></windowRule>|' /defaults/labwc.xml && \
-  grep -q 'title="Battle.net Login"' /defaults/labwc.xml && \
+  grep -qF '<windowRule identifier="steam_proton" title="Battle.net Login"><action name="UnMaximize" /></windowRule>' /defaults/labwc.xml && \
   echo "**** add heroic, xodus nexus and battle.net to the openbox menus ****" && \
   for menu in /defaults/menu.xml /defaults/menu_wayland.xml; do \
     sed -i 's|</menu>|<item label="Heroic" icon="/usr/share/icons/hicolor/48x48/apps/heroic.png"><action name="Execute"><command>/usr/bin/wrapped-heroic</command></action></item>\n</menu>|' "$menu" && \
