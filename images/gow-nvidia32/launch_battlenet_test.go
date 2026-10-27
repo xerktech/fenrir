@@ -28,7 +28,9 @@ case "$*" in
     bash -c 'exec -a "$0" sleep "$1"' 'Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe -launcherlogin -uid wow' "$GAME_SECONDS" &
     echo $! >"$STUB_DIR/game.pid"
   fi
-  touch "$STUB_DIR/ready" ;;
+  touch "$STUB_DIR/ready"
+  # A wrapper that stays up, even past wineserver -k.
+  [ -n "${EXEC_STAYS_UP:-}" ] && exec sleep 600 ;;
 *)
   echo "client VKD3D_SHADER_CACHE_PATH=${VKD3D_SHADER_CACHE_PATH:-} DXVK_STATE_CACHE_PATH=${DXVK_STATE_CACHE_PATH:-}" >>"$STUB_LOG"
   [ -n "${CLIENT_EXITS:-}" ] && exit 0
@@ -178,6 +180,26 @@ func TestLaunchBattlenetEndsWhenBattlenetExits(t *testing.T) {
 	}
 	if calls := r.calls(t); calls[len(calls)-1] != "killall sway" {
 		t.Errorf("calls %q, want the session ended", calls)
+	}
+}
+
+// A launch wrapper that never exits must neither stall the wait for the game
+// nor keep the session up after it.
+func TestLaunchBattlenetOutlivesStuckLaunchWrappers(t *testing.T) {
+	r := runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3", "EXEC_STAYS_UP=1")
+	if r.code != 0 || !strings.Contains(r.out, "wow exited; stopping Battle.net") {
+		t.Fatalf("exit %d, want 0 after the game\n%s", r.code, r.out)
+	}
+}
+
+// Outside sway (gamescope, or no compositor), the launcher's own exit ends it.
+func TestLaunchBattlenetLeavesSwayAloneOutsideSway(t *testing.T) {
+	r := runLaunchBattlenet(t, false, []string{"wow"}, "SWAY_STOP_ON_APP_EXIT=")
+	if r.code != 1 {
+		t.Fatalf("exit %d, want 1\n%s", r.code, r.out)
+	}
+	if calls := r.calls(t); calls != nil {
+		t.Errorf("calls %q, want none", calls)
 	}
 }
 

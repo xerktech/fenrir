@@ -97,6 +97,13 @@ game_running() { pgrep -u "$(id -u)" -f "${game}" >/dev/null; }
 # Ends the client, its Agent, the game and every `proton run` on the prefix.
 stop_battlenet() {
   WINEPREFIX="${pfx}" "${PROTON%/*}/files/bin/wineserver" -k
+  # The wrappers should exit with it; one that does not must not hold the session.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -z "$(jobs -pr)" ] && break
+    sleep 1
+  done
+  # shellcheck disable=SC2046 # one PID per word
+  kill $(jobs -pr) 2>/dev/null
   wait
 }
 
