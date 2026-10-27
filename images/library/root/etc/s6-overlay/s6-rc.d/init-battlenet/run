@@ -1,0 +1,32 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Readies Battle.net before the desktop starts: makes its game directory on
+# the shared games volume, owned by the desktop user (the volume's root is
+# root's), then has `battlenet --prepare` create its Wine prefix in the home.
+#
+# The volume is writable by the desktop user (Steam libraries live there), so
+# an existing entry that is not a plain directory (a planted link) is left
+# alone rather than followed by root. The prefix is only ever touched as the
+# desktop user: the home is writable by anything the desktop runs.
+#
+# Never exits non-zero: a failed oneshot stops s6 starting the desktop and
+# leaves the pod Running but never Ready, which would hold the Steam lock.
+
+dir="${BATTLENET_GAMES:-/games/battlenet}"
+if [[ ! -d "${dir%/*}" ]]; then
+  echo "init-battlenet: ${dir%/*} is not mounted; skipping the game directory" >&2
+elif [[ -L "${dir}" || ( -e "${dir}" && ! -d "${dir}" ) ]]; then
+  echo "init-battlenet: ${dir} is not a plain directory; leaving it" >&2
+else
+  if [[ ! -d "${dir}" ]]; then
+    mkdir -m 0755 "${dir}" || echo "init-battlenet: cannot create ${dir}" >&2
+  fi
+  [[ -d "${dir}" ]] && { chown -h abc:abc "${dir}" || echo "init-battlenet: cannot hand ${dir} to abc" >&2; }
+fi
+
+home="$(getent passwd abc | cut -d: -f6)"
+[[ -n "${home}" ]] || { echo "init-battlenet: cannot find abc's home" >&2; exit 0; }
+HOME="${home}" timeout 600 s6-setuidgid abc /usr/bin/battlenet --prepare ||
+  echo "init-battlenet: timed out or failed; Battle.net makes its prefix on first start" >&2
+exit 0

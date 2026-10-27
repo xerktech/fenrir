@@ -1,0 +1,87 @@
+#! /bin/bash
+
+# Starts Battle.net (Blizzard games) under the image's pinned Proton-CachyOS,
+# in its own Wine prefix in the shared home; the first start runs Blizzard's
+# installer instead, which installs Battle.net and starts it. Battle.net
+# updates itself after that. Arguments go to Battle.net.exe.
+#
+# `battlenet --prepare` (init-battlenet, as the desktop user, before the
+# desktop starts) only creates the prefix and applies the Wine setting below.
+#
+# Runs `proton run` directly, not umu-run: pressure-vessel's bwrap cannot make
+# a user namespace in the Library. Without umu's GAMEID, protonfixes applies
+# nothing, so the fixes Battle.net needs are applied here (XERK-2360).
+
+PROTON=/opt/proton-cachyos/proton
+SETUP=/opt/battlenet/Battle.net-Setup.exe
+
+export STEAM_COMPAT_DATA_PATH="${BATTLENET_PREFIX:-${HOME}/.local/share/battlenet}"
+# Proton copies Steam's client libraries into the prefix from here.
+export STEAM_COMPAT_CLIENT_INSTALL_PATH="${HOME}/.local/share/Steam"
+# Xalia walks CEF's accessibility tree at ~27% CPU on the CPU-rendered Library.
+export PROTON_USE_XALIA=0
+
+pfx="${STEAM_COMPAT_DATA_PATH}/pfx"
+games="${BATTLENET_GAMES:-/games/battlenet}"
+client="${pfx}/drive_c/Program Files (x86)/Battle.net/Battle.net.exe"
+config="${pfx}/drive_c/users/steamuser/AppData/Roaming/Battle.net/Battle.net.config"
+
+# Keyboard input from Selkies never reaches Battle.net's windows under labwc
+# unless Wine leaves focus to the window manager. `proton run` creates the
+# prefix first if there is none. The value is the only UseTakeFocus in user.reg.
+prepare() {
+  grep -qs '^"UseTakeFocus"="N"' "${pfx}/user.reg" && return 0
+  mkdir -p "${STEAM_COMPAT_DATA_PATH}" || return 1
+  "${PROTON}" run reg add 'HKCU\Software\Wine\X11 Driver' /v UseTakeFocus /d N /f || return 1
+  # Wine writes user.reg when its wineserver exits.
+  WINEPREFIX="${pfx}" "${PROTON%/*}/files/bin/wineserver" -w
+  grep -qs '^"UseTakeFocus"="N"' "${pfx}/user.reg"
+}
+
+if [ "$1" == "--prepare" ]; then
+  if prepare; then
+    echo "battlenet: prefix ready at ${STEAM_COMPAT_DATA_PATH}"
+  else
+    echo "battlenet: could not prepare ${STEAM_COMPAT_DATA_PATH}" >&2
+  fi
+  exit 0
+fi
+
+prepare || echo "battlenet: could not prepare ${STEAM_COMPAT_DATA_PATH}; starting anyway" >&2
+
+# A running client rewrites its config when it exits: only edit it while none
+# runs (a second start then hands its arguments to the running client).
+# - Client.HardwareAcceleration off: the Library has no GPU, and its CEF
+#   sign-in page renders black with it on.
+# - New games default to the games volume, not C:\Program Files (x86) in the
+#   home, which steam-backup-saves copies hourly. Only when none is set, so
+#   a folder picked in Battle.net's settings stays.
+if ! pgrep -f '[B]attle\.net\.exe' >/dev/null; then
+  install_path=""
+  [ -d "${games}" ] && install_path="Z:${games}/"
+  mkdir -p "${config%/*}" && python3 -I -c '
+import json, os, sys
+path, install_path = sys.argv[1:]
+try:
+    with open(path) as f:
+        config = json.load(f)
+except FileNotFoundError:
+    config = {}
+if not isinstance(config, dict) or not isinstance(config.setdefault("Client", {}), dict):
+    sys.exit("not a JSON object")
+client = config["Client"]
+client["HardwareAcceleration"] = "false"
+install = client.setdefault("Install", {})
+if install_path and isinstance(install, dict) and not install.get("DefaultInstallPath"):
+    install["DefaultInstallPath"] = install_path
+with open(path + ".tmp", "w") as f:
+    json.dump(config, f, indent=4)
+os.replace(path + ".tmp", path)
+' "${config}" "${install_path}" || echo "battlenet: could not update ${config}" >&2
+fi
+
+if [ -f "${client}" ]; then
+  exec "${PROTON}" run "${client}" "$@"
+fi
+echo "battlenet: Battle.net is not installed; running its installer"
+exec "${PROTON}" run "${SETUP}" --lang=enUS --installpath='C:\Program Files (x86)\Battle.net'
