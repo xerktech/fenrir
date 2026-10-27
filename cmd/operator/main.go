@@ -66,6 +66,8 @@ func main() {
 	libraryHomePVC := flag.String("library-home-pvc", "", "PVC holding the shared Steam home. Required with --library-port")
 	libraryGamesPVC := flag.String("library-games-pvc", "", "PVC holding the shared game library. Required with --library-port")
 	libraryGamesPath := flag.String("library-games-path", "/games", "Where the Library mounts the game library")
+	libraryWoWAddons := flag.String("library-wow-addons", os.Getenv("LIBRARY_WOW_ADDONS"),
+		`JSON list of WoW addons the Library installs and keeps updated, e.g. [{"name":"ConsolePort","source":{"type":"github","repo":"seblindfors/ConsolePort","asset":"ConsolePort-*.zip"},"flavors":["retail"]}]. Addons dropped from it are uninstalled`)
 	libraryIdleTimeout := flag.Duration("library-idle-timeout", controllers.DefaultLibraryIdleTimeout,
 		"How long the Library may go without browser traffic (and with nothing downloading) before it is stopped")
 	libraryMaxRuntime := flag.Duration("library-max-runtime", controllers.DefaultLibraryMaxRuntime,
@@ -131,6 +133,10 @@ func main() {
 	}
 	if pathErr := controllers.ValidateLibraryGamesPath(*libraryGamesPath); *libraryPort != 0 && pathErr != nil {
 		klog.Fatalf("--library-games-path: %v", pathErr)
+	}
+	wowAddons, err := controllers.ParseWoWAddons(*libraryWoWAddons)
+	if err != nil {
+		klog.Fatalf("--library-wow-addons: %v", err)
 	}
 	if *libraryPort == 0 && (*catalogueSteamApp != "" || *catalogueHeroicApp != "" || *catalogueNexusApp != "") {
 		klog.Fatal("--catalogue-steam-app, --catalogue-heroic-app and --catalogue-nexus-app need --library-port: the catalogue is read from the Library")
@@ -259,6 +265,7 @@ func main() {
 				Tolerations:  tolerations,
 				IdleTimeout:  *libraryIdleTimeout,
 				MaxRuntime:   *libraryMaxRuntime,
+				WoWAddons:    wowAddons,
 			},
 		)
 		if *catalogueSteamApp != "" || *catalogueHeroicApp != "" || *catalogueNexusApp != "" {

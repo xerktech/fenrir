@@ -223,6 +223,9 @@ type LibraryControllerOptions struct {
 
 	IdleTimeout time.Duration
 	MaxRuntime  time.Duration
+
+	// WoWAddons are the WoW addons the Library installs and keeps updated.
+	WoWAddons []WoWAddon
 }
 
 // LibraryController owns the on-demand Library pod: it is created by a visit
@@ -778,6 +781,8 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 					// Where the image's Battle.net installs games: on the games
 					// volume, which steam-backup-saves does not copy.
 					{Name: "BATTLENET_GAMES", Value: path.Join(c.GamesPath, "battlenet")},
+					// What the image's wow-addons-update keeps installed in WoW there.
+					{Name: "WOW_ADDONS", Value: wowAddonsEnv(c.WoWAddons)},
 					{Name: "PASSWORD", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: libraryAuthSecret},
 						Key:                  libraryAuthKey,

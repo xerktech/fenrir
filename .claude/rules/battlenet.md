@@ -32,6 +32,25 @@ paths:
     pin, into the prefix on every run.
   - No autostart beside Heroic: nothing needs the client running, and its CEF costs CPU.
 
+## Managed WoW addons (XERK-2366)
+
+- Chart `wowAddons` → operator env `LIBRARY_WOW_ADDONS` (`--library-wow-addons`, strict JSON,
+  `ParseWoWAddons`) → Library env `WOW_ADDONS`, always set (`[]` for none).
+- The Library's `svc-wow-addons` runs `wow-addons-update` as abc at start, then hourly; sessions
+  never download addons, they read what the Library installed on the games volume.
+- Unset or unreadable `WOW_ADDONS` leaves everything alone: read as "none", it would uninstall
+  every managed addon. Keep both the operator's and the script's parse strict.
+- Each flavor's `Interface/.direwolf-addons.json` records the folders it installed; anything else
+  in AddOns is the user's and is never replaced or removed (a name clash refuses the install).
+- Only GitHub releases, installed only when the asset matches GitHub's published SHA256. Zips are
+  hostile: no absolute, `..`, backslash, link or root-level entries; capped size and entry count.
+- Unpacked into `Interface/.direwolf-addons-*` (same filesystem), then swapped in by rename; a
+  failed swap or manifest write puts the old folders back. Flavor dirs are never created.
+- ConsolePort: `seblindfors/ConsolePort`, asset `ConsolePort-<version>.zip`, one zip for every
+  flavor (multi-interface TOCs).
+- Tests: `images/library/wow_addons_update_test.go` (real script, stubbed curl);
+  `TestParseWoWAddons*` in `pkg/controllers/library_wow_addons_test.go`.
+
 ## Running it under Proton
 
 - umu-run fails in the Library: pressure-vessel's bwrap can't create a user namespace there

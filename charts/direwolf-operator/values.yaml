@@ -4,6 +4,18 @@
 global:
   fullnameOverride: direwolf
 
+# WoW addons the Library installs into each listed flavor's Interface/AddOns
+# under <library games path>/battlenet/World of Warcraft, and keeps on their
+# latest release while it runs (sessions never download). Dropping an entry
+# uninstalls it; addons installed by hand are never touched. Only GitHub
+# releases: the asset glob must match one asset of the latest release, and it
+# is installed only if it matches GitHub's published SHA256.
+# Flavors: retail, classic, classic_era.
+wowAddons: []
+#  - name: ConsolePort
+#    source: {type: github, repo: seblindfors/ConsolePort, asset: "ConsolePort-*.zip"}
+#    flavors: [retail]
+
 serviceAccount:
   direwolf_operator:
     forceRename: &operatorName direwolf-operator
@@ -116,6 +128,8 @@ controllers:
           WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-d74b274@sha256:4a8a9c3b225b86f46a54a349f85064549eaa9ed82e2c44b03684981073f4979d
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
+          # The wowAddons list below, for the Library (--library-wow-addons).
+          LIBRARY_WOW_ADDONS: '{{ toJson .Values.wowAddons }}'
           ROMM_TOKEN:
             valueFrom:
               secretKeyRef:
