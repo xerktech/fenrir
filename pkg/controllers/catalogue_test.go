@@ -406,11 +406,17 @@ func TestCatalogueSync(t *testing.T) {
 		Name: "steam-999", Namespace: libraryTestNS, UID: "u999",
 		Labels: map[string]string{v1alpha1types.CatalogueLabel: v1alpha1types.CatalogueStoreSteam},
 	}}
+	steamBase := baseApp("steam-base", &v1alpha1types.AppGPU{Memory: &eightGi})
+	steamBase.Spec.RequireAppPod = true
 	f := newCatalogueFixture(t,
-		baseApp("steam-base", &v1alpha1types.AppGPU{Memory: &eightGi}),
+		steamBase,
 		baseApp("heroic-base", nil),
 		handMade, uninstalled)
 	f.scan(t)
+	// A copy is created with its base's requireAppPod (XERK-2362).
+	if !f.app(t, "steam-570").Spec.RequireAppPod {
+		t.Error("steam-570 created without the base App's requireAppPod")
+	}
 
 	apps, err := f.dw.DirewolfV1alpha1().Apps(libraryTestNS).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
