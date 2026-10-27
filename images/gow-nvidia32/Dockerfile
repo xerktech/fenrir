@@ -124,6 +124,11 @@ FROM heroic AS nexus
 RUN apt-get update \
   && apt-get install -y --no-install-recommends gnome-keyring libsecret-1-0 dbus \
   && rm -rf /var/lib/apt/lists/*
+# GoW's images set UMASK=000 (10-setup_user.sh applies it before the entrypoint
+# drops to the user), so the session left world-writable files in the shared
+# home, e.g. ~/.cache/vkd3d-proton 0777 (XERK-2351). Session and Library both
+# write that home as uid 1000, so group/other write is never needed.
+ENV UMASK=022
 COPY --from=nexus-app /opt/xodus-nexus /opt/xodus-nexus
 COPY --chmod=755 root/usr/bin/xodus-nexus /usr/bin/xodus-nexus
 COPY --chmod=755 root/opt/direwolf/launch-nexus /opt/direwolf/launch-nexus
