@@ -31,19 +31,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - Nexus games run from a temporary launch view, so `launch-nexus` sets a per-game
     `VKD3D_SHADER_CACHE_PATH` in `~/.cache/vkd3d-proton/<id>`; without it vkd3d-proton caches in
     that view and every launch recompiles shaders (XERK-2349). Tests: `launch_nexus_test.go`.
-  - The nexus stage sets `ENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1` session-wide: NVIDIA trims its
-    cache past its cap in the session's first OpenGL process (sway), before the game starts, and
-    Gears' alone reached about 1.2 GB. Setting it only for the game does not stop that.
-  - Its steam and heroic stages set `ENV UMASK=022` (nexus inherits heroic's): GoW's bases set
-    000, so sessions left world-writable files in the shared home and /games (XERK-2351).
+  - Its game-session stage (base of `nexus`, `battlenet`) sets
+    `ENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1` session-wide: NVIDIA trims its cache past its cap
+    in the session's first OpenGL process (sway), before the game starts, and Gears' alone reached
+    about 1.2 GB. Setting it only for the game does not stop that.
+  - Its steam and heroic stages set `ENV UMASK=022` (game-session inherits heroic's): GoW's bases
+    set 000, so sessions left world-writable files in the shared home and /games (XERK-2351).
     Tests: `TestSessionImagesUseUmask022`, `TestImageScriptsLeaveUmaskAlone`.
-  - Its nexus target drops to the desktop user via `/opt/direwolf/run-as-user`, not gosu, keeping
-    CAP_SYS_PTRACE ambient (XERK-2349): talos04 has `kernel.yama.ptrace_scope=2`, and Easy
+  - Its game-session targets drop to the desktop user via `/opt/direwolf/run-as-user`, not gosu,
+    keeping CAP_SYS_PTRACE ambient (XERK-2349): talos04 has `kernel.yama.ptrace_scope=2`, and Easy
     Anti-Cheat's Linux module ptrace-attaches in its own tree, so without it EAC exits 210
     `Unexpected error. (#1)`. Strace hides this: EAC sees the tracer and bails earlier.
-  - Session Apps (`steam`, `heroic`, `nexus` targets) are pinned by digest in xerktech/ArgoCD
-    `streaming/direwolf/app-*.yaml` and bumped there by hand: the chart release moves only the
-    operator, Library and moonlight-proxy. A merged change here reaches sessions only after that
+  - Session Apps (`steam`, `heroic`, `nexus`, `battlenet` targets) are pinned by digest in
+    xerktech/ArgoCD `streaming/direwolf/app-*.yaml` and bumped there by hand: the chart release
+    moves only the operator, Library and moonlight-proxy. A merged change here reaches sessions only after that
     PR (`crane digest ghcr.io/xerktech/fenrir/<target>:main`; check its revision label).
   - Its steam target keeps GoW's NetworkManager off the node's links (XERK-1867): session pods
     are hostNetwork and Steam added NET_ADMIN, so stock NM ran DHCP on every new pod veth.
