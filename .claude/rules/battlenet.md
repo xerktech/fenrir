@@ -50,6 +50,34 @@ paths:
   - The product never joins sway's exec line: the startup runs the script bare.
   - Tests: `images/gow-nvidia32/launch_battlenet_test.go` (stub Proton and wineserver).
 
+## Managed WoW addons (XERK-2366)
+
+- Chart `wowAddons` → operator env `LIBRARY_WOW_ADDONS` (`--library-wow-addons`, strict JSON,
+  `ParseWoWAddons`) → Library env `WOW_ADDONS`, always set (`[]` for none).
+- The Library's `svc-wow-addons` runs `wow-addons-update` as abc at start, then hourly; sessions
+  never download addons, they read what the Library installed on the games volume.
+- Unset or unreadable `WOW_ADDONS` leaves everything alone: read as "none", it would uninstall
+  every managed addon. Keep both the operator's and the script's parse strict.
+- Each flavor's `Interface/.direwolf-addons.json` records the folders it installed; anything else
+  in AddOns is the user's and is never replaced or removed (a name clash refuses the install).
+- Only GitHub releases, installed only when the asset matches GitHub's published SHA256. Zips are
+  hostile: no absolute, `..`, backslash, link or root-level entries; capped size and entry count.
+- Unpacked into `Interface/.direwolf-addons-*` (same filesystem), then swapped in by rename; a
+  failed swap puts the old folders and their manifest entry back.
+  - The manifest claims old + new folders (no SHA256) before the swap: a run killed mid-swap
+    must not leave folders that look hand-installed, which would block every later update.
+- Only installed flavors are touched: `_retail_` etc. are never created (`Interface/AddOns` is).
+- An unreadable `--library-wow-addons` is logged, not fatal (it must not stop game sessions),
+  and the Library pod gets no `WOW_ADDONS`. `null` reads as none (helm renders an empty value so).
+- ConsolePort: `seblindfors/ConsolePort`, asset `ConsolePort-<version>.zip`, one zip for every
+  flavor (multi-interface TOCs).
+- A swap whose own rollback fails (`RollbackIncomplete`) keeps the claim, not the old entry.
+  Tests: `TestWoWAddonsSurvivesInterruptedSwap` (kills or fails each rename in turn).
+- Go caches these tests' results without seeing the script (python reads it, not the test):
+  mutation-test the script with `go test -count=1`, or every mutant "passes".
+- Tests: `images/library/wow_addons_update_test.go` (real script, stubbed curl);
+  `TestParseWoWAddons*` in `pkg/controllers/library_wow_addons_test.go`.
+
 ## Running it under Proton
 
 - umu-run fails in the Library: pressure-vessel's bwrap can't create a user namespace there

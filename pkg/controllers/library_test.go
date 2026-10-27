@@ -570,6 +570,17 @@ func TestLibraryEnsurePodStartsLibrary(t *testing.T) {
 	if env["BATTLENET_GAMES"] != "/games/battlenet" {
 		t.Errorf("Library BATTLENET_GAMES = %q, want the games volume's /games/battlenet", env["BATTLENET_GAMES"])
 	}
+	// Set even with no addons listed, so the last one listed is uninstalled.
+	if env["WOW_ADDONS"] != "[]" {
+		t.Errorf("Library WOW_ADDONS = %q, want [] with no addons configured", env["WOW_ADDONS"])
+	}
+	// An unreadable list leaves it unset: read as none, it would uninstall them all.
+	f.library.WoWAddonsInvalid = true
+	for _, e := range f.library.buildPod().Spec.Containers[0].Env {
+		if e.Name == "WOW_ADDONS" {
+			t.Errorf("Library WOW_ADDONS = %q with an unreadable list, want it unset", e.Value)
+		}
+	}
 	if env["PUID"] != "1000" || env["PGID"] != "1000" {
 		t.Errorf("Library runs as PUID %q PGID %q, want the sessions' 1000:1000", env["PUID"], env["PGID"])
 	}

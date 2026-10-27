@@ -66,6 +66,8 @@ func main() {
 	libraryHomePVC := flag.String("library-home-pvc", "", "PVC holding the shared Steam home. Required with --library-port")
 	libraryGamesPVC := flag.String("library-games-pvc", "", "PVC holding the shared game library. Required with --library-port")
 	libraryGamesPath := flag.String("library-games-path", "/games", "Where the Library mounts the game library")
+	libraryWoWAddons := flag.String("library-wow-addons", os.Getenv("LIBRARY_WOW_ADDONS"),
+		`JSON list of WoW addons the Library installs and keeps updated, e.g. [{"name":"ConsolePort","source":{"type":"github","repo":"seblindfors/ConsolePort","asset":"ConsolePort-*.zip"},"flavors":["retail"]}]. Addons dropped from it are uninstalled`)
 	libraryIdleTimeout := flag.Duration("library-idle-timeout", controllers.DefaultLibraryIdleTimeout,
 		"How long the Library may go without browser traffic (and with nothing downloading) before it is stopped")
 	libraryMaxRuntime := flag.Duration("library-max-runtime", controllers.DefaultLibraryMaxRuntime,
@@ -131,6 +133,12 @@ func main() {
 	}
 	if pathErr := controllers.ValidateLibraryGamesPath(*libraryGamesPath); *libraryPort != 0 && pathErr != nil {
 		klog.Fatalf("--library-games-path: %v", pathErr)
+	}
+	// Not fatal: one typo in an optional Library value must not stop game
+	// sessions. The Library then leaves the installed addons as they are.
+	wowAddons, wowAddonsErr := controllers.ParseWoWAddons(*libraryWoWAddons)
+	if wowAddonsErr != nil {
+		klog.Errorf("--library-wow-addons: %v; the Library leaves WoW addons as they are", wowAddonsErr)
 	}
 	if *libraryPort == 0 && (*catalogueSteamApp != "" || *catalogueHeroicApp != "" || *catalogueNexusApp != "") {
 		klog.Fatal("--catalogue-steam-app, --catalogue-heroic-app and --catalogue-nexus-app need --library-port: the catalogue is read from the Library")
@@ -251,14 +259,16 @@ func main() {
 			generic.NewInformer[*corev1.Pod](libraryPodInformer),
 			controllers.NewPodExecutor(restConfig, k8sClient),
 			controllers.LibraryControllerOptions{
-				Image:        *libraryImage,
-				HomePVC:      *libraryHomePVC,
-				GamesPVC:     *libraryGamesPVC,
-				GamesPath:    *libraryGamesPath,
-				NodeSelector: nodeSelector,
-				Tolerations:  tolerations,
-				IdleTimeout:  *libraryIdleTimeout,
-				MaxRuntime:   *libraryMaxRuntime,
+				Image:            *libraryImage,
+				HomePVC:          *libraryHomePVC,
+				GamesPVC:         *libraryGamesPVC,
+				GamesPath:        *libraryGamesPath,
+				NodeSelector:     nodeSelector,
+				Tolerations:      tolerations,
+				IdleTimeout:      *libraryIdleTimeout,
+				MaxRuntime:       *libraryMaxRuntime,
+				WoWAddons:        wowAddons,
+				WoWAddonsInvalid: wowAddonsErr != nil,
 			},
 		)
 		if *catalogueSteamApp != "" || *catalogueHeroicApp != "" || *catalogueNexusApp != "" {

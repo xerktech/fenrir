@@ -1,0 +1,368 @@
+#!/usr/bin/python3 -I
+"""Installs, updates and uninstalls the chart's WoW addons (XERK-2366).
+
+$WOW_ADDONS is the operator's validated list (chart wowAddons). For each WoW
+flavor installed under $BATTLENET_GAMES/World of Warcraft, every listed addon
+is installed from its source's latest release into Interface/AddOns, and every
+addon this script installed that is no longer listed is removed. Run as the
+desktop user (abc), at Library start and then periodically.
+
+Each flavor's Interface/.direwolf-addons.json records what this script
+installed: an addon's folders and the asset's SHA256. Folders it does not
+record are the user's, and are never replaced or removed.
+
+A release asset is installed only if it matches the SHA256 GitHub publishes
+for it, and its zip is treated as hostile: absolute paths, "..", links, files
+outside a folder, and oversized or overlong archives are refused. It is
+unpacked into a staging folder beside AddOns, then each folder is swapped in
+by rename; a failure puts the old folders back.
+
+Never exits non-zero, and any failure keeps what is installed.
+"""
+
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import zipfile
+
+FLAVORS = {"retail": "_retail_", "classic": "_classic_", "classic_era": "_classic_era_"}
+MANIFEST = ".direwolf-addons.json"
+STAGING_PREFIX = ".direwolf-addons-"
+MAX_DOWNLOAD = 200 << 20
+MAX_UNPACKED = 1 << 30
+MAX_FILES = 20000
+
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+REPO = re.compile(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9_.-]{1,100}")
+ASSET = re.compile(r"[A-Za-z0-9_.*?+-]{1,128}")
+# Addon folder names, e.g. ConsolePort_Bar or !BugGrabber.
+FOLDER = re.compile(r"[A-Za-z0-9_!][A-Za-z0-9_.!+-]{0,99}")
+SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+class Refused(Exception):
+    pass
+
+
+class RollbackIncomplete(Exception):
+    """A failed swap could not put every folder back."""
+
+
+def log(msg):
+    print(f"wow-addons-update: {msg}", flush=True)
+
+
+def parse_addons(raw):
+    """The operator validated the list; checked again, since names become paths."""
+    addons = json.loads(raw)
+    if not isinstance(addons, list):
+        raise ValueError("not a list")
+    for a in addons:
+        src = a["source"]
+        if not (
+            isinstance(a["name"], str) and NAME.fullmatch(a["name"])
+            and src["type"] == "github"
+            and isinstance(src["repo"], str) and REPO.fullmatch(src["repo"])
+            and ".." not in src["repo"].split("/") and "." not in src["repo"].split("/")
+            and isinstance(src["asset"], str) and ASSET.fullmatch(src["asset"])
+            and isinstance(a["flavors"], list) and a["flavors"]
+            and all(f in FLAVORS for f in a["flavors"])
+        ):
+            raise ValueError(f"invalid entry {a!r}")
+    if len({a["name"] for a in addons}) != len(addons):
+        raise ValueError("an addon is listed twice")
+    return addons
+
+
+def latest_asset(source):
+    """The release asset the source names: (tag, name, url, size, sha256)."""
+    out = subprocess.run(
+        ["curl", "-fsSL", "--max-time", "30",
+         f"https://api.github.com/repos/{source['repo']}/releases/latest"],
+        capture_output=True, check=True,
+    ).stdout
+    release = json.loads(out)
+    matches = [a for a in release["assets"] if fnmatch.fnmatchcase(a["name"], source["asset"])]
+    if len(matches) != 1:
+        raise Refused(f"{len(matches)} assets of {source['repo']} {release.get('tag_name')} match {source['asset']}")
+    a = matches[0]
+    url, size, digest = a["browser_download_url"], a["size"], a.get("digest") or ""
+    if not isinstance(url, str) or not url.startswith("https://github.com/"):
+        raise Refused(f"{a['name']} is not served from github.com")
+    if type(size) is not int or not 0 < size <= MAX_DOWNLOAD:
+        raise Refused(f"{a['name']} is {size} bytes; the limit is {MAX_DOWNLOAD}")
+    if not isinstance(digest, str) or not digest.startswith("sha256:") or not SHA256.fullmatch(digest[7:]):
+        raise Refused(f"{a['name']} has no published SHA256")
+    return str(release.get("tag_name", "")), a["name"], url, size, digest[7:]
+
+
+def download(url, size, sha, dest):
+    subprocess.run(
+        ["curl", "-fsSL", "--max-time", "600", "--max-filesize", str(size), "-o", dest, url],
+        check=True,
+    )
+    h = hashlib.sha256()
+    with open(dest, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    if os.path.getsize(dest) != size or h.hexdigest() != sha:
+        raise Refused(f"{url} does not match its published SHA256")
+
+
+def zip_folders(zf):
+    """Checks every entry; returns the top-level folders the zip installs."""
+    entries = zf.infolist()
+    if len(entries) > MAX_FILES:
+        raise Refused(f"{len(entries)} entries; the limit is {MAX_FILES}")
+    if sum(e.file_size for e in entries) > MAX_UNPACKED:
+        raise Refused(f"unpacks to more than {MAX_UNPACKED} bytes")
+    folders = set()
+    for e in entries:
+        name = e.filename
+        parts = name.rstrip("/").split("/")
+        if (
+            "\\" in name or "\0" in name or name.startswith("/")
+            or any(p in ("", ".", "..") for p in parts)
+        ):
+            raise Refused(f"unsafe path {name!r}")
+        mode = e.external_attr >> 16
+        if stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR):
+            raise Refused(f"{name!r} is not a plain file or folder")
+        if len(parts) == 1 and not e.is_dir():
+            raise Refused(f"{name!r} is outside any addon folder")
+        if not FOLDER.fullmatch(parts[0]):
+            raise Refused(f"unexpected addon folder name {parts[0]!r}")
+        folders.add(parts[0])
+    if not folders:
+        raise Refused("no addon folders")
+    return folders
+
+
+def unpack(zf, dest):
+    """Unpacks into dest, a new empty folder: nothing in it can be a link."""
+    total = 0
+    for e in zf.infolist():
+        path = os.path.join(dest, *e.filename.rstrip("/").split("/"))
+        if e.is_dir():
+            os.makedirs(path, mode=0o755, exist_ok=True)
+            continue
+        os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+        # "x": a duplicate entry is refused, not written twice.
+        with zf.open(e) as src, open(path, "xb") as out:
+            while chunk := src.read(1 << 20):
+                total += len(chunk)
+                if total > MAX_UNPACKED:
+                    raise Refused(f"unpacks to more than {MAX_UNPACKED} bytes")
+                out.write(chunk)
+        os.chmod(path, 0o644)
+
+
+def remove(path):
+    if os.path.islink(path) or (os.path.lexists(path) and not os.path.isdir(path)):
+        os.unlink(path)
+    elif os.path.isdir(path):
+        shutil.rmtree(path)
+
+
+def swap_in(addons_dir, staged, new_folders, old_folders, trash):
+    """Moves the staged folders into AddOns and the old ones into trash;
+    on any failure, moves everything back and re-raises."""
+    done = []  # (moved from, moved to), in order
+    try:
+        for f in sorted(old_folders | new_folders):
+            live = os.path.join(addons_dir, f)
+            if os.path.lexists(live):
+                os.rename(live, os.path.join(trash, f))
+                done.append((live, os.path.join(trash, f)))
+            if f in new_folders:
+                os.rename(os.path.join(staged, f), live)
+                done.append((os.path.join(staged, f), live))
+    except BaseException as failure:
+        restored = True
+        for src, dst in reversed(done):
+            try:
+                os.rename(dst, src)
+            except OSError as e:
+                restored = False
+                log(f"cannot restore {src}: {e}")
+        if not restored:
+            raise RollbackIncomplete(str(failure)) from failure
+        raise
+
+
+def load_manifest(path):
+    try:
+        with open(path) as f:
+            m = json.load(f)
+    except FileNotFoundError:
+        return {}
+    if not isinstance(m, dict):
+        raise ValueError("not an object")
+    for name, entry in m.items():
+        if not NAME.fullmatch(name) or not all(FOLDER.fullmatch(f) for f in entry["folders"]):
+            raise ValueError(f"invalid entry {name!r}")
+    return m
+
+
+def save_manifest(path, manifest):
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=STAGING_PREFIX)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(manifest, f, indent=2, sort_keys=True)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+class Flavor:
+    def __init__(self, root):
+        self.interface = os.path.join(root, "Interface")
+        self.addons = os.path.join(self.interface, "AddOns")
+        self.manifest_path = os.path.join(self.interface, MANIFEST)
+        os.makedirs(self.addons, exist_ok=True)
+        # Left by a run that was killed; only this script names folders so.
+        for leftover in os.listdir(self.interface):
+            if leftover.startswith(STAGING_PREFIX):
+                remove(os.path.join(self.interface, leftover))
+        self.manifest = load_manifest(self.manifest_path)
+
+    def owned_elsewhere(self, name):
+        return {f for n, e in self.manifest.items() if n != name for f in e["folders"]}
+
+    def uninstall(self, name):
+        for f in self.manifest[name]["folders"]:
+            remove(os.path.join(self.addons, f))
+        del self.manifest[name]
+        save_manifest(self.manifest_path, self.manifest)
+        log(f"uninstalled {name} from {self.addons}")
+
+    def current(self, name, sha):
+        entry = self.manifest.get(name)
+        return entry is not None and entry["sha256"] == sha and all(
+            os.path.isdir(os.path.join(self.addons, f)) for f in entry["folders"]
+        )
+
+    def install(self, name, archive, tag, sha):
+        old = set(self.manifest.get(name, {}).get("folders", []))
+        work = tempfile.mkdtemp(dir=self.interface, prefix=STAGING_PREFIX)
+        try:
+            with zipfile.ZipFile(archive) as zf:
+                new = zip_folders(zf)
+                taken = {f for f in new - old if os.path.lexists(os.path.join(self.addons, f))}
+                taken |= new & self.owned_elsewhere(name)
+                if taken:
+                    raise Refused(f"would replace {', '.join(sorted(taken))}, not installed by direwolf")
+                staged = os.path.join(work, "new")
+                trash = os.path.join(work, "old")
+                os.mkdir(staged)
+                os.mkdir(trash)
+                unpack(zf, staged)
+            previous = self.manifest.get(name)
+            # Claimed before the swap, with no SHA256 (so the next run
+            # reinstalls): if this run dies mid-swap, folders already moved
+            # in are recorded as direwolf's, never mistaken for the user's.
+            self.manifest[name] = {"folders": sorted(old | new), "sha256": "", "version": tag}
+            try:
+                save_manifest(self.manifest_path, self.manifest)
+                swap_in(self.addons, staged, new, old, trash)
+            except RollbackIncomplete:
+                # New and old folders may both be live: the claim, which names
+                # them all, stays, and the next run reinstalls.
+                raise
+            except BaseException:
+                # The old folders are back in place: so is their record.
+                if previous is None:
+                    del self.manifest[name]
+                else:
+                    self.manifest[name] = previous
+                try:
+                    save_manifest(self.manifest_path, self.manifest)
+                except OSError as e:
+                    # The claim stands; it names only folders this script owns.
+                    log(f"cannot restore the manifest: {e}")
+                raise
+            self.manifest[name] = {"folders": sorted(new), "sha256": sha, "version": tag}
+            # A failure here leaves the claim: the new folders stay recorded,
+            # and the next run reinstalls.
+            save_manifest(self.manifest_path, self.manifest)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        log(f"installed {name} {tag} into {self.addons}")
+
+
+def main():
+    raw = os.environ.get("WOW_ADDONS")
+    if raw is None:
+        log("WOW_ADDONS is not set; leaving addons alone")
+        return
+    try:
+        addons = parse_addons(raw)
+    except (ValueError, KeyError, TypeError) as e:
+        # Never read a bad list as "none": that would uninstall everything.
+        log(f"WOW_ADDONS is invalid ({e}); leaving addons alone")
+        return
+    wow = os.path.join(os.environ.get("BATTLENET_GAMES", "/games/battlenet"), "World of Warcraft")
+    flavors = {}
+    for flavor, folder in FLAVORS.items():
+        root = os.path.join(wow, folder)
+        # Only an installed flavor; Battle.net creates it.
+        if os.path.islink(root) or not os.path.isdir(root):
+            continue
+        try:
+            flavors[flavor] = Flavor(root)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log(f"skipping {root}: {e}")
+
+    listed = {a["name"] for a in addons}
+    for fl in flavors.values():
+        for name in sorted(set(fl.manifest) - listed):
+            try:
+                fl.uninstall(name)
+            except OSError as e:
+                log(f"cannot uninstall {name} from {fl.addons}: {e}")
+
+    with tempfile.TemporaryDirectory() as downloads:
+        for a in addons:
+            name = a["name"]
+            targets = {f: flavors[f] for f in a["flavors"] if f in flavors}
+            # Listed but no longer for this flavor: uninstalled like an unlisted addon.
+            for f, fl in flavors.items():
+                if f not in targets and name in fl.manifest:
+                    try:
+                        fl.uninstall(name)
+                    except OSError as e:
+                        log(f"cannot uninstall {name} from {fl.addons}: {e}")
+            if not targets:
+                continue
+            try:
+                tag, asset, url, size, sha = latest_asset(a["source"])
+                stale = [fl for fl in targets.values() if not fl.current(name, sha)]
+                if not stale:
+                    log(f"{name} {tag} is up to date")
+                    continue
+                archive = os.path.join(downloads, f"{name}.zip")
+                download(url, size, sha, archive)
+            except (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError, Refused) as e:
+                log(f"cannot update {name}: {e}; keeping what is installed")
+                continue
+            for fl in stale:
+                try:
+                    fl.install(name, archive, tag, sha)
+                except (OSError, zipfile.BadZipFile, RuntimeError, ValueError, Refused, RollbackIncomplete) as e:
+                    log(f"cannot install {name} {tag} into {fl.addons}: {e}; keeping what is installed")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:  # noqa: BLE001 - never fail the Library
+        log(f"failed: {e!r}")
+    sys.exit(0)
