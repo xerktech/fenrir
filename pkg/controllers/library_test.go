@@ -529,6 +529,11 @@ func TestLibraryEnsurePodStartsLibrary(t *testing.T) {
 	if pod.Labels[v1alpha1types.LibraryPodLabel] != v1alpha1types.LibraryPodLabelValue {
 		t.Error("Library pod lacks the label moonlight-proxy's busy check selects on")
 	}
+	// Its programs' loopback listeners (Steam's, Battle.net's client and
+	// Agent, XERK-2362) must stay the pod's own, not the node's.
+	if pod.Spec.HostNetwork {
+		t.Error("Library pod is host-networked")
+	}
 	if pod.Spec.NodeSelector["kubernetes.io/hostname"] != "talos04.xerktech.com" || len(pod.Spec.Tolerations) != 1 {
 		t.Errorf("Library pod not pinned to the session node: %v %v", pod.Spec.NodeSelector, pod.Spec.Tolerations)
 	}

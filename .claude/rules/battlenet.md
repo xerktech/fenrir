@@ -84,5 +84,12 @@ paths:
 - No CEF remote-debugging port, and no new listener after sign-in or while WoW runs.
 - They show as `wineserver` in `ss -p`, and only to uid 1000.
 - Neither the Library pod nor a session's app pod (`--app-pod-host-dir`) is host-networked, so
-  there they stay in the pod. Only a game run in the hostNetwork session pod itself (no app pod)
-  would put them on the node's loopback.
+  there they stay in the pod's own loopback, and two pods never collide on 22885 (XERK-2362).
+- A Battle.net App must set `spec.requireAppPod: true`: the operator then refuses its Sessions
+  (InvalidSpec) without `--app-pod-host-dir`, rather than run it in the hostNetwork session pod,
+  where these ports would be the node's loopback.
+  - Catalogue copies follow the base's value on every scan; set on one copy it is reset.
+  - It applies when a pod is built: setting it never moves a running Session's pod, and an App
+    pod not yet created when the operator loses the flag is refused, not built host-networked.
+  Tests: `TestRequireAppPodKeepsAppOffHostNetwork`, `TestLibraryEnsurePodStartsLibrary`,
+  `TestCatalogueRefreshFollowsBaseApp`.

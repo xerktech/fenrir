@@ -20,6 +20,8 @@ paths:
   - Not the whole pod: the apiserver refuses `hostUsers: false` with hostNetwork (Moonlight's
     port-only redirect), a user-namespaced Wolf can't open `/dev/uinput` (0660 root:996 on talos04),
     and kubelet refuses the per-netns `nf_conntrack_acct` sysctl the liveness check would need.
+- An App with `spec.requireAppPod` (Battle.net's loopback listeners, XERK-2362) fails `buildPod`
+  as InvalidSpec without the flag, so it never runs in the host-networked pod.
 - Mode is per Session: the Session pod's `direwolf/app-pod` annotation, not the flag, says it is
   split, so a flag flip leaves running Sessions alone. The App pod is never recreated either:
   `AppPodCreated` True and no pod ends the Session. Tests: `TestFinishedAppPodEndsSession`.

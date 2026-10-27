@@ -1186,6 +1186,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	if err != nil {
 		return nil, fmt.Errorf("failed to get app: %w", err)
 	}
+	if app.Spec.RequireAppPod && c.AppPodHostDir == "" {
+		return nil, invalidSpec(fmt.Errorf("app %s sets requireAppPod, but the operator runs without --app-pod-host-dir", app.Name))
+	}
 	wolfConfigSeed, err := wolfConfigSeed()
 	if err != nil {
 		return nil, err

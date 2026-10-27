@@ -44,6 +44,7 @@ func TestCatalogueRefreshFollowsBaseApp(t *testing.T) {
 	for _, name := range []string{"steam-base", "heroic-base"} {
 		base := f.app(t, name)
 		base.Spec.Template.Spec.Containers[0].Image = "new:2"
+		base.Spec.RequireAppPod = true
 		f.update(t, base)
 	}
 	fetchedBefore := len(f.fetched)
@@ -54,6 +55,10 @@ func TestCatalogueRefreshFollowsBaseApp(t *testing.T) {
 	dota = f.app(t, "steam-570")
 	if img := dota.Spec.Template.Spec.Containers[0].Image; img != "new:2" {
 		t.Errorf("steam-570 image = %q, want the base App's new:2", img)
+	}
+	// Battle.net's loopback listeners rely on it (XERK-2362).
+	if !dota.Spec.RequireAppPod {
+		t.Error("steam-570 lost the base App's requireAppPod")
 	}
 	if !dota.Spec.Hidden || dota.Spec.GPU == nil || dota.Spec.GPU.Memory != nil {
 		t.Errorf("per-game settings not kept: hidden=%v gpu=%+v", dota.Spec.Hidden, dota.Spec.GPU)

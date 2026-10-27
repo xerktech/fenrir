@@ -63,6 +63,10 @@
           "description": "Whether the app supports HDR",
           "type": "boolean"
         },
+        "requireAppPod": {
+          "description": "RequireAppPod refuses Sessions unless the operator runs the App in its\nown pod off the host network (--app-pod-host-dir). For an App whose\nprograms listen on 127.0.0.1 (Battle.net's client and Agent): in the\nhost-networked session pod that is the node's loopback, open to every\nprocess on the node, and two Sessions on one node collide on fixed ports.",
+          "type": "boolean"
+        },
         "template": {
           "description": "The operator copies this metadata onto the session pod, so a key the API\nserver rejects there would fail every Session of the App: reject it here.\nLabel values get a schema pattern from hack/update-codegen.sh instead:\nCEL over unbounded map values exceeds the CRD cost budget.\nPlain regexes, not CEL's format library, which needs a newer API server\nthan the chart's kubeVersion floor.",
           "properties": {

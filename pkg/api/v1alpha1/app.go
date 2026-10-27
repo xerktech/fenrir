@@ -76,6 +76,14 @@ type AppSpec struct {
 	// may still reference its own claims). A per-game setting the scanner keeps.
 	// +kubebuilder:validation:Optional
 	GPU *AppGPU `json:"gpu,omitempty" xml:"-"`
+
+	// RequireAppPod refuses Sessions unless the operator runs the App in its
+	// own pod off the host network (--app-pod-host-dir). For an App whose
+	// programs listen on 127.0.0.1 (Battle.net's client and Agent): in the
+	// host-networked session pod that is the node's loopback, open to every
+	// process on the node, and two Sessions on one node collide on fixed ports.
+	// +kubebuilder:validation:Optional
+	RequireAppPod bool `json:"requireAppPod,omitempty" xml:"-"`
 }
 
 // Positive means a nonzero digit before any suffix or exponent (the schema
