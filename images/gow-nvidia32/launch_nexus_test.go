@@ -58,12 +58,20 @@ func TestLaunchNexusKeepsAnExplicitShaderCache(t *testing.T) {
 	}
 }
 
-func TestLaunchNexusKeepsTheNVIDIAShaderCache(t *testing.T) {
-	launch := `DIREWOLF_LAUNCH_COMMAND=printf %s "$__GL_SHADER_DISK_CACHE_SKIP_CLEANUP"`
-	if got := runLaunchNexus(t, t.TempDir(), launch); got != "1" {
-		t.Fatalf("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP = %q, want 1", got)
+// The driver trims its cache in the session's first OpenGL process (sway), so
+// the setting must be in the nexus image's environment, not only the game's.
+func TestNexusImageKeepsTheNVIDIAShaderCache(t *testing.T) {
+	dockerfile, err := os.ReadFile("Dockerfile")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := runLaunchNexus(t, t.TempDir(), "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP=0", launch); got != "0" {
-		t.Fatalf("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP = %q, want the caller's", got)
+	for stage := range strings.SplitSeq(string(dockerfile), "\nFROM ") {
+		if strings.HasPrefix(stage, "heroic AS nexus\n") {
+			if !strings.Contains(stage, "\nENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1\n") {
+				t.Fatal("the nexus stage must set ENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1")
+			}
+			return
+		}
 	}
+	t.Fatal("no nexus stage in the Dockerfile")
 }
