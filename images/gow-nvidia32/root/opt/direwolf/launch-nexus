@@ -1,2 +1,14 @@
 #!/bin/sh
+# vkd3d-proton keeps its pipeline cache in the game's working directory unless
+# VKD3D_SHADER_CACHE_PATH names one. Nexus runs each game from a temporary launch
+# view that the next launch replaces, so every session recompiled the game's
+# shaders (XERK-2349). Steam keeps one per game; do the same in the shared home.
+# Nexus passes its environment on to the game. An explicit value is kept.
+game="$(printf '%s\n' "${DIREWOLF_LAUNCH_COMMAND:-}" | sed -n 's/.*--launch-game \([0-9A-Za-z_-]\{1,\}\).*/\1/p')"
+if [ -n "${game}" ] && [ -z "${VKD3D_SHADER_CACHE_PATH:-}" ]; then
+  cache="${XDG_CACHE_HOME:-${HOME}/.cache}/vkd3d-proton/${game}"
+  if mkdir -p "${cache}"; then
+    export VKD3D_SHADER_CACHE_PATH="${cache}"
+  fi
+fi
 exec sh -c "${DIREWOLF_LAUNCH_COMMAND:-xodus-nexus}"

@@ -121,6 +121,12 @@ RUN set -eu; \
 # store "nexus"): the heroic target (Electron's libraries, NVIDIA lib32) plus
 # Nexus, its keyring, and a startup that runs $DIREWOLF_LAUNCH_COMMAND.
 FROM heroic AS nexus
+# NVIDIA's driver trims its shader cache past its size cap in the first OpenGL
+# process of a session, sway, before the game starts: Gears of War: E-Day's
+# alone passes the cap (about 1.2 GB), so every launch recompiled (XERK-2349).
+# Session-wide, so sway and Xwayland inherit it, not just the game. Steam sets
+# it too.
+ENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
 RUN apt-get update \
   && apt-get install -y --no-install-recommends gnome-keyring libsecret-1-0 dbus \
   && rm -rf /var/lib/apt/lists/*

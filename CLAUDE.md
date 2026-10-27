@@ -28,6 +28,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     a mismatch its cont-init hook deletes them (CPU fallback, not a crash).
   - It also ships NVIDIA's NGX Wine DLLs in `/usr/lib/nvidia/wine` (XERK-2073): Proton enables
     DLSS only if `nvngx.dll` sits in `<dir of libGLX_nvidia.so.0>/nvidia/wine`; CDI injects none.
+  - Nexus games run from a temporary launch view, so `launch-nexus` sets a per-game
+    `VKD3D_SHADER_CACHE_PATH` in `~/.cache/vkd3d-proton/<id>`; without it vkd3d-proton caches in
+    that view and every launch recompiles shaders (XERK-2349). Tests: `launch_nexus_test.go`.
+  - The nexus stage sets `ENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1` session-wide: NVIDIA trims its
+    cache past its cap in the session's first OpenGL process (sway), before the game starts, and
+    Gears' alone reached about 1.2 GB. Setting it only for the game does not stop that.
   - Its nexus target drops to the desktop user via `/opt/direwolf/run-as-user`, not gosu, keeping
     CAP_SYS_PTRACE ambient (XERK-2349): talos04 has `kernel.yama.ptrace_scope=2`, and Easy
     Anti-Cheat's Linux module ptrace-attaches in its own tree, so without it EAC exits 210
