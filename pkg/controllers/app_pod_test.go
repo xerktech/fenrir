@@ -235,6 +235,33 @@ func TestBuildPodsWithoutHostDirKeepsOnePod(t *testing.T) {
 	}
 }
 
+// An App that sets requireAppPod (Battle.net: its client and Agent listen on
+// 127.0.0.1, XERK-2362) never runs in the host-networked session pod, whose
+// loopback is the node's: without AppPodHostDir its Sessions are refused.
+func TestRequireAppPodKeepsAppOffHostNetwork(t *testing.T) {
+	f := newPortsFixture(t)
+	sess := podReadySession(f)
+	app, err := f.sc.AppInformer.Namespaced(portsTestNS).Get(f.app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The informer's copy: buildPod reads it back below.
+	app.Spec.RequireAppPod = true
+
+	if _, _, err = f.sc.buildPods(sess, testWolfPodUID); !errors.Is(err, errInvalidSpec) {
+		t.Errorf("buildPods without AppPodHostDir = %v, want errInvalidSpec", err)
+	}
+
+	f.sc.AppPodHostDir = testAppPodHostDir
+	wolf, appPod, err := f.sc.buildPods(sess, testWolfPodUID)
+	if err != nil || appPod == nil {
+		t.Fatalf("buildPods with AppPodHostDir = %v, %v, %v", wolf, appPod, err)
+	}
+	if appPod.Spec.HostNetwork || slices.Contains(containerNames(&wolf.Spec), "app") {
+		t.Errorf("App pod hostNetwork=%v, Wolf pod containers %v", appPod.Spec.HostNetwork, containerNames(&wolf.Spec))
+	}
+}
+
 func waitPod(t *testing.T, f *portsFixture, name string) {
 	t.Helper()
 	for range 500 {

@@ -58,6 +58,12 @@ type AppSpecApplyConfiguration struct {
 	// creates per Session. Omitted: no GPU from this field (the pod template
 	// may still reference its own claims). A per-game setting the scanner keeps.
 	GPU *AppGPUApplyConfiguration `json:"gpu,omitempty"`
+	// RequireAppPod refuses Sessions unless the operator runs the App in its
+	// own pod off the host network (--app-pod-host-dir). For an App whose
+	// programs listen on 127.0.0.1 (Battle.net's client and Agent): in the
+	// host-networked session pod that is the node's loopback, open to every
+	// process on the node, and two Sessions on one node collide on fixed ports.
+	RequireAppPod *bool `json:"requireAppPod,omitempty"`
 }
 
 // AppSpecApplyConfiguration constructs a declarative configuration of the AppSpec type for use with
@@ -137,5 +143,13 @@ func (b *AppSpecApplyConfiguration) WithHidden(value bool) *AppSpecApplyConfigur
 // If called multiple times, the GPU field is set to the value of the last call.
 func (b *AppSpecApplyConfiguration) WithGPU(value *AppGPUApplyConfiguration) *AppSpecApplyConfiguration {
 	b.GPU = value
+	return b
+}
+
+// WithRequireAppPod sets the RequireAppPod field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the RequireAppPod field is set to the value of the last call.
+func (b *AppSpecApplyConfiguration) WithRequireAppPod(value bool) *AppSpecApplyConfiguration {
+	b.RequireAppPod = &value
 	return b
 }

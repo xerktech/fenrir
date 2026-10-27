@@ -79,6 +79,14 @@ spec:
               isHDRSupported:
                 description: Whether the app supports HDR
                 type: boolean
+              requireAppPod:
+                description: |-
+                  RequireAppPod refuses Sessions unless the operator runs the App in its
+                  own pod off the host network (--app-pod-host-dir). For an App whose
+                  programs listen on 127.0.0.1 (Battle.net's client and Agent): in the
+                  host-networked session pod that is the node's loopback, open to every
+                  process on the node, and two Sessions on one node collide on fixed ports.
+                type: boolean
               template:
                 description: |-
                   The operator copies this metadata onto the session pod, so a key the API
