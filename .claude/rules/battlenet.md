@@ -87,5 +87,9 @@ paths:
   there they stay in the pod's own loopback, and two pods never collide on 22885 (XERK-2362).
 - A Battle.net App must set `spec.requireAppPod: true`: the operator then refuses its Sessions
   (InvalidSpec) without `--app-pod-host-dir`, rather than run it in the hostNetwork session pod,
-  where these ports would be the node's loopback. Catalogue copies inherit it from the base.
-  Tests: `TestRequireAppPodKeepsAppOffHostNetwork`, `TestLibraryEnsurePodStartsLibrary`.
+  where these ports would be the node's loopback.
+  - Catalogue copies follow the base's value on every scan; set on one copy it is reset.
+  - It applies when a pod is built: setting it never moves a running Session's pod, and an App
+    pod not yet created when the operator loses the flag is refused, not built host-networked.
+  Tests: `TestRequireAppPodKeepsAppOffHostNetwork`, `TestLibraryEnsurePodStartsLibrary`,
+  `TestCatalogueRefreshFollowsBaseApp`.
