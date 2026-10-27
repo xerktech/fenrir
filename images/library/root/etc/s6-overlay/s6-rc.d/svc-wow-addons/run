@@ -1,0 +1,11 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Keeps the chart's WoW addons ($WOW_ADDONS) installed and up to date while
+# the Library runs: at start, then hourly (sessions never download them). As
+# the desktop user, who owns the games volume's WoW folders. A longrun, not a
+# oneshot: GitHub being slow or down never holds up the desktop.
+while :; do
+  s6-setuidgid abc wow-addons-update
+  sleep 3600
+done

@@ -223,6 +223,13 @@ type LibraryControllerOptions struct {
 
 	IdleTimeout time.Duration
 	MaxRuntime  time.Duration
+
+	// WoWAddons are the WoW addons the Library installs and keeps updated.
+	WoWAddons []WoWAddon
+	// WoWAddonsInvalid: the configured list could not be read. The pod then
+	// gets no WOW_ADDONS, and the Library leaves installed addons alone
+	// rather than read it as none and uninstall them.
+	WoWAddonsInvalid bool
 }
 
 // LibraryController owns the on-demand Library pod: it is created by a visit
@@ -745,7 +752,7 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 			},
 		}},
 	}
-	return &corev1.Pod{
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      LibraryPodName,
 			Namespace: c.Namespace,
@@ -800,6 +807,14 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 			}},
 		},
 	}
+	// What the image's wow-addons-update keeps installed in WoW there. Left
+	// unset when the operator's list is unreadable: the Library then leaves
+	// installed addons alone.
+	if !c.WoWAddonsInvalid {
+		env := &pod.Spec.Containers[0].Env
+		*env = append(*env, corev1.EnvVar{Name: "WOW_ADDONS", Value: wowAddonsEnv(c.WoWAddons)})
+	}
+	return pod
 }
 
 // AuthPassword returns the Library's basic-auth password (see

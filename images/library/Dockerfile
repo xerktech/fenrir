@@ -85,6 +85,8 @@ RUN \
   echo "${HEROIC_SHA256}  /tmp/heroic.deb" | sha256sum -c - && \
   apt-get update && \
   apt-get install -y --no-install-recommends /tmp/heroic.deb && \
+  # init-heroic-update and wow-addons-update need it; the base only brings it in.
+  python3 -I -c 'import zipfile, fnmatch, hashlib, json' && \
   echo "**** route heroic through wrapped-heroic ****" && \
   # Also run by init-heroic-update after it installs a newer release.
   heroic-postinstall && \
