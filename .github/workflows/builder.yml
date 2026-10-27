@@ -112,6 +112,10 @@ jobs:
           - app: nexus
             context: images/gow-nvidia32
             target: nexus
+          # Heroic's session image plus Proton-CachyOS for one Battle.net game.
+          - app: battlenet
+            context: images/gow-nvidia32
+            target: battlenet
           # Go binary plus a C shim: repo-root context, own Dockerfile.
           - app: nri-nvenc-fix
             file: cmd/nri-nvenc-fix/Dockerfile

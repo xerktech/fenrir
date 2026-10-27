@@ -10,7 +10,8 @@ import (
 
 // GoW's base images set UMASK=000, so without the override every session
 // target leaves world-writable files in the shared home and /games (XERK-2351).
-// nexus inherits heroic's ENV, so it must only not reset it.
+// nexus and battlenet inherit heroic's ENV via game-session, so they must only
+// not reset it.
 func TestSessionImagesUseUmask022(t *testing.T) {
 	dockerfile, err := os.ReadFile("Dockerfile")
 	if err != nil {
@@ -39,8 +40,10 @@ func TestSessionImagesUseUmask022(t *testing.T) {
 	for name := range want {
 		t.Errorf("no %s stage in the Dockerfile", name)
 	}
-	if !strings.Contains(string(dockerfile), "\nFROM heroic AS nexus\n") {
-		t.Error("nexus no longer builds on heroic, so it no longer inherits its UMASK")
+	for _, from := range []string{"heroic AS game-session", "game-session AS nexus", "game-session AS battlenet"} {
+		if !strings.Contains(string(dockerfile), "\nFROM "+from+"\n") {
+			t.Errorf("no FROM %s: the game-session targets no longer inherit heroic's UMASK", from)
+		}
 	}
 }
 

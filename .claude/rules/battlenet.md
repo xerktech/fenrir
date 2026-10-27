@@ -32,6 +32,21 @@ paths:
     pin, into the prefix on every run.
   - No autostart beside Heroic: nothing needs the client running, and its CEF costs CPU.
 
+## In a game session (`battlenet` target of `images/gow-nvidia32`, XERK-2363)
+
+- `launch-battlenet` (`$BATTLENET_PRODUCT`, allowlist `wow`) runs the Library's prefix and client
+  with a Proton at the Library's pin: one prefix, bump both (`TestBattlenetProtonMatchesLibrary`).
+  - It installs nothing: a missing client, a patch or an expired sign-in end the session after
+    `BATTLENET_LAUNCH_TIMEOUT` (300s) with Battle.net's window on screen meanwhile.
+  - It resends `--exec="launch <code>"` every `BATTLENET_RESEND_INTERVAL` until the game appears:
+    when the client is ready to take it is unmeasured.
+  - The game is matched by Wine's argv[0] from the drive letter (`^X:\...\Wow.exe .*-uid wow`):
+    other processes' command lines (a shell, an agent) mention the path too.
+  - It refuses the host user namespace (identity `uid_map`): only the App pod
+    (`spec.requireAppPod`) keeps the client's listeners off the node's loopback.
+  - The product never joins sway's exec line: the startup runs the script bare.
+  - Tests: `images/gow-nvidia32/launch_battlenet_test.go` (stub Proton and wineserver).
+
 ## Running it under Proton
 
 - umu-run fails in the Library: pressure-vessel's bwrap can't create a user namespace there

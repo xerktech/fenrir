@@ -124,22 +124,35 @@ RUN set -eu; \
   # xodus-nexus-update compares releases against this.
   echo "${NEXUS_VERSION#v}" >/opt/xodus-nexus/.direwolf-version
 
-# Sessions of Microsoft Store games installed with Xodus Nexus (catalogue
-# store "nexus"): the heroic target (Electron's libraries, NVIDIA lib32) plus
-# Nexus, its keyring, and a startup that runs $DIREWOLF_LAUNCH_COMMAND.
-FROM heroic AS nexus
+# Proton-CachyOS for Battle.net, the Library's (images/library/Dockerfile,
+# XERK-2361) at the same pin: both run the one prefix in the shared home, and
+# Proton upgrades or warns about a prefix another version last ran. Bump both
+# together (TestBattlenetProtonMatchesLibrary). Root-owned, read-only to the user.
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS proton-cachyos
+ARG PROTON_CACHYOS_VERSION=cachyos-11.0-20261005-slr
+ARG PROTON_CACHYOS_SHA512=457bee6051ee671509e1cd6b865246df00685e508908cd0cf98c62fd311d0c781ce80fca3e9500e89fd7e48463fa26335806cdb1c38e528fd0e3e2b6b66c4469
+RUN set -eu; \
+  apt-get update; apt-get install -y --no-install-recommends ca-certificates curl xz-utils; \
+  name="proton-${PROTON_CACHYOS_VERSION}-x86_64"; \
+  curl -fsSL -o /tmp/proton.tar.xz \
+    "https://github.com/CachyOS/proton-cachyos/releases/download/${PROTON_CACHYOS_VERSION}/${name}.tar.xz"; \
+  echo "${PROTON_CACHYOS_SHA512}  /tmp/proton.tar.xz" | sha512sum -c -; \
+  tar -xJf /tmp/proton.tar.xz --no-same-owner -C /tmp; \
+  test -x "/tmp/${name}/proton"; \
+  # Proton writes into its own directory only to build a missing default prefix.
+  test -f "/tmp/${name}/files/share/default_pfx/system.reg"; \
+  chmod -R u=rwX,go=rX "/tmp/${name}"; \
+  mv "/tmp/${name}" /opt/proton-cachyos
+
+# What the game-session targets (nexus, battlenet) share over heroic: one
+# fullscreen game, no desktop, and the session ends when the game exits.
+FROM heroic AS game-session
 # NVIDIA's driver trims its shader cache past its size cap in the first OpenGL
 # process of a session, sway, before the game starts: Gears of War: E-Day's
 # alone passes the cap (about 1.2 GB), so every launch recompiled (XERK-2349).
 # Session-wide, so sway and Xwayland inherit it, not just the game. Steam sets
 # it too.
 ENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends gnome-keyring libsecret-1-0 dbus \
-  && rm -rf /var/lib/apt/lists/*
-COPY --from=nexus-app /opt/xodus-nexus /opt/xodus-nexus
-COPY --chmod=755 root/usr/bin/xodus-nexus /usr/bin/xodus-nexus
-COPY --chmod=755 root/opt/direwolf/launch-nexus /opt/direwolf/launch-nexus
 # Easy Anti-Cheat games need CAP_SYS_PTRACE under Talos' ptrace_scope=2 (see
 # run-as-user, XERK-2349): the entrypoint drops to the user through it instead
 # of gosu. The grep fails the build if a GoW bump changes that line.
@@ -147,19 +160,45 @@ COPY --chmod=755 root/opt/direwolf/run-as-user /opt/direwolf/run-as-user
 RUN grep -qx 'exec gosu "${UNAME}" /opt/gow/startup.sh' /entrypoint.sh \
   && sed -i 's|^exec gosu "${UNAME}" /opt/gow/startup.sh$|exec /opt/direwolf/run-as-user /opt/gow/startup.sh|' /entrypoint.sh \
   && grep -qx 'exec /opt/direwolf/run-as-user /opt/gow/startup.sh' /entrypoint.sh
-COPY --chmod=755 root/opt/gow/nexus-startup-app.sh /opt/gow/startup-app.sh
-COPY --chmod=755 root/usr/local/bin/xodus-nexus-update /usr/local/bin/xodus-nexus-update
-COPY --chmod=755 root/etc/cont-init.d/30-xodus-nexus-update.sh /etc/cont-init.d/
 # No waybar in game sessions: the game fills the screen (XERK-2290; see
-# direwolf-nexus.conf). launch-comp.sh copies /cfg/sway/config into the home at
+# direwolf-game.conf). launch-comp.sh copies /cfg/sway/config into the home at
 # every start; the include goes last so its values override GoW's. The grep
 # fails the build if a GoW bump renames the bar line.
-COPY --chmod=644 root/cfg/sway/direwolf-nexus.conf /cfg/sway/direwolf-nexus.conf
+COPY --chmod=644 root/cfg/sway/direwolf-game.conf /cfg/sway/direwolf-game.conf
 RUN grep -qx 'bar swaybar_command waybar' /cfg/sway/config \
   && sed -i '/^bar swaybar_command waybar$/d' /cfg/sway/config \
   && ! grep -q '^bar' /cfg/sway/config \
-  && echo 'include /cfg/sway/direwolf-nexus.conf' >>/cfg/sway/config
+  && echo 'include /cfg/sway/direwolf-game.conf' >>/cfg/sway/config
+
+# Sessions of Microsoft Store games installed with Xodus Nexus (catalogue
+# store "nexus"): Nexus, its keyring, and a startup that runs
+# $DIREWOLF_LAUNCH_COMMAND.
+FROM game-session AS nexus
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends gnome-keyring libsecret-1-0 dbus \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=nexus-app /opt/xodus-nexus /opt/xodus-nexus
+COPY --chmod=755 root/usr/bin/xodus-nexus /usr/bin/xodus-nexus
+COPY --chmod=755 root/opt/direwolf/launch-nexus /opt/direwolf/launch-nexus
+COPY --chmod=755 root/opt/gow/nexus-startup-app.sh /opt/gow/startup-app.sh
+COPY --chmod=755 root/usr/local/bin/xodus-nexus-update /usr/local/bin/xodus-nexus-update
+COPY --chmod=755 root/etc/cont-init.d/30-xodus-nexus-update.sh /etc/cont-init.d/
 RUN test -x /opt/xodus-nexus/AppRun && command -v gnome-keyring-daemon dbus-run-session dbus-send >/dev/null \
   && command -v python3 curl sha256sum gosu timeout >/dev/null \
   && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/xodus-nexus' \
+  && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
+
+# Sessions of one Battle.net game (XERK-2363): launch-battlenet starts the
+# client the Library installed, in its prefix in the shared home, launches the
+# game, and stops the client when the game exits. Battle.net's 32-bit client
+# needs the i386 freetype, fontconfig and ldap libraries heroic already has.
+FROM game-session AS battlenet
+COPY --from=proton-cachyos /opt/proton-cachyos /opt/proton-cachyos
+COPY --chmod=755 root/opt/direwolf/launch-battlenet /opt/direwolf/launch-battlenet
+COPY --chmod=755 root/opt/gow/battlenet-startup-app.sh /opt/gow/startup-app.sh
+RUN for lib in libfreetype.so.6 libfontconfig.so.1 libldap.so.2; do \
+    ldconfig -p | grep -q "${lib} (libc6)" || { echo "no i386 ${lib}" >&2; exit 1; }; \
+  done \
+  && command -v pgrep timeout >/dev/null \
+  && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/proton-cachyos' \
   && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"

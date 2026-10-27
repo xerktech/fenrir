@@ -1,0 +1,120 @@
+#!/bin/bash
+# launch-battlenet [product]: plays one Battle.net game in a session and exits
+# when it does, so the session ends with the game (XERK-2363). The product is
+# the argument or $BATTLENET_PRODUCT, a Battle.net uid from the list below.
+#
+# What the XERK-2360 spike found (.claude/rules/battlenet.md):
+# - Battle.net.exe --exec="launch <code>" on a cold start launches nothing; a
+#   second one sent to the running client does. So start the client, then
+#   send the launch until the game appears.
+# - The client starts the game, not either `proton run`, so wait on the game's
+#   process, then `wineserver -k` the prefix: the client, its Agent and both
+#   wrappers otherwise keep running.
+#
+# The client and its games are installed (and kept patched) from the Library,
+# which shares this prefix and Proton pin. A game the client must patch first
+# shows Battle.net's window, not a hung screen, until $BATTLENET_LAUNCH_TIMEOUT
+# ends the session; so does an expired sign-in.
+
+PROTON="${BATTLENET_PROTON:-/opt/proton-cachyos/proton}"
+UID_MAP="${BATTLENET_UID_MAP:-/proc/self/uid_map}"
+timeout="${BATTLENET_LAUNCH_TIMEOUT:-300}"
+resend="${BATTLENET_RESEND_INTERVAL:-15}"
+
+log() { echo "launch-battlenet: $*" >&2; }
+
+product="${1:-${BATTLENET_PRODUCT:-}}"
+# Only games known to launch this way: the code goes into Battle.net's command
+# line, the product into a process pattern. Each: --exec code, executable.
+case "${product}" in
+  wow) code=WoW exe=Wow.exe ;;  # World of Warcraft (retail), XERK-2360
+  *)
+    log "unknown product '${product}'; expected one of: wow"
+    exit 2
+    ;;
+esac
+for n in "${timeout}" "${resend}"; do
+  if [[ ! "${n}" =~ ^[1-9][0-9]{0,4}$ ]]; then
+    log "BATTLENET_LAUNCH_TIMEOUT and BATTLENET_RESEND_INTERVAL must be whole seconds"
+    exit 2
+  fi
+done
+
+# Battle.net serves its WebServer and Agent on 127.0.0.1 (XERK-2362): run only
+# off the host network. Its App needs spec.requireAppPod, which puts it in the
+# user-namespaced App pod; the host user namespace maps every ID to itself.
+read -r inside outside count <"${UID_MAP}" || count=""
+if [ "${inside}-${outside}-${count}" = "0-0-4294967295" ]; then
+  log "refusing to run in the host user namespace: its pod may be host-networked," \
+    "where Battle.net's listeners would be the node's loopback; set spec.requireAppPod"
+  exit 2
+fi
+
+export STEAM_COMPAT_DATA_PATH="${BATTLENET_PREFIX:-${HOME}/.local/share/battlenet}"
+export STEAM_COMPAT_CLIENT_INSTALL_PATH="${HOME}/.local/share/Steam"
+# Xalia walks CEF's accessibility tree at a quarter of a core.
+export PROTON_USE_XALIA=0
+# This Proton otherwise fetches an unpinned DLL into the prefix on every run.
+export PROTON_FSR4_UPGRADE=0
+pfx="${STEAM_COMPAT_DATA_PATH}/pfx"
+client="${pfx}/drive_c/Program Files (x86)/Battle.net/Battle.net.exe"
+
+if [ ! -f "${client}" ]; then
+  log "Battle.net is not installed in ${STEAM_COMPAT_DATA_PATH}; install it from the Library"
+  exit 1
+fi
+
+# The game inherits the client's environment. vkd3d-proton keeps its pipeline
+# cache in the game's working directory and DXVK beside its executable, both
+# on the shared games volume; keep them per game in the home instead, as
+# launch-nexus does (XERK-2349). An explicit value is kept.
+cache="${XDG_CACHE_HOME:-${HOME}/.cache}"
+if [ -z "${VKD3D_SHADER_CACHE_PATH:-}" ] && mkdir -p "${cache}/vkd3d-proton/battlenet-${product}"; then
+  export VKD3D_SHADER_CACHE_PATH="${cache}/vkd3d-proton/battlenet-${product}"
+fi
+if [ -z "${DXVK_STATE_CACHE_PATH:-}" ] && mkdir -p "${cache}/dxvk/battlenet-${product}"; then
+  export DXVK_STATE_CACHE_PATH="${cache}/dxvk/battlenet-${product}"
+fi
+
+# Wine names the game's process by its Windows path, e.g.
+# Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe -launcherlogin -uid wow
+# Anchored at the drive letter: other command lines may mention the game.
+game='^[A-Za-z]:\\.*\\'"${exe//./\\.}"' .*-uid '"${product}"'( |$)'
+game_running() { pgrep -u "$(id -u)" -f "${game}" >/dev/null; }
+
+# Ends the client, its Agent, the game and every `proton run` on the prefix.
+stop_battlenet() {
+  WINEPREFIX="${pfx}" "${PROTON%/*}/files/bin/wineserver" -k
+  wait
+}
+
+log "starting Battle.net for ${product}"
+"${PROTON}" run "${client}" &
+client_pid=$!
+
+deadline=$((SECONDS + timeout))
+next_send=$((SECONDS + resend))
+until game_running; do
+  if ! kill -0 "${client_pid}" 2>/dev/null; then
+    log "Battle.net exited before ${product} started"
+    stop_battlenet
+    exit 1
+  fi
+  if ((SECONDS >= deadline)); then
+    log "${product} did not start within ${timeout}s (patching, or signed out?)"
+    stop_battlenet
+    exit 1
+  fi
+  if ((SECONDS >= next_send)); then
+    timeout 60 "${PROTON}" run "${client}" --exec="launch ${code}"
+    next_send=$((SECONDS + resend))
+  fi
+  sleep 1
+done
+
+log "${product} is running"
+while game_running; do
+  sleep 2
+done
+log "${product} exited; stopping Battle.net"
+stop_battlenet

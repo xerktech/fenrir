@@ -59,19 +59,13 @@ func TestLaunchNexusKeepsAnExplicitShaderCache(t *testing.T) {
 }
 
 // The driver trims its cache in the session's first OpenGL process (sway), so
-// the setting must be in the nexus image's environment, not only the game's.
-func TestNexusImageKeepsTheNVIDIAShaderCache(t *testing.T) {
-	dockerfile, err := os.ReadFile("Dockerfile")
-	if err != nil {
-		t.Fatal(err)
+// the setting must be in the game-session image's environment (nexus and
+// battlenet build on it), not only the game's.
+func TestGameSessionImageKeepsTheNVIDIAShaderCache(t *testing.T) {
+	if !strings.Contains(dockerfileStage(t, "heroic AS game-session"), "\nENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1\n") {
+		t.Fatal("the game-session stage must set ENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1")
 	}
-	for stage := range strings.SplitSeq(string(dockerfile), "\nFROM ") {
-		if strings.HasPrefix(stage, "heroic AS nexus\n") {
-			if !strings.Contains(stage, "\nENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1\n") {
-				t.Fatal("the nexus stage must set ENV __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1")
-			}
-			return
-		}
+	for _, target := range []string{"nexus", "battlenet"} {
+		dockerfileStage(t, "game-session AS "+target)
 	}
-	t.Fatal("no nexus stage in the Dockerfile")
 }
