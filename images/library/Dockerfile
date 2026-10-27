@@ -104,6 +104,13 @@ RUN \
     libfreetype6:i386 libfontconfig1:i386 libldap2:i386 libkrb5-3:i386 libgssapi-krb5-2:i386 \
     libsqlite3-0:i386 libgpg-error0:i386 libpulse0:i386 libdbus-1-3:i386 libxrandr2:i386 \
     libxcomposite1:i386 libxcursor1:i386 libcups2t64:i386 && \
+  echo "**** keep battle.net's login window its own size ****" && \
+  # The desktop's rc.xml is rebuilt from /defaults/labwc.xml at every start,
+  # and its catch-all rule maximizes every window. Battle.net's fixed-size
+  # login window then fights the resize forever and its page never renders
+  # (XERK-2361 QA). Its class, steam_proton, is every Proton window's.
+  sed -i 's|<windowRule identifier="\*"><action name="Maximize" /></windowRule>|&\n    <windowRule identifier="steam_proton" title="Battle.net Login"><action name="UnMaximize" /></windowRule>|' /defaults/labwc.xml && \
+  grep -q 'title="Battle.net Login"' /defaults/labwc.xml && \
   echo "**** add heroic, xodus nexus and battle.net to the openbox menus ****" && \
   for menu in /defaults/menu.xml /defaults/menu_wayland.xml; do \
     sed -i 's|</menu>|<item label="Heroic" icon="/usr/share/icons/hicolor/48x48/apps/heroic.png"><action name="Execute"><command>/usr/bin/wrapped-heroic</command></action></item>\n</menu>|' "$menu" && \

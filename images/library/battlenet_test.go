@@ -37,7 +37,7 @@ func newBattlenetHost(t *testing.T) *battlenetHost {
 if [ "$2" = reg ]; then mkdir -p "$STEAM_COMPAT_DATA_PATH/pfx" && echo '"UseTakeFocus"="N"' >>"$STEAM_COMPAT_DATA_PATH/pfx/user.reg"; fi
 exit 0`)
 	writeStub(t, filepath.Join(h.proton, "files", "bin", "wineserver"), `echo "wineserver $* $WINEPREFIX" >>"$LOG"`)
-	writeStub(t, filepath.Join(dir, "bin", "pgrep"), `[ -n "$CLIENT_RUNNING" ]`)
+	writeStub(t, filepath.Join(dir, "bin", "pgrep"), `case "$*" in *Setup*) [ -n "$SETUP_RUNNING" ] ;; *) [ -n "$CLIENT_RUNNING" ] ;; esac`)
 	return h
 }
 
@@ -86,13 +86,24 @@ func (h *battlenetHost) run(env []string, args ...string) string {
 	return string(calls) + string(out)
 }
 
-func (h *battlenetHost) readConfig() map[string]any {
+// battlenetConfig is the part of Battle.net.config the wrapper sets, plus
+// settings it must keep.
+type battlenetConfig struct {
+	Client struct {
+		HardwareAcceleration string
+		AutoLogin            string
+		Install              struct{ DefaultInstallPath string }
+	}
+	WoW map[string]any `json:"wow"`
+}
+
+func (h *battlenetHost) readConfig() battlenetConfig {
 	h.t.Helper()
 	b, err := os.ReadFile(h.config())
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	var c map[string]any
+	var c battlenetConfig
 	if err = json.Unmarshal(b, &c); err != nil {
 		h.t.Fatalf("%v\n%s", err, b)
 	}
@@ -137,11 +148,11 @@ func TestBattlenetFirstStartInstalls(t *testing.T) {
 	if want := `proton run /opt/battlenet/Battle.net-Setup.exe --lang=enUS --installpath=C:\Program Files (x86)\Battle.net`; !strings.Contains(calls, want) {
 		t.Errorf("calls lack %q:\n%s", want, calls)
 	}
-	client := h.readConfig()["Client"].(map[string]any)
-	if client["HardwareAcceleration"] != "false" {
-		t.Errorf("HardwareAcceleration %v", client["HardwareAcceleration"])
+	client := h.readConfig().Client
+	if client.HardwareAcceleration != "false" {
+		t.Errorf("HardwareAcceleration %q", client.HardwareAcceleration)
 	}
-	if p := client["Install"].(map[string]any)["DefaultInstallPath"]; p != "Z:"+h.games+"/" {
+	if p := client.Install.DefaultInstallPath; p != "Z:"+h.games+"/" {
 		t.Errorf("DefaultInstallPath %v, want Z:%s/", p, h.games)
 	}
 }
@@ -152,7 +163,7 @@ func TestBattlenetStartsInstalledClientAndKeepsSettings(t *testing.T) {
 	h := newBattlenetHost(t)
 	for path, body := range map[string]string{
 		h.client(): "",
-		h.config(): `{"Client":{"HardwareAcceleration":"true","AutoLogin":"true","Install":{"DefaultInstallPath":"D:/Blizzard/"}},"wow":{"Region":"US"}}`,
+		h.config(): "\ufeff" + `{"Client":{"HardwareAcceleration":"true","AutoLogin":"true","Install":{"DefaultInstallPath":"D:/Blizzard/"}},"wow":{"Region":"US"}}`,
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -166,9 +177,8 @@ func TestBattlenetStartsInstalledClientAndKeepsSettings(t *testing.T) {
 		t.Errorf("calls lack %q:\n%s", want, calls)
 	}
 	c := h.readConfig()
-	client := c["Client"].(map[string]any)
-	if client["HardwareAcceleration"] != "false" || client["AutoLogin"] != "true" ||
-		client["Install"].(map[string]any)["DefaultInstallPath"] != "D:/Blizzard/" || c["wow"] == nil {
+	if c.Client.HardwareAcceleration != "false" || c.Client.AutoLogin != "true" ||
+		c.Client.Install.DefaultInstallPath != "D:/Blizzard/" || c.WoW["Region"] != "US" {
 		t.Errorf("config %v", c)
 	}
 }
@@ -260,5 +270,14 @@ func TestInitBattlenetLeavesLinkAndMissingVolume(t *testing.T) {
 		if strings.Contains(calls, "chown") || !strings.Contains(calls, "--prepare") {
 			t.Errorf("%s: calls:\n%s", g, calls)
 		}
+	}
+}
+
+// A second start while the installer runs starts no second installer.
+func TestBattlenetStartsOneInstaller(t *testing.T) {
+	h := newBattlenetHost(t)
+	calls := h.run([]string{"SETUP_RUNNING=1"})
+	if strings.Contains(calls, "Battle.net-Setup.exe --lang") || !strings.Contains(calls, "installer is already running") {
+		t.Errorf("calls:\n%s", calls)
 	}
 }

@@ -23,6 +23,12 @@ paths:
   - Each start with no client running forces `Client.HardwareAcceleration` off and, if unset,
     `Client.Install.DefaultInstallPath` to `Z:/games/battlenet/`. That key name is unverified
     against Battle.net; if it ignores it, pick the folder in the install dialog.
+  - The Library's labwc maximizes every window (`/defaults/labwc.xml`, rebuilt into rc.xml at each
+    start). The fixed-size "Battle.net Login" window then fights the resize and its page never
+    renders, so the image adds an UnMaximize rule for that title. Its class `steam_proton` is
+    every Proton window's: never unmaximize by class alone.
+  - `PROTON_FSR4_UPGRADE=0`: this Proton otherwise downloads a 65 MB DLL, outside the image's
+    pin, into the prefix on every run.
   - No autostart beside Heroic: nothing needs the client running, and its CEF costs CPU.
 
 ## Running it under Proton
