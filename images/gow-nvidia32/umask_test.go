@@ -18,9 +18,13 @@ func TestSessionImagesUseUmask022(t *testing.T) {
 	for stage := range strings.SplitSeq(string(dockerfile), "\nFROM ") {
 		header, _, _ := strings.Cut(stage, "\n")
 		_, name, _ := strings.Cut(header, " AS ")
+		// Any other mention could reset it: a second key on an ENV line, the
+		// legacy "ENV UMASK 000", a continuation, a RUN editing GoW's hook.
 		for line := range strings.SplitSeq(stage, "\n") {
-			if strings.HasPrefix(line, "ENV UMASK=") && line != "ENV UMASK=022" {
-				t.Errorf("stage %s sets %q, want ENV UMASK=022", name, line)
+			line = strings.TrimSpace(line)
+			if strings.Contains(strings.ToUpper(line), "UMASK") &&
+				!strings.HasPrefix(line, "#") && line != "ENV UMASK=022" {
+				t.Errorf("stage %s has %q; only ENV UMASK=022 may mention UMASK", name, line)
 			}
 		}
 		if want[name] {
