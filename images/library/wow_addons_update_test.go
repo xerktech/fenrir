@@ -162,11 +162,12 @@ func (p *wowPod) runArgs(list *string, args []string, mayFail bool, env ...strin
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "python3", append([]string{"-I"}, args...)...) //nolint:gosec // the script under test, or its fault driver
+	// -B: the fault driver imports the script, and its __pycache__ would land
+	// in the image source (-I ignores PYTHONDONTWRITEBYTECODE).
+	cmd := exec.CommandContext(ctx, "python3", append([]string{"-I", "-B"}, args...)...) //nolint:gosec // the script under test, or its fault driver
 	cmd.Env = append(os.Environ(),
 		"PATH="+filepath.Join(p.dir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
-		// The fault driver imports the script: no __pycache__ in the image source.
-		"PYTHONDONTWRITEBYTECODE=1", "LOG="+p.log, "BATTLENET_GAMES="+p.games,
+		"LOG="+p.log, "BATTLENET_GAMES="+p.games,
 		"FAKE_RELEASE="+filepath.Join(p.dir, "release.json"), "FAKE_ASSET="+filepath.Join(p.dir, "asset"))
 	cmd.Env = append(cmd.Env, env...)
 	if list != nil {
