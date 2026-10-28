@@ -88,11 +88,14 @@ if [ -z "${DXVK_STATE_CACHE_PATH:-}" ] && mkdir -p "${cache}/dxvk/battlenet-${pr
   export DXVK_STATE_CACHE_PATH="${cache}/dxvk/battlenet-${product}"
 fi
 
-# Wine names the game's process by its Windows path, e.g.
-# Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe -launcherlogin -uid wow
-# Anchored at the drive letter: other command lines may mention the game.
-game='^[A-Za-z]:\\.*\\'"${exe//./\\.}"' .*-uid '"${product}"'( |$)'
-game_running() { pgrep -u "$(id -u)" -f "${game}" >/dev/null; }
+# Wine names the game's process by the Windows path it was started with.
+# Battle.net writes them with forward slashes (C:/Program Files (x86)/
+# Battle.net/Battle.net.exe; WoW at Z:/games/battlenet/World of Warcraft), and
+# a pattern for backslashes alone never saw WoW start, so every resend started
+# another copy, each logging the last one out (XERK-2363). Either separator,
+# any arguments. Anchored at the drive letter: other command lines may name it.
+game='^[A-Za-z]:[\\/](.*[\\/])?'"${exe//./\\.}"'( |$)'
+game_running() { pgrep -u "$(id -u)" -f -i "${game}" >/dev/null; }
 
 # Ends the client, its Agent, the game and every `proton run` on the prefix.
 stop_battlenet() {
@@ -113,6 +116,7 @@ client_pid=$!
 
 deadline=$((SECONDS + timeout))
 next_send=$((SECONDS + resend))
+sends=0
 until game_running; do
   if ! kill -0 "${client_pid}" 2>/dev/null; then
     log "Battle.net exited before ${product} started"
@@ -128,7 +132,11 @@ until game_running; do
     # In the background: if this wrapper stays up too, it must not hold the
     # loop. wineserver -k ends it with the rest.
     "${PROTON}" run "${client}" --exec="launch ${code}" &
-    next_send=$((SECONDS + resend))
+    sends=$((sends + 1))
+    log "sent launch ${sends} for ${product}"
+    # Backing off: a launch the client took but this missed starts another
+    # copy of the game, so a missed match must cost few of them.
+    next_send=$((SECONDS + resend * (1 << (sends < 3 ? sends : 3))))
   fi
   sleep 1
 done

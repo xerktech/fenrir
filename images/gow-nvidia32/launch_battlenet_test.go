@@ -25,7 +25,7 @@ case "$*" in
 *--exec=*)
   if [ -f "$STUB_DIR/ready" ] && [ -n "${GAME_SECONDS:-}" ]; then
     # Wine's argv[0] is the game's Windows path with its arguments.
-    bash -c 'exec -a "$0" sleep "$1"' 'Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe -launcherlogin -uid wow' "$GAME_SECONDS" &
+    bash -c 'exec -a "$0" sleep "$1"' "${GAME_ARGV0:-Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe -launcherlogin -uid wow}" "$GAME_SECONDS" &
     echo $! >"$STUB_DIR/game.pid"
   fi
   touch "$STUB_DIR/ready"
@@ -203,12 +203,42 @@ func TestLaunchBattlenetLeavesSwayAloneOutsideSway(t *testing.T) {
 	}
 }
 
+// Wine shows the path the client started the game with: Battle.net uses
+// forward slashes, but either must count, with or without arguments.
+func TestLaunchBattlenetSeesTheGameByEitherPath(t *testing.T) {
+	for _, argv0 := range []string{
+		`Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe -launcherlogin -uid wow`,
+		`Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe -launcherlogin -uid wow`,
+		`z:/games/battlenet/World of Warcraft/_retail_/WOW.EXE`,
+	} {
+		r := runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3", "GAME_ARGV0="+argv0)
+		if r.code != 0 || !strings.Contains(r.out, "wow is running") {
+			t.Errorf("%s: exit %d, want the game seen\n%s", argv0, r.code, r.out)
+		}
+	}
+}
+
+// A missed match makes every send start another copy, each logging the last
+// one out: sends back off (2, 4, then 8 resend intervals apart).
+func TestLaunchBattlenetBacksOffItsLaunches(t *testing.T) {
+	r := runLaunchBattlenet(t, true, []string{"wow"}, "BATTLENET_RESEND_INTERVAL=1", "BATTLENET_LAUNCH_TIMEOUT=20")
+	if r.code != 1 {
+		t.Fatalf("exit %d, want 1\n%s", r.code, r.out)
+	}
+	// Sends at about 1, 3, 7, 15s: four in 20s, not twenty.
+	if n := strings.Count(r.out, "sent launch "); n != 4 {
+		t.Errorf("%d launches in 20s, want 4\n%s", n, r.out)
+	}
+}
+
 // Other processes whose command lines name the game, or another product's
 // game, are not the game (with no game started, the launch times out).
 func TestLaunchBattlenetIgnoresLookalikeProcesses(t *testing.T) {
-	path := `Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe`
-	for _, argv0 := range []string{"bash " + path + " -launcherlogin -uid wow",
-		path + " -launcherlogin -uid wow_classic", `Z:\games\WowB.exe -uid wow`} {
+	for _, argv0 := range []string{
+		`bash Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe -launcherlogin -uid wow`,
+		`bash Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe -launcherlogin -uid wow`,
+		`Z:/games/battlenet/World of Warcraft/_classic_/WowClassic.exe -uid wow_classic`,
+		`Z:\games\WowB.exe -uid wow`, `Z:/games/Wow.exe.bak`} {
 		decoy := exec.CommandContext(t.Context(), "bash", "-c", `exec -a "$0" sleep 30`, argv0)
 		if err := decoy.Start(); err != nil {
 			t.Fatal(err)
