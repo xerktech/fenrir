@@ -67,6 +67,10 @@ const stubKillall = `#!/bin/sh
 echo "killall $*" >>"$STUB_LOG"
 `
 
+const stubSwaymsg = `#!/bin/sh
+echo "swaymsg $* SWAYSOCK=$SWAYSOCK" >>"$STUB_LOG"
+`
+
 type battlenetRun struct {
 	home, prefix, log string
 	code              int
@@ -81,7 +85,7 @@ func runLaunchBattlenet(t *testing.T, install bool, args []string, env ...string
 	if err := os.MkdirAll(filepath.Join(stub, "files", "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	stubs := map[string]string{"proton": stubProton, "files/bin/wineserver": stubWineserver, "bin/killall": stubKillall}
+	stubs := map[string]string{"proton": stubProton, "files/bin/wineserver": stubWineserver, "bin/killall": stubKillall, "bin/swaymsg": stubSwaymsg}
 	if err := os.MkdirAll(filepath.Join(stub, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -263,6 +267,28 @@ func TestLaunchBattlenetLaunchesOnceTheClientIsUp(t *testing.T) {
 	}
 	if n := strings.Count(r.out, "sent launch "); n != 1 || !strings.Contains(r.out, "Battle.net is up") {
 		t.Errorf("%d launches, want 1 after the client is up\n%s", n, r.out)
+	}
+}
+
+// Under sway the client's window would share the screen with the game's: once
+// the game runs it goes to the scratchpad. Outside sway nothing is asked.
+func TestLaunchBattlenetMovesTheClientOutOfTheGamesWay(t *testing.T) {
+	r := runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3", "SWAYSOCK=/run/sway.sock")
+	if r.code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
+	}
+	calls := r.calls(t)
+	want := `swaymsg [title="^Battle\.net$" class="^steam_proton$"] move scratchpad SWAYSOCK=/run/sway.sock`
+	i := slices.Index(calls, want)
+	if i < 0 {
+		t.Fatalf("calls %q, want %q", calls, want)
+	}
+	if j := slices.IndexFunc(calls, func(c string) bool { return strings.Contains(c, "--exec=launch WoW") }); j > i {
+		t.Errorf("moved the client's window before launching the game: %q", calls)
+	}
+	if slices.ContainsFunc(runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3").calls(t),
+		func(c string) bool { return strings.HasPrefix(c, "swaymsg ") }) {
+		t.Error("ran swaymsg without SWAYSOCK")
 	}
 }
 

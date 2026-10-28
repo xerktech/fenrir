@@ -51,6 +51,9 @@ paths:
   - It refuses the host user namespace (identity `uid_map`): only the App pod
     (`spec.requireAppPod`) keeps the client's listeners off the node's loopback.
   - The product never joins sway's exec line: the startup runs the script bare.
+  - Battle.net's window (`Battle.net`, class `steam_proton`) and WoW's (`World of Warcraft`) tile
+    side by side under sway, so once the game runs the client's goes to the scratchpad
+    (`swaymsg`). Tested live: WoW then fills the output.
   - Tests: `images/gow-nvidia32/launch_battlenet_test.go` (stub Proton and wineserver).
 
 ## Managed WoW addons (XERK-2366)

@@ -173,6 +173,13 @@ until game_running; do
 done
 
 log "${product} is running"
+# Under sway the client's window and the game's tile side by side, so the game
+# got half the screen (XERK-2363). Once the game runs, put the client's window
+# on sway's scratchpad; until then it stays in view (sign-in, patching).
+if [ -n "${SWAYSOCK:-}" ]; then
+  swaymsg '[title="^Battle\.net$" class="^steam_proton$"] move scratchpad' >/dev/null ||
+    log "could not move Battle.net's window out of the game's way"
+fi
 while game_running; do
   sleep 2
 done
