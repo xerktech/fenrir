@@ -37,7 +37,7 @@ paths:
     scan reads through it, so keep `tar -h` and never resolve or reject that link.
   - A launcher whose base App is missing is skipped: its Apps stay, never "uninstalled".
   - Only Apps labelled `direwolf/catalogue=<store>` are ever updated or deleted.
-- Generated Apps are a copy of `--catalogue-steam-app` / `--catalogue-heroic-app`.
+- Generated Apps are a copy of their store's `--catalogue-<store>-app` base App.
   - The base App's container must run `$DIREWOLF_LAUNCH_COMMAND` (a shell command line).
   - The base should be `hidden: true`; copies reset `hidden` to false on create.
   - `hidden` and `gpu` are per-game settings: set from the base on create, then the user's.
@@ -89,6 +89,18 @@ paths:
     up to ~4 MB of base64, so a few dozen games pass `catalogueMaxStoreBytes`, and an over-cap
     file fails the scan for every store. `LC_ALL=C` and no capture group keep the sed within the
     scan timeout. Tests: `TestCatalogueScanStripsNexusInlineCovers`.
+- Battle.net (`--catalogue-battlenet-app`, store `battlenet`, XERK-2364): the scan reads the
+  Agent's `product.db` in the Library's prefix (`battlenetProductDB`), a protobuf.
+  - `protoWalk` is a bounded, non-recursive decoder (no protobuf dependency). Field numbers are
+    Lutris's ProductDb.proto: uid 1; installed at 4 → 1 → 1. Unverified against a live file.
+  - Absent is no games; empty, torn, or a known field in another wire type fails the scan.
+  - Only installed uids in `battlenetProducts` get an App; others are logged and skipped.
+    That table must equal `launch-battlenet`'s case list (`TestBattlenetProductsLaunchable`):
+    an App launch-battlenet refuses only ends its session. Add a game to both at once.
+  - The battlenet image's startup reads the uid from `BATTLENET_PRODUCT`, never a shell line, so
+    syncApp sets it beside `$DIREWOLF_LAUNCH_COMMAND` (`/opt/direwolf/launch-battlenet <uid>`).
+  - Covers are fixed URLs in `battlenetProducts` (Blizzard's CDN, exact host in `artHosts`).
+  - Tests: `catalogue_battlenet_test.go` (fixture product.db in `testdata/catalogue`).
 - The CRD rejects an empty `appAssetWebP` (the fake clientset doesn't): a catalogue App shows
   the base App's cover until its own is fetched.
 - A name held by a hand-made App is never overwritten; that game is skipped, with an error.

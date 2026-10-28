@@ -78,6 +78,8 @@ func main() {
 		"App copied for each installed Epic/GOG game, launched through Heroic. Empty: Heroic games are not catalogued. Needs --library-port")
 	catalogueNexusApp := flag.String("catalogue-nexus-app", "",
 		"App copied for each Microsoft Store game installed with Xodus Nexus. Empty: Nexus games are not catalogued. Needs --library-port")
+	catalogueBattlenetApp := flag.String("catalogue-battlenet-app", "",
+		"App copied for each Blizzard game installed with Battle.net (its pod template runs launch-battlenet, which reads $BATTLENET_PRODUCT). Empty: Battle.net games are not catalogued. Needs --library-port")
 	rommURL := flag.String("romm-url", "",
 		"RomM's base URL, e.g. http://romm.games.svc:8080; its token is read from $ROMM_TOKEN. Empty: ROMs are not catalogued")
 	rommApp := flag.String("romm-app", "",
@@ -140,8 +142,8 @@ func main() {
 	if wowAddonsErr != nil {
 		klog.Errorf("--library-wow-addons: %v; the Library leaves WoW addons as they are", wowAddonsErr)
 	}
-	if *libraryPort == 0 && (*catalogueSteamApp != "" || *catalogueHeroicApp != "" || *catalogueNexusApp != "") {
-		klog.Fatal("--catalogue-steam-app, --catalogue-heroic-app and --catalogue-nexus-app need --library-port: the catalogue is read from the Library")
+	if *libraryPort == 0 && (*catalogueSteamApp != "" || *catalogueHeroicApp != "" || *catalogueNexusApp != "" || *catalogueBattlenetApp != "") {
+		klog.Fatal("--catalogue-steam-app, --catalogue-heroic-app, --catalogue-nexus-app and --catalogue-battlenet-app need --library-port: the catalogue is read from the Library")
 	}
 	if *libraryIdleTimeout <= 0 {
 		klog.Fatalf("--library-idle-timeout must be positive, got %s", *libraryIdleTimeout)
@@ -271,12 +273,12 @@ func main() {
 				WoWAddonsInvalid: wowAddonsErr != nil,
 			},
 		)
-		if *catalogueSteamApp != "" || *catalogueHeroicApp != "" || *catalogueNexusApp != "" {
+		if *catalogueSteamApp != "" || *catalogueHeroicApp != "" || *catalogueNexusApp != "" || *catalogueBattlenetApp != "" {
 			libraryController.Catalogue = controllers.NewCatalogue(
 				direwolfClient.DirewolfV1alpha1().Apps(*namespace),
 				libraryController.Exec,
 				*libraryGamesPath,
-				controllers.CatalogueOptions{SteamBaseApp: *catalogueSteamApp, HeroicBaseApp: *catalogueHeroicApp, NexusBaseApp: *catalogueNexusApp},
+				controllers.CatalogueOptions{SteamBaseApp: *catalogueSteamApp, HeroicBaseApp: *catalogueHeroicApp, NexusBaseApp: *catalogueNexusApp, BattlenetBaseApp: *catalogueBattlenetApp},
 			)
 			catalogueBaseChanged, err = libraryController.Catalogue.BaseAppChanges(appInformer)
 			if err != nil {

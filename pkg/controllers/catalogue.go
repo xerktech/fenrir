@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,6 +67,9 @@ const (
 	// shell command line that starts the game. The base App's container runs
 	// it once the session is up (e.g. `exec sh -c "$DIREWOLF_LAUNCH_COMMAND"`).
 	LaunchCommandEnv = "DIREWOLF_LAUNCH_COMMAND"
+	// battlenetProductEnv names a Battle.net catalogue App's game for the
+	// battlenet image's launch-battlenet, which never runs a shell line.
+	battlenetProductEnv = "BATTLENET_PRODUCT"
 
 	// A Library that reports more games than this is not believed: every one
 	// becomes an App CR.
@@ -121,6 +125,27 @@ const nexusState = libraryHome + "/.config/xodus-nexus/launcher-state.json"
 // (game-shortcuts.ts validId).
 var nexusGameID = regexp.MustCompile(`^[a-f0-9]{16}$`)
 
+// battlenetProductDB is the Battle.net Agent's record of installed products
+// (protobuf), in the prefix the Library's battlenet wrapper runs the client in.
+const battlenetProductDB = libraryHome + "/.local/share/battlenet/pfx/drive_c/ProgramData/Battle.net/Agent/product.db"
+
+// battlenetProduct is a Blizzard game the catalogue makes an App for.
+type battlenetProduct struct {
+	title string
+	art   string // a fixed URL on artHosts: never one from the Library's files
+}
+
+// battlenetProducts are the games catalogued, by their uid in product.db.
+// Only the uids launch-battlenet accepts (its case list, held equal by
+// TestBattlenetProductsLaunchable): any other would be an App that only
+// ends its session. The uid goes into a shell line and BATTLENET_PRODUCT.
+var battlenetProducts = map[string]battlenetProduct{
+	"wow": {"World of Warcraft", "https://blz-contentstack-images.akamaized.net/v3/assets/blta8f9a8e092360c6c/blt32d88afeaf869b25/68a34c30a317901872445d82/WoW_12.0_600x800.png"},
+}
+
+// battlenetUID is what a product.db uid may look like to be logged by name.
+var battlenetUID = regexp.MustCompile(`^[a-z0-9_.-]{1,32}$`)
+
 // storeProductID is a Microsoft Store product ID (9P8MK4NC0LJB). It goes into
 // the Store catalog lookup's query string.
 var storeProductID = regexp.MustCompile(`^[0-9A-Z]{12}$`)
@@ -155,11 +180,13 @@ const steamFullyInstalled = 4
 // write, so anything else would let them point the operator at in-cluster
 // services and read the reply back as an App's box art.
 // RomM's covers come from its metadata sources (IGDB, SteamGridDB, libretro
-// thumbnails, MobyGames); Nexus's from the Microsoft Store and Xbox image CDNs.
+// thumbnails, MobyGames); Nexus's from the Microsoft Store and Xbox image CDNs;
+// Battle.net's from Blizzard's (battlenetProducts, fixed in code).
 var artHosts = []string{
 	"steamstatic.com", "akamaihd.net", "epicgames.com", "unrealengine.com", "gog-statics.com", "gog.com",
 	"igdb.com", "steamgriddb.com", "libretro.com", "mobygames.com",
 	"s-microsoft.com", "xboxlive.com",
+	"blz-contentstack-images.akamaized.net",
 }
 
 type CatalogueOptions struct {
@@ -172,6 +199,9 @@ type CatalogueOptions struct {
 	// NexusBaseApp names the App Xodus Nexus (Microsoft Store) games are
 	// copied from.
 	NexusBaseApp string
+	// BattlenetBaseApp names the App Battle.net (Blizzard) games are copied
+	// from.
+	BattlenetBaseApp string
 	// RomMBaseApp names the App RomM ROM entries are copied from. Only ever
 	// set on RomM's own Catalogue: a Catalogue syncs every store it has a
 	// base for, so the Library's would delete every RomM App as uninstalled.
@@ -181,7 +211,7 @@ type CatalogueOptions struct {
 // catalogueGame is one installed game found in the Library.
 type catalogueGame struct {
 	Store  string // v1alpha1types.CatalogueStore*
-	ID     string // Steam appid, Heroic appName or Nexus game ID
+	ID     string // Steam appid, Heroic appName, Nexus game ID or Battle.net uid
 	Title  string
 	ArtURL []string // tried in order
 	// StoreID is a Nexus game's Store product ID: its Store catalog art is
@@ -316,8 +346,8 @@ func (c *Catalogue) Scan(ctx context.Context, pod *corev1.Pod, artBudget time.Du
 
 // catalogueScanCommand tars every appmanifest in the default Steam library
 // and in library folders on the games volume (as steamDownloadsCommand looks
-// for downloads), plus Heroic's installed-games and library stores and Nexus's
-// launcher state. tar frames
+// for downloads), plus Heroic's installed-games and library stores, Nexus's
+// launcher state and Battle.net's product.db. tar frames
 // each file with its size, and fails (exit 1) on a file that changed while
 // read, so a torn read fails the scan rather than parsing as fewer games.
 // Symlinks are followed (-h; tar would otherwise archive an empty entry); a
@@ -403,7 +433,7 @@ done
 [ $# -eq 0 ] && exit 0
 tar -chf - -- "$@"
 `, "sh", strconv.Itoa(catalogueMaxManifestBytes), strconv.Itoa(catalogueMaxStoreBytes), libraryHome, gamesPath,
-		nexusState, heroicLegendaryInstalled, heroicGOGInstalled, heroicLegendaryLibrary, heroicGOGLibrary}
+		nexusState, heroicLegendaryInstalled, heroicGOGInstalled, heroicLegendaryLibrary, heroicGOGLibrary, battlenetProductDB}
 }
 
 // readTar returns the archive's files by name (tar drops the leading /).
@@ -465,6 +495,11 @@ func parseInstalls(files map[string][]byte) ([]catalogueGame, error) {
 		return nil, err
 	}
 	games = append(games, nexus...)
+	battlenet, err := parseBattlenet(files)
+	if err != nil {
+		return nil, err
+	}
+	games = append(games, battlenet...)
 	if len(games) > catalogueMaxGames {
 		return nil, fmt.Errorf("the Library reports %d games, more than the %d catalogued", len(games), catalogueMaxGames)
 	}
@@ -766,6 +801,153 @@ func parseNexus(files map[string][]byte) ([]catalogueGame, error) {
 	return games, nil
 }
 
+// parseBattlenet reads the Blizzard games installed with Battle.net from its
+// Agent's product.db: no file means no games; an empty or malformed one fails
+// the scan. Only products whose install has completed, and whose uid is in
+// battlenetProducts, get an App.
+//
+// The layout (Blizzard's ProductDb.proto, as Lutris reads it): Database has
+// product_install = 1 (repeated); ProductInstall has uid = 1 and
+// cached_product_state = 4; CachedProductState has base_product_state = 1;
+// BaseProductState has installed = 1 (bool).
+func parseBattlenet(files map[string][]byte) ([]catalogueGame, error) {
+	data, ok := heroicFile(files, battlenetProductDB)
+	if !ok {
+		return nil, nil
+	}
+	// An installed client always lists itself (agent, battle.net), so an
+	// empty file is a torn or truncated one, not "no games".
+	if len(data) == 0 {
+		return nil, fmt.Errorf("parsing %s: empty", battlenetProductDB)
+	}
+	installed := map[string]bool{}
+	err := protoWalk(data, func(num, wire, _ uint64, field []byte) error {
+		if num != 1 {
+			return nil
+		}
+		if wire != protoBytes {
+			return errors.New("product_install is not a message")
+		}
+		uid, done, err := parseBattlenetInstall(field)
+		if err != nil {
+			return err
+		}
+		installed[uid] = installed[uid] || done
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", battlenetProductDB, err)
+	}
+	var games []catalogueGame
+	for uid, done := range installed {
+		product, known := battlenetProducts[uid]
+		switch {
+		case uid == "agent" || uid == "battle.net":
+		case !known && battlenetUID.MatchString(uid):
+			klog.Infof("Catalogue: skipping Battle.net product %q: not one launch-battlenet plays", uid)
+		case !known:
+			klog.Warning("Catalogue: skipping a Battle.net product with an unusable uid")
+		case done:
+			games = append(games, catalogueGame{Store: v1alpha1types.CatalogueStoreBattlenet, ID: uid, Title: product.title, ArtURL: []string{product.art}})
+		}
+	}
+	sort.Slice(games, func(i, j int) bool { return games[i].ID < games[j].ID })
+	return games, nil
+}
+
+// parseBattlenetInstall reads a ProductInstall's uid and whether its
+// install has completed (cached_product_state.base_product_state.installed).
+// A known field in another wire type than the schema's is a file this parser
+// doesn't understand, so it fails the scan.
+func parseBattlenetInstall(msg []byte) (uid string, installed bool, err error) {
+	// field returns fn for a message's field num, of the given wire type.
+	field := func(num, want uint64, fn func(v uint64, field []byte) error) func(n, wire, v uint64, f []byte) error {
+		return func(n, wire, v uint64, f []byte) error {
+			if n != num {
+				return nil
+			}
+			if wire != want {
+				return fmt.Errorf("field %d has wire type %d, want %d", num, wire, want)
+			}
+			return fn(v, f)
+		}
+	}
+	installedFlag := field(1, protoVarint, func(v uint64, _ []byte) error { installed = v != 0; return nil })
+	baseState := field(1, protoBytes, func(_ uint64, f []byte) error { return protoWalk(f, installedFlag) })
+	cachedState := field(4, protoBytes, func(_ uint64, f []byte) error { return protoWalk(f, baseState) })
+	uidField := field(1, protoBytes, func(_ uint64, f []byte) error { uid = string(f); return nil })
+	err = protoWalk(msg, func(n, wire, v uint64, f []byte) error {
+		if uidErr := uidField(n, wire, v, f); uidErr != nil {
+			return uidErr
+		}
+		return cachedState(n, wire, v, f)
+	})
+	if err == nil && uid == "" {
+		err = errors.New("a product_install has no uid")
+	}
+	return uid, installed, err
+}
+
+// Protobuf wire types protoWalk passes on.
+const (
+	protoVarint = 0
+	protoBytes  = 2
+)
+
+// protoWalk calls fn with each field of a protobuf message: its number, wire
+// type and value (a varint's in v, a length-delimited field's bytes in
+// field). It reads only within msg and never recurses on its own, so a
+// hostile file can neither overrun it nor nest it to death. Groups (wire
+// types 3 and 4, long deprecated) are an error.
+func protoWalk(msg []byte, fn func(num, wire, v uint64, field []byte) error) error {
+	for len(msg) > 0 {
+		key, n := binary.Uvarint(msg)
+		if n <= 0 {
+			return errors.New("bad field key")
+		}
+		msg = msg[n:]
+		num, wire := key>>3, key&7
+		if num == 0 {
+			return errors.New("field number 0")
+		}
+		var v uint64
+		var field []byte
+		switch wire {
+		case protoVarint:
+			if v, n = binary.Uvarint(msg); n <= 0 {
+				return errors.New("bad varint")
+			}
+			msg = msg[n:]
+		case 1, 5: // fixed64, fixed32
+			size := 8
+			if wire == 5 {
+				size = 4
+			}
+			if len(msg) < size {
+				return errors.New("truncated fixed-width field")
+			}
+			msg = msg[size:]
+		case protoBytes:
+			size, n := binary.Uvarint(msg)
+			if n <= 0 {
+				return errors.New("bad length")
+			}
+			msg = msg[n:]
+			if size > uint64(len(msg)) {
+				return errors.New("truncated length-delimited field")
+			}
+			end := int(size) //nolint:gosec // at most len(msg), checked above
+			field, msg = msg[:end:end], msg[end:]
+		default:
+			return fmt.Errorf("unsupported wire type %d", wire)
+		}
+		if err := fn(num, wire, v, field); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // heroicFile finds a Heroic store among the scanned files by its path below
 // the home directory (tar keeps the path relative to /).
 func heroicFile(files map[string][]byte, store string) ([]byte, bool) {
@@ -818,7 +1000,7 @@ func catalogueMoonlightID(store, id string) int {
 }
 
 // launchCommand is the shell command line that starts the game. IDs are
-// checked (numeric, heroicAppName, nexusGameID) before they get here.
+// checked (numeric, heroicAppName, nexusGameID, battlenetProducts) before they get here.
 func launchCommand(game *catalogueGame) string {
 	switch game.Store {
 	case v1alpha1types.CatalogueStoreRomM:
@@ -829,6 +1011,10 @@ func launchCommand(game *catalogueGame) string {
 		// Starts the game without the launcher window; Nexus quits when the
 		// game exits, which ends the session.
 		return "xodus-nexus --launch-game " + game.ID
+	case v1alpha1types.CatalogueStoreBattlenet:
+		// For the record: the battlenet image's startup reads the uid from
+		// BATTLENET_PRODUCT (set by syncApp), so it never joins a shell line.
+		return "/opt/direwolf/launch-battlenet " + game.ID
 	}
 	runner := "legendary"
 	if game.Store == v1alpha1types.CatalogueStoreGOG {
@@ -921,6 +1107,7 @@ func (o CatalogueOptions) baseApps() []struct {
 		{o.HeroicBaseApp, []string{v1alpha1types.CatalogueStoreEpic, v1alpha1types.CatalogueStoreGOG}},
 		{o.RomMBaseApp, []string{v1alpha1types.CatalogueStoreRomM}},
 		{o.NexusBaseApp, []string{v1alpha1types.CatalogueStoreNexus}},
+		{o.BattlenetBaseApp, []string{v1alpha1types.CatalogueStoreBattlenet}},
 	}
 }
 
@@ -1043,6 +1230,10 @@ func catalogueGameOf(app *v1alpha1types.App) (catalogueGame, error) {
 		if !nexusGameID.MatchString(game.ID) {
 			return game, errors.New("its catalogue ID is not a valid Nexus game ID")
 		}
+	case v1alpha1types.CatalogueStoreBattlenet:
+		if _, ok := battlenetProducts[game.ID]; !ok {
+			return game, errors.New("its catalogue ID is not a catalogued Battle.net product")
+		}
 	default:
 		if !heroicAppName.MatchString(game.ID) {
 			return game, errors.New("its catalogue ID is not a valid Heroic appName")
@@ -1148,6 +1339,9 @@ func (c *Catalogue) syncApp(ctx, artCtx context.Context, base *v1alpha1types.App
 	for i := range spec.Template.Spec.Containers {
 		ctr := &spec.Template.Spec.Containers[i]
 		ctr.Env = setEnv(ctr.Env, LaunchCommandEnv, launchCommand(game))
+		if game.Store == v1alpha1types.CatalogueStoreBattlenet {
+			ctr.Env = setEnv(ctr.Env, battlenetProductEnv, game.ID)
+		}
 	}
 
 	app := &v1alpha1types.App{ObjectMeta: metav1.ObjectMeta{Name: name}}

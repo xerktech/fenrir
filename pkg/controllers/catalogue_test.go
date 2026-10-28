@@ -110,6 +110,7 @@ func TestCatalogueScanFixtures(t *testing.T) {
 		"epic/Quail":             "Hades",
 		"gog/1207658924":         "Unreal Tournament 2004",
 		"nexus/3f2a9c1e7b4d5a60": "Minecraft Dungeons", // not the incomplete one, nor the unusable ID
+		"battlenet/wow":          "World of Warcraft",  // not the client, nor unlaunchable or uninstalled products
 	}
 	if len(got) != len(want) {
 		t.Errorf("scanned %d games, want %d: %+v", len(got), len(want), games)
@@ -227,6 +228,7 @@ func TestLaunchCommand(t *testing.T) {
 		{catalogueGame{Store: v1alpha1types.CatalogueStoreEpic, ID: "Quail"}, "heroic 'heroic://launch?appName=Quail&runner=legendary'"},
 		{catalogueGame{Store: v1alpha1types.CatalogueStoreGOG, ID: "1207658924"}, "heroic 'heroic://launch?appName=1207658924&runner=gog'"},
 		{catalogueGame{Store: v1alpha1types.CatalogueStoreNexus, ID: "3f2a9c1e7b4d5a60"}, "xodus-nexus --launch-game 3f2a9c1e7b4d5a60"},
+		{catalogueGame{Store: v1alpha1types.CatalogueStoreBattlenet, ID: "wow"}, "/opt/direwolf/launch-battlenet wow"},
 	} {
 		if got := launchCommand(&tc.game); got != tc.want {
 			t.Errorf("launchCommand(%+v) = %q, want %q", tc.game, got, tc.want)

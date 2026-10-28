@@ -74,6 +74,8 @@ controllers:
           #   --catalogue-steam-app=<base App for Steam games>
           #   --catalogue-heroic-app=<base App for Epic/GOG games>
           #   --catalogue-nexus-app=<base App for Xodus Nexus (Microsoft Store) games>
+          #   --catalogue-battlenet-app=<base App for Battle.net games: the battlenet
+          #     image, spec.requireAppPod; launch-battlenet reads $BATTLENET_PRODUCT>
           # RomM ROMs (one App per playable ROM, a RetroArch session) are off
           # unless --romm-url is set; the base App is examples/retroarch.yaml,
           # and the token (a RomM client API token with roms.read) is

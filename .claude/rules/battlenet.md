@@ -36,6 +36,8 @@ paths:
 
 - `launch-battlenet` (`$BATTLENET_PRODUCT`, allowlist `wow`) runs the Library's prefix and client
   with a Proton at the Library's pin: one prefix, bump both (`TestBattlenetProtonMatchesLibrary`).
+  - Its allowlist must equal the catalogue's `battlenetProducts`: add a game to both
+    (`TestBattlenetProductsLaunchable`). Catalogue Apps name it in `BATTLENET_PRODUCT`.
   - It installs nothing: a missing client, a patch or an expired sign-in end the session after
     `BATTLENET_LAUNCH_TIMEOUT` (300s) with Battle.net's window on screen meanwhile.
   - Every launch the client takes starts another copy, which logs the last one out (seen live).
@@ -130,6 +132,7 @@ paths:
 - `ProgramData\Battle.net\Agent\product.db` (protobuf) lists each product: uid (`agent`,
   `battle.net`, `wow`), install path (`Z:/games/battlenet/World of Warcraft`), region, locale,
   version (`12.1.5.70575`), plus a `_retail_` subdir for WoW.
+- The catalogue reads `product.db` for one App per installed game (`catalogue.md`, XERK-2364).
 - Each game folder also has `.build.info` (pipe-separated table: Branch, Active, Build Key, CDN
   Key, …, Version, Product) and its own `.product.db`.
 - A WoW download counts as Library activity under the idle rule: it is received bytes on eth0
