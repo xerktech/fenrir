@@ -89,7 +89,6 @@ echo "swaymsg $* SWAYSOCK=$SWAYSOCK" >>"$STUB_LOG"
 
 type battlenetRun struct {
 	home, prefix, log string
-	games             string // $BATTLENET_GAMES
 	code              int
 	out               string
 }
@@ -101,9 +100,9 @@ func runLaunchBattlenet(t *testing.T, install bool, args []string, env ...string
 	return runLaunchBattlenetWith(t, install, nil, args, env...)
 }
 
-// runLaunchBattlenetWith is runLaunchBattlenet with setup run on the run's
-// directories (the games volume is $BATTLENET_GAMES, not yet created) first.
-func runLaunchBattlenetWith(t *testing.T, install bool, setup func(battlenetRun), args []string, env ...string) battlenetRun {
+// runLaunchBattlenetWith is runLaunchBattlenet with setup first run on the
+// games volume, $BATTLENET_GAMES (not yet created).
+func runLaunchBattlenetWith(t *testing.T, install bool, setup func(games string), args []string, env ...string) battlenetRun {
 	t.Helper()
 	stub := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(stub, "files", "bin"), 0o755); err != nil {
@@ -124,7 +123,7 @@ func runLaunchBattlenetWith(t *testing.T, install bool, setup func(battlenetRun)
 	}
 	home := t.TempDir()
 	r := battlenetRun{home: home, prefix: filepath.Join(home, ".local", "share", "battlenet"),
-		log: filepath.Join(stub, "log"), games: filepath.Join(home, "games")}
+		log: filepath.Join(stub, "log")}
 	if install {
 		dir := filepath.Join(r.prefix, "pfx", "drive_c", "Program Files (x86)", "Battle.net")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -134,8 +133,9 @@ func runLaunchBattlenetWith(t *testing.T, install bool, setup func(battlenetRun)
 			t.Fatal(err)
 		}
 	}
+	games := filepath.Join(home, "games")
 	if setup != nil {
-		setup(r)
+		setup(games)
 	}
 	// A script that leaves the stub client up would otherwise hang the test.
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
@@ -143,7 +143,7 @@ func runLaunchBattlenetWith(t *testing.T, install bool, setup func(battlenetRun)
 	cmd := exec.CommandContext(ctx, "bash", append([]string{launchBattlenet}, args...)...) //nolint:gosec // the script under test
 	cmd.WaitDelay = time.Second
 	cmd.Env = append([]string{"PATH=" + filepath.Join(stub, "bin") + ":" + os.Getenv("PATH"), "HOME=" + home,
-		"SWAY_STOP_ON_APP_EXIT=yes", "BATTLENET_GAMES=" + r.games,
+		"SWAY_STOP_ON_APP_EXIT=yes", "BATTLENET_GAMES=" + games,
 		"STUB_LOG=" + r.log, "STUB_DIR=" + stub,
 		"BATTLENET_PROTON=" + filepath.Join(stub, "proton"), "BATTLENET_UID_MAP=" + uidMap,
 		"BATTLENET_WEB_PORT=" + freePort(t), "BATTLENET_SETTLE=0", "BATTLENET_READY_WAIT=10",
@@ -504,22 +504,26 @@ func TestLaunchBattlenetTurnsOnWoWGamepadUnlessSet(t *testing.T) {
 		config    *string // nil: no Config.wtf
 		want      *string // nil: no Config.wtf afterwards
 	}{
-		{"absent", true, nil, ptr(on + "\n")},
+		{"absent", true, nil, new(on + "\n")},
 		{"not installed", false, nil, nil},
-		{"present on", true, ptr("SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n"), ptr("SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n")},
-		{"present off", true, ptr("SET GamePadEnable \"0\"\nSET gxApi \"D3D12\"\n"), ptr("SET GamePadEnable \"0\"\nSET gxApi \"D3D12\"\n")},
-		{"present off, other case", true, ptr("SET gamepadenable \"0\"\n"), ptr("SET gamepadenable \"0\"\n")},
-		{"other CVars", true, ptr("SET portal \"US\"\nSET textLocale \"enUS\"\n"), ptr("SET portal \"US\"\nSET textLocale \"enUS\"\n" + on + "\n")},
-		{"empty", true, ptr(""), ptr(on + "\n")},
-		{"no final newline", true, ptr(`SET portal "US"`), ptr("SET portal \"US\"\n" + on + "\n")},
-		{"CRLF", true, ptr("SET portal \"US\"\r\n"), ptr("SET portal \"US\"\r\n" + on + "\r\n")},
-		{"unparseable", true, ptr("SET portal \"US\"\ngarbage\n"), ptr("SET portal \"US\"\ngarbage\n")},
-		{"unparseable, binary", true, ptr("SET portal \"US\"\n\x00\xff\n"), ptr("SET portal \"US\"\n\x00\xff\n")},
-		{"unparseable, indented", true, ptr("  SET GamePadEnable \"0\"\n"), ptr("  SET GamePadEnable \"0\"\n")},
+		{"present on", true, new("SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n"), new("SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n")},
+		{"present off", true, new("SET GamePadEnable \"0\"\nSET gxApi \"D3D12\"\n"), new("SET GamePadEnable \"0\"\nSET gxApi \"D3D12\"\n")},
+		{"present off, other case", true, new("SET gamepadenable \"0\"\n"), new("SET gamepadenable \"0\"\n")},
+		{"other CVars", true, new("SET portal \"US\"\nSET textLocale \"enUS\"\n"), new("SET portal \"US\"\nSET textLocale \"enUS\"\n" + on + "\n")},
+		{"empty", true, new(""), new(on + "\n")},
+		{"no final newline", true, new(`SET portal "US"`), new("SET portal \"US\"\n" + on + "\n")},
+		{"lookalike CVar", true, new("SET GamePadEnableX \"0\"\n"), new("SET GamePadEnableX \"0\"\n" + on + "\n")},
+		{"lookalike CVar, no value", true, new("SET GamePadEnable\n"), new("SET GamePadEnable\n")},
+		{"name with a quote", true, new("SET GamePad\"Enable \"1\"\n"), new("SET GamePad\"Enable \"1\"\n")},
+		{"bare CR at the end", true, new("SET portal \"US\"\r"), new("SET portal \"US\"\r\n" + on + "\r\n")},
+		{"CRLF", true, new("SET portal \"US\"\r\n"), new("SET portal \"US\"\r\n" + on + "\r\n")},
+		{"unparseable", true, new("SET portal \"US\"\ngarbage\n"), new("SET portal \"US\"\ngarbage\n")},
+		{"unparseable, binary", true, new("SET portal \"US\"\n\x00\xff\n"), new("SET portal \"US\"\n\x00\xff\n")},
+		{"unparseable, indented", true, new("  SET GamePadEnable \"0\"\n"), new("  SET GamePadEnable \"0\"\n")},
 	} {
 		var wtf string
-		r := runLaunchBattlenetWith(t, true, func(r battlenetRun) {
-			game := filepath.Join(r.games, "World of Warcraft", "_retail_")
+		r := runLaunchBattlenetWith(t, true, func(games string) {
+			game := filepath.Join(games, "World of Warcraft", "_retail_")
 			wtf = filepath.Join(game, "WTF", "Config.wtf")
 			if !tc.installed {
 				return
@@ -543,28 +547,44 @@ func TestLaunchBattlenetTurnsOnWoWGamepadUnlessSet(t *testing.T) {
 		case tc.want != nil && (err != nil || string(got) != *tc.want):
 			t.Errorf("%s: Config.wtf %q (%v), want %q\n%s", tc.name, got, err, *tc.want, r.out)
 		}
-		if !tc.installed {
-			if _, err := os.Stat(r.games); !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("%s: created %s for a game that is not installed", tc.name, r.games)
+		if games := filepath.Join(r.home, "games"); !tc.installed {
+			if _, err := os.Stat(games); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("%s: created %s for a game that is not installed", tc.name, games)
 			}
 		}
 	}
 }
 
 // A Config.wtf that is a link or a directory is left alone, and its failure
-// never stops the game.
+// never stops the game. So is one that cannot be read: it may name the CVar.
 func TestLaunchBattlenetLeavesOddConfigWtfAlone(t *testing.T) {
-	r := runLaunchBattlenetWith(t, true, func(r battlenetRun) {
-		if err := os.MkdirAll(filepath.Join(r.games, "World of Warcraft", "_retail_", "WTF", "Config.wtf"), 0o755); err != nil {
+	r := runLaunchBattlenetWith(t, true, func(games string) {
+		if err := os.MkdirAll(filepath.Join(games, "World of Warcraft", "_retail_", "WTF", "Config.wtf"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}, []string{"wow"}, "GAME_SECONDS=3")
 	if r.code != 0 || !strings.Contains(r.out, "GamePadEnable unchanged") {
 		t.Fatalf("exit %d, want 0 with the directory left alone\n%s", r.code, r.out)
 	}
+	var wtf string
+	r = runLaunchBattlenetWith(t, true, func(games string) {
+		wtf = filepath.Join(games, "World of Warcraft", "_retail_", "WTF", "Config.wtf")
+		if err := os.MkdirAll(filepath.Dir(wtf), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(wtf, []byte("SET GamePadEnable \"0\"\n"), 0o200); err != nil {
+			t.Fatal(err)
+		}
+	}, []string{"wow"}, "GAME_SECONDS=3")
+	if err := os.Chmod(wtf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(wtf); os.Geteuid() != 0 && (r.code != 0 || string(got) != "SET GamePadEnable \"0\"\n") {
+		t.Fatalf("exit %d, unreadable Config.wtf now %q (%v), want 0 and it untouched\n%s", r.code, got, err, r.out)
+	}
 	target := filepath.Join(t.TempDir(), "elsewhere")
-	r = runLaunchBattlenetWith(t, true, func(r battlenetRun) {
-		wtf := filepath.Join(r.games, "World of Warcraft", "_retail_", "WTF")
+	r = runLaunchBattlenetWith(t, true, func(games string) {
+		wtf := filepath.Join(games, "World of Warcraft", "_retail_", "WTF")
 		if err := os.MkdirAll(wtf, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -576,5 +596,3 @@ func TestLaunchBattlenetLeavesOddConfigWtfAlone(t *testing.T) {
 		t.Fatalf("exit %d, dangling link's target %v, want 0 and no file written through it\n%s", r.code, err, r.out)
 	}
 }
-
-func ptr(s string) *string { return &s }

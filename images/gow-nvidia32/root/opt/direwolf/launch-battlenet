@@ -104,22 +104,29 @@ fi
 # not all SET lines is left alone: WoW rewrites it, a guess could lose CVars.
 # Nothing is created for a game that is not installed.
 enable_wow_gamepad() {
-  local wtf="$1/WTF/Config.wtf" eol=$'\n'
+  local wtf="$1/WTF/Config.wtf" eol=$'\n' last
   [ -d "$1" ] || return 0
   if [ ! -e "${wtf}" ] && [ ! -L "${wtf}" ]; then
     mkdir -p "$1/WTF" && printf 'SET GamePadEnable "1"\n' >"${wtf}" &&
       log "turned on WoW's gamepad mode (new ${wtf})"
     return
   fi
-  if [ ! -f "${wtf}" ] || grep -aqvE $'^(SET [^ "]+ ".*")?\r?$' "${wtf}"; then
+  # Unreadable, grep fails as if nothing matched: it must not count as unset.
+  if [ ! -f "${wtf}" ] || [ ! -r "${wtf}" ] || grep -aqvE $'^(SET [^ "]+ ".*")?\r?$' "${wtf}"; then
     log "left ${wtf} alone: not a file of SET lines; GamePadEnable unchanged"
     return 0
   fi
   # CVar names are case-insensitive.
   grep -qiE '^SET GamePadEnable ' "${wtf}" && return 0
-  # Keep the file's line ending, and end a last line that has none.
+  # Keep the file's line ending, and end a last line that has none (a bare
+  # CR only needs its LF).
   grep -q $'\r$' "${wtf}" && eol=$'\r\n'
-  if [ -n "$(tail -c1 "${wtf}")" ]; then printf '%s' "${eol}" >>"${wtf}" || return; fi
+  last="$(tail -c1 "${wtf}")" || return
+  if [ "${last}" = $'\r' ]; then
+    printf '\n' >>"${wtf}" || return
+  elif [ -n "${last}" ]; then
+    printf '%s' "${eol}" >>"${wtf}" || return
+  fi
   printf 'SET GamePadEnable "1"%s' "${eol}" >>"${wtf}" &&
     log "turned on WoW's gamepad mode in ${wtf}"
 }
