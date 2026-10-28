@@ -135,12 +135,17 @@ func runLaunchBattlenet(t *testing.T, install bool, args []string, env ...string
 // freePort returns a loopback TCP port nothing listens on.
 func freePort(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+	addr, ok := l.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address %v is not TCP", l.Addr())
+	}
+	return strconv.Itoa(addr.Port)
 }
 
 func (r battlenetRun) calls(t *testing.T) []string {
