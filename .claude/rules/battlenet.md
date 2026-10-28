@@ -45,15 +45,17 @@ paths:
     Each send runs in the background: whether its `proton run` returns is unmeasured.
   - Under sway, GoW's launcher kills sway only on exit 0 (`<cmd> && killall sway`), so each failure
     runs `killall sway` itself; otherwise the session sits on an empty desktop.
-  - The game is matched by Wine's argv[0] alone (up to the first ` -`), either slash, any case:
-    Battle.net starts it with forward slashes, and a backslash-only pattern never matched live.
+  - The game is matched by Wine's argv[0] alone (up to the first ` -`), either slash, any case.
+    Live it is `Z:\games\battlenet\World of Warcraft\_retail_\WoW.exe -launcherlogin -uid wow`:
+    capital O, so a case-sensitive `Wow.exe` never matched and each resend started another WoW.
     Other command lines (a shell, a crash reporter) name the path in their arguments.
   - It refuses the host user namespace (identity `uid_map`): only the App pod
     (`spec.requireAppPod`) keeps the client's listeners off the node's loopback.
   - The product never joins sway's exec line: the startup runs the script bare.
-  - Battle.net's window (`Battle.net`, class `steam_proton`) and WoW's (`World of Warcraft`) tile
-    side by side under sway, so once the game runs the client's goes to the scratchpad
-    (`swaymsg`). Tested live: WoW then fills the output.
+  - Under sway Battle.net's window tiles beside WoW's, and Wine's desktop window
+    (`explorer.exe /desktop`, 160x50, untitled) floats over it as a white box. While the game
+    runs, every `steam_proton` window whose `pid` is not the game's goes to the scratchpad,
+    every 2s. Moving both by hand live left WoW alone on the full output.
   - Tests: `images/gow-nvidia32/launch_battlenet_test.go` (stub Proton and wineserver).
 
 ## Managed WoW addons (XERK-2366)
@@ -137,8 +139,7 @@ paths:
 
 - `Battle.net.exe --exec="launch WoW"` on a cold start only logs the argument; it launches
   nothing. A second `--exec="launch WoW"` sent to the running client launches the game.
-- The game runs as `...\_retail_\Wow.exe -launcherlogin -uid wow` (Wine's argv[0] uses Battle.net's
-  forward slashes, `Z:/games/...`),
+- The game runs as `Z:\games\battlenet\World of Warcraft\_retail_\WoW.exe -launcherlogin -uid wow`,
   started by the client (not a child of either `proton run`): wait on that process.
 - After the game exits, Battle.net and its Agent keep running, and so do both `proton run`
   wrappers. `wineserver -k` on the prefix ends them all at once.

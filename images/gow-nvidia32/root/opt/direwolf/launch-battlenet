@@ -42,7 +42,7 @@ product="${1:-${BATTLENET_PRODUCT:-}}"
 # Only games known to launch this way: the code goes into Battle.net's command
 # line, the product into a process pattern. Each: --exec code, executable.
 case "${product}" in
-  wow) code=WoW exe=Wow.exe ;;  # World of Warcraft (retail), XERK-2360
+  wow) code=WoW exe=WoW.exe ;;  # World of Warcraft (retail), XERK-2360
   *)
     log "unknown product '${product}'; expected one of: wow"
     exit 2
@@ -97,9 +97,8 @@ if [ -z "${DXVK_STATE_CACHE_PATH:-}" ] && mkdir -p "${cache}/dxvk/battlenet-${pr
 fi
 
 # Wine names the game's process by the path it was started with, then its
-# arguments. Battle.net writes paths with forward slashes (C:/Program Files
-# (x86)/Battle.net/Battle.net.exe; WoW at Z:/games/battlenet/World of
-# Warcraft), and a pattern for backslashes alone never saw WoW start, so every
+# arguments; live, Z:\games\battlenet\World of Warcraft\_retail_\WoW.exe
+# -launcherlogin -uid wow. A case-sensitive Wow.exe never saw it start, so every
 # resend started another copy, each logging the last one out (XERK-2363).
 # Either separator, any case, with or without a drive and directory. Only the
 # program, the start of the line up to the first " -": other command lines
@@ -112,6 +111,38 @@ client_ready() {
   local port
   printf -v port '%04X' "${web_port}"
   grep -qs -E "^ *[0-9]+: [0-9A-F]+:${port} [0-9A-F]+:0000 0A " /proc/net/tcp /proc/net/tcp6
+}
+
+# Under sway every other Wine window shares the screen with the game's: the
+# client's tiled beside it (half the screen), and Wine's desktop window
+# (explorer.exe /desktop) floated a white 160x50 box over it (XERK-2363).
+# While the game runs, move every Wine window not the game process's own to
+# sway's scratchpad; until then they stay in view (sign-in, patching). Run
+# again and again: the client may open or re-show a window at any time.
+hide_other_windows() {
+  local pids id
+  pids="$(pgrep -u "$(id -u)" -f -i "${game}" | paste -sd, -)"
+  [ -n "${pids}" ] || return 0
+  swaymsg -t get_tree 2>/dev/null | python3 -I -c '
+import json, sys
+game = set(sys.argv[1].split(","))
+def walk(node, workspace):
+    if node.get("type") == "workspace":
+        workspace = node.get("name")
+    props = node.get("window_properties") or {}
+    if (props.get("class") == "steam_proton" and workspace != "__i3_scratch"
+            and str(node.get("pid")) not in game):
+        print(int(node["id"]))
+    for child in node.get("nodes", []) + node.get("floating_nodes", []):
+        walk(child, workspace)
+try:
+    walk(json.load(sys.stdin), None)
+except ValueError:
+    pass
+' "${pids}" | while read -r id; do
+    swaymsg "[con_id=${id}] move scratchpad" >/dev/null ||
+      log "could not move window ${id} out of the game's way"
+  done
 }
 
 # Ends the client, its Agent, the game and every `proton run` on the prefix.
@@ -173,14 +204,8 @@ until game_running; do
 done
 
 log "${product} is running"
-# Under sway the client's window and the game's tile side by side, so the game
-# got half the screen (XERK-2363). Once the game runs, put the client's window
-# on sway's scratchpad; until then it stays in view (sign-in, patching).
-if [ -n "${SWAYSOCK:-}" ]; then
-  swaymsg '[title="^Battle\.net$" class="^steam_proton$"] move scratchpad' >/dev/null ||
-    log "could not move Battle.net's window out of the game's way"
-fi
 while game_running; do
+  [ -n "${SWAYSOCK:-}" ] && hide_other_windows
   sleep 2
 done
 log "${product} exited; stopping Battle.net"
