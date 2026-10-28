@@ -152,6 +152,12 @@ paths:
 - A Wolf "X-Box One (virtual) pad" reaches WoW: Wine's `winedevice.exe` opens its evdev node.
 - WoW ignores it until `/console GamePadEnable 1`; then movement works. The CVar persists in
   `_retail_/WTF/Config.wtf` (`SET GamePadEnable "1"`) on the games volume.
+- `launch-battlenet` adds that line before launch when Config.wtf names no `GamePadEnable` (any
+  case), creating the file if `_retail_` exists (XERK-2365). A user's `"0"` is kept.
+  - Games volume: `$BATTLENET_GAMES`, default `/games/battlenet` (the session App sets none).
+  - A file with any line that is not `SET <name> "<value>"` is left alone: WoW rewrites the
+    whole file, and a mis-edit could drop the user's CVars. CRLF and a missing final newline
+    are kept consistent. Tests: `TestLaunchBattlenetTurnsOnWoWGamepadUnlessSet`.
 
 ## Loopback listeners (feeds XERK-2362)
 

@@ -89,6 +89,7 @@ echo "swaymsg $* SWAYSOCK=$SWAYSOCK" >>"$STUB_LOG"
 
 type battlenetRun struct {
 	home, prefix, log string
+	games             string // $BATTLENET_GAMES
 	code              int
 	out               string
 }
@@ -96,6 +97,13 @@ type battlenetRun struct {
 // runLaunchBattlenet runs the real script against a stub Proton, as if in a
 // user-namespaced App pod with Battle.net installed in the home's prefix.
 func runLaunchBattlenet(t *testing.T, install bool, args []string, env ...string) battlenetRun {
+	t.Helper()
+	return runLaunchBattlenetWith(t, install, nil, args, env...)
+}
+
+// runLaunchBattlenetWith is runLaunchBattlenet with setup run on the run's
+// directories (the games volume is $BATTLENET_GAMES, not yet created) first.
+func runLaunchBattlenetWith(t *testing.T, install bool, setup func(battlenetRun), args []string, env ...string) battlenetRun {
 	t.Helper()
 	stub := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(stub, "files", "bin"), 0o755); err != nil {
@@ -116,7 +124,7 @@ func runLaunchBattlenet(t *testing.T, install bool, args []string, env ...string
 	}
 	home := t.TempDir()
 	r := battlenetRun{home: home, prefix: filepath.Join(home, ".local", "share", "battlenet"),
-		log: filepath.Join(stub, "log")}
+		log: filepath.Join(stub, "log"), games: filepath.Join(home, "games")}
 	if install {
 		dir := filepath.Join(r.prefix, "pfx", "drive_c", "Program Files (x86)", "Battle.net")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -126,13 +134,16 @@ func runLaunchBattlenet(t *testing.T, install bool, args []string, env ...string
 			t.Fatal(err)
 		}
 	}
+	if setup != nil {
+		setup(r)
+	}
 	// A script that leaves the stub client up would otherwise hang the test.
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", append([]string{launchBattlenet}, args...)...) //nolint:gosec // the script under test
 	cmd.WaitDelay = time.Second
 	cmd.Env = append([]string{"PATH=" + filepath.Join(stub, "bin") + ":" + os.Getenv("PATH"), "HOME=" + home,
-		"SWAY_STOP_ON_APP_EXIT=yes",
+		"SWAY_STOP_ON_APP_EXIT=yes", "BATTLENET_GAMES=" + r.games,
 		"STUB_LOG=" + r.log, "STUB_DIR=" + stub,
 		"BATTLENET_PROTON=" + filepath.Join(stub, "proton"), "BATTLENET_UID_MAP=" + uidMap,
 		"BATTLENET_WEB_PORT=" + freePort(t), "BATTLENET_SETTLE=0", "BATTLENET_READY_WAIT=10",
@@ -480,3 +491,90 @@ func dockerfileStage(t *testing.T, header string) string {
 	t.Fatalf("no %q stage in the Dockerfile", header)
 	return ""
 }
+
+// WoW ignores a pad until GamePadEnable is on (XERK-2365): it is turned on in
+// WTF/Config.wtf before launch unless the file already names it, whatever its
+// value. A file that is not all SET lines is never touched, and nothing is
+// created for a game that is not installed.
+func TestLaunchBattlenetTurnsOnWoWGamepadUnlessSet(t *testing.T) {
+	const on = `SET GamePadEnable "1"`
+	for _, tc := range []struct {
+		name      string
+		installed bool
+		config    *string // nil: no Config.wtf
+		want      *string // nil: no Config.wtf afterwards
+	}{
+		{"absent", true, nil, ptr(on + "\n")},
+		{"not installed", false, nil, nil},
+		{"present on", true, ptr("SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n"), ptr("SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n")},
+		{"present off", true, ptr("SET GamePadEnable \"0\"\nSET gxApi \"D3D12\"\n"), ptr("SET GamePadEnable \"0\"\nSET gxApi \"D3D12\"\n")},
+		{"present off, other case", true, ptr("SET gamepadenable \"0\"\n"), ptr("SET gamepadenable \"0\"\n")},
+		{"other CVars", true, ptr("SET portal \"US\"\nSET textLocale \"enUS\"\n"), ptr("SET portal \"US\"\nSET textLocale \"enUS\"\n" + on + "\n")},
+		{"empty", true, ptr(""), ptr(on + "\n")},
+		{"no final newline", true, ptr(`SET portal "US"`), ptr("SET portal \"US\"\n" + on + "\n")},
+		{"CRLF", true, ptr("SET portal \"US\"\r\n"), ptr("SET portal \"US\"\r\n" + on + "\r\n")},
+		{"unparseable", true, ptr("SET portal \"US\"\ngarbage\n"), ptr("SET portal \"US\"\ngarbage\n")},
+		{"unparseable, binary", true, ptr("SET portal \"US\"\n\x00\xff\n"), ptr("SET portal \"US\"\n\x00\xff\n")},
+		{"unparseable, indented", true, ptr("  SET GamePadEnable \"0\"\n"), ptr("  SET GamePadEnable \"0\"\n")},
+	} {
+		var wtf string
+		r := runLaunchBattlenetWith(t, true, func(r battlenetRun) {
+			game := filepath.Join(r.games, "World of Warcraft", "_retail_")
+			wtf = filepath.Join(game, "WTF", "Config.wtf")
+			if !tc.installed {
+				return
+			}
+			if err := os.MkdirAll(filepath.Dir(wtf), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.config != nil {
+				if err := os.WriteFile(wtf, []byte(*tc.config), 0o644); err != nil { //nolint:gosec // test fixture
+					t.Fatal(err)
+				}
+			}
+		}, []string{"wow"}, "GAME_SECONDS=3")
+		if r.code != 0 {
+			t.Errorf("%s: exit %d, want 0\n%s", tc.name, r.code, r.out)
+		}
+		got, err := os.ReadFile(wtf)
+		switch {
+		case tc.want == nil && !errors.Is(err, os.ErrNotExist):
+			t.Errorf("%s: Config.wtf %q (%v), want none", tc.name, got, err)
+		case tc.want != nil && (err != nil || string(got) != *tc.want):
+			t.Errorf("%s: Config.wtf %q (%v), want %q\n%s", tc.name, got, err, *tc.want, r.out)
+		}
+		if !tc.installed {
+			if _, err := os.Stat(r.games); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("%s: created %s for a game that is not installed", tc.name, r.games)
+			}
+		}
+	}
+}
+
+// A Config.wtf that is a link or a directory is left alone, and its failure
+// never stops the game.
+func TestLaunchBattlenetLeavesOddConfigWtfAlone(t *testing.T) {
+	r := runLaunchBattlenetWith(t, true, func(r battlenetRun) {
+		if err := os.MkdirAll(filepath.Join(r.games, "World of Warcraft", "_retail_", "WTF", "Config.wtf"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}, []string{"wow"}, "GAME_SECONDS=3")
+	if r.code != 0 || !strings.Contains(r.out, "GamePadEnable unchanged") {
+		t.Fatalf("exit %d, want 0 with the directory left alone\n%s", r.code, r.out)
+	}
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	r = runLaunchBattlenetWith(t, true, func(r battlenetRun) {
+		wtf := filepath.Join(r.games, "World of Warcraft", "_retail_", "WTF")
+		if err := os.MkdirAll(wtf, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(wtf, "Config.wtf")); err != nil {
+			t.Fatal(err)
+		}
+	}, []string{"wow"}, "GAME_SECONDS=3")
+	if _, err := os.Lstat(target); r.code != 0 || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exit %d, dangling link's target %v, want 0 and no file written through it\n%s", r.code, err, r.out)
+	}
+}
+
+func ptr(s string) *string { return &s }
