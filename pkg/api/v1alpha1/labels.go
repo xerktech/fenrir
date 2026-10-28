@@ -41,4 +41,7 @@ const (
 	// CatalogueStoreNexus marks an App made from a Microsoft Store (Xbox PC)
 	// game installed with Xodus Nexus in the Library.
 	CatalogueStoreNexus = "nexus"
+	// CatalogueStoreBattlenet marks an App made from a Blizzard game
+	// installed with Battle.net in the Library.
+	CatalogueStoreBattlenet = "battlenet"
 )
