@@ -67,7 +67,23 @@ const stubKillall = `#!/bin/sh
 echo "killall $*" >>"$STUB_LOG"
 `
 
+// stubSwaymsg logs each command. Its tree has the client's window, Wine's
+// desktop window, one already on the scratchpad, and the game's own window
+// (its pid from game.pid).
 const stubSwaymsg = `#!/bin/sh
+if [ "$1" = -t ] && [ "$2" = get_tree ]; then
+  game=$(cat "$STUB_DIR/game.pid" 2>/dev/null || echo 0)
+  cat <<JSON
+{"type":"root","nodes":[{"type":"output","nodes":[
+ {"type":"workspace","name":"__i3_scratch","nodes":[],"floating_nodes":[
+  {"id":104,"type":"floating_con","pid":3,"window_properties":{"class":"steam_proton"}}]},
+ {"type":"workspace","name":"main","nodes":[
+  {"id":101,"type":"con","name":"Battle.net","pid":1,"window_properties":{"class":"steam_proton"}},
+  {"id":103,"type":"con","name":"World of Warcraft","pid":$game,"window_properties":{"class":"steam_proton"}}],
+  "floating_nodes":[{"id":102,"type":"floating_con","pid":2,"window_properties":{"class":"steam_proton"}}]}]}]}
+JSON
+  exit 0
+fi
 echo "swaymsg $* SWAYSOCK=$SWAYSOCK" >>"$STUB_LOG"
 `
 
@@ -270,21 +286,26 @@ func TestLaunchBattlenetLaunchesOnceTheClientIsUp(t *testing.T) {
 	}
 }
 
-// Under sway the client's window would share the screen with the game's: once
-// the game runs it goes to the scratchpad. Outside sway nothing is asked.
-func TestLaunchBattlenetMovesTheClientOutOfTheGamesWay(t *testing.T) {
+// Under sway the client's and Wine's desktop window would share the screen
+// with the game's: while the game runs they go to the scratchpad, never the
+// game's own or one already there. Outside sway nothing is asked.
+func TestLaunchBattlenetMovesOtherWindowsOutOfTheGamesWay(t *testing.T) {
 	r := runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3", "SWAYSOCK=/run/sway.sock")
 	if r.code != 0 {
 		t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
 	}
-	calls := r.calls(t)
-	want := `swaymsg [title="^Battle\.net$" class="^steam_proton$"] move scratchpad SWAYSOCK=/run/sway.sock`
-	i := slices.Index(calls, want)
-	if i < 0 {
-		t.Fatalf("calls %q, want %q", calls, want)
+	moved := map[string]bool{}
+	for _, c := range r.calls(t) {
+		if id, ok := strings.CutPrefix(c, "swaymsg [con_id="); ok {
+			id, _, _ = strings.Cut(id, "]")
+			moved[id] = true
+			if !strings.HasSuffix(c, "] move scratchpad SWAYSOCK=/run/sway.sock") {
+				t.Errorf("unexpected sway command %q", c)
+			}
+		}
 	}
-	if j := slices.IndexFunc(calls, func(c string) bool { return strings.Contains(c, "--exec=launch WoW") }); j > i {
-		t.Errorf("moved the client's window before launching the game: %q", calls)
+	if !moved["101"] || !moved["102"] || moved["103"] || moved["104"] {
+		t.Errorf("moved %v, want the client's (101) and Wine's desktop (102) windows only\n%q", moved, r.calls(t))
 	}
 	if slices.ContainsFunc(runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3").calls(t),
 		func(c string) bool { return strings.HasPrefix(c, "swaymsg ") }) {
