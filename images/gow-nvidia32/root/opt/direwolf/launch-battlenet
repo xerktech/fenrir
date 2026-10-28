@@ -40,9 +40,10 @@ trap end_session EXIT
 
 product="${1:-${BATTLENET_PRODUCT:-}}"
 # Only games known to launch this way: the code goes into Battle.net's command
-# line, the product into a process pattern. Each: --exec code, executable.
+# line, the product into a process pattern. Each: --exec code, executable,
+# and the game's own folder under the games volume.
 case "${product}" in
-  wow) code=WoW exe=WoW.exe ;;  # World of Warcraft (retail), XERK-2360
+  wow) code=WoW exe=WoW.exe game_dir="World of Warcraft/_retail_" ;;  # World of Warcraft (retail), XERK-2360
   *)
     log "unknown product '${product}'; expected one of: wow"
     exit 2
@@ -94,6 +95,44 @@ if [ -z "${VKD3D_SHADER_CACHE_PATH:-}" ] && mkdir -p "${cache}/vkd3d-proton/batt
 fi
 if [ -z "${DXVK_STATE_CACHE_PATH:-}" ] && mkdir -p "${cache}/dxvk/battlenet-${product}"; then
   export DXVK_STATE_CACHE_PATH="${cache}/dxvk/battlenet-${product}"
+fi
+
+# WoW ignores a pad until its GamePadEnable CVar is on; set from its console
+# it persists in WTF/Config.wtf as SET GamePadEnable "1" (XERK-2360). Turn it
+# on before launch when the file does not name it, so a pad works from the
+# first session. A user's own value, either way, is kept, and a file that is
+# not all SET lines is left alone: WoW rewrites it, a guess could lose CVars.
+# Nothing is created for a game that is not installed.
+enable_wow_gamepad() {
+  local wtf="$1/WTF/Config.wtf" eol=$'\n' last
+  [ -d "$1" ] || return 0
+  if [ ! -e "${wtf}" ] && [ ! -L "${wtf}" ]; then
+    mkdir -p "$1/WTF" && printf 'SET GamePadEnable "1"\n' >"${wtf}" &&
+      log "turned on WoW's gamepad mode (new ${wtf})"
+    return
+  fi
+  # Unreadable, grep fails as if nothing matched: it must not count as unset.
+  if [ ! -f "${wtf}" ] || [ ! -r "${wtf}" ] || grep -aqvE $'^(SET [^ "]+ ".*")?\r?$' "${wtf}"; then
+    log "left ${wtf} alone: not a file of SET lines; GamePadEnable unchanged"
+    return 0
+  fi
+  # CVar names are case-insensitive.
+  grep -qiE '^SET GamePadEnable ' "${wtf}" && return 0
+  # Keep the file's line ending, and end a last line that has none (a bare
+  # CR only needs its LF).
+  grep -q $'\r$' "${wtf}" && eol=$'\r\n'
+  last="$(tail -c1 "${wtf}")" || return
+  if [ "${last}" = $'\r' ]; then
+    printf '\n' >>"${wtf}" || return
+  elif [ -n "${last}" ]; then
+    printf '%s' "${eol}" >>"${wtf}" || return
+  fi
+  printf 'SET GamePadEnable "1"%s' "${eol}" >>"${wtf}" &&
+    log "turned on WoW's gamepad mode in ${wtf}"
+}
+if [ "${product}" = wow ]; then
+  enable_wow_gamepad "${BATTLENET_GAMES:-/games/battlenet}/${game_dir}" ||
+    log "could not turn on WoW's gamepad mode; a pad needs /console GamePadEnable 1"
 fi
 
 # Wine names the game's process by the path it was started with, then its
