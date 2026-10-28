@@ -839,17 +839,26 @@ func parseBattlenet(files map[string][]byte) ([]catalogueGame, error) {
 		return nil, fmt.Errorf("parsing %s: %w", battlenetProductDB, err)
 	}
 	var games []catalogueGame
+	// Logged as a few names and a count: the file is the desktop user's, and
+	// one line per entry let 8 MiB of uids log ~120 MB every scan.
+	var skipped []string
+	unusable := 0
 	for uid, done := range installed {
 		product, known := battlenetProducts[uid]
 		switch {
-		case uid == "agent" || uid == "battle.net":
+		case !done || uid == "agent" || uid == "battle.net":
 		case !known && battlenetUID.MatchString(uid):
-			klog.Infof("Catalogue: skipping Battle.net product %q: not one launch-battlenet plays", uid)
+			skipped = append(skipped, uid)
 		case !known:
-			klog.Warning("Catalogue: skipping a Battle.net product with an unusable uid")
-		case done:
+			unusable++
+		default:
 			games = append(games, catalogueGame{Store: v1alpha1types.CatalogueStoreBattlenet, ID: uid, Title: product.title, ArtURL: []string{product.art}})
 		}
+	}
+	if len(skipped) > 0 || unusable > 0 {
+		sort.Strings(skipped)
+		klog.Infof("Catalogue: skipping %d installed Battle.net products launch-battlenet does not play (%q) and %d with an unusable uid",
+			len(skipped), skipped[:min(len(skipped), 5)], unusable)
 	}
 	sort.Slice(games, func(i, j int) bool { return games[i].ID < games[j].ID })
 	return games, nil
@@ -907,8 +916,8 @@ func protoWalk(msg []byte, fn func(num, wire, v uint64, field []byte) error) err
 		}
 		msg = msg[n:]
 		num, wire := key>>3, key&7
-		if num == 0 {
-			return errors.New("field number 0")
+		if num == 0 || num > 1<<29-1 {
+			return errors.New("field number out of range")
 		}
 		var v uint64
 		var field []byte

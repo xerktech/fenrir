@@ -72,14 +72,15 @@ func TestParseBattlenet(t *testing.T) {
 		db   []byte
 		want []string
 	}{
-		"installed":              {pbBytes(1, pbInstall("wow", true)), []string{"wow"}},
-		"not installed":          {pbBytes(1, pbInstall("wow", false)), nil},
-		"no cached state":        {pbBytes(1, pbBytes(1, []byte("wow"))), nil},
-		"only the client":        {slices.Concat(pbBytes(1, pbInstall("agent", true)), pbBytes(1, pbInstall("battle.net", true))), nil},
-		"unknown product":        {pbBytes(1, pbInstall("s2", true)), nil},
-		"unusable uid":           {pbBytes(1, pbInstall("wow; reboot", true)), nil},
-		"listed twice, one done": {slices.Concat(pbBytes(1, pbInstall("wow", false)), pbBytes(1, pbInstall("wow", true))), []string{"wow"}},
-		"empty product_install":  {slices.Concat(pbBytes(1, pbInstall("wow", true)), pbBytes(2)), []string{"wow"}},
+		"installed":                {pbBytes(1, pbInstall("wow", true)), []string{"wow"}},
+		"not installed":            {pbBytes(1, pbInstall("wow", false)), nil},
+		"no cached state":          {pbBytes(1, pbBytes(1, []byte("wow"))), nil},
+		"only the client":          {slices.Concat(pbBytes(1, pbInstall("agent", true)), pbBytes(1, pbInstall("battle.net", true))), nil},
+		"unknown product":          {pbBytes(1, pbInstall("s2", true)), nil},
+		"unusable uid":             {pbBytes(1, pbInstall("wow; reboot", true)), nil},
+		"listed twice, done last":  {slices.Concat(pbBytes(1, pbInstall("wow", false)), pbBytes(1, pbInstall("wow", true))), []string{"wow"}},
+		"listed twice, done first": {slices.Concat(pbBytes(1, pbInstall("wow", true)), pbBytes(1, pbInstall("wow", false))), []string{"wow"}},
+		"empty product_install":    {slices.Concat(pbBytes(1, pbInstall("wow", true)), pbBytes(2)), []string{"wow"}},
 	} {
 		games, err := parseProductDB(tc.db)
 		if err != nil {
@@ -109,6 +110,7 @@ func TestParseBattlenetRejects(t *testing.T) {
 		"cut fixed64":                 append(pbKey(9, 1), 1, 2, 3),
 		"group":                       pbKey(9, 3),
 		"field number 0":              pbVarint(0, 1),
+		"field number past 2^29-1":    pbVarint(1<<29, 1),
 		"product_install as a varint": pbVarint(1, 1),
 		"uid as a varint":             pbBytes(1, pbVarint(1, 7)),
 		"no uid":                      pbBytes(1, pbBytes(4, pbBytes(1, pbVarint(1, 1)))),
@@ -153,7 +155,9 @@ func TestBattlenetProductsLaunchable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	matches := regexp.MustCompile(`(?m)^\s+([a-z0-9_]+)\) code=`).FindAllSubmatch(script, -1)
+	// Any pattern before ") code=" is captured whole, so `a|b)` or `"x")`
+	// shows up as a mismatch rather than going unseen.
+	matches := regexp.MustCompile(`(?m)^\s+(\S+)\) code=`).FindAllSubmatch(script, -1)
 	launchable := make([]string, 0, len(matches))
 	for _, m := range matches {
 		launchable = append(launchable, string(m[1]))
