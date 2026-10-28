@@ -93,9 +93,14 @@ paths:
     labwc's children get `DISPLAY=:0`; `kubectl exec` and startwm carry a dead `:1`.
   - `wrapped-steam` (the labwc autostart hook) starts it beside Heroic, unless `xodus-nexus.bin`
     already runs. Tests: `TestWrappedSteamKeepsRunningNexus`.
-  - The Library's selkies-desktop menu lists only `.desktop` files; the openbox `menu.xml` item
-    reaches a home only when it has no `~/.config/labwc/menu.xml`, so ship both.
+  - The Library's selkies-desktop menu lists only `.desktop` files; labwc's right-click menu is
+    the openbox `menu.xml`, so ship both.
 - Battle.net (`/usr/bin/battlenet`, `init-battlenet`) is in `.claude/rules/battlenet.md`.
+- linuxserver's `init-selkies-config` copies the default `menu.xml` into the home only when it
+  has none, then restores its own `menu.xml.bak` of that first copy at every start: menu items
+  added later never reached an existing home (XERK-2363). `init-desktop-menu` (ordered before it
+  via its `dependencies.d`) rewrites both from the image's default each start; home edits go.
+  Tests: `images/library/init_desktop_menu_test.go`.
 - `wrapped-steam` checks for a running Steam again under a per-pod `flock`, held until it
   execs Steam: two cold launches at once would otherwise both start Steam and Heroic.
   - No child may inherit the lock fd (`9>&-`): Heroic outlives the script, and every later cold

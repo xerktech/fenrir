@@ -119,9 +119,11 @@ RUN \
     grep -q wrapped-heroic "$menu" || exit 1; \
     sed -i 's|</menu>|<item label="Xodus Nexus" icon="/opt/xodus-nexus/.DirIcon"><action name="Execute"><command>/usr/bin/xodus-nexus</command></action></item>\n</menu>|' "$menu" && \
     grep -q '/usr/bin/xodus-nexus' "$menu" || exit 1; \
-    sed -i 's|</menu>|<item label="Battle.net" icon="applications-games"><action name="Execute"><command>/usr/bin/battlenet</command></action></item>\n</menu>|' "$menu" && \
+    sed -i 's|</menu>|<item label="Battle.net" icon="/usr/share/icons/Adwaita/scalable/devices/input-gaming.svg"><action name="Execute"><command>/usr/bin/battlenet</command></action></item>\n</menu>|' "$menu" && \
     grep -q '/usr/bin/battlenet' "$menu" || exit 1; \
   done && \
+  # Battle.net's menu icon: the theme has no applications-games, so it showed none.
+  test -f /usr/share/icons/Adwaita/scalable/devices/input-gaming.svg && \
   echo "**** resolve game sessions' Steam paths ****" && \
   # Sessions mount the shared Steam home at /home/retro, and Steam records
   # absolute paths (~/.steam/steam, library folders); see init-steam-home.

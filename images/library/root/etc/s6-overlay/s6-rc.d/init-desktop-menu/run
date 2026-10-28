@@ -1,0 +1,34 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Keeps the desktop's right-click menu the image's. linuxserver's
+# init-selkies-config copies the default menu into the home only when there
+# is none, and on every later start restores its own backup of that first
+# copy, so entries the image added since (Xodus Nexus, Battle.net) never
+# reached an existing home (XERK-2363). Runs before it (its dependencies.d
+# names this), so its terminal handling still applies to the fresh copy.
+# The menu is the image's: an edit to it in the home is replaced.
+#
+# Never exits non-zero: a failed oneshot stops s6 starting the desktop and
+# leaves the pod Running but never Ready, which would hold the Steam lock.
+
+# As the desktop user: the home is user-writable, and root would follow
+# links planted there.
+if [[ "$(id -u)" == 0 ]]; then
+  exec s6-setuidgid abc "$0"
+fi
+
+defaults="${DESKTOP_MENU_DEFAULTS:-/defaults}"
+if [[ "${PIXELFLUX_WAYLAND,,}" == "true" ]]; then
+  conf="${HOME}/.config/labwc" menu="${defaults}/menu_wayland.xml"
+else
+  conf="${HOME}/.config/openbox" menu="${defaults}/menu.xml"
+fi
+
+# A first start: init-selkies-config copies the default itself.
+[[ -f "${conf}/menu.xml" ]] || exit 0
+for f in menu.xml menu.xml.bak; do
+  cp "${menu}" "${conf}/${f}.tmp" && mv -f "${conf}/${f}.tmp" "${conf}/${f}" ||
+    echo "init-desktop-menu: cannot refresh ${conf}/${f}; keeping it" >&2
+done
+exit 0
