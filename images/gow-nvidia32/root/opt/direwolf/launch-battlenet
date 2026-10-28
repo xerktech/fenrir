@@ -6,7 +6,7 @@
 # What the XERK-2360 spike found (.claude/rules/battlenet.md):
 # - Battle.net.exe --exec="launch <code>" on a cold start launches nothing; a
 #   second one sent to the running client does. So start the client, then
-#   send the launch until the game appears.
+#   send the launch once it is up (below).
 # - The client starts the game, not either `proton run`, so wait on the game's
 #   process, then `wineserver -k` the prefix: the client, its Agent and both
 #   wrappers otherwise keep running.
@@ -19,7 +19,11 @@
 PROTON="${BATTLENET_PROTON:-/opt/proton-cachyos/proton}"
 UID_MAP="${BATTLENET_UID_MAP:-/proc/self/uid_map}"
 timeout="${BATTLENET_LAUNCH_TIMEOUT:-300}"
-resend="${BATTLENET_RESEND_INTERVAL:-15}"
+resend="${BATTLENET_RESEND_INTERVAL:-90}"
+# The client's WebServer listens on 127.0.0.1:22885 once it is up (XERK-2360).
+web_port="${BATTLENET_WEB_PORT:-22885}"
+ready_wait="${BATTLENET_READY_WAIT:-60}"
+settle="${BATTLENET_SETTLE:-5}"
 
 log() { echo "launch-battlenet: $*" >&2; }
 
@@ -44,12 +48,16 @@ case "${product}" in
     exit 2
     ;;
 esac
-for n in "${timeout}" "${resend}"; do
+for n in "${timeout}" "${resend}" "${web_port}" "${ready_wait}"; do
   if [[ ! "${n}" =~ ^[1-9][0-9]{0,4}$ ]]; then
-    log "BATTLENET_LAUNCH_TIMEOUT and BATTLENET_RESEND_INTERVAL must be whole seconds"
+    log "BATTLENET_LAUNCH_TIMEOUT, _RESEND_INTERVAL, _WEB_PORT and _READY_WAIT must be whole numbers"
     exit 2
   fi
 done
+if [[ ! "${settle}" =~ ^[0-9]{1,3}$ ]]; then
+  log "BATTLENET_SETTLE must be whole seconds"
+  exit 2
+fi
 
 # Battle.net serves its WebServer and Agent on 127.0.0.1 (XERK-2362): run only
 # off the host network. Its App needs spec.requireAppPod, which puts it in the
@@ -88,14 +96,23 @@ if [ -z "${DXVK_STATE_CACHE_PATH:-}" ] && mkdir -p "${cache}/dxvk/battlenet-${pr
   export DXVK_STATE_CACHE_PATH="${cache}/dxvk/battlenet-${product}"
 fi
 
-# Wine names the game's process by the Windows path it was started with.
-# Battle.net writes them with forward slashes (C:/Program Files (x86)/
-# Battle.net/Battle.net.exe; WoW at Z:/games/battlenet/World of Warcraft), and
-# a pattern for backslashes alone never saw WoW start, so every resend started
-# another copy, each logging the last one out (XERK-2363). Either separator,
-# any arguments. Anchored at the drive letter: other command lines may name it.
-game='^[A-Za-z]:[\\/](.*[\\/])?'"${exe//./\\.}"'( |$)'
+# Wine names the game's process by the path it was started with, then its
+# arguments. Battle.net writes paths with forward slashes (C:/Program Files
+# (x86)/Battle.net/Battle.net.exe; WoW at Z:/games/battlenet/World of
+# Warcraft), and a pattern for backslashes alone never saw WoW start, so every
+# resend started another copy, each logging the last one out (XERK-2363).
+# Either separator, any case, with or without a drive and directory. Only the
+# program, the start of the line up to the first " -": other command lines
+# (a crash reporter, a shell) may name the game in their arguments.
+game='^([A-Za-z]:[\\/](([^ ]| [^-])*[\\/])?)?'"${exe//./\\.}"'( |$)'
 game_running() { pgrep -u "$(id -u)" -f -i "${game}" >/dev/null; }
+
+# Whether the client is up: its WebServer listens (state 0A) on web_port.
+client_ready() {
+  local port
+  printf -v port '%04X' "${web_port}"
+  grep -qs -E "^ *[0-9]+: [0-9A-F]+:${port} [0-9A-F]+:0000 0A " /proc/net/tcp /proc/net/tcp6
+}
 
 # Ends the client, its Agent, the game and every `proton run` on the prefix.
 stop_battlenet() {
@@ -114,8 +131,14 @@ log "starting Battle.net for ${product}"
 "${PROTON}" run "${client}" &
 client_pid=$!
 
+# Every launch the client takes starts another copy of the game, which logs
+# the last one out, and one sent while it starts is ignored. So send once,
+# $settle seconds after the client is up (or after $ready_wait regardless),
+# and again only every $resend seconds without a game.
 deadline=$((SECONDS + timeout))
-next_send=$((SECONDS + resend))
+ready_by=$((SECONDS + ready_wait))
+ready_at=""
+next_send=""
 sends=0
 until game_running; do
   if ! kill -0 "${client_pid}" 2>/dev/null; then
@@ -128,15 +151,23 @@ until game_running; do
     stop_battlenet
     exit 1
   fi
-  if ((SECONDS >= next_send)); then
+  if [ -z "${next_send}" ]; then
+    if [ -z "${ready_at}" ] && client_ready; then
+      ready_at=${SECONDS}
+      log "Battle.net is up"
+      next_send=$((SECONDS + settle))
+    elif ((SECONDS >= ready_by)); then
+      log "Battle.net not seen up within ${ready_wait}s; launching anyway"
+      next_send=${SECONDS}
+    fi
+  fi
+  if [ -n "${next_send}" ] && ((SECONDS >= next_send)); then
     # In the background: if this wrapper stays up too, it must not hold the
     # loop. wineserver -k ends it with the rest.
     "${PROTON}" run "${client}" --exec="launch ${code}" &
     sends=$((sends + 1))
     log "sent launch ${sends} for ${product}"
-    # Backing off: a launch the client took but this missed starts another
-    # copy of the game, so a missed match must cost few of them.
-    next_send=$((SECONDS + resend * (1 << (sends < 3 ? sends : 3))))
+    next_send=$((SECONDS + resend))
   fi
   sleep 1
 done

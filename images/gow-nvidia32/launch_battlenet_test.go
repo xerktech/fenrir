@@ -3,11 +3,13 @@ package gownvidia32
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,27 +17,42 @@ import (
 
 const launchBattlenet = "root/opt/direwolf/launch-battlenet"
 
-// stubProton stands in for Proton: `run <client>` stays up as the client until
-// wineserver -k, and `run <client> --exec=...` starts a fake game process whose
-// command line is Wine's for WoW, for $GAME_SECONDS (none if unset). Like a
-// client still starting up, it ignores the first launch.
+// stubProton stands in for Proton. `run <client>` is the client: it listens
+// on $BATTLENET_WEB_PORT after $CLIENT_UP_AFTER seconds (never with
+// $CLIENT_NEVER_UP) and stays up until wineserver -k. `run <client> --exec=...`
+// starts a fake game process, whose command line is Wine's for WoW, for
+// $GAME_SECONDS (none if unset), $GAME_DELAY seconds after the launch. Like
+// the real client, it ignores a launch sent before it is up; with
+// $IGNORE_FIRST it also ignores the first one sent after.
 const stubProton = `#!/bin/sh
 echo "proton $*" >>"$STUB_LOG"
 case "$*" in
 *--exec=*)
-  if [ -f "$STUB_DIR/ready" ] && [ -n "${GAME_SECONDS:-}" ]; then
+  if [ -n "${IGNORE_FIRST:-}" ] && [ ! -f "$STUB_DIR/ignored" ]; then
+    touch "$STUB_DIR/ignored"
+  elif { [ -f "$STUB_DIR/up" ] || [ -n "${CLIENT_NEVER_UP:-}" ]; } && [ -n "${GAME_SECONDS:-}" ]; then
     # Wine's argv[0] is the game's Windows path with its arguments.
-    bash -c 'exec -a "$0" sleep "$1"' "${GAME_ARGV0:-Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe -launcherlogin -uid wow}" "$GAME_SECONDS" &
+    bash -c 'sleep "$2"; exec -a "$0" sleep "$1"' \
+      "${GAME_ARGV0:-Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe -launcherlogin -uid wow}" \
+      "$GAME_SECONDS" "${GAME_DELAY:-0}" &
     echo $! >"$STUB_DIR/game.pid"
   fi
-  touch "$STUB_DIR/ready"
   # A wrapper that stays up, even past wineserver -k.
   [ -n "${EXEC_STAYS_UP:-}" ] && exec sleep 600 ;;
 *)
   echo "client VKD3D_SHADER_CACHE_PATH=${VKD3D_SHADER_CACHE_PATH:-} DXVK_STATE_CACHE_PATH=${DXVK_STATE_CACHE_PATH:-}" >>"$STUB_LOG"
   [ -n "${CLIENT_EXITS:-}" ] && exit 0
   echo $$ >"$STUB_DIR/client.pid"
-  exec sleep 600 ;;
+  [ -n "${CLIENT_NEVER_UP:-}" ] && exec sleep 600
+  exec python3 -c '
+import socket, sys, time
+time.sleep(float(sys.argv[1]))
+s = socket.socket()
+s.bind(("127.0.0.1", int(sys.argv[2])))
+s.listen()
+open(sys.argv[3], "w").close()
+time.sleep(600)
+' "${CLIENT_UP_AFTER:-1}" "$BATTLENET_WEB_PORT" "$STUB_DIR/up" ;;
 esac
 `
 
@@ -98,7 +115,8 @@ func runLaunchBattlenet(t *testing.T, install bool, args []string, env ...string
 		"SWAY_STOP_ON_APP_EXIT=yes",
 		"STUB_LOG=" + r.log, "STUB_DIR=" + stub,
 		"BATTLENET_PROTON=" + filepath.Join(stub, "proton"), "BATTLENET_UID_MAP=" + uidMap,
-		"BATTLENET_RESEND_INTERVAL=2", "BATTLENET_LAUNCH_TIMEOUT=20"}, env...)
+		"BATTLENET_WEB_PORT=" + freePort(t), "BATTLENET_SETTLE=0", "BATTLENET_READY_WAIT=10",
+		"BATTLENET_RESEND_INTERVAL=30", "BATTLENET_LAUNCH_TIMEOUT=20"}, env...)
 	out, err := cmd.CombinedOutput()
 	r.out = string(out)
 	var exitErr *exec.ExitError
@@ -112,6 +130,17 @@ func runLaunchBattlenet(t *testing.T, install bool, args []string, env ...string
 		t.Fatalf("launch-battlenet did not exit\n%s", out)
 	}
 	return r
+}
+
+// freePort returns a loopback TCP port nothing listens on.
+func freePort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
 }
 
 func (r battlenetRun) calls(t *testing.T) []string {
@@ -138,7 +167,6 @@ func TestLaunchBattlenetPlaysTheGameThenStopsBattlenet(t *testing.T) {
 	want := []string{
 		"proton run " + client,
 		"client VKD3D_SHADER_CACHE_PATH=" + vkd3d + " DXVK_STATE_CACHE_PATH=" + dxvk,
-		"proton run " + client + " --exec=launch WoW",
 		"proton run " + client + " --exec=launch WoW",
 		"wineserver -k WINEPREFIX=" + filepath.Join(r.prefix, "pfx"),
 	}
@@ -210,6 +238,7 @@ func TestLaunchBattlenetSeesTheGameByEitherPath(t *testing.T) {
 		`Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe -launcherlogin -uid wow`,
 		`Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe -launcherlogin -uid wow`,
 		`z:/games/battlenet/World of Warcraft/_retail_/WOW.EXE`,
+		`Wow.exe -launcherlogin -uid wow`,
 	} {
 		r := runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3", "GAME_ARGV0="+argv0)
 		if r.code != 0 || !strings.Contains(r.out, "wow is running") {
@@ -218,16 +247,36 @@ func TestLaunchBattlenetSeesTheGameByEitherPath(t *testing.T) {
 	}
 }
 
-// A missed match makes every send start another copy, each logging the last
-// one out: sends back off (2, 4, then 8 resend intervals apart).
-func TestLaunchBattlenetBacksOffItsLaunches(t *testing.T) {
-	r := runLaunchBattlenet(t, true, []string{"wow"}, "BATTLENET_RESEND_INTERVAL=1", "BATTLENET_LAUNCH_TIMEOUT=20")
-	if r.code != 1 {
-		t.Fatalf("exit %d, want 1\n%s", r.code, r.out)
+// Every launch the client takes starts another copy of the game, each logging
+// the last one out: one launch once the client is up, even when the game is
+// slow to appear.
+func TestLaunchBattlenetLaunchesOnceTheClientIsUp(t *testing.T) {
+	r := runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3", "GAME_DELAY=6",
+		"CLIENT_UP_AFTER=3", "BATTLENET_RESEND_INTERVAL=15")
+	if r.code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
 	}
-	// Sends at about 1, 3, 7, 15s: four in 20s, not twenty.
-	if n := strings.Count(r.out, "sent launch "); n != 4 {
-		t.Errorf("%d launches in 20s, want 4\n%s", n, r.out)
+	if n := strings.Count(r.out, "sent launch "); n != 1 || !strings.Contains(r.out, "Battle.net is up") {
+		t.Errorf("%d launches, want 1 after the client is up\n%s", n, r.out)
+	}
+}
+
+// A launch the client still ignored is sent again.
+func TestLaunchBattlenetResendsAnIgnoredLaunch(t *testing.T) {
+	r := runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3", "IGNORE_FIRST=1",
+		"BATTLENET_RESEND_INTERVAL=3")
+	if r.code != 0 || strings.Count(r.out, "sent launch ") != 2 {
+		t.Fatalf("exit %d, want 0 after a second launch\n%s", r.code, r.out)
+	}
+}
+
+// If the client never shows its port (another one, or no /proc/net/tcp), it is
+// launched anyway after BATTLENET_READY_WAIT.
+func TestLaunchBattlenetLaunchesAnywayAfterTheReadyWait(t *testing.T) {
+	r := runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3", "CLIENT_NEVER_UP=1",
+		"BATTLENET_READY_WAIT=2")
+	if r.code != 0 || !strings.Contains(r.out, "not seen up within 2s; launching anyway") {
+		t.Fatalf("exit %d, want 0 after launching anyway\n%s", r.code, r.out)
 	}
 }
 
@@ -238,7 +287,9 @@ func TestLaunchBattlenetIgnoresLookalikeProcesses(t *testing.T) {
 		`bash Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe -launcherlogin -uid wow`,
 		`bash Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe -launcherlogin -uid wow`,
 		`Z:/games/battlenet/World of Warcraft/_classic_/WowClassic.exe -uid wow_classic`,
-		`Z:\games\WowB.exe -uid wow`, `Z:/games/Wow.exe.bak`} {
+		`Z:\games\WowB.exe -uid wow`, `Z:/games/Wow.exe.bak`,
+		`C:/Program Files (x86)/Battle.net/BlizzardError.exe -exe Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe`,
+		`C:/Program Files (x86)/Battle.net/Battle.net.exe --game=Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe`} {
 		decoy := exec.CommandContext(t.Context(), "bash", "-c", `exec -a "$0" sleep 30`, argv0)
 		if err := decoy.Start(); err != nil {
 			t.Fatal(err)
@@ -276,7 +327,8 @@ func TestLaunchBattlenetRefusesUnknownProducts(t *testing.T) {
 
 func TestLaunchBattlenetRefusesBadTimings(t *testing.T) {
 	for _, env := range []string{"BATTLENET_LAUNCH_TIMEOUT=0", "BATTLENET_LAUNCH_TIMEOUT=$(id)",
-		"BATTLENET_RESEND_INTERVAL=-1", "BATTLENET_RESEND_INTERVAL=1.5"} {
+		"BATTLENET_RESEND_INTERVAL=-1", "BATTLENET_RESEND_INTERVAL=1.5", "BATTLENET_WEB_PORT=http",
+		"BATTLENET_READY_WAIT=0", "BATTLENET_SETTLE=-1"} {
 		if r := runLaunchBattlenet(t, true, []string{"wow"}, env); r.code != 2 {
 			t.Errorf("%s: exit %d, want 2\n%s", env, r.code, r.out)
 		}
