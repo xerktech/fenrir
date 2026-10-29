@@ -63,7 +63,10 @@ usable = (os.path.isabs(cli) and p.get("linuxRunPatch") == contract
           and all(os.path.isfile(b) and os.access(b, os.X_OK) for b in (cli, service)))
 if usable:
     try:
-        files = json.load(open(os.path.join(os.path.dirname(cli), "metadata.json")))["files"]
+        metadata = os.path.join(os.path.dirname(cli), "metadata.json")
+        if not stat.S_ISREG(os.stat(metadata).st_mode):
+            raise ValueError("not a file")
+        files = json.load(open(metadata))["files"]
         usable = all(hashlib.sha256(open(b, "rb").read()).hexdigest() == files[os.path.basename(b)] for b in (cli, service))
     except (OSError, ValueError, KeyError, TypeError):
         usable = False
@@ -233,7 +236,9 @@ fi
 if [[ ! -e "${release}" ]]; then
   mv "${staging}/x/${package}" "${release}" || give_up "cannot install ${package}"
 fi
-cp "${staging}/manifest.json" "${release}/metadata.json" || give_up "cannot record ${package}'s manifest"
+# Whatever is at metadata.json (a link, a directory) is removed, never written through.
+{ rm -rf -- "${release}/metadata.json" && cp "${staging}/manifest.json" "${release}/metadata.json"; } ||
+  give_up "cannot record ${package}'s manifest"
 
 # Written whole, then renamed over, as Nexus writes it.
 # The temporary name is new each time, so a planted link is never followed.

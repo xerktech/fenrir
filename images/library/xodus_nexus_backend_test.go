@@ -632,3 +632,65 @@ func TestXodusNexusBackendReplacesDanglingRelease(t *testing.T) {
 		t.Errorf("release: %v %v", fi, err)
 	}
 }
+
+// A current release whose metadata.json is missing, not a file, or a link is
+// reinstalled once, never blocks, and nothing outside the home is written.
+func TestXodusNexusBackendRepairsMetadata(t *testing.T) {
+	for test, damage := range map[string]func(t *testing.T, meta, outside string){
+		"missing": func(t *testing.T, meta, _ string) {
+			t.Helper()
+			if err := os.Remove(meta); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"fifo": func(t *testing.T, meta, _ string) {
+			t.Helper()
+			if err := os.Remove(meta); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(meta, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"directory": func(t *testing.T, meta, _ string) {
+			t.Helper()
+			if err := os.Remove(meta); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(meta, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"link": func(t *testing.T, meta, outside string) {
+			t.Helper()
+			if err := os.Remove(meta); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, meta); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(test, func(t *testing.T) {
+			h := newBackendHost(t)
+			h.pointer(oldBackend)
+			h.publish(backendRelease{version: "0.2.13", contract: "linux-run-v25"})
+			h.run()
+			meta := filepath.Join(filepath.Dir(h.current()["binaryPath"]), "metadata.json")
+			outside := filepath.Join(h.dir, "outside")
+			if err := os.WriteFile(outside, []byte("keep"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			damage(t, meta, outside)
+			if calls := h.run(); !strings.Contains(calls, "reinstalled the damaged backend 0.2.13") {
+				t.Errorf("calls:\n%s", calls)
+			}
+			if calls := h.run(); !strings.Contains(calls, "is up to date") {
+				t.Errorf("second start:\n%s", calls)
+			}
+			if b, _ := os.ReadFile(outside); string(b) != "keep" {
+				t.Errorf("written through to %q", b)
+			}
+		})
+	}
+}
