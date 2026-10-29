@@ -157,6 +157,7 @@ func (h *backendHost) pointer(p map[string]string) {
 			t.Fatal(err)
 		}
 		writeStub(t, cli, "exit 0")
+		writeStub(t, filepath.Join(filepath.Dir(cli), "xodus-service"), "exit 0")
 		p = maps.Clone(p)
 		p["binaryPath"] = cli
 	}
@@ -357,7 +358,7 @@ func TestXodusNexusBackendKeepsBackend(t *testing.T) {
 		"below the launcher":    {oldBackend, []backendRelease{{version: "0.2.12", contract: "linux-run-v25"}}, "cannot find a backend release"},
 		"locally built": {map[string]string{"version": "0.2.11", "delivery": "local"},
 			[]backendRelease{{version: "0.2.13", contract: "linux-run-v25"}}, "locally built"},
-		"already newer": {map[string]string{"version": "0.2.15", "delivery": "release"},
+		"already newer": {map[string]string{"version": "0.2.15", "linuxRunPatch": "linux-run-v25", "delivery": "release"},
 			[]backendRelease{{version: "0.2.13", contract: "linux-run-v25"}}, "up to date"},
 	} {
 		t.Run(test, func(t *testing.T) {
@@ -413,6 +414,10 @@ func TestXodusNexusBackendRefusesUnverified(t *testing.T) {
 		}, "failed verification"},
 		"no external sign-in": {func(h *backendHost) backendRelease {
 			cli := fakeCLI(h.t, "--materialize-chain", "--external-webview-stdio")
+			return backendRelease{files: map[string][]byte{"xodus-cli": cli, "xodus-service": cli, "LICENSE": []byte("x")}}
+		}, "failed verification"},
+		"no account command": {func(h *backendHost) backendRelease {
+			cli := fakeCLI(h.t, "--materialize-chain", "account")
 			return backendRelease{files: map[string][]byte{"xodus-cli": cli, "xodus-service": cli, "LICENSE": []byte("x")}}
 		}, "failed verification"},
 		"no package selection": {func(h *backendHost) backendRelease {
@@ -505,8 +510,9 @@ func TestXodusNexusBackendIgnoresNonFilePointer(t *testing.T) {
 	}
 }
 
-// A release directory already present (from an earlier install) is used only
-// if it still verifies.
+// A release directory already present (from an earlier install) is used if it
+// still verifies, and replaced if it does not: a backend with a file deleted
+// is repaired.
 func TestXodusNexusBackendVerifiesExistingRelease(t *testing.T) {
 	h := newBackendHost(t)
 	h.pointer(oldBackend)
@@ -517,11 +523,22 @@ func TestXodusNexusBackendVerifiesExistingRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.pointer(oldBackend)
-	if calls := h.run(); !strings.Contains(calls, "failed verification") {
+	if calls := h.run(); !strings.Contains(calls, "replacing the damaged") || !strings.Contains(calls, "0.2.11 -> 0.2.13") {
 		t.Errorf("calls:\n%s", calls)
 	}
-	if p := h.current(); p["version"] != "0.2.11" {
-		t.Errorf("current.json changed: %v", p)
+	if b, _ := os.ReadFile(filepath.Join(release, "LICENSE")); string(b) != "GPL-3.0\n" {
+		t.Errorf("LICENSE not repaired: %q", b)
+	}
+	for _, missing := range []string{"xodus-cli", "xodus-service"} {
+		if err := os.Remove(filepath.Join(release, missing)); err != nil {
+			t.Fatal(err)
+		}
+		if calls := h.run(); !strings.Contains(calls, "replacing the damaged") {
+			t.Errorf("%s deleted:\n%s", missing, calls)
+		}
+		if _, err := os.Stat(filepath.Join(release, missing)); err != nil {
+			t.Errorf("%s not repaired: %v", missing, err)
+		}
 	}
 }
 
@@ -543,5 +560,27 @@ func TestXodusNexusBackendPointerTempIsUnpredictable(t *testing.T) {
 	}
 	if fi, err := os.Lstat(filepath.Join(h.managed(), "current.json")); err != nil || !fi.Mode().IsRegular() {
 		t.Errorf("current.json: %v %v", fi, err)
+	}
+}
+
+// A pointer on another launch contract than the launcher's (which refuses to
+// play with it) is replaced, even by an older version.
+func TestXodusNexusBackendReplacesOtherContract(t *testing.T) {
+	h := newBackendHost(t)
+	h.pointer(map[string]string{"version": "0.2.14", "linuxRunPatch": "linux-run-v26", "delivery": "release"})
+	h.publish(backendRelease{version: "0.2.13", contract: "linux-run-v25"})
+	h.run()
+	if p := h.current(); p["version"] != "0.2.13" || p["linuxRunPatch"] != "linux-run-v25" {
+		t.Errorf("current.json %v", p)
+	}
+}
+
+// With every release on another contract the script says so cleanly.
+func TestXodusNexusBackendNoReleaseOnContract(t *testing.T) {
+	h := newBackendHost(t)
+	h.pointer(map[string]string{"version": "0.2.13", "linuxRunPatch": "linux-run-v25", "delivery": "release"})
+	h.publish(backendRelease{version: "0.2.14", contract: "linux-run-v26"}, backendRelease{version: "0.2.15", contract: "linux-run-v26"})
+	if calls := h.run(); strings.Contains(calls, "Traceback") || !strings.Contains(calls, "no backend release uses") {
+		t.Errorf("calls:\n%s", calls)
 	}
 }

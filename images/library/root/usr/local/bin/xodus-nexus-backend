@@ -46,19 +46,22 @@ print(lock["version"], lock["compatibility"])
 ' "${asar}" 2>/dev/null)
 [[ "${minimum}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && -n "${contract}" ]] || give_up "cannot read the launcher's backend lock"
 
-# The installed backend: its version, delivery, and whether its binary is
-# still there ("-" when unknown). Only a regular file is read: a FIFO would
-# block the Library start. A backend without its binary is reinstalled.
+# The installed backend: its version, delivery, and whether Nexus can play with
+# it ("-" when unknown): both binaries are there and it is on the launcher's
+# launch contract. Only a regular file is read: a FIFO would block the
+# Library start. A backend Nexus cannot play with is reinstalled.
 read -r shown delivery usable < <(python3 -I -c '
 import json, os, stat, sys
-path = sys.argv[1]
+path, contract = sys.argv[1:]
 if not stat.S_ISREG(os.stat(path).st_mode):
     sys.exit(1)
 p = json.load(open(path))
 cli = p.get("binaryPath") or ""
-usable = os.path.isabs(cli) and os.path.isfile(cli) and os.access(cli, os.X_OK)
+service = os.path.join(os.path.dirname(cli), "xodus-service")
+usable = (os.path.isabs(cli) and p.get("linuxRunPatch") == contract
+          and all(os.path.isfile(b) and os.access(b, os.X_OK) for b in (cli, service)))
 print(p.get("version") or "-", p.get("delivery") or "-", int(usable))
-' "${managed}/current.json" 2>/dev/null)
+' "${managed}/current.json" "${contract}" 2>/dev/null)
 shown="${shown:--}"
 installed="${shown}"
 [[ "${installed}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${usable}" == 1 ]] || installed=-
@@ -141,7 +144,7 @@ print(m["archiveSha512"])
   esac
 done <<<"${candidates}"
 if [[ -z "${tag}" ]]; then
-  [[ "${installed}" != - ]] && older "${version}" "${installed}" && {
+  [[ "${installed}" != - && -n "${version}" ]] && older "${version}" "${installed}" && {
     echo "xodus-nexus-backend: backend ${installed} is up to date"
     exit 0
   }
@@ -215,9 +218,12 @@ sys.exit(not ({"account", "run", "streaming", "login", "logout", "download", "re
 verify "${staging}/x/${package}" || give_up "${package} failed verification"
 
 release="${managed}/releases/${package}-${sha512:0:16}"
-if [[ -e "${release}" ]]; then
-  verify "${release}" || give_up "the installed ${release##*/} failed verification"
-else
+# A copy from an earlier install is kept if it still verifies, else replaced.
+if [[ -e "${release}" || -L "${release}" ]] && ! verify "${release}" 2>/dev/null; then
+  echo "xodus-nexus-backend: replacing the damaged ${release##*/}"
+  mv "${release}" "${staging}/damaged" || give_up "cannot move the damaged ${release##*/} aside"
+fi
+if [[ ! -e "${release}" ]]; then
   mv "${staging}/x/${package}" "${release}" || give_up "cannot install ${package}"
 fi
 cp "${staging}/manifest.json" "${release}/metadata.json" || give_up "cannot record ${package}'s manifest"
