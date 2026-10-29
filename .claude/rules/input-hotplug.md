@@ -89,7 +89,12 @@ paths:
     lobby during the outage (WolfUI combo, lobby stop), and then Wolf destroys them (QA read another
     device through such a node). So the agent drops, each second, every node whose
     `/sys/dev/char/<maj:min>` no longer points at its DEVPATH (`pruneGoneDevices`).
+  - The prune runs for the agent's whole life (`pruneLoop`), not only while the event stream is up,
+    and under the lock every device change takes: a prune between a plug's mknod and its record
+    dropped the new node. A plug replaces any record on its DEVNAME or minor: a destroyed pad's
+    record on a reused minor would prune the new pad.
   - Tests: `TestAgentPauseKeepsLobbyStreamDevices`, `TestAgentPrunesNodesOfGoneDevices`,
+    `TestAgentPruneSparesNodeReusedByNewDevice`, `TestAgentPrunesWhileEventStreamIsDown`,
     `TestWolfCommandRefusesWolfWithoutHTTPServersSwitch`.
 - Joining a stream to the Wolf lobby moves its joypads with an unplug addressed to the stream; once
   joined, real unplugs are re-fired addressed to the lobby. So the agent skips unplugs to a
