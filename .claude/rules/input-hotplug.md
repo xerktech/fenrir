@@ -94,7 +94,8 @@ paths:
     dropped the new node. A plug replaces any record on its DEVNAME or minor: a destroyed pad's
     record on a reused minor would prune the new pad.
   - Tests: `TestAgentPauseKeepsLobbyStreamDevices`, `TestAgentPrunesNodesOfGoneDevices`,
-    `TestAgentPruneSparesNodeReusedByNewDevice`, `TestAgentPrunesWhileEventStreamIsDown`,
+    `TestAgentPruneSparesNodeReusedByNewDevice`, `TestAgentPrunesWhileEventStreamIsDown` (Wolf
+    unreachable: no subscribe succeeds),
     `TestWolfCommandRefusesWolfWithoutHTTPServersSwitch`.
 - Joining a stream to the Wolf lobby moves its joypads with an unplug addressed to the stream; once
   joined, real unplugs are re-fired addressed to the lobby. So the agent skips unplugs to a

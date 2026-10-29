@@ -341,41 +341,55 @@ func TestAgentPruneSparesNodeReusedByNewDevice(t *testing.T) {
 	// Gone, but already unplugged or cleared: nothing left to prune
 	gone := plug("input11", "73")
 	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent(gone))
+	nodes.calls = nil
+	a.pruneGoneDevices()
+	if len(nodes.calls) != 0 {
+		t.Errorf("pruned a device already unplugged: %v", nodes.calls)
+	}
 	plug("input12", "74")
 	a.clearDevices()
 	nodes.calls = nil
 	a.pruneGoneDevices()
 	if len(nodes.calls) != 0 {
-		t.Errorf("pruned devices already removed: %v", nodes.calls)
+		t.Errorf("pruned a device already cleared: %v", nodes.calls)
 	}
 }
 
+// unreachableClient fails every subscribe, as when Wolf's API is down.
+type unreachableClient struct{ *lobbyClient }
+
+func (unreachableClient) SubscribeToEvents(context.Context) (<-chan *sse.Event, error) {
+	return nil, errors.New("wolf unreachable")
+}
+
 // The prune runs for the agent's life, also while Wolf's event stream is
-// down: Wolf destroys devices then too.
+// down (here no subscribe ever succeeds), and keeps running: Wolf destroys
+// devices then too.
 func TestAgentPrunesWhileEventStreamIsDown(t *testing.T) {
-	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
+	client := unreachableClient{newLobbyClient()}
 	a := hotplugAgent(t, client)
+	a.subscribeFailed = func(error) {}
 	nodes := &recordingNodes{}
 	a.bridge = nodes
 	a.sysDevChar = t.TempDir() // no links: every device is gone
 	a.pruneInterval = 10 * time.Millisecond
-	a.handleDevicePlug(wolfapi.PlugDeviceEvent{SessionID: "42", UdevEvents: []map[string]string{
-		{"ACTION": "add", "DEVNAME": "/dev/input/event72", "MAJOR": "13", "MINOR": "72", "DEVPATH": "/devices/virtual/input/input9/event72"},
-	}})
-	a.devicesMu.Lock()
-	nodes.calls = nil
-	a.devicesMu.Unlock()
+	a.minResubscribeDelay, a.maxResubscribeDelay = time.Hour, time.Hour // one failed subscribe, then a long wait
 	go a.Run(t.Context())
-	<-client.subs // subscribed, then never served: as if Wolf's stream were stuck
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		a.devicesMu.Lock()
-		pruned := slices.Contains(nodes.calls, "remove /dev/input/event72")
-		a.devicesMu.Unlock()
-		if pruned {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the gone device's node was never pruned")
+	// Each device plugged after the last prune is pruned in turn
+	for _, minor := range []string{"72", "73", "74"} {
+		a.handleDevicePlug(wolfapi.PlugDeviceEvent{SessionID: "42", UdevEvents: []map[string]string{
+			{"ACTION": "add", "DEVNAME": "/dev/input/event" + minor, "MAJOR": "13", "MINOR": minor, "DEVPATH": "/devices/virtual/input/input9/event" + minor},
+		}})
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			a.devicesMu.Lock()
+			pruned := slices.Contains(nodes.calls, "remove /dev/input/event"+minor)
+			a.devicesMu.Unlock()
+			if pruned {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the gone device's node event%s was never pruned", minor)
+			}
 		}
 	}
 }
