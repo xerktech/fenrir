@@ -102,10 +102,10 @@ RUN d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin' \
 # moves only with this pin.
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS nexus-app
 # renovate: datasource=github-releases depName=domsvoboda/xodus-nexus
-ARG NEXUS_VERSION=v0.4.1
+ARG NEXUS_VERSION=v0.4.0
 # Must be updated by hand with the version (the release's .sha512sum asset): a
 # Renovate bump without it fails the build closed.
-ARG NEXUS_SHA512=5f206737de156bcafa4c0103b06db7925c88967759b40286e2cf2a7d8283ae0d2c8dd897006b3a2d37c2eca16c6233b466ad3cab5cad9e5b2ecaf89bfa14e52c
+ARG NEXUS_SHA512=55b4ff16b1ec312b5ba96ee701dade439a4a500483f674fdb87e65b0af812688859e14c288d8b4eedb0ec048fdeb583ed083a25140fb104ad0df4633db270716
 RUN set -eu; \
   apt-get update; apt-get install -y --no-install-recommends ca-certificates curl; \
   curl -fsSL -o /tmp/nexus.AppImage \
@@ -183,6 +183,7 @@ COPY --chmod=755 root/opt/direwolf/launch-nexus /opt/direwolf/launch-nexus
 COPY --chmod=755 root/opt/gow/nexus-startup-app.sh /opt/gow/startup-app.sh
 COPY --chmod=755 root/usr/local/bin/xodus-nexus-update /usr/local/bin/xodus-nexus-update
 COPY --chmod=755 root/etc/cont-init.d/30-xodus-nexus-update.sh /etc/cont-init.d/
+COPY --chmod=644 root/opt/xodus-nexus.hold /opt/xodus-nexus.hold
 RUN test -x /opt/xodus-nexus/AppRun && command -v gnome-keyring-daemon dbus-run-session dbus-send >/dev/null \
   && command -v python3 curl sha256sum gosu timeout >/dev/null \
   && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/xodus-nexus' \

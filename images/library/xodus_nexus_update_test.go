@@ -375,3 +375,47 @@ func TestXodusNexusUpdateCachedOnlyTakesHighestVersion(t *testing.T) {
 		t.Errorf("installed %q running %q, want 0.3.12", v, runs)
 	}
 }
+
+// A hold file beside /opt/xodus-nexus keeps the image's Nexus: neither a newer
+// release nor a newer cached copy is installed, and nothing is fetched.
+func TestXodusNexusUpdateHeld(t *testing.T) {
+	p := newNexusPod(t, "0.3.8")
+	app := nexusApp("v0.3.12")
+	p.run([]nexusRelease{launcherRelease("0.3.12", app)}, app)
+	p.reset("0.3.8")
+	if err := os.WriteFile(p.opt+".hold", []byte("upstream bug #457\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{nil, {"--cached-only"}} {
+		calls := p.run([]nexusRelease{launcherRelease("0.3.12", app)}, app, args...)
+		if !strings.Contains(calls, "held at 0.3.8: upstream bug #457") || strings.Contains(calls, "releases") {
+			t.Errorf("%v: want held without asking GitHub:\n%s", args, calls)
+		}
+		if v, runs := p.installed(); v != "0.3.8" || runs != "image" {
+			t.Errorf("%v: installed %q running %q, want the image's 0.3.8", args, v, runs)
+		}
+	}
+}
+
+// The hold ships in both images: the Library copies root/ whole, the session
+// image file by file.
+func TestXodusNexusHoldShipsInBothImages(t *testing.T) {
+	library, err := os.ReadFile("root/opt/xodus-nexus.hold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := os.ReadFile("../gow-nvidia32/root/opt/xodus-nexus.hold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(library, session) {
+		t.Error("images/library and images/gow-nvidia32 ship different Xodus Nexus holds")
+	}
+	dockerfile, err := os.ReadFile("../gow-nvidia32/Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(dockerfile), "COPY --chmod=644 root/opt/xodus-nexus.hold /opt/xodus-nexus.hold") {
+		t.Error("the session image does not copy /opt/xodus-nexus.hold")
+	}
+}
