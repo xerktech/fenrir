@@ -741,15 +741,16 @@ func joinedOnFreshSubscription(t *testing.T, client *resubClient, beforeResubscr
 // A pause Wolf sends while the event stream is down is lost for good (Wolf
 // replays nothing), but it takes the stream out of the lobby. After
 // resubscribing, the agent must stop it as the pause would have, so the
-// operator sees the disconnect, and drop its devices (XERK-1378).
+// operator sees the disconnect (XERK-1378). Its devices stay: Wolf keeps a
+// joined stream's joypads plugged into the game (XERK-2365).
 func TestAgentCatchesUpPauseMissedWhileResubscribing(t *testing.T) {
 	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
 	a, _, entry := joinedOnFreshSubscription(t, client, func() { client.leave(true) })
 	if got := client.stopCalls(); !slices.Equal(got, []string{wolfStreamID}) {
 		t.Errorf("StopSession calls %v, want [%s]", got, wolfStreamID)
 	}
-	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("device of the missed-paused stream kept: %v", err)
+	if _, err := os.Stat(entry); err != nil {
+		t.Errorf("device of the missed-paused stream dropped (Wolf keeps a joined stream's joypads): %v", err)
 	}
 	wantForgotten(t, a)
 }
@@ -776,8 +777,8 @@ func TestAgentCatchUpSparesResumeReusingID(t *testing.T) {
 	if got := client.stopCalls(); len(got) != 0 {
 		t.Errorf("StopSession calls %v: stopped the resumed stream", got)
 	}
-	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("device of the ended stream kept: %v", err)
+	if _, err := os.Stat(entry); err != nil {
+		t.Errorf("device of the ended stream dropped (Wolf keeps a joined stream's joypads): %v", err)
 	}
 	wantForgotten(t, a)
 }
@@ -806,15 +807,15 @@ func TestAgentCatchUpRetriesFailedStop(t *testing.T) {
 }
 
 // A stream Wolf stopped while the event stream was down is no longer listed:
-// nothing to stop, but its devices are gone.
+// nothing to stop, and its joypads are still in the game (XERK-2365).
 func TestAgentCatchesUpStopMissedWhileResubscribing(t *testing.T) {
 	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
 	a, _, entry := joinedOnFreshSubscription(t, client, func() { client.leave(false) })
 	if got := client.stopCalls(); len(got) != 0 {
 		t.Errorf("StopSession calls %v for a stream Wolf no longer lists", got)
 	}
-	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("device of the missed-stopped stream kept: %v", err)
+	if _, err := os.Stat(entry); err != nil {
+		t.Errorf("device of the missed-stopped stream dropped (Wolf keeps a joined stream's joypads): %v", err)
 	}
 	wantForgotten(t, a)
 }
@@ -962,7 +963,7 @@ func TestAgentCatchesUpPauseOfStreamNotYetJoined(t *testing.T) {
 		t.Errorf("StopSession calls %v, want [%s]", got, wolfStreamID)
 	}
 	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("device of the missed-paused stream kept: %v", err)
+		t.Errorf("device of the missed-paused stream kept, though it never joined: %v", err)
 	}
 	// Its pings, had any come, no longer join it.
 	sendOn(ch, wolfapi.RTPVideoPingEventType, `{}`)
@@ -1006,8 +1007,8 @@ func TestAgentCatchUpSparesLiveStreamSharingPausedID(t *testing.T) {
 }
 
 // A joined stream paused and resumed under its ID during the outage: the
-// paused entry is spared (the resume shares its ID), but the joined stream
-// is over, so its devices go.
+// paused entry is spared (the resume shares its ID), and the joined stream
+// is over; its joypads stay, for the resume to take over (XERK-2365).
 func TestAgentCatchUpEndsJoinedStreamResumedUnderItsID(t *testing.T) {
 	client := &resubClient{lobbyClient: newLobbyClient(), subs: make(chan chan *sse.Event, 4)}
 	a, _, entry := joinedOnFreshSubscription(t, client, func() {
@@ -1022,8 +1023,8 @@ func TestAgentCatchUpEndsJoinedStreamResumedUnderItsID(t *testing.T) {
 	if got := client.stopCalls(); len(got) != 0 {
 		t.Errorf("StopSession calls %v: stopped the resumed stream's ID", got)
 	}
-	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("device of the ended stream kept: %v", err)
+	if _, err := os.Stat(entry); err != nil {
+		t.Errorf("device of the ended stream dropped (Wolf keeps a joined stream's joypads): %v", err)
 	}
 	if s, k := a.lobby.joinedStream(); s != "" {
 		t.Errorf("joined stream %q key %q after catching up its end, want none", s, k)
@@ -1052,8 +1053,8 @@ func TestAgentCatchUpKeepsJoinedStreamSharingPausedID(t *testing.T) {
 	close(ch)
 	ch = <-client.subs
 	sendOn(ch, "Done", "")
-	if _, err := os.Stat(entry); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("device of the stream stopped in the second outage kept: %v", err)
+	if _, err := os.Stat(entry); err != nil {
+		t.Errorf("device of the stream stopped in the second outage dropped (Wolf keeps a joined stream's joypads): %v", err)
 	}
 }
 

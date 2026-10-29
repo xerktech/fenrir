@@ -200,6 +200,9 @@ func (a *Agent) catchUp(ctx context.Context) {
 			live = append(live, s)
 		}
 	}
+	// Wolf keeps the joined stream's joypads plugged into the game when it
+	// ends (WOLF_LOBBY_KEEPS_JOYPADS): their nodes stay, as on a pause event.
+	joined, _ := a.lobby.joinedStream()
 	for _, s := range paused {
 		// Wolf stops by ID, which would end a live stream sharing it too.
 		if slices.ContainsFunc(live, func(l wolfapi.Session) bool { return l.ClientID == s.ClientID }) {
@@ -214,7 +217,9 @@ func (a *Agent) catchUp(ctx context.Context) {
 			utilruntime.HandleError(err)
 			continue
 		}
-		a.clearDevices()
+		if s.ClientID != joined {
+			a.clearDevices()
+		}
 	}
 
 	if stream, key := a.lobby.joinedStream(); stream != "" && !slices.ContainsFunc(live, func(s wolfapi.Session) bool {
@@ -222,7 +227,6 @@ func (a *Agent) catchUp(ctx context.Context) {
 	}) {
 		klog.Infof("Session %s was stopped while the event stream was down", stream)
 		a.lobby.ended(stream)
-		a.clearDevices()
 	}
 
 	var missed []wolfapi.Session
