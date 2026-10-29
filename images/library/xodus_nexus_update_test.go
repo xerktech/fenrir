@@ -396,3 +396,26 @@ func TestXodusNexusUpdateHeld(t *testing.T) {
 		}
 	}
 }
+
+// The hold ships in both images: the Library copies root/ whole, the session
+// image file by file.
+func TestXodusNexusHoldShipsInBothImages(t *testing.T) {
+	library, err := os.ReadFile("root/opt/xodus-nexus.hold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := os.ReadFile("../gow-nvidia32/root/opt/xodus-nexus.hold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(library, session) {
+		t.Error("images/library and images/gow-nvidia32 ship different Xodus Nexus holds")
+	}
+	dockerfile, err := os.ReadFile("../gow-nvidia32/Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(dockerfile), "COPY --chmod=644 root/opt/xodus-nexus.hold /opt/xodus-nexus.hold") {
+		t.Error("the session image does not copy /opt/xodus-nexus.hold")
+	}
+}
