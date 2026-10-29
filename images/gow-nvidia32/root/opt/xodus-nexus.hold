@@ -1,0 +1,1 @@
+Nexus 0.4.1 quits game launches from Moonlight (--launch-game) before starting them (domsvoboda/xodus-nexus#457, XERK-2354). Remove this file with the NEXUS_VERSION bump to a fixed release.
