@@ -15,23 +15,30 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// captureKlog sends klog output to a buffer for the rest of the test.
-func captureKlog(t *testing.T) *lockedBuffer {
-	t.Helper()
+// TestMain points klog at its output writer (stderr until a test captures it)
+// once, before any test starts: changing klog's flags while a handler left
+// running by an earlier test logs is a data race.
+func TestMain(m *testing.M) {
 	fs := flag.NewFlagSet("klog", flag.ContinueOnError)
 	klog.InitFlags(fs)
 	for k, v := range map[string]string{"logtostderr": "false", "alsologtostderr": "false", "stderrthreshold": "FATAL"} {
 		if err := fs.Set(k, v); err != nil {
-			t.Fatal(err)
+			panic(err)
 		}
 	}
+	klog.SetOutput(os.Stderr)
+	os.Exit(m.Run())
+}
+
+// captureKlog sends klog output to a buffer for the rest of the test. Only
+// the writer is swapped, which klog does under its own lock.
+func captureKlog(t *testing.T) *lockedBuffer {
+	t.Helper()
 	buf := &lockedBuffer{}
 	klog.SetOutput(buf)
 	t.Cleanup(func() {
 		klog.Flush()
 		klog.SetOutput(os.Stderr)
-		_ = fs.Set("logtostderr", "true")
-		_ = fs.Set("stderrthreshold", "ERROR")
 	})
 	return buf
 }
