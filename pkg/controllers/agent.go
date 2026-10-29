@@ -283,12 +283,18 @@ func (a *Agent) handleEvents(ctx context.Context, ch <-chan *sse.Event) {
 					continue
 				}
 
+				// Wolf keeps a lobby stream's joypads plugged into the game
+				// for the next stream (WOLF_LOBBY_KEEPS_JOYPADS): their
+				// nodes stay, or the game would see them unplugged.
+				joined, _ := a.lobby.joinedStream()
 				a.lobby.ended(pauseEvent.SessionID)
 				if err := a.WolfClient.StopSession(ctx, pauseEvent.SessionID); err != nil {
 					utilruntime.HandleError(err)
 					continue
 				}
-				a.clearDevices()
+				if joined != pauseEvent.SessionID {
+					a.clearDevices()
+				}
 			// Wolf hotplugged a virtual input device. Play the role of
 			// fake-udev: publish its node and udev db entry. The app
 			// container hears of it from the node's udevd, whose

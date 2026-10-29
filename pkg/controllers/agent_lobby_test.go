@@ -268,6 +268,35 @@ func TestAgentKeepsDevicesMovedToLobby(t *testing.T) {
 	}
 }
 
+// Wolf keeps a lobby stream's joypads plugged into the game when it ends
+// (WOLF_LOBBY_KEEPS_JOYPADS), for the next stream to take over: a pause of the
+// joined stream stops it but keeps their nodes, or the game would see them
+// unplugged (XERK-2365). A stream that never joined is cleared as before
+// (TestAgentPauseClearsDevices).
+func TestAgentPauseKeepsLobbyStreamDevices(t *testing.T) {
+	client := newLobbyClient()
+	a := lobbyAgent(t, client)
+	entry := deviceEntry(t, a)
+	client.startStream()
+	client.wantJoin(t)
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if stream, _ := a.lobby.joinedStream(); stream == wolfStreamID {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("join never completed")
+		}
+	}
+	client.send(wolfapi.PauseStreamEventType, `{"session_id":"`+wolfStreamID+`"}`)
+	client.send("Done", "") // unbuffered: the pause has been handled
+	if got := client.stopCalls(); !slices.Equal(got, []string{wolfStreamID}) {
+		t.Errorf("stopped %v, want the paused stream", got)
+	}
+	if _, err := os.Stat(entry); err != nil {
+		t.Errorf("pause of the lobby stream dropped its device: %v", err)
+	}
+}
+
 // Until the join is under way, a stream's unplugs are its own: Wolf relays
 // unplugs to the lobby only for streams already in it.
 func TestAgentUnplugBeforeJoin(t *testing.T) {

@@ -79,6 +79,13 @@ paths:
 - Wolf sends no unplug when a stream stops: it destroys the devices on StopStream. The agent
   clears both dirs on pause (`clearDevices`), or a stale 0666 node would open whatever device the
   kernel gives that minor next (another session's keyboard). Tests: `TestAgentPauseClearsDevices`.
+- Except a stream joined to the lobby: Wolf runs with `WOLF_LOBBY_KEEPS_JOYPADS=TRUE`
+  (`withWolfLobbyKeepsJoypads`), keeps its joypads plugged into the game, and the next stream's
+  `sessions/add` takes them over, so its pause keeps the nodes (XERK-2365).
+  - Why: recreated on every /resume, WoW under Wine missed the new pad about half the time,
+    though Wine itself picked it up each time (WINEDEBUG on talos04).
+  - `wolfCommand` refuses a Wolf without the switch: the agent would keep nodes of destroyed pads.
+  - Tests: `TestAgentPauseKeepsLobbyStreamDevices`, `TestWolfCommandRefusesWolfWithoutHTTPServersSwitch`.
 - Joining a stream to the Wolf lobby moves its joypads with an unplug addressed to the stream; once
   joined, real unplugs are re-fired addressed to the lobby. So the agent skips unplugs to a
   joining/joined stream (`ignoresUnplug`). Tests: `TestAgentKeepsDevicesMovedToLobby`.
