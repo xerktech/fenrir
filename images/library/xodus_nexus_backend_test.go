@@ -158,6 +158,14 @@ func (h *backendHost) pointer(p map[string]string) {
 		}
 		writeStub(t, cli, "exit 0")
 		writeStub(t, filepath.Join(filepath.Dir(cli), "xodus-service"), "exit 0")
+		meta, err := json.Marshal(map[string]any{"files": map[string]string{
+			"xodus-cli": sha256Hex("#!/bin/sh\nexit 0\n"), "xodus-service": sha256Hex("#!/bin/sh\nexit 0\n")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(filepath.Dir(cli), "metadata.json"), meta, 0o600); err != nil {
+			t.Fatal(err)
+		}
 		p = maps.Clone(p)
 		p["binaryPath"] = cli
 	}
@@ -485,7 +493,7 @@ func TestXodusNexusBackendReinstallsMissingBinary(t *testing.T) {
 	h := newBackendHost(t)
 	h.pointer(map[string]string{"version": "0.2.13", "delivery": "release", "binaryPath": filepath.Join(h.dir, "gone", "xodus-cli")})
 	h.publish(backendRelease{version: "0.2.13", contract: "linux-run-v25"})
-	if calls := h.run(); !strings.Contains(calls, "updated the backend 0.2.13 -> 0.2.13") {
+	if calls := h.run(); !strings.Contains(calls, "reinstalled the damaged backend 0.2.13") {
 		t.Errorf("calls:\n%s", calls)
 	}
 	if p := h.current(); !strings.HasPrefix(p["binaryPath"], h.managed()) {
@@ -582,5 +590,45 @@ func TestXodusNexusBackendNoReleaseOnContract(t *testing.T) {
 	h.publish(backendRelease{version: "0.2.14", contract: "linux-run-v26"}, backendRelease{version: "0.2.15", contract: "linux-run-v26"})
 	if calls := h.run(); strings.Contains(calls, "Traceback") || !strings.Contains(calls, "no backend release uses") {
 		t.Errorf("calls:\n%s", calls)
+	}
+}
+
+// A current backend whose binary was corrupted in place (still present and
+// executable) is reinstalled: Nexus would refuse it.
+func TestXodusNexusBackendReinstallsCorruptedBinary(t *testing.T) {
+	h := newBackendHost(t)
+	h.pointer(oldBackend)
+	h.publish(backendRelease{version: "0.2.13", contract: "linux-run-v25"})
+	h.run()
+	cli := h.current()["binaryPath"]
+	if err := os.WriteFile(cli, nil, 0o755); err != nil { //nolint:gosec // an executable, as installed
+		t.Fatal(err)
+	}
+	if calls := h.run(); !strings.Contains(calls, "replacing the damaged") || !strings.Contains(calls, "reinstalled the damaged backend 0.2.13") {
+		t.Errorf("calls:\n%s", calls)
+	}
+	if fi, err := os.Stat(cli); err != nil || fi.Size() == 0 {
+		t.Errorf("xodus-cli not repaired: %v %v", fi, err)
+	}
+}
+
+// A dangling link where the release directory belongs is replaced.
+func TestXodusNexusBackendReplacesDanglingRelease(t *testing.T) {
+	h := newBackendHost(t)
+	h.pointer(oldBackend)
+	h.publish(backendRelease{version: "0.2.13", contract: "linux-run-v25"})
+	h.run()
+	release := filepath.Dir(h.current()["binaryPath"])
+	if err := os.RemoveAll(release); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(h.dir, "nowhere"), release); err != nil {
+		t.Fatal(err)
+	}
+	if calls := h.run(); !strings.Contains(calls, "reinstalled the damaged backend 0.2.13") {
+		t.Errorf("calls:\n%s", calls)
+	}
+	if fi, err := os.Lstat(release); err != nil || !fi.IsDir() {
+		t.Errorf("release: %v %v", fi, err)
 	}
 }

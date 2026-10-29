@@ -92,7 +92,8 @@ paths:
     - Minimum version and contract come from the installed launcher's lock inside `app.asar`. A
       newer release on another contract (published minutes before its launcher) is passed over
       for the newest on the launcher's; a locally built backend (`delivery: local`) is left alone.
-    - "Up to date" means Nexus can play with the pointer: both binaries present and the pointer on
+    - "Up to date" means Nexus can play with the pointer: both binaries present and matching the
+      release's `metadata.json` hashes, and the pointer on
       the launcher's contract. A damaged release directory is replaced, not given up on.
     - Keep both images' `NEXUS_VERSION` on the launch contract of the newest backend: a session
       that falls back to the image's launcher refuses to play with a newer-contract backend.

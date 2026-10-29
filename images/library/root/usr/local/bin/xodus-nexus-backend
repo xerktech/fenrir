@@ -47,11 +47,12 @@ print(lock["version"], lock["compatibility"])
 [[ "${minimum}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && -n "${contract}" ]] || give_up "cannot read the launcher's backend lock"
 
 # The installed backend: its version, delivery, and whether Nexus can play with
-# it ("-" when unknown): both binaries are there and it is on the launcher's
-# launch contract. Only a regular file is read: a FIFO would block the
+# it ("-" when unknown): both binaries are there, match the hashes in the
+# release's metadata.json (which Nexus writes too) and it is on the
+# launcher's launch contract. Only a regular file is read: a FIFO would block the
 # Library start. A backend Nexus cannot play with is reinstalled.
 read -r shown delivery usable < <(python3 -I -c '
-import json, os, stat, sys
+import hashlib, json, os, stat, sys
 path, contract = sys.argv[1:]
 if not stat.S_ISREG(os.stat(path).st_mode):
     sys.exit(1)
@@ -60,6 +61,12 @@ cli = p.get("binaryPath") or ""
 service = os.path.join(os.path.dirname(cli), "xodus-service")
 usable = (os.path.isabs(cli) and p.get("linuxRunPatch") == contract
           and all(os.path.isfile(b) and os.access(b, os.X_OK) for b in (cli, service)))
+if usable:
+    try:
+        files = json.load(open(os.path.join(os.path.dirname(cli), "metadata.json")))["files"]
+        usable = all(hashlib.sha256(open(b, "rb").read()).hexdigest() == files[os.path.basename(b)] for b in (cli, service))
+    except (OSError, ValueError, KeyError, TypeError):
+        usable = False
 print(p.get("version") or "-", p.get("delivery") or "-", int(usable))
 ' "${managed}/current.json" "${contract}" 2>/dev/null)
 shown="${shown:--}"
@@ -245,4 +252,8 @@ except BaseException:
     os.unlink(tmp)
     raise
 ' "${staging}/manifest.json" "${release}/xodus-cli" "${managed}/current.json" || give_up "cannot write current.json"
-echo "xodus-nexus-backend: updated the backend ${shown} -> ${version}"
+if [[ "${shown}" == "${version}" ]]; then
+  echo "xodus-nexus-backend: reinstalled the damaged backend ${version}"
+else
+  echo "xodus-nexus-backend: updated the backend ${shown} -> ${version}"
+fi
