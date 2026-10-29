@@ -1,0 +1,15 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+# Updates Xodus Nexus's backend to the newest compatible release, after the
+# launcher update and before the desktop starts; see xodus-nexus-backend. It
+# works only in the desktop user's home, so it runs as that user.
+#
+# Never exits non-zero: a failed oneshot stops s6 starting the desktop and
+# leaves the pod Running but never Ready, which would hold the Steam lock.
+
+home="$(getent passwd abc | cut -d: -f6)"
+[[ -n "${home}" ]] || { echo "init-xodus-nexus-backend: cannot find abc's home" >&2; exit 0; }
+HOME="${home}" timeout 600 s6-setuidgid abc /usr/local/bin/xodus-nexus-backend ||
+  echo "init-xodus-nexus-backend: timed out or failed; Nexus offers the update in Settings" >&2
+exit 0

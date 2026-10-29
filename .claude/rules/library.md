@@ -85,6 +85,13 @@ paths:
     the newest runtime release when `<runtimeRoot>/current.json` has no working wine, the way
     Nexus's `installNexus` does (XERK-2289). Install-if-missing only; updates stay in Settings.
     Tests: `images/library/xodus_nexus_runtime_test.go`.
+  - Nexus updates its backend only on first run or from Settings, and a launcher on a newer launch
+    contract (`linux-run-vNN`) refuses to play with an older backend. `init-xodus-nexus-backend`
+    (as abc, after `init-xodus-nexus-update`) installs the newest `backend-v*` release the
+    launcher accepts, as Nexus's own update does (XERK-2354).
+    - Minimum version and contract come from the installed launcher's lock inside `app.asar`; a
+      release on another contract, or a locally built backend (`delivery: local`), is left alone.
+    - Tests: `images/library/xodus_nexus_backend_test.go` (builds a real x86_64 ELF as xodus-cli).
   - The wrapper exports `APPDIR`: AppRun otherwise finds its directory by testing `"$dir/$1"`,
     so any argument sends it to `/xodus-nexus`. The build makes the unpacked tree world-readable
     (`--appimage-extract` leaves 0700 root dirs) and fails if any entry is not.
