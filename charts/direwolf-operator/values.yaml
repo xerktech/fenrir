@@ -126,8 +126,10 @@ controllers:
           # Wolf creates its CUDA context on the GPU the pod was given, not on that GPU's index
           # among all host GPUs (XERK-1391); stopping a live stream's viewers early no longer
           # hangs them (XERK-2130).
+          # A game's controllers stay plugged in across a /resume (WOLF_LOBBY_KEEPS_JOYPADS,
+          # XERK-2365), which wolfCommand requires.
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-d74b274@sha256:4a8a9c3b225b86f46a54a349f85064549eaa9ed82e2c44b03684981073f4979d
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-dd74809@sha256:3296c42a2287200af47136eba86de3dc074c8424fd5f78b9e4e2df4b022b73f1
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           # The wowAddons list below, for the Library (--library-wow-addons).

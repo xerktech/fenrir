@@ -1690,7 +1690,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 			Command: wolfCommand,
 			// Keeps wolfCommand's refusal of an old Wolf once the pod is gone.
 			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
-			Env:                      withWolfHTTPServersOff(append(wolfEnvVarsSlice, wolfEnv...)),
+			Env:                      withWolfLobbyKeepsJoypads(withWolfHTTPServersOff(append(wolfEnvVarsSlice, wolfEnv...))),
 			// Declared so they become hostPorts; see HostNetwork above.
 			Ports: []corev1.ContainerPort{
 				{Name: "http", ContainerPort: ports.HTTP, Protocol: corev1.ProtocolTCP},
@@ -2453,8 +2453,17 @@ func withHotplugMounts(mounts []corev1.VolumeMount) []corev1.VolumeMount {
 // and serve Moonlight HTTP/HTTPS on the node IP, where its HTTPS lets an
 // unpaired client in (XERK-1682). Wolf reads the name from its binary's
 // strings, so the binary holding it is the check.
+//
+// It refuses one without WOLF_LOBBY_KEEPS_JOYPADS (xerktech/wolf XERK-2365) the
+// same way: wolf-agent keeps a paused lobby stream's device nodes for joypads
+// such a Wolf destroys, and a node left behind opens whichever device gets its
+// minor next (input-hotplug.md).
 var wolfCommand = []string{"/bin/sh", "-c", `if ! grep -qF ` + wolfHTTPServersEnv + ` ` + wolfBinary + `; then
   echo "` + wolfBinary + ` predates ` + wolfHTTPServersEnv + ` (needs xerktech/wolf >= 91fe38e), refusing to serve its HTTP/HTTPS on the node" >&2
+  exit 1
+fi
+if ! grep -qF ` + wolfLobbyKeepsJoypadsEnv + ` ` + wolfBinary + `; then
+  echo "` + wolfBinary + ` predates ` + wolfLobbyKeepsJoypadsEnv + ` (needs xerktech/wolf with XERK-2365), whose joypads wolf-agent would leave nodes for" >&2
   exit 1
 fi
 if [ ! -c "${WOLF_RENDER_NODE:-}" ]; then
@@ -2476,8 +2485,21 @@ func withWolfHTTPServersOff(env []corev1.EnvVar) []corev1.EnvVar {
 	return append(env, corev1.EnvVar{Name: wolfHTTPServersEnv, Value: "FALSE"})
 }
 
+// withWolfLobbyKeepsJoypads makes a stream that ends in Wolf's lobby leave its
+// joypads plugged into the game for the session's next stream
+// (WOLF_LOBBY_KEEPS_JOYPADS, xerktech/wolf XERK-2365). Every /resume stops the
+// stream and adds a new one, so Wolf would otherwise destroy and recreate the
+// pads, and WoW under Wine kept the new one only about half the time.
+// wolf-agent relies on it (it keeps a paused lobby stream's device nodes), so
+// it replaces any value from a User's wolf policy.
+func withWolfLobbyKeepsJoypads(env []corev1.EnvVar) []corev1.EnvVar {
+	env = slices.DeleteFunc(env, func(e corev1.EnvVar) bool { return e.Name == wolfLobbyKeepsJoypadsEnv })
+	return append(env, corev1.EnvVar{Name: wolfLobbyKeepsJoypadsEnv, Value: "TRUE"})
+}
+
 const (
-	wolfHTTPServersEnv = "WOLF_HTTP_SERVERS"
+	wolfHTTPServersEnv       = "WOLF_HTTP_SERVERS"
+	wolfLobbyKeepsJoypadsEnv = "WOLF_LOBBY_KEEPS_JOYPADS"
 	// Where the Wolf image's entrypoint runs Wolf from.
 	wolfBinary = "/wolf/wolf"
 )

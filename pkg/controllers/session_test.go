@@ -671,7 +671,7 @@ func TestWolfCommandPicksClaimedRenderNode(t *testing.T) {
 	}
 	dri := t.TempDir()
 	script := strings.ReplaceAll(wolfCommand[2], "/dev/dri/", dri+"/")
-	script = strings.ReplaceAll(script, wolfBinary, fakeWolfBinary(t, true))
+	script = strings.ReplaceAll(script, wolfBinary, fakeWolfBinary(t, wolfHTTPServersEnv, wolfLobbyKeepsJoypadsEnv))
 	script = strings.ReplaceAll(script, "exec /entrypoint.sh", `echo "$WOLF_RENDER_NODE"`)
 	run := func(env ...string) string {
 		cmd := exec.CommandContext(t.Context(), "sh", "-c", script)
@@ -738,6 +738,15 @@ func TestSessionPodTurnsOffWolfHTTPServers(t *testing.T) {
 		if want := []corev1.EnvVar{{Name: "WOLF_HTTP_SERVERS", Value: "FALSE"}}; !slices.Equal(servers, want) {
 			t.Errorf("%s: wolf WOLF_HTTP_SERVERS = %+v, want %+v", user, servers, want)
 		}
+		var keeps []corev1.EnvVar
+		for _, e := range wolf.Env {
+			if e.Name == wolfLobbyKeepsJoypadsEnv {
+				keeps = append(keeps, e)
+			}
+		}
+		if want := []corev1.EnvVar{{Name: wolfLobbyKeepsJoypadsEnv, Value: "TRUE"}}; !slices.Equal(keeps, want) {
+			t.Errorf("%s: wolf %s = %+v, want %+v", user, wolfLobbyKeepsJoypadsEnv, keeps, want)
+		}
 	}
 }
 
@@ -747,12 +756,17 @@ func TestWolfCommandRefusesWolfWithoutHTTPServersSwitch(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
 	}
-	for _, knows := range []bool{true, false} {
-		script := strings.ReplaceAll(wolfCommand[2], wolfBinary, fakeWolfBinary(t, knows))
+	for _, knows := range [][]string{
+		{wolfHTTPServersEnv, wolfLobbyKeepsJoypadsEnv},
+		{wolfHTTPServersEnv},
+		{wolfLobbyKeepsJoypadsEnv},
+		nil,
+	} {
+		script := strings.ReplaceAll(wolfCommand[2], wolfBinary, fakeWolfBinary(t, knows...))
 		script = strings.ReplaceAll(script, "exec /entrypoint.sh", "echo started")
 		out, err := exec.CommandContext(t.Context(), "sh", "-c", script).Output()
-		if started := err == nil && strings.TrimSpace(string(out)) == "started"; started != knows {
-			t.Errorf("Wolf binary knowing %s=%v: started=%v (%v)", wolfHTTPServersEnv, knows, started, err)
+		if started, want := err == nil && strings.TrimSpace(string(out)) == "started", len(knows) == 2; started != want {
+			t.Errorf("Wolf binary knowing %v: started=%v (%v)", knows, started, err)
 		}
 	}
 }
@@ -790,12 +804,9 @@ func TestSessionPodWolfKeepsRefusalAsTerminationMessage(t *testing.T) {
 
 // fakeWolfBinary stands in for the Wolf binary, holding the WOLF_HTTP_SERVERS
 // name among other bytes as a build that reads it does.
-func fakeWolfBinary(t *testing.T, knowsHTTPServers bool) string {
+func fakeWolfBinary(t *testing.T, knows ...string) string {
 	t.Helper()
-	content := "\x7fELF\x00WOLF_HTTP_PORT\x00"
-	if knowsHTTPServers {
-		content += wolfHTTPServersEnv + "\x00"
-	}
+	content := "\x7fELF\x00WOLF_HTTP_PORT\x00" + strings.Join(append(knows, ""), "\x00")
 	p := filepath.Join(t.TempDir(), "wolf")
 	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)

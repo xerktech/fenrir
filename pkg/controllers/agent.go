@@ -6,7 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/r3labs/sse/v2"
@@ -49,6 +53,25 @@ type Agent struct {
 	subscribeFailed func(error)
 
 	lobby *lobbyJoiner
+
+	// Serializes publishing and removing devices, including
+	// pruneGoneDevices, which runs on its own goroutine: a prune between a
+	// plug's node and its record would drop the new node.
+	devicesMu sync.Mutex
+	// The devices whose nodes are published, by node DEVPATH, for
+	// pruneGoneDevices; sysDevChar is /sys/dev/char outside tests, "" to
+	// prune nothing, every pruneInterval.
+	published     map[string]publishedDevice
+	sysDevChar    string
+	pruneInterval time.Duration
+}
+
+// publishedDevice is what a plug published for one /dev/input node: Wolf's
+// udev events for its device (to announce its removal) and its udev entries.
+type publishedDevice struct {
+	node     map[string]string
+	events   []map[string]string
+	hwdbFile []string
 }
 
 func NewAgent(
@@ -62,6 +85,8 @@ func NewAgent(
 		minResubscribeDelay: 200 * time.Millisecond,
 		maxResubscribeDelay: 10 * time.Second,
 		subscribeFailed:     utilruntime.HandleError,
+		sysDevChar:          "/sys/dev/char",
+		pruneInterval:       time.Second,
 	}
 	res.lobby = &lobbyJoiner{client: wolfClient, settle: lobbyJoinSettle, unplug: res.handleDeviceUnplug}
 
@@ -141,6 +166,9 @@ func (a *Agent) nodes() deviceNodes {
 // events would no longer stop Wolf's session or clear the devices.
 func (a *Agent) Run(ctx context.Context) {
 	klog.Infof("Starting Agent")
+	// For the agent's whole life: Wolf destroys devices while its event
+	// stream is down too.
+	go a.pruneLoop(ctx)
 	delay := a.minResubscribeDelay
 	for {
 		// Timed from the request: a proxy may hold the response headers
@@ -200,6 +228,9 @@ func (a *Agent) catchUp(ctx context.Context) {
 			live = append(live, s)
 		}
 	}
+	// Wolf keeps the joined stream's joypads plugged into the game when it
+	// ends (WOLF_LOBBY_KEEPS_JOYPADS): their nodes stay, as on a pause event.
+	joined, _ := a.lobby.joinedStream()
 	for _, s := range paused {
 		// Wolf stops by ID, which would end a live stream sharing it too.
 		if slices.ContainsFunc(live, func(l wolfapi.Session) bool { return l.ClientID == s.ClientID }) {
@@ -214,7 +245,9 @@ func (a *Agent) catchUp(ctx context.Context) {
 			utilruntime.HandleError(err)
 			continue
 		}
-		a.clearDevices()
+		if s.ClientID != joined {
+			a.clearDevices()
+		}
 	}
 
 	if stream, key := a.lobby.joinedStream(); stream != "" && !slices.ContainsFunc(live, func(s wolfapi.Session) bool {
@@ -222,7 +255,6 @@ func (a *Agent) catchUp(ctx context.Context) {
 	}) {
 		klog.Infof("Session %s was stopped while the event stream was down", stream)
 		a.lobby.ended(stream)
-		a.clearDevices()
 	}
 
 	var missed []wolfapi.Session
@@ -283,12 +315,18 @@ func (a *Agent) handleEvents(ctx context.Context, ch <-chan *sse.Event) {
 					continue
 				}
 
+				// Wolf keeps a lobby stream's joypads plugged into the game
+				// for the next stream (WOLF_LOBBY_KEEPS_JOYPADS): their
+				// nodes stay, or the game would see them unplugged.
+				joined, _ := a.lobby.joinedStream()
 				a.lobby.ended(pauseEvent.SessionID)
 				if err := a.WolfClient.StopSession(ctx, pauseEvent.SessionID); err != nil {
 					utilruntime.HandleError(err)
 					continue
 				}
-				a.clearDevices()
+				if joined != pauseEvent.SessionID {
+					a.clearDevices()
+				}
 			// Wolf hotplugged a virtual input device. Play the role of
 			// fake-udev: publish its node and udev db entry. The app
 			// container hears of it from the node's udevd, whose
@@ -358,12 +396,17 @@ func logEvent(ev *sse.Event) {
 // a 0666 node would open whichever device the kernel gives its minor next,
 // possibly another session's keyboard. A resumed stream plugs anew.
 func (a *Agent) clearDevices() {
+	a.devicesMu.Lock()
+	defer a.devicesMu.Unlock()
+	a.published = nil
 	if err := a.nodes().Clear(); err != nil {
 		utilruntime.HandleError(fmt.Errorf("failed to clear devices: %w", err))
 	}
 }
 
 func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
+	a.devicesMu.Lock()
+	defer a.devicesMu.Unlock()
 	// Wolf reports MAJOR/MINOR as "0" when it cannot stat the device node
 	// in its own container; resolve the real numbers from sysfs so both
 	// the node and the hwdb filename are correct.
@@ -383,6 +426,7 @@ func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
 		}
 	}
 
+	var hwdbFiles []string
 	for _, entry := range ev.UdevHwDbEntries {
 		filename := entry.Filename
 		// Recompute "cMAJOR:MINOR" filenames that were built from the
@@ -396,9 +440,74 @@ func (a *Agent) handleDevicePlug(ev wolfapi.PlugDeviceEvent) {
 			utilruntime.HandleError(fmt.Errorf("failed to write udev hwdb entry %q: %w", filename, err))
 		} else {
 			klog.InfoS("Wrote udev hwdb entry", "file", filename, "session", ev.SessionID)
+			hwdbFiles = append(hwdbFiles, filename)
 		}
 	}
 	a.announce(ev.UdevEvents, "add")
+	for _, udevEvent := range ev.UdevEvents {
+		if !fakeudev.IsInputDeviceNode(udevEvent) {
+			continue
+		}
+		// A device Wolf destroyed without an unplug may have left its record
+		// on this node: the node is this device's now, and pruning the old
+		// record would drop it.
+		maps.DeleteFunc(a.published, func(_ string, d publishedDevice) bool {
+			return d.node["DEVNAME"] == udevEvent["DEVNAME"] ||
+				d.node["MAJOR"]+":"+d.node["MINOR"] == udevEvent["MAJOR"]+":"+udevEvent["MINOR"]
+		})
+		if a.published == nil {
+			a.published = map[string]publishedDevice{}
+		}
+		a.published[udevEvent["DEVPATH"]] = publishedDevice{node: udevEvent, events: ev.UdevEvents, hwdbFile: hwdbFiles}
+	}
+}
+
+// pruneLoop runs pruneGoneDevices every pruneInterval until ctx ends.
+func (a *Agent) pruneLoop(ctx context.Context) {
+	if a.sysDevChar == "" {
+		return
+	}
+	t := time.NewTicker(a.pruneInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			a.pruneGoneDevices()
+		}
+	}
+}
+
+// pruneGoneDevices drops the published nodes whose device the kernel no
+// longer has under their numbers. Wolf destroys a device without an unplug
+// event in places the agent can't see, e.g. a joined stream that left the
+// lobby while the event stream was down and then ended (catchUp keeps a joined
+// stream's nodes, as Wolf keeps its joypads in the game). A 0666 node left
+// behind would open whichever device the kernel gives its minor next.
+func (a *Agent) pruneGoneDevices() {
+	if a.sysDevChar == "" {
+		return
+	}
+	a.devicesMu.Lock()
+	defer a.devicesMu.Unlock()
+	for devpath, d := range a.published {
+		target, err := os.Readlink(filepath.Join(a.sysDevChar, d.node["MAJOR"]+":"+d.node["MINOR"]))
+		if err == nil && strings.HasSuffix(target, devpath) {
+			continue
+		}
+		klog.InfoS("Dropping the node of a device that is gone", "devname", d.node["DEVNAME"], "devpath", devpath)
+		if err := a.nodes().Remove(d.node); err != nil {
+			utilruntime.HandleError(fmt.Errorf("failed to remove device node: %w", err))
+		}
+		for _, f := range d.hwdbFile {
+			if err := a.nodes().RemoveHwDB(f); err != nil {
+				utilruntime.HandleError(fmt.Errorf("failed to remove udev hwdb entry %q: %w", f, err))
+			}
+		}
+		a.announce(d.events, "remove")
+		delete(a.published, devpath)
+	}
 }
 
 // announce passes Wolf's udev events for one device on, in Wolf's order (the
@@ -414,6 +523,8 @@ func (a *Agent) announce(events []map[string]string, action string) {
 }
 
 func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
+	a.devicesMu.Lock()
+	defer a.devicesMu.Unlock()
 	for _, udevEvent := range ev.UdevEvents {
 		fakeudev.ResolveDevNumbers(udevEvent)
 		if !fakeudev.IsInputDeviceNode(udevEvent) {
@@ -422,6 +533,7 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 		if err := a.nodes().Remove(udevEvent); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to remove device node: %w", err))
 		}
+		delete(a.published, udevEvent["DEVPATH"])
 	}
 
 	for _, entry := range ev.UdevHwDbEntries {

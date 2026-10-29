@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ func hotplugAgent(t *testing.T, client wolfapi.Client) *Agent {
 	t.Helper()
 	a := NewAgent(client)
 	a.inputDevPath, a.udevDataPath = t.TempDir(), t.TempDir()
+	a.sysDevChar = "" // the test's devices aren't the kernel's
 	return a
 }
 
@@ -253,5 +255,141 @@ func TestAgentAnnouncesThroughBridge(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no event reached the bridge's stream")
+	}
+}
+
+// A published node whose device the kernel no longer has under its numbers
+// (gone, or the minor reused by another device) is dropped with its entry,
+// and its removal announced; one whose device is there stays (XERK-2365).
+func TestAgentPrunesNodesOfGoneDevices(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &recordingNodes{}
+	a.bridge = nodes
+	a.sysDevChar = t.TempDir()
+	plug := func(input string, minor string) {
+		a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+			SessionID: "42",
+			UdevEvents: []map[string]string{
+				{"ACTION": "add", "DEVPATH": "/devices/virtual/input/" + input},
+				{"ACTION": "add", "DEVNAME": "/dev/input/event" + minor, "MAJOR": "13", "MINOR": minor, "DEVPATH": "/devices/virtual/input/" + input + "/event" + minor},
+			},
+			UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:" + minor, Content: []string{"E:ID_INPUT_JOYSTICK=1"}}},
+		})
+	}
+	link := func(minor, target string) {
+		if err := os.Symlink("../../devices/virtual/input/"+target, filepath.Join(a.sysDevChar, "13:"+minor)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plug("input9", "72")
+	plug("input10", "73")
+	plug("input11", "74")
+	link("72", "input9/event72")  // still there
+	link("73", "input12/event73") // its minor now another device's
+	// 74: gone
+	nodes.calls = nil
+	a.pruneGoneDevices()
+	for _, want := range []string{
+		"remove /dev/input/event73", "rm hwdb c13:73",
+		"announce remove /devices/virtual/input/input10", "announce remove /devices/virtual/input/input10/event73",
+		"remove /dev/input/event74", "rm hwdb c13:74",
+		"announce remove /devices/virtual/input/input11/event74",
+	} {
+		if !slices.Contains(nodes.calls, want) {
+			t.Errorf("no %q in %v", want, nodes.calls)
+		}
+	}
+	if slices.ContainsFunc(nodes.calls, func(c string) bool { return strings.Contains(c, "72") || strings.Contains(c, "input9") }) {
+		t.Errorf("pruned the device still there: %v", nodes.calls)
+	}
+	nodes.calls = nil
+	a.pruneGoneDevices()
+	if len(nodes.calls) != 0 {
+		t.Errorf("pruned again: %v", nodes.calls)
+	}
+}
+
+// A device Wolf destroyed without an unplug leaves its record; the next
+// device on its minor replaces it, so pruning never drops the new node. An
+// unplugged or cleared device is no longer pruned either.
+func TestAgentPruneSparesNodeReusedByNewDevice(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &recordingNodes{}
+	a.bridge = nodes
+	a.sysDevChar = t.TempDir()
+	plug := func(input, minor string) wolfapi.PlugDeviceEvent {
+		ev := wolfapi.PlugDeviceEvent{
+			SessionID: "42",
+			UdevEvents: []map[string]string{
+				{"ACTION": "add", "DEVNAME": "/dev/input/event" + minor, "MAJOR": "13", "MINOR": minor, "DEVPATH": "/devices/virtual/input/" + input + "/event" + minor},
+			},
+		}
+		a.handleDevicePlug(ev)
+		return ev
+	}
+	plug("input9", "72")
+	plug("input10", "72") // input9 destroyed, its minor reused
+	if err := os.Symlink("../../devices/virtual/input/input10/event72", filepath.Join(a.sysDevChar, "13:72")); err != nil {
+		t.Fatal(err)
+	}
+	nodes.calls = nil
+	a.pruneGoneDevices()
+	if len(nodes.calls) != 0 {
+		t.Errorf("pruned the device now on the node: %v", nodes.calls)
+	}
+
+	// Gone, but already unplugged or cleared: nothing left to prune
+	gone := plug("input11", "73")
+	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent(gone))
+	nodes.calls = nil
+	a.pruneGoneDevices()
+	if len(nodes.calls) != 0 {
+		t.Errorf("pruned a device already unplugged: %v", nodes.calls)
+	}
+	plug("input12", "74")
+	a.clearDevices()
+	nodes.calls = nil
+	a.pruneGoneDevices()
+	if len(nodes.calls) != 0 {
+		t.Errorf("pruned a device already cleared: %v", nodes.calls)
+	}
+}
+
+// unreachableClient fails every subscribe, as when Wolf's API is down.
+type unreachableClient struct{ *lobbyClient }
+
+func (unreachableClient) SubscribeToEvents(context.Context) (<-chan *sse.Event, error) {
+	return nil, errors.New("wolf unreachable")
+}
+
+// The prune runs for the agent's life, also while Wolf's event stream is
+// down (here no subscribe ever succeeds), and keeps running: Wolf destroys
+// devices then too.
+func TestAgentPrunesWhileEventStreamIsDown(t *testing.T) {
+	client := unreachableClient{newLobbyClient()}
+	a := hotplugAgent(t, client)
+	a.subscribeFailed = func(error) {}
+	nodes := &recordingNodes{}
+	a.bridge = nodes
+	a.sysDevChar = t.TempDir() // no links: every device is gone
+	a.pruneInterval = 10 * time.Millisecond
+	a.minResubscribeDelay, a.maxResubscribeDelay = time.Hour, time.Hour // one failed subscribe, then a long wait
+	go a.Run(t.Context())
+	// Each device plugged after the last prune is pruned in turn
+	for _, minor := range []string{"72", "73", "74"} {
+		a.handleDevicePlug(wolfapi.PlugDeviceEvent{SessionID: "42", UdevEvents: []map[string]string{
+			{"ACTION": "add", "DEVNAME": "/dev/input/event" + minor, "MAJOR": "13", "MINOR": minor, "DEVPATH": "/devices/virtual/input/input9/event" + minor},
+		}})
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			a.devicesMu.Lock()
+			pruned := slices.Contains(nodes.calls, "remove /dev/input/event"+minor)
+			a.devicesMu.Unlock()
+			if pruned {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the gone device's node event%s was never pruned", minor)
+			}
+		}
 	}
 }
