@@ -85,7 +85,12 @@ paths:
   - Why: recreated on every /resume, WoW under Wine missed the new pad about half the time,
     though Wine itself picked it up each time (WINEDEBUG on talos04).
   - `wolfCommand` refuses a Wolf without the switch: the agent would keep nodes of destroyed pads.
-  - Tests: `TestAgentPauseKeepsLobbyStreamDevices`, `TestWolfCommandRefusesWolfWithoutHTTPServersSwitch`.
+  - catchUp keeps them too, but "joined" doesn't prove Wolf kept the pads: a stream can leave the
+    lobby during the outage (WolfUI combo, lobby stop), and then Wolf destroys them (QA read another
+    device through such a node). So the agent drops, each second, every node whose
+    `/sys/dev/char/<maj:min>` no longer points at its DEVPATH (`pruneGoneDevices`).
+  - Tests: `TestAgentPauseKeepsLobbyStreamDevices`, `TestAgentPrunesNodesOfGoneDevices`,
+    `TestWolfCommandRefusesWolfWithoutHTTPServersSwitch`.
 - Joining a stream to the Wolf lobby moves its joypads with an unplug addressed to the stream; once
   joined, real unplugs are re-fired addressed to the lobby. So the agent skips unplugs to a
   joining/joined stream (`ignoresUnplug`). Tests: `TestAgentKeepsDevicesMovedToLobby`.

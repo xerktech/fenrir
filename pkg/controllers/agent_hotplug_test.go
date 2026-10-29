@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ func hotplugAgent(t *testing.T, client wolfapi.Client) *Agent {
 	t.Helper()
 	a := NewAgent(client)
 	a.inputDevPath, a.udevDataPath = t.TempDir(), t.TempDir()
+	a.sysDevChar = "" // the test's devices aren't the kernel's
 	return a
 }
 
@@ -253,5 +255,56 @@ func TestAgentAnnouncesThroughBridge(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no event reached the bridge's stream")
+	}
+}
+
+// A published node whose device the kernel no longer has under its numbers
+// (gone, or the minor reused by another device) is dropped with its entry,
+// and its removal announced; one whose device is there stays (XERK-2365).
+func TestAgentPrunesNodesOfGoneDevices(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &recordingNodes{}
+	a.bridge = nodes
+	a.sysDevChar = t.TempDir()
+	plug := func(input string, minor string) {
+		a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+			SessionID: "42",
+			UdevEvents: []map[string]string{
+				{"ACTION": "add", "DEVPATH": "/devices/virtual/input/" + input},
+				{"ACTION": "add", "DEVNAME": "/dev/input/event" + minor, "MAJOR": "13", "MINOR": minor, "DEVPATH": "/devices/virtual/input/" + input + "/event" + minor},
+			},
+			UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:" + minor, Content: []string{"E:ID_INPUT_JOYSTICK=1"}}},
+		})
+	}
+	link := func(minor, target string) {
+		if err := os.Symlink("../../devices/virtual/input/"+target, filepath.Join(a.sysDevChar, "13:"+minor)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plug("input9", "72")
+	plug("input10", "73")
+	plug("input11", "74")
+	link("72", "input9/event72")  // still there
+	link("73", "input12/event73") // its minor now another device's
+	// 74: gone
+	nodes.calls = nil
+	a.pruneGoneDevices()
+	for _, want := range []string{
+		"remove /dev/input/event73", "rm hwdb c13:73",
+		"announce remove /devices/virtual/input/input10", "announce remove /devices/virtual/input/input10/event73",
+		"remove /dev/input/event74", "rm hwdb c13:74",
+		"announce remove /devices/virtual/input/input11/event74",
+	} {
+		if !slices.Contains(nodes.calls, want) {
+			t.Errorf("no %q in %v", want, nodes.calls)
+		}
+	}
+	if slices.ContainsFunc(nodes.calls, func(c string) bool { return strings.Contains(c, "72") || strings.Contains(c, "input9") }) {
+		t.Errorf("pruned the device still there: %v", nodes.calls)
+	}
+	nodes.calls = nil
+	a.pruneGoneDevices()
+	if len(nodes.calls) != 0 {
+		t.Errorf("pruned again: %v", nodes.calls)
 	}
 }
