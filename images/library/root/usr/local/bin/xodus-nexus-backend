@@ -16,9 +16,10 @@
 # then pointed at by current.json. Paths are absolute under /config; sessions
 # mount the home there too.
 #
-# Unlike Nexus, it also skips a release whose launch contract differs from
-# the installed launcher's, since that launcher would refuse to play with it,
-# and it leaves a locally built backend (delivery "local") alone.
+# Unlike Nexus, it also passes over a release whose launch contract differs
+# from the installed launcher's (the launcher would refuse to play with it) for
+# the newest one that matches, and it leaves a locally built backend (delivery
+# "local") alone.
 #
 # Never exits non-zero: any failure keeps the installed backend.
 
@@ -45,27 +46,36 @@ print(lock["version"], lock["compatibility"])
 ' "${asar}" 2>/dev/null)
 [[ "${minimum}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && -n "${contract}" ]] || give_up "cannot read the launcher's backend lock"
 
-# The installed backend: version and delivery, empty when there is none.
-read -r installed delivery < <(python3 -I -c '
-import json, sys
-p = json.load(open(sys.argv[1]))
-print(p.get("version") or "-", p.get("delivery") or "-")
+# The installed backend: its version, delivery, and whether its binary is
+# still there ("-" when unknown). Only a regular file is read: a FIFO would
+# block the Library start. A backend without its binary is reinstalled.
+read -r shown delivery usable < <(python3 -I -c '
+import json, os, stat, sys
+path = sys.argv[1]
+if not stat.S_ISREG(os.stat(path).st_mode):
+    sys.exit(1)
+p = json.load(open(path))
+cli = p.get("binaryPath") or ""
+usable = os.path.isabs(cli) and os.path.isfile(cli) and os.access(cli, os.X_OK)
+print(p.get("version") or "-", p.get("delivery") or "-", int(usable))
 ' "${managed}/current.json" 2>/dev/null)
+shown="${shown:--}"
+installed="${shown}"
+[[ "${installed}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "${usable}" == 1 ]] || installed=-
 if [[ "${delivery}" == local ]]; then
   echo "xodus-nexus-backend: a locally built backend is installed; leaving it"
   exit 0
 fi
 
 releases="$(curl -fsSL --max-time 30 "${releases_url}")" || give_up "cannot read the releases"
-# The newest backend release at or above the minimum that carries every asset
-# Nexus requires, at the URLs Nexus expects. Prints its tag and version, or
-# "current" when it is not newer than the installed one.
-fields="$(python3 -I -c '
+# The backend releases at or above the minimum that carry every asset Nexus
+# requires, at the URLs Nexus expects, newest first: one "tag version" a line.
+candidates="$(python3 -I -c '
 import json, re, sys
-minimum, installed, base = sys.argv[1:]
+minimum, base = sys.argv[1:]
 def key(v):
     return tuple(int(n) for n in v.split("."))
-best = None
+found = []
 for r in json.load(sys.stdin):
     if r.get("draft") or r.get("prerelease"):
         continue
@@ -78,30 +88,34 @@ for r in json.load(sys.stdin):
     if not all(urls.get(package + s) == f"{base}/{tag}/{package}{s}"
                for s in (".tar.xz", ".manifest.json", ".sha512sum", "-source.tar.xz", "-source.sha512sum")):
         continue
-    if best is None or key(m[1]) > key(best[1]):
-        best = (tag, m[1])
-if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", installed) and key(best[1]) <= key(installed):
-    print("current", best[1])
-else:
-    print(*best)
-' "${minimum}" "${installed}" "${download_url}" <<<"${releases}" 2>/dev/null)" ||
+    found.append((key(m[1]), tag, m[1]))
+if not found:
+    sys.exit(1)
+for _, tag, version in sorted(found, reverse=True):
+    print(tag, version)
+' "${minimum}" "${download_url}" <<<"${releases}" 2>/dev/null)" ||
   give_up "cannot find a backend release for launcher backend ${minimum}"
-read -r tag version <<<"${fields}"
-if [[ "${tag}" == current ]]; then
-  echo "xodus-nexus-backend: backend ${installed} is up to date (latest ${version})"
-  exit 0
-fi
-package="xodus-nexus-backend-${version}-linux-x86_64"
-url="${download_url}/${tag}/${package}"
+
+older() {
+  python3 -I -c 'import sys; k = lambda v: tuple(map(int, v.split("."))); sys.exit(k(sys.argv[1]) > k(sys.argv[2]))' "$1" "$2"
+}
 
 mkdir -p "${managed}/releases" || give_up "cannot create ${managed}"
 staging="$(mktemp -d "${managed}/.download-direwolf-XXXXXX")" || give_up "cannot make a staging directory"
 trap 'rm -rf "${staging}"' EXIT
 
-# As Nexus validates it, plus the launch contract.
-curl -fsSL --max-time 60 --max-filesize 100000 -o "${staging}/manifest.json" "${url}.manifest.json" ||
-  give_up "cannot download ${package}'s manifest"
-sha512="$(python3 -I -c '
+# The newest release on the launcher's launch contract, its manifest valid as
+# Nexus validates it. Stops at the installed version: nothing older replaces it.
+tag=
+while read -r candidate version; do
+  if [[ "${installed}" != - ]] && older "${version}" "${installed}"; then
+    break
+  fi
+  package="xodus-nexus-backend-${version}-linux-x86_64"
+  url="${download_url}/${candidate}/${package}"
+  curl -fsSL --max-time 60 --max-filesize 100000 -o "${staging}/manifest.json" "${url}.manifest.json" ||
+    give_up "cannot download ${package}'s manifest"
+  sha512="$(python3 -I -c '
 import json, re, sys
 path, version, minimum, contract, package = sys.argv[1:]
 def key(v):
@@ -120,11 +134,19 @@ if m.get("compatibility") != contract:
     sys.exit(2)
 print(m["archiveSha512"])
 ' "${staging}/manifest.json" "${version}" "${minimum}" "${contract}" "${package}" 2>/dev/null)"
-case $? in
-  0) ;;
-  2) give_up "backend ${version} does not use the launcher's launch contract ${contract}" ;;
-  *) give_up "${package}'s manifest is not a valid compatible release" ;;
-esac
+  case $? in
+    0) tag="${candidate}"; break ;;
+    2) echo "xodus-nexus-backend: passing over backend ${version}: not on the launcher's launch contract ${contract}" ;;
+    *) give_up "${package}'s manifest is not a valid compatible release" ;;
+  esac
+done <<<"${candidates}"
+if [[ -z "${tag}" ]]; then
+  [[ "${installed}" != - ]] && older "${version}" "${installed}" && {
+    echo "xodus-nexus-backend: backend ${installed} is up to date"
+    exit 0
+  }
+  give_up "no backend release uses the launcher's launch contract ${contract}"
+fi
 sum="$(curl -fsSL --max-time 30 --max-filesize 1000 "${url}.sha512sum")" || give_up "cannot download ${package}'s .sha512sum"
 [[ "$(tr -d '\n' <<<"${sum}")" == "${sha512}  ${package}.tar.xz" ]] || give_up "${package}'s .sha512sum does not match its manifest"
 
@@ -154,8 +176,8 @@ for line in lines:
   give_up "cannot unpack ${package}"
 
 # Each file matches the manifest, both binaries are x86_64 Linux ELF, and the
-# CLI has the commands Nexus needs to play (never run xodus-service: it starts
-# keychain and device authentication).
+# CLI has every capability Nexus's update requires (never run xodus-service: it
+# starts keychain and device authentication).
 verify() {
   python3 -I -c '
 import hashlib, json, os, stat, sys
@@ -170,8 +192,25 @@ for name in ("xodus-cli", "xodus-service"):
         sys.exit(1)
 ' "$1" "${staging}/manifest.json" &&
     chmod 0755 "$1/xodus-cli" "$1/xodus-service" &&
-    timeout 60 "$1/xodus-cli" --help >/dev/null 2>&1 &&
-    timeout 60 "$1/xodus-cli" run --help 2>/dev/null | grep -q -- --materialize-chain
+    capable "$1/xodus-cli"
+}
+
+# As Nexus's validate and parseBackendHelp read the help: two-space-indented
+# command names, and the flags its update checks for.
+capable() {
+  local help streaming run
+  help="$(timeout 60 "$1" --help 2>&1)" &&
+    streaming="$(timeout 60 "$1" streaming --help 2>&1)" &&
+    run="$(timeout 60 "$1" run --help 2>&1)" || return 1
+  python3 -I -c '
+import re, sys
+help, streaming, run = sys.argv[1:]
+commands = set(re.findall(r"^[ \t]{2}([a-z][a-z0-9-]+)[ \t]{2,}", help, re.M))
+flag = lambda f, text: re.search(r"(?:^|\s)" + f + r"(?:\s|$)", text, re.M)
+sys.exit(not ({"account", "run", "streaming", "login", "logout", "download", "resolve-package"} <= commands
+              and flag("--external-webview-stdio", help) and flag("--selected-content-id", streaming)
+              and "--materialize-chain" in run))
+' "${help}" "${streaming}" "${run}"
 }
 verify "${staging}/x/${package}" || give_up "${package} failed verification"
 
@@ -184,15 +223,20 @@ fi
 cp "${staging}/manifest.json" "${release}/metadata.json" || give_up "cannot record ${package}'s manifest"
 
 # Written whole, then renamed over, as Nexus writes it.
+# The temporary name is new each time, so a planted link is never followed.
 python3 -I -c '
-import datetime, json, os, sys
+import datetime, json, os, sys, tempfile
 manifest, cli, path = sys.argv[1:]
 m = json.load(open(manifest))
 built = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w") as f:
-    json.dump({"commit": m["commit"], "binaryPath": cli, "builtAt": built, "linuxRunPatch": m["compatibility"],
-               "recipeSha256": m["recipeSha256"], "version": m["version"], "delivery": "release"}, f, indent=2)
-os.replace(path + ".tmp", path)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="current.json.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump({"commit": m["commit"], "binaryPath": cli, "builtAt": built, "linuxRunPatch": m["compatibility"],
+                   "recipeSha256": m["recipeSha256"], "version": m["version"], "delivery": "release"}, f, indent=2)
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
 ' "${staging}/manifest.json" "${release}/xodus-cli" "${managed}/current.json" || give_up "cannot write current.json"
-echo "xodus-nexus-backend: updated the backend ${installed} -> ${version}"
+echo "xodus-nexus-backend: updated the backend ${shown} -> ${version}"

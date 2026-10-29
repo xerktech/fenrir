@@ -11,10 +11,10 @@
 # moves only with this pin.
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS nexus
 # renovate: datasource=github-releases depName=domsvoboda/xodus-nexus
-ARG NEXUS_VERSION=v0.3.11
+ARG NEXUS_VERSION=v0.4.1
 # Must be updated by hand with the version (the release's .sha512sum asset): a
 # Renovate bump without it fails the build closed.
-ARG NEXUS_SHA512=0d6ef2d254aa26eb80565653c3b08d4b1c66e77ac0c62360fbb0725079a91cef209e33123fecd995783374fdc1d4c4af39595c3a529a6f1d31aaaadab0759c99
+ARG NEXUS_SHA512=5f206737de156bcafa4c0103b06db7925c88967759b40286e2cf2a7d8283ae0d2c8dd897006b3a2d37c2eca16c6233b466ad3cab5cad9e5b2ecaf89bfa14e52c
 RUN set -eu; \
   apt-get update; apt-get install -y --no-install-recommends ca-certificates curl; \
   curl -fsSL -o /tmp/nexus.AppImage \

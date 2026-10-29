@@ -6,20 +6,23 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
 const xodusNexusBackend = "root/usr/local/bin/xodus-nexus-backend"
 
-// fakeCLI builds a real x86_64 ELF standing in for xodus-cli: --help exits 0,
-// and "run --help" lists --materialize-chain unless runHelp says otherwise.
-func fakeCLI(t *testing.T, runHelp string) []byte {
+// fakeCLI builds a real x86_64 ELF standing in for xodus-cli: --help lists the
+// commands and flags Nexus's update requires but omit, and "run --help"
+// prints runHelp.
+func fakeCLI(t *testing.T, runHelp, omit string) []byte {
 	t.Helper()
 	if runtime.GOARCH != "amd64" {
 		t.Skip("the backend updater installs only x86_64 backends")
@@ -33,8 +36,23 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "run" {
+	switch {
+	case len(os.Args) > 1 && os.Args[1] == "run":
 		fmt.Println(` + "`" + runHelp + "`" + `)
+	case len(os.Args) > 1 && os.Args[1] == "streaming":
+		if ` + "`" + omit + "`" + ` != "--selected-content-id" {
+			fmt.Println("      --selected-content-id <ID>")
+		}
+	default:
+		fmt.Println("Usage: xodus-cli [OPTIONS] <COMMAND>\n\nCommands:")
+		for _, c := range []string{"account", "login", "logout", "download", "streaming", "resolve-package", "run"} {
+			if c != ` + "`" + omit + "`" + ` {
+				fmt.Printf("  %-16s  does %s\n", c, c)
+			}
+		}
+		if ` + "`" + omit + "`" + ` != "--external-webview-stdio" {
+			fmt.Println("\nOptions:\n      --external-webview-stdio")
+		}
 	}
 }
 `
@@ -67,10 +85,9 @@ type backendRelease struct {
 
 // backendHost is a desktop home, an installed launcher and a fake GitHub.
 type backendHost struct {
-	t                         *testing.T
-	dir, home, log, asar, gh  string
-	cli                       []byte
-	launcherMin, launcherLink string
+	t                        *testing.T
+	dir, home, log, asar, gh string
+	cli                      []byte
 }
 
 func newBackendHost(t *testing.T) *backendHost {
@@ -91,7 +108,7 @@ echo "download ${url##*/}" >>"$LOG"
 f="$FAKE_GH/${url##*/}"; [ -f "$f" ] || exit 22
 if [ -n "$out" ]; then cp "$f" "$out"; else cat "$f"; fi`)
 	h := &backendHost{t: t, dir: dir, home: filepath.Join(dir, "home"), log: filepath.Join(dir, "log"),
-		asar: filepath.Join(dir, "app.asar"), gh: gh, cli: fakeCLI(t, "--materialize-chain")}
+		asar: filepath.Join(dir, "app.asar"), gh: gh, cli: fakeCLI(t, "--materialize-chain", "")}
 	h.launcher("0.2.13", "linux-run-v25")
 	return h
 }
@@ -113,9 +130,9 @@ func (h *backendHost) launcher(version, contract string) {
 	}
 	padded := (len(header) + 3) &^ 3
 	b := binary.LittleEndian.AppendUint32(nil, 4)
-	b = binary.LittleEndian.AppendUint32(b, uint32(8+padded))
-	b = binary.LittleEndian.AppendUint32(b, uint32(4+padded))
-	b = binary.LittleEndian.AppendUint32(b, uint32(len(header)))
+	for _, n := range []int{8 + padded, 4 + padded, len(header)} {
+		b = binary.LittleEndian.AppendUint32(b, uint32(n)) //nolint:gosec // a test header of a few hundred bytes
+	}
 	b = append(b, header...)
 	b = append(b, make([]byte, padded-len(header))...)
 	b = append(b, "{}"...)
@@ -129,10 +146,20 @@ func (h *backendHost) managed() string {
 	return filepath.Join(h.home, ".config", "xodus-nexus", "xodus-backends")
 }
 
-// pointer writes current.json as an earlier Nexus left it.
+// pointer writes current.json as an earlier Nexus left it, with an installed
+// binary unless p names one.
 func (h *backendHost) pointer(p map[string]string) {
 	t := h.t
 	t.Helper()
+	if _, ok := p["binaryPath"]; !ok {
+		cli := filepath.Join(h.dir, "installed-"+p["version"], "xodus-cli")
+		if err := os.MkdirAll(filepath.Dir(cli), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeStub(t, cli, "exit 0")
+		p = maps.Clone(p)
+		p["binaryPath"] = cli
+	}
 	b, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +176,7 @@ func (h *backendHost) pointer(p map[string]string) {
 func (h *backendHost) publish(releases ...backendRelease) {
 	t := h.t
 	t.Helper()
-	var list []map[string]any
+	list := make([]map[string]any, 0, len(releases)+1)
 	list = append(list, map[string]any{"tag_name": "v0.4.1", "assets": []map[string]any{
 		{"name": "Xodus-Nexus-0.4.1-x86_64.AppImage", "browser_download_url": "https://github.com/domsvoboda/xodus-nexus/releases/download/v0.4.1/Xodus-Nexus-0.4.1-x86_64.AppImage"},
 	}})
@@ -166,7 +193,7 @@ func (h *backendHost) publish(releases ...backendRelease) {
 		}
 		hashes := map[string]string{}
 		for name, data := range files {
-			if err := os.WriteFile(filepath.Join(src, pkg, name), data, 0o755); err != nil {
+			if err := os.WriteFile(filepath.Join(src, pkg, name), data, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			hashes[name] = sha256Hex(string(data))
@@ -262,8 +289,7 @@ func (h *backendHost) current() map[string]string {
 	return p
 }
 
-var oldBackend = map[string]string{"version": "0.2.11", "linuxRunPatch": "linux-run-v22", "delivery": "release",
-	"binaryPath": "/config/.config/xodus-nexus/xodus-backends/releases/old/xodus-cli"}
+var oldBackend = map[string]string{"version": "0.2.11", "linuxRunPatch": "linux-run-v22", "delivery": "release"}
 
 // An older release backend is replaced by the newest release the launcher
 // accepts, installed and pointed at as Nexus's own update does; the next
@@ -327,7 +353,7 @@ func TestXodusNexusBackendKeepsBackend(t *testing.T) {
 		releases []backendRelease
 		want     string
 	}{
-		"other launch contract": {oldBackend, []backendRelease{{version: "0.2.14", contract: "linux-run-v26"}}, "launch contract"},
+		"other launch contract": {oldBackend, []backendRelease{{version: "0.2.14", contract: "linux-run-v26"}}, "no backend release uses"},
 		"below the launcher":    {oldBackend, []backendRelease{{version: "0.2.12", contract: "linux-run-v25"}}, "cannot find a backend release"},
 		"locally built": {map[string]string{"version": "0.2.11", "delivery": "local"},
 			[]backendRelease{{version: "0.2.13", contract: "linux-run-v25"}}, "locally built"},
@@ -365,7 +391,11 @@ func TestXodusNexusBackendRefusesUnverified(t *testing.T) {
 		}, "does not match its SHA-512"},
 		"file differs from manifest": {func(*backendHost) backendRelease {
 			return backendRelease{manifest: func(m map[string]any) {
-				m["files"].(map[string]string)["LICENSE"] = strings.Repeat("e", 64)
+				files, ok := m["files"].(map[string]string)
+				if !ok {
+					panic("manifest files")
+				}
+				files["LICENSE"] = strings.Repeat("e", 64)
 			}}
 		}, "failed verification"},
 		"other architecture": {func(*backendHost) backendRelease {
@@ -375,10 +405,22 @@ func TestXodusNexusBackendRefusesUnverified(t *testing.T) {
 			return backendRelease{tarArgs: []string{"--transform", "s,LICENSE$,../escape,"}}
 		}, "unexpected layout"},
 		"not an ELF": {func(h *backendHost) backendRelease {
-			return backendRelease{files: map[string][]byte{"xodus-cli": []byte("#!/bin/sh\necho --materialize-chain\n"), "xodus-service": h.cli, "LICENSE": []byte("x")}}
+			return backendRelease{files: map[string][]byte{"xodus-cli": []byte("#!/bin/sh\necho --materialize-chain\n" + strings.Repeat("#", 64)), "xodus-service": h.cli, "LICENSE": []byte("x")}}
 		}, "failed verification"},
 		"cannot launch games": {func(h *backendHost) backendRelease {
-			cli := fakeCLI(h.t, "--exe")
+			cli := fakeCLI(h.t, "--exe", "")
+			return backendRelease{files: map[string][]byte{"xodus-cli": cli, "xodus-service": cli, "LICENSE": []byte("x")}}
+		}, "failed verification"},
+		"no external sign-in": {func(h *backendHost) backendRelease {
+			cli := fakeCLI(h.t, "--materialize-chain", "--external-webview-stdio")
+			return backendRelease{files: map[string][]byte{"xodus-cli": cli, "xodus-service": cli, "LICENSE": []byte("x")}}
+		}, "failed verification"},
+		"no package selection": {func(h *backendHost) backendRelease {
+			cli := fakeCLI(h.t, "--materialize-chain", "resolve-package")
+			return backendRelease{files: map[string][]byte{"xodus-cli": cli, "xodus-service": cli, "LICENSE": []byte("x")}}
+		}, "failed verification"},
+		"no content selection": {func(h *backendHost) backendRelease {
+			cli := fakeCLI(h.t, "--materialize-chain", "--selected-content-id")
 			return backendRelease{files: map[string][]byte{"xodus-cli": cli, "xodus-service": cli, "LICENSE": []byte("x")}}
 		}, "failed verification"},
 	} {
@@ -413,5 +455,93 @@ func TestXodusNexusBackendNeedsLauncherLock(t *testing.T) {
 	}
 	if calls := h.run(); strings.Contains(calls, "releases") || !strings.Contains(calls, "backend lock") {
 		t.Errorf("calls:\n%s", calls)
+	}
+}
+
+// A newer release on another launch contract (published before its launcher)
+// is passed over for the newest one the launcher plays with.
+func TestXodusNexusBackendFallsBackToLauncherContract(t *testing.T) {
+	h := newBackendHost(t)
+	h.pointer(oldBackend)
+	h.publish(backendRelease{version: "0.2.13", contract: "linux-run-v25"},
+		backendRelease{version: "0.2.14", contract: "linux-run-v26"})
+	calls := h.run()
+	if !strings.Contains(calls, "passing over backend 0.2.14") || !strings.Contains(calls, "0.2.11 -> 0.2.13") {
+		t.Errorf("calls:\n%s", calls)
+	}
+	if p := h.current(); p["version"] != "0.2.13" || p["linuxRunPatch"] != "linux-run-v25" {
+		t.Errorf("current.json %v", p)
+	}
+}
+
+// A pointer at the latest version whose binary is gone is reinstalled, as
+// Nexus itself would offer the update.
+func TestXodusNexusBackendReinstallsMissingBinary(t *testing.T) {
+	h := newBackendHost(t)
+	h.pointer(map[string]string{"version": "0.2.13", "delivery": "release", "binaryPath": filepath.Join(h.dir, "gone", "xodus-cli")})
+	h.publish(backendRelease{version: "0.2.13", contract: "linux-run-v25"})
+	if calls := h.run(); !strings.Contains(calls, "updated the backend 0.2.13 -> 0.2.13") {
+		t.Errorf("calls:\n%s", calls)
+	}
+	if p := h.current(); !strings.HasPrefix(p["binaryPath"], h.managed()) {
+		t.Errorf("current.json %v", p)
+	}
+}
+
+// A FIFO where the pointer belongs never blocks the Library start; it is
+// replaced by a pointer to the newest backend.
+func TestXodusNexusBackendIgnoresNonFilePointer(t *testing.T) {
+	h := newBackendHost(t)
+	if err := os.MkdirAll(h.managed(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(h.managed(), "current.json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.publish(backendRelease{version: "0.2.13", contract: "linux-run-v25"})
+	h.run()
+	if p := h.current(); p["version"] != "0.2.13" {
+		t.Errorf("current.json %v", p)
+	}
+}
+
+// A release directory already present (from an earlier install) is used only
+// if it still verifies.
+func TestXodusNexusBackendVerifiesExistingRelease(t *testing.T) {
+	h := newBackendHost(t)
+	h.pointer(oldBackend)
+	h.publish(backendRelease{version: "0.2.13", contract: "linux-run-v25"})
+	h.run()
+	release := filepath.Dir(h.current()["binaryPath"])
+	if err := os.WriteFile(filepath.Join(release, "LICENSE"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.pointer(oldBackend)
+	if calls := h.run(); !strings.Contains(calls, "failed verification") {
+		t.Errorf("calls:\n%s", calls)
+	}
+	if p := h.current(); p["version"] != "0.2.11" {
+		t.Errorf("current.json changed: %v", p)
+	}
+}
+
+// A planted link at any temporary pointer name is never written through.
+func TestXodusNexusBackendPointerTempIsUnpredictable(t *testing.T) {
+	h := newBackendHost(t)
+	h.pointer(oldBackend)
+	victim := filepath.Join(h.dir, "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(h.managed(), "current.json.tmp")); err != nil {
+		t.Fatal(err)
+	}
+	h.publish(backendRelease{version: "0.2.13", contract: "linux-run-v25"})
+	h.run()
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Errorf("victim overwritten: %q", b)
+	}
+	if fi, err := os.Lstat(filepath.Join(h.managed(), "current.json")); err != nil || !fi.Mode().IsRegular() {
+		t.Errorf("current.json: %v %v", fi, err)
 	}
 }

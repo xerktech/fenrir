@@ -89,8 +89,11 @@ paths:
     contract (`linux-run-vNN`) refuses to play with an older backend. `init-xodus-nexus-backend`
     (as abc, after `init-xodus-nexus-update`) installs the newest `backend-v*` release the
     launcher accepts, as Nexus's own update does (XERK-2354).
-    - Minimum version and contract come from the installed launcher's lock inside `app.asar`; a
-      release on another contract, or a locally built backend (`delivery: local`), is left alone.
+    - Minimum version and contract come from the installed launcher's lock inside `app.asar`. A
+      newer release on another contract (published minutes before its launcher) is passed over
+      for the newest on the launcher's; a locally built backend (`delivery: local`) is left alone.
+    - Keep both images' `NEXUS_VERSION` on the launch contract of the newest backend: a session
+      that falls back to the image's launcher refuses to play with a newer-contract backend.
     - Tests: `images/library/xodus_nexus_backend_test.go` (builds a real x86_64 ELF as xodus-cli).
   - The wrapper exports `APPDIR`: AppRun otherwise finds its directory by testing `"$dir/$1"`,
     so any argument sends it to `/xodus-nexus`. The build makes the unpacked tree world-readable
