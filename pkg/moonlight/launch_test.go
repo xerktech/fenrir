@@ -659,7 +659,9 @@ func TestLaunchCountsUsersNotSessions(t *testing.T) {
 
 func TestLaunchWaiterHonoursCancellation(t *testing.T) {
 	release := make(chan struct{})
-	entered := make(chan struct{})
+	// Buffered: alice's check can run before the test waits on it, and an
+	// unbuffered send then took the default branch, so the test waited forever.
+	entered := make(chan struct{}, 1)
 	f := newLaunchFixture(t, &RESTServerOptions{
 		BusyCheck: func(context.Context) (string, error) {
 			select {
