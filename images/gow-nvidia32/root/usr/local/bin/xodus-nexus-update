@@ -57,6 +57,13 @@ as_user() {
 installed="$(cat "${opt}/.direwolf-version" 2>/dev/null)"
 [[ "${installed}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || give_up "cannot read the installed version"
 
+# A hold keeps the image's Nexus (the file says why): nothing is downloaded,
+# and a newer cached copy is not installed either.
+if [[ -f "${opt}.hold" ]]; then
+  echo "xodus-nexus-update: Xodus Nexus is held at ${installed}: $(head -c 300 "${opt}.hold")"
+  exit 0
+fi
+
 # In --cached-only mode, the cached AppImage's version is the target.
 want=
 if [[ -n "${cached_only}" ]]; then
