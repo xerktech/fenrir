@@ -20,6 +20,11 @@
       "description": "cmd/nri-input/containerd226 pins the NRI talos04's containerd vendors; bump it with the node's containerd, by hand",
       "matchFileNames": ["cmd/nri-input/containerd226/go.mod"],
       "enabled": false
+    },
+    {
+      "description": "Xodus Nexus v0.4.1 quits game shortcut launches (domsvoboda/xodus-nexus#457); images hold v0.4.0 via /opt/xodus-nexus.hold. Drop this rule with the hold.",
+      "matchPackageNames": ["domsvoboda/xodus-nexus"],
+      "allowedVersions": "!/^v?0\\.4\\.1$/"
     }
   ]
 }

@@ -126,10 +126,10 @@ controllers:
           # Wolf creates its CUDA context on the GPU the pod was given, not on that GPU's index
           # among all host GPUs (XERK-1391); stopping a live stream's viewers early no longer
           # hangs them (XERK-2130).
+          # A game's controllers stay plugged in across a /resume (WOLF_LOBBY_KEEPS_JOYPADS,
+          # XERK-2365), which wolfCommand requires.
           # With WOLF_HTTP_SERVERS=FALSE the WolfUI hotkeys (Ctrl+Alt+Shift+W, START+UP+RB) reach the
-          # game and no longer pull the stream out of its lobby (XERK-2403, XERK-2406). Also carries
-          # XERK-2105, XERK-2159, XERK-2365 (WOLF_LOBBY_KEEPS_JOYPADS, off unless set), XERK-2401, and
-          # CI/build-only changes (XERK-2408, the Dockerfile base-image digest).
+          # game and no longer pull the stream out of its lobby (XERK-2403, XERK-2406).
           # Pinned by hand; CI does not set it.
           WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-dd74809@sha256:3296c42a2287200af47136eba86de3dc074c8424fd5f78b9e4e2df4b022b73f1
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main

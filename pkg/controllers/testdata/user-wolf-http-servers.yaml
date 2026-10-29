@@ -10,5 +10,7 @@ spec:
       env:
         - name: WOLF_HTTP_SERVERS
           value: "TRUE"
+        - name: WOLF_LOBBY_KEEPS_JOYPADS
+          value: "FALSE"
         - name: WOLF_LOG_LEVEL
           value: DEBUG
