@@ -1210,8 +1210,12 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		"WOLF_SOCKET_PATH":       "/etc/wolf/wolf.sock",
 		// A stream's pipeline starts on its own producer, then switches to
 		// the lobby's (lobbyBufferCaps). With zero copy their caps differ
-		// (DMABuf/CUDAMemory vs system memory) and on VA every second
-		// switch fails to renegotiate, killing the stream's video.
+		// (DMABuf/CUDAMemory vs system memory), and a Wolf image whose
+		// gst-interpipe lacks the XERK-2496 patch keeps the old caps: the
+		// stream's video dies on every switch on CUDA ("Input buffer is not
+		// CUDA") and on every second switch on VA. Even where the switch
+		// renegotiates, the lobby still produces system memory, so zero
+		// copy saves no copy until lobbyBufferCaps match Wolf's own.
 		"WOLF_USE_ZERO_COPY": "FALSE",
 		// "WOLF_CFG_FILE":          "/etc/wolf/cfg/config.toml", // no longer needed
 		// "WOLF_PRIVATE_CERT_FILE": "/mnt/data/wolf/cfg/cert.pem",

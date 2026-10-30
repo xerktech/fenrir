@@ -151,7 +151,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
       - wolf-agent joins each stream (`lobbyJoiner`) only after both pipelines start (setup events,
         then RTP pings): Wolf switches only running pipelines to the lobby's producers.
       - Wolf runs with `WOLF_USE_ZERO_COPY=FALSE` so a stream's own producer has the lobby's caps
-        (`video/x-raw`); mismatched caps break every second producer switch on VA.
+        (`video/x-raw`); on a Wolf image without the XERK-2496 gst-interpipe patch, mismatched caps
+        kill the video on every producer switch on CUDA and every second one on VA.
       - A stream's Wolf session ID is its paired client's cert hash. The init container seeds
         Wolf's config (on the PVC) with one paired client every attach uses (`wolf_clients.go`).
         IDs repeat across resumes: tell streams apart by events, not ID.
