@@ -50,11 +50,12 @@ ASSET = re.compile(r"[A-Za-z0-9_.*?+-]{1,128}")
 FOLDER = re.compile(r"[A-Za-z0-9_!][A-Za-z0-9_.!+-]{0,99}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 # As the operator's: no spaces, quotes, shell metacharacters or fragments.
-URL = re.compile(r"https://[A-Za-z0-9._~:/?@&+,;=%-]{1,2040}")
+URL = re.compile(r"https://[A-Za-z0-9._~:/?@&+,;=%-]+")
+URL_MAX = 2048
 
 
 def valid_url(url):
-    if not isinstance(url, str) or not URL.fullmatch(url):
+    if not isinstance(url, str) or len(url) > URL_MAX or not URL.fullmatch(url):
         return False
     parts = urllib.parse.urlsplit(url)
     return parts.scheme == "https" and bool(parts.hostname) and parts.username is None

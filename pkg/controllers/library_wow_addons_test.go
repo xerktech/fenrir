@@ -82,6 +82,7 @@ func TestParseWoWAddonsRejects(t *testing.T) {
 		"short sha256":     strings.Replace(paw, pawSHA, pawSHA[:63], 1),
 		"upper sha256":     strings.Replace(paw, pawSHA, strings.ToUpper(pawSHA), 1),
 		"sha256 prefix":    strings.Replace(paw, pawSHA, "sha256:"+pawSHA, 1),
+		"long url":         strings.Replace(paw, "/files/", "/"+strings.Repeat("a", 2048)+"/", 1),
 	} {
 		// Every case but the first three is one entry of a list.
 		if !strings.HasPrefix(s, "[") && name != "not json" && name != "not a list" {

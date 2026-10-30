@@ -51,14 +51,17 @@ var (
 	wowAddonAsset = regexp.MustCompile(`^[A-Za-z0-9_.*?+-]{1,128}$`)
 	// Unreserved characters and the few delimiters CDN paths and queries use:
 	// no spaces, quotes, shell metacharacters, fragments or controls.
-	wowAddonURL    = regexp.MustCompile(`^https://[A-Za-z0-9._~:/?@&+,;=%-]{1,2040}$`)
+	// RE2 caps a repeat at 1000, so the length limit is wowAddonURLMax instead.
+	wowAddonURL    = regexp.MustCompile(`^https://[A-Za-z0-9._~:/?@&+,;=%-]+$`)
 	wowAddonSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
+
+const wowAddonURLMax = 2048
 
 // validWoWAddonURL reports whether s is a plain https URL to a host, with no
 // credentials. wow-addons-update checks the same: it is handed the list again.
 func validWoWAddonURL(s string) bool {
-	if !wowAddonURL.MatchString(s) {
+	if len(s) > wowAddonURLMax || !wowAddonURL.MatchString(s) {
 		return false
 	}
 	u, err := url.Parse(s)
