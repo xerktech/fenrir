@@ -568,7 +568,19 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 			hwdbFiles = append(hwdbFiles, filename)
 		}
 	}
+	// Each of the device's records lists all its entries, and a taken node's
+	// entry is its new device's now.
+	keep := map[string]bool{}
+	for devpath, d := range a.published {
+		if !slices.ContainsFunc(ev.UdevEvents, func(e map[string]string) bool { return e["DEVPATH"] == devpath }) {
+			keep["c"+d.node["MAJOR"]+":"+d.node["MINOR"]] = true
+		}
+	}
 	for _, filename := range hwdbFiles {
+		if keep[filename] {
+			continue
+		}
+		keep[filename] = true
 		if err := a.nodes().RemoveHwDB(filename); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to remove udev hwdb entry %q: %w", filename, err))
 		}

@@ -105,7 +105,9 @@ paths:
 - An unplug whose node another device's record holds skips that node: no removal, no announce
   (XERK-2450). The kernel reuses `eventN` but never `inputN`, so DEVPATH names one device; a pad
   destroyed before its late unplug may have lost its node to a new pad, and non-split mode removes
-  by DEVNAME. Tests: `TestAgentLateUnplugSparesNodeReusedByNewDevice`.
+  by DEVNAME. Nor does it remove a udev entry `c<maj:min>` another device's record holds: each
+  record lists all its device's entries, and a PS5 pad's touchpad/motion nodes can outlive the
+  pad node a new pad took. Tests: `TestAgentLateUnplugSpares*`.
 - Joining a stream to the Wolf lobby moves its joypads with an unplug addressed to the stream; once
   joined, real unplugs are re-fired addressed to the lobby. So the agent skips unplugs to a
   joining/joined stream (`ignoresUnplug`). Tests: `TestAgentKeepsDevicesMovedToLobby`.

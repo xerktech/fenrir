@@ -503,3 +503,57 @@ func TestAgentLateUnplugSparesNodeReusedByNewDevice(t *testing.T) {
 		t.Errorf("calls = %v, want %v", nodes.calls, want)
 	}
 }
+
+// A pad with several nodes (PS5: pad, touchpad, motion) replaced by one that
+// takes only its first: the old pad's late unplug removes its other nodes and
+// entries, but not the entry the new pad rewrote on the taken node (XERK-2450).
+func TestAgentLateUnplugSparesUdevEntryOfPartlyReusedDevice(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &numberedNodes{}
+	a.bridge = nodes
+	node := func(input, event, minor string) map[string]string {
+		return map[string]string{"ACTION": "add", "DEVNAME": "/dev/input/" + event, "MAJOR": "13", "MINOR": minor, "DEVPATH": "/devices/virtual/input/" + input + "/" + event}
+	}
+	ps5 := func(major string) []map[string]string {
+		evs := []map[string]string{node("input9", "event69", "69"), node("input10", "event70", "70")}
+		for _, e := range evs {
+			e["MAJOR"] = major
+		}
+		return evs
+	}
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      ps5("13"),
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}, {Filename: "c13:70"}},
+	})
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      []map[string]string{node("input11", "event69", "69")},
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}},
+	})
+
+	nodes.calls = nil
+	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent{SessionID: "42", UdevEvents: ps5("0")})
+	want := []string{
+		"remove /dev/input/event70 13:70", "rm hwdb c13:70",
+		"announce remove /devices/virtual/input/input10/event70",
+	}
+	if !slices.Equal(nodes.calls, want) {
+		t.Errorf("calls = %v, want %v", nodes.calls, want)
+	}
+}
+
+// A node with no record and no other device on it (plugged before the agent
+// started) is still removed by what sysfs gives, and announced.
+func TestAgentUnplugOfUnrecordedNodeFallsBackToSysfs(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &numberedNodes{}
+	a.bridge = nodes
+	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent{SessionID: "42", UdevEvents: []map[string]string{
+		{"ACTION": "remove", "DEVNAME": "/dev/input/event69", "MAJOR": "0", "MINOR": "0", "DEVPATH": "/devices/virtual/input/input9/event69"},
+	}})
+	want := []string{"remove /dev/input/event69 0:0", "announce remove /devices/virtual/input/input9/event69"}
+	if !slices.Equal(nodes.calls, want) {
+		t.Errorf("calls = %v, want %v", nodes.calls, want)
+	}
+}
