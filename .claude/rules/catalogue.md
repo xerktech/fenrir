@@ -92,7 +92,7 @@ paths:
 - Battle.net (`--catalogue-battlenet-app`, store `battlenet`, XERK-2364): the scan reads the
   Agent's `product.db` in the Library's prefix (`battlenetProductDB`), a protobuf.
   - `protoWalk` is a bounded, non-recursive decoder (no protobuf dependency). Field numbers are
-    Lutris's ProductDb.proto: uid 1; installed at 4 → 1 → 1. Unverified against a live file.
+    Lutris's ProductDb.proto: uid 1; installed at 4 → 1 → 1 (confirmed on a live file).
   - Absent is no games; empty, torn, or a known field in another wire type fails the scan.
   - Only installed uids in `battlenetProducts` get an App; others are logged and skipped.
     That table must equal `launch-battlenet`'s case list (`TestBattlenetProductsLaunchable`):

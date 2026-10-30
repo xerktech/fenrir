@@ -22,8 +22,8 @@ paths:
   - `init-battlenet` (root) makes `$BATTLENET_GAMES` for abc, never following a link, then runs
     `battlenet --prepare` as abc: creates the prefix and sets `UseTakeFocus=N`.
   - Each start with no client running forces `Client.HardwareAcceleration` off and, if unset,
-    `Client.Install.DefaultInstallPath` to `Z:$BATTLENET_GAMES/`. That key name is unverified
-    against Battle.net; if it ignores it, pick the folder in the install dialog.
+    `Client.Install.DefaultInstallPath` to `Z:$BATTLENET_GAMES/`. Battle.net keeps that key; that
+    its install dialog uses it is unverified, so check the folder there.
   - The Library's labwc maximizes every window (`/defaults/labwc.xml`, rebuilt into rc.xml at each
     start). The fixed-size "Battle.net Login" window then fights the resize and its page never
     renders, so the image adds an UnMaximize rule for that title. Its class `steam_proton` is
@@ -182,8 +182,8 @@ paths:
 
 ## Acceptance matrix (XERK-2368, talos04, 2026-10-30, PC Moonlight client)
 
-- Only WoW retail was run. The other titles (Classic, D4, OW2, SC2, HS, D2R, D3) are unrun and
-  have no App: the account's other uids, launch codes and exes are still unrecorded.
+- Only WoW retail was run. The other titles (Classic, D4, OW2, SC2, HS, D2R, D3) are not
+  installed and have no App: their uids, launch codes and exes are still unrecorded.
 - WoW retail (`battlenet-wow`, App pod), all from Moonlight:
   - Starts: yes; the client signs in from the stored token, WoW up ~25s after the Session.
   - GPU: yes. gx.log shows the RTX 3090 as adapter 0 and "D3d12 Device Create".
@@ -195,4 +195,12 @@ paths:
   - Quit: quitting WoW in game ends the Session (app exits 0). Moonlight's Quit sends `/cancel`.
   - Loopback: 22885 and the Agent's port listen on 127.0.0.1 in the App pod only.
 - product.db: the catalogue made `battlenet-wow` from a live file, so the uid and installed field
-  numbers are right. Whether the Agent rewrites the file atomically is unmeasured (no patch ran).
+  numbers are right.
+- The Agent replaces product.db by rename, not in place (XERK-2488): its inode changed between
+  two looks (8322007506, then 8321958136 at 18:06:45, same 1224 bytes), the directory's mtime
+  moved with it, and the Agent checks for a leftover `product.db.new` on every start.
+  So the catalogue needs no guard against a torn read.
+- Only WoW is installed (product.db: `agent`, `bna`, `wow`; `/games/battlenet` holds only it).
+  Other titles get a launch-battlenet case and a catalogue entry once someone installs them.
+- `Client.Install.DefaultInstallPath` is a real key: Battle.net rewrote the config keeping it and
+  added its own sibling under `Install`. That its install dialog defaults to it is unverified.
