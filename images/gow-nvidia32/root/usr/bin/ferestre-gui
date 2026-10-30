@@ -1,0 +1,22 @@
+#! /bin/bash
+
+# Starts Ferestre's window (github.com/icex/ferestre, unpacked in
+# /opt/ferestre; XERK-2471 trial). Its Xbox client keeps the Microsoft account
+# in a Secret Service keyring, and the session image runs none: start
+# gnome-keyring's secrets component on a session bus, as xodus-nexus does (see
+# its comments for why the two daemon calls and the empty password).
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+  exec dbus-run-session -- "$0" "$@"
+fi
+if ! dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+    org.freedesktop.DBus.NameHasOwner string:org.freedesktop.secrets 2>/dev/null | grep -q 'boolean true'; then
+  mkdir -p "${HOME}/.local/share/keyrings"
+  eval "$(printf '\n' | gnome-keyring-daemon --unlock --components=secrets)"
+  export GNOME_KEYRING_CONTROL
+  eval "$(gnome-keyring-daemon --start --components=secrets)"
+  export GNOME_KEYRING_CONTROL
+fi
+
+# Ferestre finds its client, scripts and titles in ../lib/ferestre beside the
+# real binary, so run it from the unpacked tree rather than a copy.
+exec /opt/ferestre/usr/bin/ferestre-gui "$@"

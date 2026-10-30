@@ -40,6 +40,10 @@ jobs:
           - app: nexus
             context: images/gow-nvidia32
             target: nexus
+          # The nexus image plus Ferestre, on trial as its alternative (XERK-2471).
+          - app: ferestre
+            context: images/gow-nvidia32
+            target: ferestre
           # Heroic's session image plus Proton-CachyOS for one Battle.net game.
           - app: battlenet
             context: images/gow-nvidia32
