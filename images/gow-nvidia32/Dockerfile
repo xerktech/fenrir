@@ -211,17 +211,19 @@ RUN test -x /opt/xodus-nexus/AppRun && command -v gnome-keyring-daemon dbus-run-
 
 # Trial sessions of Ferestre (XERK-2471): the nexus session image plus
 # Ferestre, whose Xbox client links WebKitGTK 4.1 for sign-in (the only library
-# the nexus image lacks). Its App sets $DIREWOLF_LAUNCH_COMMAND to ferestre-gui;
+# the nexus image lacks). Its App sets $DIREWOLF_LAUNCH_COMMAND to
+# ferestre-session, which adds the session bus and keyring its client needs.
 # Ferestre installs its own runtime into the home, so no Nexus runtime is used.
 FROM nexus AS ferestre
 RUN apt-get update \
   && apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=ferestre-app /opt/ferestre /opt/ferestre
+COPY --chmod=755 root/usr/bin/ferestre-session /usr/bin/ferestre-session
 RUN ln -s /opt/ferestre/usr/bin/ferestre /usr/bin/ferestre \
   && ln -s /opt/ferestre/usr/bin/ferestre-gui /usr/bin/ferestre-gui \
   && ldconfig -p | grep -q libwebkit2gtk-4.1.so.0 \
-  && ! ldd /opt/ferestre/usr/bin/ferestre-gui /opt/ferestre/usr/lib/ferestre/client/xodus-cli | grep 'not found' \
+  && ! ldd /opt/ferestre/usr/bin/ferestre-gui /opt/ferestre/usr/lib/ferestre/client/xodus-cli /opt/ferestre/usr/lib/ferestre/client/xodus-service | grep 'not found' \
   && d=/opt/ferestre && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
 
 # Sessions of one Battle.net game (XERK-2363): launch-battlenet starts the
