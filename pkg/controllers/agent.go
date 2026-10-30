@@ -530,11 +530,19 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 	// node takes them, and its udev entries, from what its plug recorded.
 	var hwdbFiles []string
 	recorded := false
+	// The nodes another device holds now (by DEVPATH): the kernel reuses
+	// eventN, never inputN, so a device destroyed before its unplug arrived
+	// may have had its node taken by a new one. Neither removed nor announced.
+	taken := map[string]bool{}
 	for _, udevEvent := range ev.UdevEvents {
 		if d, ok := a.published[udevEvent["DEVPATH"]]; ok {
 			udevEvent["MAJOR"], udevEvent["MINOR"] = d.node["MAJOR"], d.node["MINOR"]
 			hwdbFiles = append(hwdbFiles, d.hwdbFile...)
 			recorded = true
+		} else if a.publishedOn(udevEvent["DEVNAME"]) {
+			klog.InfoS("Keeping a device node a new device took over", "devname", udevEvent["DEVNAME"], "devpath", udevEvent["DEVPATH"])
+			taken[udevEvent["DEVPATH"]] = true
+			continue
 		} else {
 			fakeudev.ResolveDevNumbers(udevEvent)
 		}
@@ -565,5 +573,20 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 			utilruntime.HandleError(fmt.Errorf("failed to remove udev hwdb entry %q: %w", filename, err))
 		}
 	}
-	a.announce(ev.UdevEvents, "remove")
+	a.announce(slices.DeleteFunc(slices.Clone(ev.UdevEvents), func(e map[string]string) bool {
+		return taken[e["DEVPATH"]]
+	}), "remove")
+}
+
+// publishedOn reports whether a published record holds the node devname.
+func (a *Agent) publishedOn(devname string) bool {
+	if devname == "" {
+		return false
+	}
+	for _, d := range a.published {
+		if d.node["DEVNAME"] == devname {
+			return true
+		}
+	}
+	return false
 }

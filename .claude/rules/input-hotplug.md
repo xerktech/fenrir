@@ -102,6 +102,10 @@ paths:
     `TestAgentPruneSparesNodeReusedByNewDevice`, `TestAgentPrunesWhileEventStreamIsDown` (Wolf
     unreachable: no subscribe succeeds),
     `TestWolfCommandRefusesWolfWithoutHTTPServersSwitch`.
+- An unplug whose node another device's record holds skips that node: no removal, no announce
+  (XERK-2450). The kernel reuses `eventN` but never `inputN`, so DEVPATH names one device; a pad
+  destroyed before its late unplug may have lost its node to a new pad, and non-split mode removes
+  by DEVNAME. Tests: `TestAgentLateUnplugSparesNodeReusedByNewDevice`.
 - Joining a stream to the Wolf lobby moves its joypads with an unplug addressed to the stream; once
   joined, real unplugs are re-fired addressed to the lobby. So the agent skips unplugs to a
   joining/joined stream (`ignoresUnplug`). Tests: `TestAgentKeepsDevicesMovedToLobby`.

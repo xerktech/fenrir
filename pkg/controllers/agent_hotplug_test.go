@@ -455,3 +455,51 @@ func TestAgentUnplugUsesThePlugsNumbers(t *testing.T) {
 		t.Errorf("records after unplug: %v", a.published)
 	}
 }
+
+// Wolf destroyed pad A, the kernel gave its eventN to pad B (a new inputN:
+// those are never reused), and only then did A's unplug arrive. It must not
+// remove or un-announce B's node (XERK-2450).
+func TestAgentLateUnplugSparesNodeReusedByNewDevice(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &numberedNodes{}
+	a.bridge = nodes
+	events := func(input, major, minor string) []map[string]string {
+		return []map[string]string{
+			{"ACTION": "add", "DEVPATH": "/devices/virtual/input/" + input},
+			{"ACTION": "add", "DEVNAME": "/dev/input/event69", "MAJOR": major, "MINOR": minor, "DEVPATH": "/devices/virtual/input/" + input + "/event69"},
+		}
+	}
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{SessionID: "42", UdevEvents: events("input9", "13", "69")})
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      events("input10", "13", "69"),
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69", Content: []string{"E:ID_INPUT_JOYSTICK=1"}}},
+	})
+
+	nodes.calls = nil
+	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      events("input9", "0", "0"),
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c0:0", Content: []string{"E:ID_INPUT_JOYSTICK=1"}}},
+	})
+	for _, c := range nodes.calls {
+		if strings.Contains(c, "event69") || c == "rm hwdb c13:69" || strings.HasPrefix(c, "remove ") {
+			t.Errorf("A's late unplug touched B's node: %v", nodes.calls)
+			break
+		}
+	}
+	if _, ok := a.published["/devices/virtual/input/input10/event69"]; !ok || len(a.published) != 1 {
+		t.Errorf("records after A's unplug = %v, want B's only", a.published)
+	}
+
+	// B's own unplug still removes it.
+	nodes.calls = nil
+	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent{SessionID: "42", UdevEvents: events("input10", "0", "0")})
+	want := []string{
+		"remove /dev/input/event69 13:69", "rm hwdb c13:69",
+		"announce remove /devices/virtual/input/input10", "announce remove /devices/virtual/input/input10/event69",
+	}
+	if !slices.Equal(nodes.calls, want) {
+		t.Errorf("calls = %v, want %v", nodes.calls, want)
+	}
+}
