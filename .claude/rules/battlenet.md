@@ -179,3 +179,20 @@ paths:
     pod not yet created when the operator loses the flag is refused, not built host-networked.
   Tests: `TestRequireAppPodKeepsAppOffHostNetwork`, `TestLibraryEnsurePodStartsLibrary`,
   `TestCatalogueRefreshFollowsBaseApp`.
+
+## Acceptance matrix (XERK-2368, talos04, 2026-10-30, PC Moonlight client)
+
+- Only WoW retail was run. The other titles (Classic, D4, OW2, SC2, HS, D2R, D3) are unrun and
+  have no App: the account's other uids, launch codes and exes are still unrecorded.
+- WoW retail (`battlenet-wow`, App pod), all from Moonlight:
+  - Starts: yes; the client signs in from the stored token, WoW up ~25s after the Session.
+  - GPU: yes. gx.log shows the RTX 3090 as adapter 0 and "D3d12 Device Create".
+  - Pad: yes, plugged in after WoW was already running. In one of two sessions it never worked
+    (XERK-2485).
+  - Mouse/keyboard: yes.
+  - ConsolePort 3.3.13: loaded and usable from the pad. The Library's updater installed it.
+  - Resume: yes (disconnect, then `/resume` 23s later; the pad kept working).
+  - Quit: quitting WoW in game ends the Session (app exits 0). Moonlight's Quit sends `/cancel`.
+  - Loopback: 22885 and the Agent's port listen on 127.0.0.1 in the App pod only.
+- product.db: the catalogue made `battlenet-wow` from a live file, so the uid and installed field
+  numbers are right. Whether the Agent rewrites the file atomically is unmeasured (no patch ran).
