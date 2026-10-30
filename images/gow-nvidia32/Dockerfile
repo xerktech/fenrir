@@ -144,6 +144,26 @@ RUN set -eu; \
   chmod -R u=rwX,go=rX "/tmp/${name}"; \
   mv "/tmp/${name}" /opt/proton-cachyos
 
+# Ferestre (github.com/icex/ferestre), an alternative Xbox GDK launcher on trial
+# against Xodus Nexus (XERK-2471). Its release tarball, not the AppImage: pods
+# have no FUSE, and the tarball is the same tree unpacked.
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS ferestre-app
+# renovate: datasource=github-releases depName=icex/ferestre
+ARG FERESTRE_VERSION=v0.1.14
+# Must be updated by hand with the version (the tarball's line in the release's
+# SHA256SUMS): a Renovate bump without it fails the build closed.
+ARG FERESTRE_SHA256=587bd05941bd27752ae11ebedb19e6478cde45254d03fb45d9cc63ff0d9892bd
+RUN set -eu; \
+  apt-get update; apt-get install -y --no-install-recommends ca-certificates curl zstd; \
+  v="${FERESTRE_VERSION#v}"; \
+  curl -fsSL -o /tmp/ferestre.tar.zst \
+    "https://github.com/icex/ferestre/releases/download/${FERESTRE_VERSION}/ferestre-${v}-x86_64.tar.zst"; \
+  echo "${FERESTRE_SHA256}  /tmp/ferestre.tar.zst" | sha256sum -c -; \
+  mkdir /tmp/x; tar -I zstd -xf /tmp/ferestre.tar.zst -C /tmp/x; \
+  test -x "/tmp/x/ferestre-${v}/usr/bin/ferestre" && test -x "/tmp/x/ferestre-${v}/usr/bin/ferestre-gui"; \
+  chmod -R u=rwX,go=rX "/tmp/x/ferestre-${v}"; \
+  mv "/tmp/x/ferestre-${v}" /opt/ferestre
+
 # What the game-session targets (nexus, battlenet) share over heroic: one
 # fullscreen game, no desktop, and the session ends when the game exits.
 FROM heroic AS game-session
@@ -188,6 +208,21 @@ RUN test -x /opt/xodus-nexus/AppRun && command -v gnome-keyring-daemon dbus-run-
   && command -v python3 curl sha256sum gosu timeout >/dev/null \
   && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/xodus-nexus' \
   && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
+
+# Trial sessions of Ferestre (XERK-2471): the nexus session image plus
+# Ferestre, whose Xbox client links WebKitGTK 4.1 for sign-in (the only library
+# the nexus image lacks). Its App sets $DIREWOLF_LAUNCH_COMMAND to ferestre-gui;
+# Ferestre installs its own runtime into the home, so no Nexus runtime is used.
+FROM nexus AS ferestre
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=ferestre-app /opt/ferestre /opt/ferestre
+RUN ln -s /opt/ferestre/usr/bin/ferestre /usr/bin/ferestre \
+  && ln -s /opt/ferestre/usr/bin/ferestre-gui /usr/bin/ferestre-gui \
+  && ldconfig -p | grep -q libwebkit2gtk-4.1.so.0 \
+  && ! ldd /opt/ferestre/usr/bin/ferestre-gui /opt/ferestre/usr/lib/ferestre/client/xodus-cli | grep 'not found' \
+  && d=/opt/ferestre && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
 
 # Sessions of one Battle.net game (XERK-2363): launch-battlenet starts the
 # client the Library installed, in its prefix in the shared home, launches the

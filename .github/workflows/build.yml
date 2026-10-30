@@ -44,6 +44,10 @@ jobs:
           - app: battlenet
             context: images/gow-nvidia32
             target: battlenet
+          # Nexus's session image plus Ferestre, on trial (XERK-2471).
+          - app: ferestre
+            context: images/gow-nvidia32
+            target: ferestre
           # Go binary plus a C shim: repo-root context, own Dockerfile.
           - app: nri-nvenc-fix
             file: cmd/nri-nvenc-fix/Dockerfile
