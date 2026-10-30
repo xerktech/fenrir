@@ -73,6 +73,8 @@ paths:
   - `/opt/xodus-nexus.hold` (in both images) stops `xodus-nexus-update` entirely: the image's
     `NEXUS_VERSION` runs, and neither a newer release nor a newer cached copy is installed. Use it
     to hold back a broken release; its text says why. Remove it with the pin bump to a fixed one.
+  - `NEXUS_RELEASE` may point at a xerktech/xodus-nexus build carrying a fix upstream lacks; keep
+    the hold with it, or the updater replaces that build with upstream's same or newer version.
   - Tests: `images/library/xodus_nexus_update_test.go`.
   - `xodus-nexus` (identical in `images/gow-nvidia32`, `TestXodusNexusWrapperMatchesSessionImage`)
     starts gnome-keyring's secrets component: Nexus keeps the Microsoft account in a Secret

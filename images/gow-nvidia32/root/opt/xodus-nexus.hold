@@ -1,1 +1,1 @@
-Nexus 0.4.1 quits game launches from Moonlight (--launch-game) before starting them (domsvoboda/xodus-nexus#457, XERK-2354). Remove this file with the NEXUS_VERSION bump to a fixed release.
+Nexus runs xerktech/xodus-nexus's 0.4.1 build with the fix for upstream's shortcut quit (domsvoboda/xodus-nexus#457, XERK-2448): upstream 0.4.1 quits game launches from Moonlight (--launch-game) before starting them. Remove this file with the NEXUS_VERSION bump to an upstream release carrying the fix.

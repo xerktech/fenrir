@@ -11,14 +11,18 @@
 # moves only with this pin.
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS nexus
 # renovate: datasource=github-releases depName=domsvoboda/xodus-nexus
-ARG NEXUS_VERSION=v0.4.0
+ARG NEXUS_VERSION=v0.4.1
+# Where NEXUS_VERSION's AppImage comes from: xerktech/xodus-nexus's build of it
+# with the #457 shortcut-quit fix (XERK-2448), until upstream releases one; then
+# back to https://github.com/domsvoboda/xodus-nexus/releases/download/${NEXUS_VERSION}.
+ARG NEXUS_RELEASE=https://github.com/xerktech/xodus-nexus/releases/download/v0.4.1-direwolf.1
 # Must be updated by hand with the version (the release's .sha512sum asset): a
 # Renovate bump without it fails the build closed.
-ARG NEXUS_SHA512=55b4ff16b1ec312b5ba96ee701dade439a4a500483f674fdb87e65b0af812688859e14c288d8b4eedb0ec048fdeb583ed083a25140fb104ad0df4633db270716
+ARG NEXUS_SHA512=d686507c1c6a452c35f9291ec45e272f5b3610ff3a0ef92dc22d6c075e2da51aa3363714a73b6e54871ed0f5f2f981faf5941240a1201913ad806c2268befe19
 RUN set -eu; \
   apt-get update; apt-get install -y --no-install-recommends ca-certificates curl; \
   curl -fsSL -o /tmp/nexus.AppImage \
-    "https://github.com/domsvoboda/xodus-nexus/releases/download/${NEXUS_VERSION}/Xodus-Nexus-${NEXUS_VERSION#v}-x86_64.AppImage"; \
+    "${NEXUS_RELEASE}/Xodus-Nexus-${NEXUS_VERSION#v}-x86_64.AppImage"; \
   echo "${NEXUS_SHA512}  /tmp/nexus.AppImage" | sha512sum -c -; \
   chmod +x /tmp/nexus.AppImage; \
   cd /tmp && ./nexus.AppImage --appimage-extract >/dev/null; \

@@ -22,9 +22,9 @@
       "enabled": false
     },
     {
-      "description": "Xodus Nexus v0.4.1 quits game shortcut launches (domsvoboda/xodus-nexus#457); images hold v0.4.0 via /opt/xodus-nexus.hold. Drop this rule with the hold.",
+      "description": "Images run xerktech/xodus-nexus's v0.4.1 build with the #457 fix (NEXUS_RELEASE) and hold it via /opt/xodus-nexus.hold; a bump must also move NEXUS_RELEASE back upstream, by hand (XERK-2448). Drop this rule with the hold.",
       "matchPackageNames": ["domsvoboda/xodus-nexus"],
-      "allowedVersions": "!/^v?0\\.4\\.1$/"
+      "enabled": false
     }
   ]
 }
