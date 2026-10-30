@@ -74,7 +74,7 @@ paths:
   `url` (one fixed https zip, only when it matches the list's `sha256`; XERK-2486).
   - `url` is for CurseForge-only addons: its API needs a key, its CDN
     (`mediafilez.forgecdn.net/files/<id/1000>/<id%1000>/<name>`) does not. `edge.forgecdn.net`
-    302s there and the script's curl has no `-L`, so list the `mediafilez` URL.
+    302s there over https, which curl follows (`-L`, `--proto =https` on every hop).
   - A `url` addon never updates and, once installed, makes no network call: bump url + sha256.
   - Both parses (operator, script) allow only unreserved URL characters plus `:/?@&+,;=%`.
 - Zips are

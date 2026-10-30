@@ -56,6 +56,12 @@ var (
 	wowAddonSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
+// WoWAddonSource types.
+const (
+	wowSourceGitHub = "github"
+	wowSourceURL    = "url"
+)
+
 const wowAddonURLMax = 2048
 
 // validWoWAddonURL reports whether s is a plain https URL to a host, with no
@@ -65,7 +71,8 @@ func validWoWAddonURL(s string) bool {
 		return false
 	}
 	u, err := url.Parse(s)
-	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil
+	// The pattern already requires the https scheme.
+	return err == nil && u.Hostname() != "" && u.User == nil
 }
 
 // ParseWoWAddons reads the --library-wow-addons JSON list. Empty means none.
@@ -91,19 +98,19 @@ func ParseWoWAddons(s string) ([]WoWAddon, error) {
 			return nil, fmt.Errorf("addon %d: name %q must match %s", i, a.Name, wowAddonName)
 		case seen[a.Name]:
 			return nil, fmt.Errorf("addon %q is listed twice", a.Name)
-		case a.Source.Type != "github" && a.Source.Type != "url":
+		case a.Source.Type != wowSourceGitHub && a.Source.Type != wowSourceURL:
 			return nil, fmt.Errorf("addon %q: source type %q is not supported (github or url)", a.Name, a.Source.Type)
-		case a.Source.Type == "github" && (a.Source.URL != "" || a.Source.SHA256 != ""):
+		case a.Source.Type == wowSourceGitHub && (a.Source.URL != "" || a.Source.SHA256 != ""):
 			return nil, fmt.Errorf("addon %q: a github source takes no url or sha256", a.Name)
-		case a.Source.Type == "github" && (!wowAddonRepo.MatchString(a.Source.Repo) || path.Clean(a.Source.Repo) != a.Source.Repo):
+		case a.Source.Type == wowSourceGitHub && (!wowAddonRepo.MatchString(a.Source.Repo) || path.Clean(a.Source.Repo) != a.Source.Repo):
 			return nil, fmt.Errorf("addon %q: repo %q is not owner/name", a.Name, a.Source.Repo)
-		case a.Source.Type == "github" && !wowAddonAsset.MatchString(a.Source.Asset):
+		case a.Source.Type == wowSourceGitHub && !wowAddonAsset.MatchString(a.Source.Asset):
 			return nil, fmt.Errorf("addon %q: asset pattern %q must match %s", a.Name, a.Source.Asset, wowAddonAsset)
-		case a.Source.Type == "url" && (a.Source.Repo != "" || a.Source.Asset != ""):
+		case a.Source.Type == wowSourceURL && (a.Source.Repo != "" || a.Source.Asset != ""):
 			return nil, fmt.Errorf("addon %q: a url source takes no repo or asset", a.Name)
-		case a.Source.Type == "url" && !validWoWAddonURL(a.Source.URL):
+		case a.Source.Type == wowSourceURL && !validWoWAddonURL(a.Source.URL):
 			return nil, fmt.Errorf("addon %q: url %q is not a plain https URL", a.Name, a.Source.URL)
-		case a.Source.Type == "url" && !wowAddonSHA256.MatchString(a.Source.SHA256):
+		case a.Source.Type == wowSourceURL && !wowAddonSHA256.MatchString(a.Source.SHA256):
 			return nil, fmt.Errorf("addon %q: sha256 %q must be 64 lowercase hex digits", a.Name, a.Source.SHA256)
 		case len(a.Flavors) == 0:
 			return nil, fmt.Errorf("addon %q lists no flavors", a.Name)
