@@ -141,8 +141,10 @@ controllers:
           # A controller plugged or unplugged while its stream joins or leaves a lobby goes to the
           # right app instead of being left as a ghost pad or missing (XERK-2410); a stream joining
           # a lobby while it stops no longer gets stuck in it (XERK-2440).
+          # A pad unplugged mid-join leaves the lobby (XERK-2409). The XERK-1740 fix is now built from
+          # upstream gst-wayland-display plus a patch vendored in wolf, not a fork (XERK-2487).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-0107682@sha256:b3e8f9b5a1e6cd571a5e47806cce82b21cedb15461071f91c5cd46999ad533ff
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-fefd2c3@sha256:c34be79607ac3f0e6e84498fb9d10cf55e3e5abb7937d1616155c67bf5269e8b
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           # The wowAddons list below, for the Library (--library-wow-addons).
