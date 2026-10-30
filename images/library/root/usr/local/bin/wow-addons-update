@@ -3,16 +3,19 @@
 
 $WOW_ADDONS is the operator's validated list (chart wowAddons). For each WoW
 flavor installed under $BATTLENET_GAMES/World of Warcraft, every listed addon
-is installed from its source's latest release into Interface/AddOns, and every
-addon this script installed that is no longer listed is removed. Run as the
-desktop user (abc), at Library start and then periodically.
+is installed from its source into Interface/AddOns, and every addon this
+script installed that is no longer listed is removed. Run as the desktop user
+(abc), at Library start and then periodically.
+
+A "github" source installs its repo's latest release; a "url" source installs
+one fixed zip pinned by SHA256 (XERK-2486), and needs no network once installed.
 
 Each flavor's Interface/.direwolf-addons.json records what this script
 installed: an addon's folders and the asset's SHA256. Folders it does not
 record are the user's, and are never replaced or removed.
 
-A release asset is installed only if it matches the SHA256 GitHub publishes
-for it, and its zip is treated as hostile: absolute paths, "..", links, files
+A zip is installed only if it matches the SHA256 GitHub publishes for the
+release asset, or the one the list pins, and is treated as hostile: absolute paths, "..", links, files
 outside a folder, and oversized or overlong archives are refused. It is
 unpacked into a staging folder beside AddOns, then each folder is swapped in
 by rename; a failure puts the old folders back.
@@ -30,6 +33,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import zipfile
 
 FLAVORS = {"retail": "_retail_", "classic": "_classic_", "classic_era": "_classic_era_"}
@@ -45,6 +49,15 @@ ASSET = re.compile(r"[A-Za-z0-9_.*?+-]{1,128}")
 # Addon folder names, e.g. ConsolePort_Bar or !BugGrabber.
 FOLDER = re.compile(r"[A-Za-z0-9_!][A-Za-z0-9_.!+-]{0,99}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+# As the operator's: no spaces, quotes, shell metacharacters or fragments.
+URL = re.compile(r"https://[A-Za-z0-9._~:/?@&+,;=%-]{1,2040}")
+
+
+def valid_url(url):
+    if not isinstance(url, str) or not URL.fullmatch(url):
+        return False
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme == "https" and bool(parts.hostname) and parts.username is None
 
 
 class Refused(Exception):
@@ -66,12 +79,20 @@ def parse_addons(raw):
         raise ValueError("not a list")
     for a in addons:
         src = a["source"]
-        if not (
-            isinstance(a["name"], str) and NAME.fullmatch(a["name"])
-            and src["type"] == "github"
+        github = (
+            src["type"] == "github" and "url" not in src and "sha256" not in src
             and isinstance(src["repo"], str) and REPO.fullmatch(src["repo"])
             and ".." not in src["repo"].split("/") and "." not in src["repo"].split("/")
             and isinstance(src["asset"], str) and ASSET.fullmatch(src["asset"])
+        )
+        pinned = (
+            src["type"] == "url" and "repo" not in src and "asset" not in src
+            and valid_url(src["url"])
+            and isinstance(src["sha256"], str) and SHA256.fullmatch(src["sha256"])
+        )
+        if not (
+            isinstance(a["name"], str) and NAME.fullmatch(a["name"])
+            and (github or pinned)
             and isinstance(a["flavors"], list) and a["flavors"]
             and all(f in FLAVORS for f in a["flavors"])
         ):
@@ -103,17 +124,26 @@ def latest_asset(source):
     return str(release.get("tag_name", "")), a["name"], url, size, digest[7:]
 
 
+def pinned_asset(source):
+    """A url source's zip, as latest_asset returns one; its size is unknown
+    (None), and its file name stands in for a version. No network."""
+    name = urllib.parse.urlsplit(source["url"]).path.rsplit("/", 1)[-1]
+    return name, name, source["url"], None, source["sha256"]
+
+
 def download(url, size, sha, dest):
+    """size None: unknown, capped at MAX_DOWNLOAD; the SHA256 alone decides."""
     subprocess.run(
-        ["curl", "-fsSL", "--max-time", "600", "--max-filesize", str(size), "-o", dest, url],
+        ["curl", "-fsSL", "--proto", "=https", "--max-time", "600",
+         "--max-filesize", str(size or MAX_DOWNLOAD), "-o", dest, url],
         check=True,
     )
     h = hashlib.sha256()
     with open(dest, "rb") as f:
         while chunk := f.read(1 << 20):
             h.update(chunk)
-    if os.path.getsize(dest) != size or h.hexdigest() != sha:
-        raise Refused(f"{url} does not match its published SHA256")
+    if (size is not None and os.path.getsize(dest) != size) or h.hexdigest() != sha:
+        raise Refused(f"{url} does not match its SHA256")
 
 
 def zip_folders(zf):
@@ -343,7 +373,10 @@ def main():
             if not targets:
                 continue
             try:
-                tag, asset, url, size, sha = latest_asset(a["source"])
+                source = a["source"]
+                tag, asset, url, size, sha = (
+                    latest_asset(source) if source["type"] == "github" else pinned_asset(source)
+                )
                 stale = [fl for fl in targets.values() if not fl.current(name, sha)]
                 if not stale:
                     log(f"{name} {tag} is up to date")

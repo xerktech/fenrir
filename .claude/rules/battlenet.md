@@ -70,7 +70,14 @@ paths:
   every managed addon. Keep both the operator's and the script's parse strict.
 - Each flavor's `Interface/.direwolf-addons.json` records the folders it installed; anything else
   in AddOns is the user's and is never replaced or removed (a name clash refuses the install).
-- Only GitHub releases, installed only when the asset matches GitHub's published SHA256. Zips are
+- Sources: `github` (latest release, only when the asset matches GitHub's published SHA256) or
+  `url` (one fixed https zip, only when it matches the list's `sha256`; XERK-2486).
+  - `url` is for CurseForge-only addons: its API needs a key, its CDN
+    (`mediafilez.forgecdn.net/files/<id/1000>/<id%1000>/<name>`) does not. `edge.forgecdn.net`
+    302s there and the script's curl has no `-L`, so list the `mediafilez` URL.
+  - A `url` addon never updates and, once installed, makes no network call: bump url + sha256.
+  - Both parses (operator, script) allow only unreserved URL characters plus `:/?@&+,;=%`.
+- Zips are
   hostile: no absolute, `..`, backslash, link or root-level entries; capped size and entry count.
 - Unpacked into `Interface/.direwolf-addons-*` (same filesystem), then swapped in by rename; a
   failed swap puts the old folders and their manifest entry back.

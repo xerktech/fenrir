@@ -372,6 +372,60 @@ func TestWoWAddonsUninstallsUnlistedAddon(t *testing.T) {
 	}
 }
 
+// pinnedList lists Pawn as a url source, pinned to zip's SHA256.
+func pinnedList(zip []byte) string {
+	sum := sha256.Sum256(zip)
+	return `[{"name":"Pawn","source":{"type":"url","url":"https://mediafilez.forgecdn.net/files/9283/553/Pawn-2.14.0.zip","sha256":"` +
+		hex.EncodeToString(sum[:]) + `"},"flavors":["retail"]}]`
+}
+
+// A url source installs its one zip, only on a SHA256 match, and once
+// installed needs no network (XERK-2486).
+func TestWoWAddonsInstallsPinnedURL(t *testing.T) {
+	p := newWoWPod(t)
+	v1 := makeZip(t, zipEntry{name: "Pawn/Pawn.toc", body: "Pawn 2.14.0"})
+	p.assetZip = v1
+	calls, _ := p.run(new(pinnedList(v1)))
+	if calls != "download https://mediafilez.forgecdn.net/files/9283/553/Pawn-2.14.0.zip\n" {
+		t.Fatalf("want the pinned URL downloaded once, calls:\n%s", calls)
+	}
+	if got := p.read(filepath.Join(p.retail, "Pawn", "Pawn.toc")); got != "Pawn 2.14.0" {
+		t.Errorf("Pawn.toc = %q, want the pinned zip's", got)
+	}
+	p.assertHandInstalledKept()
+	// Current: nothing is fetched, not even with the network down.
+	if calls, _ = p.run(new(pinnedList(v1)), "FAKE_OFFLINE=1"); calls != "" {
+		t.Errorf("an installed pin must not be downloaded again, calls:\n%s", calls)
+	}
+	// Served something else (a CDN swap, a tampered file): refused, the pin kept.
+	p.assetZip = makeZip(t, zipEntry{name: "Pawn/Pawn.toc", body: "evil"})
+	pinV2 := strings.Replace(pinnedList(v1), "Pawn-2.14.0.zip", "Pawn-2.15.0.zip", 1)
+	pinV2 = strings.Replace(pinV2, hex.EncodeToString(sha256Of(v1)), strings.Repeat("1", 64), 1)
+	if _, out := p.run(new(pinV2)); !strings.Contains(out, "does not match its SHA256") {
+		t.Errorf("want the mismatching zip refused, output:\n%s", out)
+	}
+	if got := p.read(filepath.Join(p.retail, "Pawn", "Pawn.toc")); got != "Pawn 2.14.0" {
+		t.Errorf("Pawn.toc = %q after a refused update, want 2.14.0's kept", got)
+	}
+	// A new pin that matches replaces it.
+	v2 := makeZip(t, zipEntry{name: "Pawn/Pawn.toc", body: "Pawn 2.15.0"})
+	p.assetZip = v2
+	p.run(new(strings.Replace(pinnedList(v2), "Pawn-2.14.0.zip", "Pawn-2.15.0.zip", 1)))
+	if got := p.read(filepath.Join(p.retail, "Pawn", "Pawn.toc")); got != "Pawn 2.15.0" {
+		t.Errorf("Pawn.toc = %q, want the new pin's", got)
+	}
+	// Unlisted, it is uninstalled like any managed addon.
+	p.run(new("[]"))
+	if p.exists(filepath.Join(p.retail, "Pawn")) {
+		t.Error("Pawn is still installed after it was unlisted")
+	}
+}
+
+func sha256Of(b []byte) []byte {
+	sum := sha256.Sum256(b)
+	return sum[:]
+}
+
 // Moving an addon to another flavor installs it there and removes it from the old one.
 func TestWoWAddonsFollowsFlavors(t *testing.T) {
 	p := newWoWPod(t)
@@ -420,6 +474,11 @@ func TestWoWAddonsKeepsAddonsWithoutValidList(t *testing.T) {
 		"bad flavor":   new(strings.Replace(consolePortList, `["retail"]`, `["../x"]`, 1)),
 		"path as name": new(strings.Replace(consolePortList, `"ConsolePort"`, `"../ConsolePort"`, 1)),
 		"other source": new(strings.Replace(consolePortList, `"github"`, `"curseforge"`, 1)),
+		"http url":     new(strings.Replace(pinnedList(nil), "https://", "http://", 1)),
+		"url creds":    new(strings.Replace(pinnedList(nil), "https://", "https://u:p@", 1)),
+		"url quote":    new(strings.Replace(pinnedList(nil), "Pawn-2.14.0.zip", "Pawn'.zip", 1)),
+		"url no sha":   new(strings.Replace(pinnedList(nil), `"sha256":"`, `"sha":"`, 1)),
+		"url and repo": new(strings.Replace(pinnedList(nil), `"type":"url"`, `"type":"url","repo":"a/b"`, 1)),
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := newWoWPod(t)

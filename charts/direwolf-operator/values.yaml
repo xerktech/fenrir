@@ -5,15 +5,23 @@ global:
   fullnameOverride: direwolf
 
 # WoW addons the Library installs into each listed flavor's Interface/AddOns
-# under <library games path>/battlenet/World of Warcraft, and keeps on their
-# latest release while it runs (sessions never download). Dropping an entry
-# uninstalls it; addons installed by hand are never touched. Only GitHub
-# releases: the asset glob must match one asset of the latest release, and it
-# is installed only if it matches GitHub's published SHA256.
+# under <library games path>/battlenet/World of Warcraft while it runs
+# (sessions never download). Dropping an entry uninstalls it; addons installed
+# by hand are never touched. Sources:
+#  - github: the latest release; the asset glob must match one of its assets,
+#    installed only if it matches GitHub's published SHA256.
+#  - url: one fixed https zip, installed only if it matches the listed sha256
+#    (e.g. a CurseForge CDN file). It never updates; bump url and sha256 together.
 # Flavors: retail, classic, classic_era.
 wowAddons: []
 #  - name: ConsolePort
 #    source: {type: github, repo: seblindfors/ConsolePort, asset: "ConsolePort-*.zip"}
+#    flavors: [retail]
+#  - name: Pawn
+#    source:
+#      type: url
+#      url: https://mediafilez.forgecdn.net/files/9283/553/Pawn-2.14.0.zip
+#      sha256: 16ff6a4351c6f34273c2e36dbfc2dd40e325c702dd632a058386041a517eafcd
 #    flavors: [retail]
 
 serviceAccount:
