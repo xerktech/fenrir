@@ -455,3 +455,144 @@ func TestAgentUnplugUsesThePlugsNumbers(t *testing.T) {
 		t.Errorf("records after unplug: %v", a.published)
 	}
 }
+
+// Wolf destroyed pad A, the kernel gave its eventN to pad B (a new inputN:
+// those are never reused), and only then did A's unplug arrive. It must not
+// remove or un-announce B's node (XERK-2450).
+func TestAgentLateUnplugSparesNodeReusedByNewDevice(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &numberedNodes{}
+	a.bridge = nodes
+	events := func(input, major, minor string) []map[string]string {
+		return []map[string]string{
+			{"ACTION": "add", "DEVPATH": "/devices/virtual/input/" + input},
+			{"ACTION": "add", "DEVNAME": "/dev/input/event69", "MAJOR": major, "MINOR": minor, "DEVPATH": "/devices/virtual/input/" + input + "/event69"},
+		}
+	}
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{SessionID: "42", UdevEvents: events("input9", "13", "69")})
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      events("input10", "13", "69"),
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69", Content: []string{"E:ID_INPUT_JOYSTICK=1"}}},
+	})
+
+	nodes.calls = nil
+	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      events("input9", "0", "0"),
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c0:0", Content: []string{"E:ID_INPUT_JOYSTICK=1"}}},
+	})
+	for _, c := range nodes.calls {
+		if strings.Contains(c, "event69") || c == "rm hwdb c13:69" || strings.HasPrefix(c, "remove ") {
+			t.Errorf("A's late unplug touched B's node: %v", nodes.calls)
+			break
+		}
+	}
+	if _, ok := a.published["/devices/virtual/input/input10/event69"]; !ok || len(a.published) != 1 {
+		t.Errorf("records after A's unplug = %v, want B's only", a.published)
+	}
+
+	// B's own unplug still removes it.
+	nodes.calls = nil
+	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent{SessionID: "42", UdevEvents: events("input10", "0", "0")})
+	want := []string{
+		"remove /dev/input/event69 13:69", "rm hwdb c13:69",
+		"announce remove /devices/virtual/input/input10", "announce remove /devices/virtual/input/input10/event69",
+	}
+	if !slices.Equal(nodes.calls, want) {
+		t.Errorf("calls = %v, want %v", nodes.calls, want)
+	}
+}
+
+// A pad with several nodes (PS5: pad, touchpad, motion) replaced by one that
+// takes only its first: the old pad's late unplug removes its other nodes and
+// entries, but not the entry the new pad rewrote on the taken node (XERK-2450).
+func TestAgentLateUnplugSparesUdevEntryOfPartlyReusedDevice(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &numberedNodes{}
+	a.bridge = nodes
+	node := func(input, event, minor string) map[string]string {
+		return map[string]string{"ACTION": "add", "DEVNAME": "/dev/input/" + event, "MAJOR": "13", "MINOR": minor, "DEVPATH": "/devices/virtual/input/" + input + "/" + event}
+	}
+	ps5 := func(major string) []map[string]string {
+		evs := []map[string]string{node("input9", "event69", "69"), node("input10", "event70", "70"), node("input12", "event71", "71")}
+		for _, e := range evs {
+			e["MAJOR"] = major
+		}
+		return evs
+	}
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      ps5("13"),
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}, {Filename: "c13:70"}, {Filename: "c13:71"}},
+	})
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      []map[string]string{node("input11", "event69", "69")},
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}},
+	})
+
+	nodes.calls = nil
+	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent{SessionID: "42", UdevEvents: ps5("0")})
+	// Once each, though both remaining records list them
+	want := []string{
+		"remove /dev/input/event70 13:70", "remove /dev/input/event71 13:71", "rm hwdb c13:70", "rm hwdb c13:71",
+		"announce remove /devices/virtual/input/input10/event70", "announce remove /devices/virtual/input/input12/event71",
+	}
+	if !slices.Equal(nodes.calls, want) {
+		t.Errorf("calls = %v, want %v", nodes.calls, want)
+	}
+}
+
+// A node with no record and no other device on it (plugged before the agent
+// started) is still removed by what sysfs gives, and announced.
+func TestAgentUnplugOfUnrecordedNodeFallsBackToSysfs(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &numberedNodes{}
+	a.bridge = nodes
+	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent{SessionID: "42", UdevEvents: []map[string]string{
+		{"ACTION": "remove", "DEVNAME": "/dev/input/event69", "MAJOR": "0", "MINOR": "0", "DEVPATH": "/devices/virtual/input/input9/event69"},
+	}})
+	want := []string{"remove /dev/input/event69 0:0", "announce remove /devices/virtual/input/input9/event69"}
+	if !slices.Equal(nodes.calls, want) {
+		t.Errorf("calls = %v, want %v", nodes.calls, want)
+	}
+}
+
+// The prune of a gone device whose pad node a new device took (PS5 replaced
+// by Xbox, no unplug) drops its other nodes, but neither the new device's
+// udev entry nor an announce on its node (XERK-2450).
+func TestAgentPruneSparesUdevEntryOfPartlyReusedDevice(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &numberedNodes{}
+	a.bridge = nodes
+	a.sysDevChar = t.TempDir()
+	node := func(input, event, minor string) map[string]string {
+		return map[string]string{"ACTION": "add", "DEVNAME": "/dev/input/" + event, "MAJOR": "13", "MINOR": minor, "DEVPATH": "/devices/virtual/input/" + input + "/" + event}
+	}
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      []map[string]string{node("input9", "event69", "69"), node("input10", "event70", "70"), node("input12", "event71", "71")},
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}, {Filename: "c13:70"}, {Filename: "c13:71"}},
+	})
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      []map[string]string{node("input11", "event69", "69")},
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}},
+	})
+	if err := os.Symlink("../../devices/virtual/input/input11/event69", filepath.Join(a.sysDevChar, "13:69")); err != nil {
+		t.Fatal(err)
+	}
+
+	nodes.calls = nil
+	a.pruneGoneDevices()
+	// Once each, though both gone records list them; map order varies
+	want := []string{
+		"announce remove /devices/virtual/input/input10/event70", "announce remove /devices/virtual/input/input12/event71",
+		"remove /dev/input/event70 13:70", "remove /dev/input/event71 13:71", "rm hwdb c13:70", "rm hwdb c13:71",
+	}
+	slices.Sort(nodes.calls)
+	if !slices.Equal(nodes.calls, want) {
+		t.Errorf("calls = %v, want %v", nodes.calls, want)
+	}
+}
