@@ -525,24 +525,42 @@ func (a *Agent) announce(events []map[string]string, action string) {
 func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 	a.devicesMu.Lock()
 	defer a.devicesMu.Unlock()
+	// Wolf usually destroys the device before the agent hears of the unplug,
+	// so sysfs no longer has its numbers (Wolf sends MAJOR "0"): a published
+	// node takes them, and its udev entries, from what its plug recorded.
+	var hwdbFiles []string
+	recorded := false
 	for _, udevEvent := range ev.UdevEvents {
-		fakeudev.ResolveDevNumbers(udevEvent)
+		if d, ok := a.published[udevEvent["DEVPATH"]]; ok {
+			udevEvent["MAJOR"], udevEvent["MINOR"] = d.node["MAJOR"], d.node["MINOR"]
+			hwdbFiles = append(hwdbFiles, d.hwdbFile...)
+			recorded = true
+		} else {
+			fakeudev.ResolveDevNumbers(udevEvent)
+		}
 		if !fakeudev.IsInputDeviceNode(udevEvent) {
 			continue
 		}
 		if err := a.nodes().Remove(udevEvent); err != nil {
+			// Kept: pruneGoneDevices retries once the device is gone
 			utilruntime.HandleError(fmt.Errorf("failed to remove device node: %w", err))
+			continue
 		}
 		delete(a.published, udevEvent["DEVPATH"])
 	}
 
-	for _, entry := range ev.UdevHwDbEntries {
-		filename := entry.Filename
-		if filename == "c0:0" && len(ev.UdevEvents) > 0 {
-			if maj := ev.UdevEvents[0]["MAJOR"]; maj != "" && maj != "0" {
-				filename = "c" + maj + ":" + ev.UdevEvents[0]["MINOR"]
+	if !recorded {
+		for _, entry := range ev.UdevHwDbEntries {
+			filename := entry.Filename
+			if filename == "c0:0" && len(ev.UdevEvents) > 0 {
+				if maj := ev.UdevEvents[0]["MAJOR"]; maj != "" && maj != "0" {
+					filename = "c" + maj + ":" + ev.UdevEvents[0]["MINOR"]
+				}
 			}
+			hwdbFiles = append(hwdbFiles, filename)
 		}
+	}
+	for _, filename := range hwdbFiles {
 		if err := a.nodes().RemoveHwDB(filename); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to remove udev hwdb entry %q: %w", filename, err))
 		}
