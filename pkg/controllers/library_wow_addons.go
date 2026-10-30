@@ -28,6 +28,10 @@ type WoWAddon struct {
 //     addons published only where an API key is needed to look them up
 //     (CurseForge, whose CDN file URLs never change). It moves only when the
 //     list does.
+//   - curseforge: the latest retail release of CurseForge project Project,
+//     checked against the SHA1 and size the CurseForge API publishes. The
+//     Library calls the API with the key in Secret wowAddonsCurseForgeSecret
+//     (XERK-2489); without it these addons keep what is installed.
 type WoWAddonSource struct {
 	Type string `json:"type"`
 	// Repo is the GitHub repository, owner/name; its latest release is used.
@@ -38,7 +42,16 @@ type WoWAddonSource struct {
 	URL string `json:"url,omitempty"`
 	// SHA256 is the zip's SHA256, lowercase hex (type url).
 	SHA256 string `json:"sha256,omitempty"`
+	// Project is the CurseForge project ID, its page's "Project ID" (type curseforge).
+	Project int64 `json:"project,omitempty"`
 }
+
+// wowAddonsCurseForgeSecret holds the CurseForge API key (key apiKey) a
+// curseforge addon needs. Optional: the Library starts without it.
+const wowAddonsCurseForgeSecret = "direwolf-curseforge"
+
+// wowAddonCurseForge is the curseforge source type.
+const wowAddonCurseForge = "curseforge"
 
 // WoWAddonFlavors are the flavors an addon may list; wow-addons-update maps
 // each to its folder under World of Warcraft.
@@ -78,6 +91,9 @@ func ParseWoWAddons(s string) ([]WoWAddon, error) {
 			return nil, fmt.Errorf("addon %q is listed twice", a.Name)
 		case len(a.Flavors) == 0:
 			return nil, fmt.Errorf("addon %q lists no flavors", a.Name)
+		// Only retail's file is picked; another flavor may need another.
+		case a.Source.Type == wowAddonCurseForge && !slices.Equal(a.Flavors, []string{"retail"}):
+			return nil, fmt.Errorf("addon %q: a curseforge source is retail only", a.Name)
 		}
 		if err := checkWoWAddonSource(&a.Source); err != nil {
 			return nil, fmt.Errorf("addon %q: %w", a.Name, err)
@@ -93,6 +109,9 @@ func ParseWoWAddons(s string) ([]WoWAddon, error) {
 }
 
 func checkWoWAddonSource(s *WoWAddonSource) error {
+	if s.Type != wowAddonCurseForge && s.Project != 0 {
+		return errors.New("only a curseforge source takes a project")
+	}
 	switch s.Type {
 	case "github":
 		switch {
@@ -112,8 +131,15 @@ func checkWoWAddonSource(s *WoWAddonSource) error {
 		case s.Repo != "" || s.Asset != "":
 			return errors.New("a url source takes no repo or asset")
 		}
+	case wowAddonCurseForge:
+		switch {
+		case s.Project <= 0 || s.Project >= 1<<31:
+			return fmt.Errorf("project %d is not a CurseForge project ID", s.Project)
+		case s.Repo != "" || s.Asset != "" || s.URL != "" || s.SHA256 != "":
+			return errors.New("a curseforge source takes only a project")
+		}
 	default:
-		return fmt.Errorf("source type %q is not supported (github or url)", s.Type)
+		return fmt.Errorf("source type %q is not supported (github, url or curseforge)", s.Type)
 	}
 	return nil
 }
@@ -130,4 +156,9 @@ func wowAddonsEnv(addons []WoWAddon) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+// usesCurseForge reports whether any addon needs the CurseForge API key.
+func usesCurseForge(addons []WoWAddon) bool {
+	return slices.ContainsFunc(addons, func(a WoWAddon) bool { return a.Source.Type == wowAddonCurseForge })
 }

@@ -71,7 +71,8 @@ paths:
 - Each flavor's `Interface/.direwolf-addons.json` records the folders it installed; anything else
   in AddOns is the user's and is never replaced or removed (a name clash refuses the install).
 - Sources: `github` (latest release, installed only when the asset matches GitHub's published
-  SHA256) or `url` (one fixed https URL, installed only when it matches the listed `sha256`).
+  SHA256), `url` (one fixed https URL, installed only when it matches the listed `sha256`) or
+  `curseforge` (below).
   Zips are hostile: no absolute, `..`, backslash, link or root-level entries; capped size and
   entry count.
 - `url` is for CurseForge-only addons (XERK-2486): CurseForge's API needs a key, but its CDN
@@ -81,6 +82,17 @@ paths:
     characters, in both parsers (keep `wowAddonURL` and the script's `URL` equal).
   - Each source carries only its own keys (both parsers refuse others). A Library image older
     than XERK-2486 reads a `url` entry as an invalid list and leaves every addon alone.
+- `curseforge` (XERK-2489): `project` ID; the latest `releaseType` 1 file of `gameVersionTypeId`
+  517 (retail) in `api.curseforge.com/v1/mods/<id>`'s `latestFilesIndexes`, checked against
+  that file's published SHA1 and size, downloaded from
+  `mediafilez.forgecdn.net/files/<id/1000>/<id%1000>/<quoted name>`.
+  - Retail only: other flavors are other version types, and one zip serves all flavors per addon.
+  - Key: Secret `direwolf-curseforge` (`apiKey`, optional) → Library env `CURSEFORGE_API_KEY`,
+    set only when a curseforge addon is listed, read at pod start.
+  - curl reads the key header from stdin, never argv, and the API calls take no `-L`: curl
+    forwards custom headers to a redirect's host.
+  - The manifest's `sha256` field holds `sha1:<hex>` for these; `download` takes `<algo>:<hex>`.
+  - cfwidget.com was rejected: third party, and it publishes no hash.
 - Unpacked into `Interface/.direwolf-addons-*` (same filesystem), then swapped in by rename; a
   failed swap puts the old folders and their manifest entry back.
   - The manifest claims old + new folders (no SHA256) before the swap: a run killed mid-swap

@@ -12,6 +12,11 @@ global:
 #     is installed only if it matches GitHub's published SHA256.
 #   url: one fixed https zip (e.g. a CurseForge CDN file), installed only if it
 #     matches the listed sha256; it changes only when this list does.
+#   curseforge: the latest retail release of a CurseForge project (its
+#     "Project ID"), installed only if it matches the SHA1 CurseForge publishes.
+#     Retail only. Needs a CurseForge API key in Secret direwolf-curseforge, key
+#     apiKey (read when the Library starts); without it these addons keep what
+#     is installed.
 # Flavors: retail, classic, classic_era.
 wowAddons: []
 #  - name: ConsolePort
@@ -19,6 +24,9 @@ wowAddons: []
 #    flavors: [retail]
 #  - name: TomTom
 #    source: {type: url, url: "https://mediafilez.forgecdn.net/files/<id>/<id>/<file>.zip", sha256: <hex>}
+#    flavors: [retail]
+#  - name: Baganator
+#    source: {type: curseforge, project: 914482}
 #    flavors: [retail]
 
 serviceAccount:
