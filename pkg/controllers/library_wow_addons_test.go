@@ -10,6 +10,9 @@ const consolePortAddon = `{"name":"ConsolePort","source":{"type":"github","repo"
 const tomTomAddon = `{"name":"TomTom","source":{"type":"url","url":"https://mediafilez.forgecdn.net/files/7012/345/TomTom-v4.0.10-release.zip","sha256":"` +
 	"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" + `"},"flavors":["retail"]}`
 
+// bag is a curseforge source: Baganator's CurseForge project.
+const bag = `{"name":"Baganator","source":{"type":"curseforge","project":914482},"flavors":["retail"]}`
+
 func TestParseWoWAddons(t *testing.T) {
 	addons, err := ParseWoWAddons("[" + consolePortAddon + "]")
 	if err != nil {
@@ -35,6 +38,17 @@ func TestParseWoWAddons(t *testing.T) {
 	if got := wowAddonsEnv(addons); got != "["+consolePortAddon+","+tomTomAddon+"]" {
 		t.Errorf("wowAddonsEnv = %s", got)
 	}
+	// A curseforge source carries only its project.
+	addons, err = ParseWoWAddons("[" + bag + "]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := addons[0].Source; s.Type != "curseforge" || s.Project != 914482 || s.Repo != "" || s.URL != "" {
+		t.Errorf("ParseWoWAddons = %+v", addons)
+	}
+	if got := wowAddonsEnv(addons); got != "["+bag+"]" {
+		t.Errorf("wowAddonsEnv = %s", got)
+	}
 	for _, empty := range []string{"", "[]"} {
 		if addons, err := ParseWoWAddons(empty); err != nil || len(addons) != 0 {
 			t.Errorf("ParseWoWAddons(%q) = %v, %v; want none", empty, addons, err)
@@ -54,7 +68,19 @@ func TestParseWoWAddonsRejects(t *testing.T) {
 		"path name":        strings.Replace(consolePortAddon, `"name":"ConsolePort"`, `"name":"../ConsolePort"`, 1),
 		"dot name":         strings.Replace(consolePortAddon, `"name":"ConsolePort"`, `"name":".."`, 1),
 		"empty name":       strings.Replace(consolePortAddon, `"name":"ConsolePort"`, `"name":""`, 1),
-		"curseforge":       strings.Replace(consolePortAddon, `"type":"github"`, `"type":"curseforge"`, 1),
+		"curseforge repo":  strings.Replace(consolePortAddon, `"type":"github"`, `"type":"curseforge"`, 1),
+		"github project":   strings.Replace(consolePortAddon, `"type":"github"`, `"type":"github","project":1`, 1),
+		"url project":      strings.Replace(tomTomAddon, `"type":"url"`, `"type":"url","project":1`, 1),
+		"cf with url":      strings.Replace(bag, `"project"`, `"url":"https://a.example/a.zip","project"`, 1),
+		"cf with sha":      strings.Replace(bag, `"project"`, `"sha256":"`+strings.Repeat("0", 64)+`","project"`, 1),
+		"no project":       strings.Replace(bag, `,"project":914482`, ``, 1),
+		"zero project":     strings.Replace(bag, `914482`, `0`, 1),
+		"negative project": strings.Replace(bag, `914482`, `-1`, 1),
+		"huge project":     strings.Replace(bag, `914482`, `2147483648`, 1),
+		"string project":   strings.Replace(bag, `914482`, `"914482"`, 1),
+		"float project":    strings.Replace(bag, `914482`, `914482.5`, 1),
+		"cf classic":       strings.Replace(bag, `["retail"]`, `["retail","classic"]`, 1),
+		"cf only classic":  strings.Replace(bag, `["retail"]`, `["classic"]`, 1),
 		"url repo":         strings.Replace(consolePortAddon, `seblindfors/ConsolePort`, `https://evil.example/x`, 1),
 		"dot repo":         strings.Replace(consolePortAddon, `seblindfors/ConsolePort`, `seblindfors/..`, 1),
 		"deep repo":        strings.Replace(consolePortAddon, `seblindfors/ConsolePort`, `a/b/c`, 1),

@@ -813,6 +813,17 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 	if !c.WoWAddonsInvalid {
 		env := &pod.Spec.Containers[0].Env
 		*env = append(*env, corev1.EnvVar{Name: "WOW_ADDONS", Value: wowAddonsEnv(c.WoWAddons)})
+		// Only with a curseforge addon: every process in the desktop sees it.
+		// Read at container start: a Secret added later needs a new Library pod.
+		if usesCurseForge(c.WoWAddons) {
+			*env = append(*env, corev1.EnvVar{Name: "CURSEFORGE_API_KEY", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: wowAddonsCurseForgeSecret},
+					Key:                  "apiKey",
+					Optional:             new(true),
+				},
+			}})
+		}
 	}
 	return pod
 }

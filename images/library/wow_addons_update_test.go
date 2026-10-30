@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha1" //nolint:gosec // CurseForge publishes SHA1
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -23,14 +24,20 @@ const wowAddonsUpdate = "root/usr/local/bin/wow-addons-update"
 // consolePortList is the chart's wowAddons with ConsolePort, retail only.
 const consolePortList = `[{"name":"ConsolePort","source":{"type":"github","repo":"seblindfors/ConsolePort","asset":"ConsolePort-*.zip"},"flavors":["retail"]}]`
 
-// wowCurlStub serves $FAKE_RELEASE as every repo's latest release and
-// $FAKE_ASSET for every download, logging each download. FAKE_OFFLINE fails both.
+// wowCurlStub serves $FAKE_RELEASE as every repo's latest release,
+// $FAKE_CF_MOD and $FAKE_CF_FILE as CurseForge's API (logging each call with
+// its argv, its stdin to $CF_STDIN) and $FAKE_ASSET for every download,
+// logging each download. FAKE_OFFLINE fails them all.
 // Like real curl, a download fails without a numeric --max-filesize; it also
 // fails unless held to https through redirects with URL globbing off.
 const wowCurlStub = `[ -n "$FAKE_OFFLINE" ] && exit 6
 for a; do [ "$prev" = -o ] && out=$a; [ "$prev" = --max-filesize ] && max=$a
   [ "$prev $a" = "--proto =https" ] && proto=1; [ "$prev $a" = "--proto-redir =https" ] && redir=1
   [ "$a" = --globoff ] && globoff=1; prev=$a; done
+case $a in https://api.curseforge.com/*)
+  echo "api $*" >>"$LOG"; cat >"$CF_STDIN"
+  case $a in */files/*) exec cat "$FAKE_CF_FILE";; *) exec cat "$FAKE_CF_MOD";; esac
+esac
 [ -z "$out" ] && exec cat "$FAKE_RELEASE"
 case "$max" in ''|*[!0-9]*) echo "curl: option --max-filesize: is badly used here" >&2; exit 2;; esac
 [ -n "$proto$redir$globoff" ] && [ "$proto$redir$globoff" = 111 ] || { echo "curl stub: download not held to https / globoff" >&2; exit 2; }
@@ -44,6 +51,7 @@ type wowPod struct {
 	dir, games, log   string
 	retail, classic   string // each flavor's AddOns
 	release, assetZip []byte
+	cfMod, cfFile     []byte   // CurseForge's API answers
 	env               []string // for the next run
 }
 
@@ -161,7 +169,7 @@ func (p *wowPod) run(list *string, env ...string) (downloads, out string) {
 func (p *wowPod) runArgs(list *string, args []string, mayFail bool, env ...string) (downloads, out string) {
 	t := p.t
 	t.Helper()
-	for f, b := range map[string][]byte{"release.json": p.release, "asset": p.assetZip, "log": nil} {
+	for f, b := range map[string][]byte{"release.json": p.release, "asset": p.assetZip, "log": nil, "cf-mod": p.cfMod, "cf-file": p.cfFile} {
 		if err := os.WriteFile(filepath.Join(p.dir, f), b, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -174,7 +182,9 @@ func (p *wowPod) runArgs(list *string, args []string, mayFail bool, env ...strin
 	cmd.Env = append(os.Environ(),
 		"PATH="+filepath.Join(p.dir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"LOG="+p.log, "BATTLENET_GAMES="+p.games,
-		"FAKE_RELEASE="+filepath.Join(p.dir, "release.json"), "FAKE_ASSET="+filepath.Join(p.dir, "asset"))
+		"FAKE_RELEASE="+filepath.Join(p.dir, "release.json"), "FAKE_ASSET="+filepath.Join(p.dir, "asset"),
+		"FAKE_CF_MOD="+filepath.Join(p.dir, "cf-mod"), "FAKE_CF_FILE="+filepath.Join(p.dir, "cf-file"),
+		"CF_STDIN="+filepath.Join(p.dir, "cf-stdin"))
 	cmd.Env = append(cmd.Env, env...)
 	if list != nil {
 		cmd.Env = append(cmd.Env, "WOW_ADDONS="+*list)
@@ -459,6 +469,161 @@ func TestWoWAddonsInstallsPinnedURL(t *testing.T) {
 	p.assertHandInstalledKept()
 }
 
+// cfList lists Baganator as a curseforge source.
+const cfList = `[{"name":"Baganator","source":{"type":"curseforge","project":914482},"flavors":["retail"]}]`
+
+// publishCF makes asset Baganator's latest retail release on CurseForge, file
+// id named name, with sha1 as its published SHA1 ("" for the asset's own).
+// Newer classic and beta files are listed too, and must be passed over.
+func (p *wowPod) publishCF(id int, name string, asset []byte, sha1 string) {
+	p.t.Helper()
+	if sha1 == "" {
+		sum := sha1Sum(asset)
+		sha1 = hex.EncodeToString(sum[:])
+	}
+	mod, err := json.Marshal(map[string]any{"data": map[string]any{
+		"id": 914482, "gameId": 1,
+		"latestFilesIndexes": []map[string]any{
+			{"fileId": id + 2, "gameVersionTypeId": 67408, "releaseType": 1, "filename": "classic.zip"},
+			{"fileId": id + 1, "gameVersionTypeId": 517, "releaseType": 2, "filename": "beta.zip"},
+			{"fileId": id, "gameVersionTypeId": 517, "releaseType": 1, "filename": name},
+			{"fileId": id - 5, "gameVersionTypeId": 517, "releaseType": 1, "filename": "old.zip"},
+		},
+	}})
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	file, err := json.Marshal(map[string]any{"data": map[string]any{
+		"id": id, "modId": 914482, "isAvailable": true, "fileName": name, "fileLength": len(asset),
+		"hashes":      []map[string]any{{"value": sha1, "algo": 1}, {"value": strings.Repeat("0", 32), "algo": 2}},
+		"downloadUrl": "https://edge.forgecdn.net/files/x/" + name,
+	}})
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	p.cfMod, p.cfFile, p.assetZip = mod, file, asset
+}
+
+// A curseforge source follows the project's latest retail release, found
+// with the API key, and installs it only on a SHA1 match (XERK-2489).
+func TestWoWAddonsFollowsCurseForgeRelease(t *testing.T) {
+	const key = "CURSEFORGE_API_KEY=$2a$10$secretkey"
+	p := newWoWPod(t)
+	v839 := makeZip(t, zipEntry{name: "Baganator/Baganator.toc", body: "Baganator 839"})
+	p.publishCF(9353264, "Baganator-839.zip", v839, "")
+	// No key: nothing is called, and nothing is installed.
+	if calls, out := p.run(new(cfList)); calls != "" || !strings.Contains(out, "CURSEFORGE_API_KEY is not set") {
+		t.Errorf("want no calls without a key, calls:\n%s", calls)
+	}
+	calls, _ := p.run(new(cfList), key)
+	if strings.Contains(calls, "secretkey") {
+		t.Errorf("the API key is in curl's argv:\n%s", calls)
+	}
+	// curl would send the key header on to wherever a redirect points.
+	if strings.Contains(calls, "-L") || strings.Contains(calls, "SL ") || strings.Contains(calls, "--location") {
+		t.Errorf("the API calls follow redirects:\n%s", calls)
+	}
+	if !strings.HasSuffix(calls, "download https://mediafilez.forgecdn.net/files/9353/264/Baganator-839.zip\n") ||
+		!strings.Contains(calls, "https://api.curseforge.com/v1/mods/914482/files/9353264\n") {
+		t.Fatalf("want the retail release's CDN file downloaded, calls:\n%s", calls)
+	}
+	if got := p.read(filepath.Join(p.dir, "cf-stdin")); got != "x-api-key: $2a$10$secretkey\n" {
+		t.Errorf("curl's header input = %q, want the key", got)
+	}
+	if got := p.read(filepath.Join(p.retail, "Baganator", "Baganator.toc")); got != "Baganator 839" {
+		t.Errorf("Baganator.toc = %q, want 839's", got)
+	}
+	p.assertHandInstalledKept()
+	// Current: looked up, not downloaded again.
+	if calls, _ = p.run(new(cfList), key); strings.Contains(calls, "download") {
+		t.Errorf("a current release must not be downloaded again, calls:\n%s", calls)
+	}
+	// A release that does not match its published SHA1 is refused, 839 kept.
+	evil := makeZip(t, zipEntry{name: "Baganator/Baganator.toc", body: "evil"})
+	p.publishCF(9353300, "Baganator-840.zip", evil, strings.Repeat("1", 40))
+	if _, out := p.run(new(cfList), key); !strings.Contains(out, "does not match its SHA1") {
+		t.Errorf("want the mismatching zip refused, output:\n%s", out)
+	}
+	if got := p.read(filepath.Join(p.retail, "Baganator", "Baganator.toc")); got != "Baganator 839" {
+		t.Errorf("Baganator.toc = %q after a refused update, want 839's kept", got)
+	}
+	// A matching release replaces it; its name is quoted into the CDN path,
+	// and the id's last three digits lose their leading zeros as the CDN's do.
+	v841 := makeZip(t, zipEntry{name: "Baganator/Baganator.toc", body: "Baganator 841"})
+	p.publishCF(9354007, "Baganator 841.zip", v841, "")
+	if calls, _ = p.run(new(cfList), key); !strings.HasSuffix(calls, "download https://mediafilez.forgecdn.net/files/9354/7/Baganator%20841.zip\n") {
+		t.Errorf("want 841 downloaded, calls:\n%s", calls)
+	}
+	if got := p.read(filepath.Join(p.retail, "Baganator", "Baganator.toc")); got != "Baganator 841" {
+		t.Errorf("Baganator.toc = %q, want 841's", got)
+	}
+	// Offline, or the project gone, keeps what is installed.
+	p.run(new(cfList), key, "FAKE_OFFLINE=1")
+	if got := p.read(filepath.Join(p.retail, "Baganator", "Baganator.toc")); got != "Baganator 841" {
+		t.Errorf("Baganator.toc = %q offline, want 841's kept", got)
+	}
+}
+
+// Anything odd in CurseForge's answers is refused before a download.
+func TestWoWAddonsRefusesOddCurseForgeAnswers(t *testing.T) {
+	zip := makeZip(t, zipEntry{name: "Baganator/Baganator.toc", body: "Baganator 839"})
+	for name, edit := range map[string]func(p *wowPod){
+		"other game": func(p *wowPod) { p.cfMod = []byte(strings.Replace(string(p.cfMod), `"gameId":1`, `"gameId":432`, 1)) },
+		"other mod": func(p *wowPod) {
+			p.cfFile = []byte(strings.Replace(string(p.cfFile), `"modId":914482`, `"modId":1`, 1))
+		},
+		"no retail": func(p *wowPod) {
+			p.cfMod = []byte(strings.ReplaceAll(string(p.cfMod), `"gameVersionTypeId":517`, `"gameVersionTypeId":1`))
+		},
+		"no sha1": func(p *wowPod) { p.cfFile = []byte(strings.Replace(string(p.cfFile), `"algo":1`, `"algo":3`, 1)) },
+		"slash name": func(p *wowPod) {
+			p.cfFile = []byte(strings.Replace(string(p.cfFile), `"fileName":"Baganator-839.zip"`, `"fileName":"../x.zip"`, 1))
+		},
+		"not zip": func(p *wowPod) {
+			p.cfFile = []byte(strings.Replace(string(p.cfFile), `"fileName":"Baganator-839.zip"`, `"fileName":"x.exe"`, 1))
+		},
+		"unavailable": func(p *wowPod) {
+			p.cfFile = []byte(strings.Replace(string(p.cfFile), `"isAvailable":true`, `"isAvailable":false`, 1))
+		},
+		"huge": func(p *wowPod) {
+			p.cfFile = []byte(strings.Replace(string(p.cfFile), `"fileLength":`, `"fileLength":999999999,"was":`, 1))
+		},
+		"not json": func(p *wowPod) { p.cfMod = []byte("<html>") },
+		// RecursionError in Python's json: not an exception the others share.
+		"deep json": func(p *wowPod) { p.cfMod = []byte(strings.Repeat("[", 200000)) },
+		"int index": func(p *wowPod) {
+			p.cfMod = []byte(`{"data":{"id":914482,"gameId":1,"latestFilesIndexes":[7]}}`)
+		},
+		"string hash": func(p *wowPod) {
+			p.cfFile = []byte(strings.Replace(string(p.cfFile), `"hashes":[`, `"hashes":["x"],"was":[`, 1))
+		},
+		// Downloaded, then refused.
+		"wrong size": func(p *wowPod) {
+			p.cfFile = []byte(strings.Replace(string(p.cfFile), `"fileLength":`, `"fileLength":`+strconv.Itoa(len(zip)+1)+`,"was":`, 1))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newWoWPod(t)
+			p.publish("3.3.12", consolePortZip(t, "3.3.12", "ConsolePort"), "")
+			p.publishCF(9353264, "Baganator-839.zip", zip, "")
+			edit(p)
+			// ConsolePort, listed after it, is still processed.
+			list := strings.TrimSuffix(cfList, "]") + "," + strings.TrimPrefix(consolePortList, "[")
+			calls, out := p.run(new(list), "CURSEFORGE_API_KEY=k")
+			if !strings.Contains(out, "cannot update Baganator") || p.exists(filepath.Join(p.retail, "Baganator")) {
+				t.Errorf("want Baganator refused, output:\n%s", out)
+			}
+			if !strings.Contains(calls, "download https://github.com/seblindfors/ConsolePort/") {
+				t.Errorf("ConsolePort, listed after Baganator, was skipped; calls:\n%s", calls)
+			}
+		})
+	}
+}
+
+func sha1Sum(b []byte) [20]byte {
+	return sha1.Sum(b) //nolint:gosec // CurseForge publishes SHA1
+}
+
 // A list the script can't read, or none at all, must not read as "none":
 // that would uninstall every managed addon.
 func TestWoWAddonsKeepsAddonsWithoutValidList(t *testing.T) {
@@ -468,7 +633,15 @@ func TestWoWAddonsKeepsAddonsWithoutValidList(t *testing.T) {
 		"null":         new("null"),
 		"bad flavor":   new(strings.Replace(consolePortList, `["retail"]`, `["../x"]`, 1)),
 		"path as name": new(strings.Replace(consolePortList, `"ConsolePort"`, `"../ConsolePort"`, 1)),
-		"other source": new(strings.Replace(consolePortList, `"github"`, `"curseforge"`, 1)),
+		"other source": new(strings.Replace(consolePortList, `"github"`, `"other"`, 1)),
+		"cf and repo":  new(strings.Replace(consolePortList, `"github"`, `"curseforge"`, 1)),
+		"cf classic":   new(strings.Replace(cfList, `["retail"]`, `["retail","classic"]`, 1)),
+		"cf str id":    new(strings.Replace(cfList, `914482`, `"914482"`, 1)),
+		"cf bool id":   new(strings.Replace(cfList, `914482`, `true`, 1)),
+		"cf zero id":   new(strings.Replace(cfList, `914482`, `0`, 1)),
+		"cf and url":   new(strings.Replace(cfList, `"project"`, `"url":"https://a.b/c.zip","project"`, 1)),
+		"github proj":  new(strings.Replace(consolePortList, `"type":"github"`, `"type":"github","project":1`, 1)),
+		"url project":  new(strings.Replace(tomTomList("https://a.example/t.zip", nil), `"url":`, `"project":1,"url":`, 1)),
 		"url, no pin":  new(`[{"name":"TomTom","source":{"type":"url","url":"https://a.example/t.zip"},"flavors":["retail"]}]`),
 		"url, http":    new(strings.Replace(tomTomList("https://a.example/t.zip", nil), "https://", "http://", 1)),
 		"url, query":   new(tomTomList("https://a.example/t.zip?x=1", nil)),
@@ -478,8 +651,14 @@ func TestWoWAddonsKeepsAddonsWithoutValidList(t *testing.T) {
 			p := newWoWPod(t)
 			p.publish("3.3.12", consolePortZip(t, "3.3.12", "ConsolePort"), "")
 			p.run(new(consolePortList))
-			if calls, _ := p.run(l); calls != "" {
+			calls, out := p.run(l)
+			if calls != "" {
 				t.Errorf("want no downloads, calls:\n%s", calls)
+			}
+			// Not vacuous: ConsolePort is current, so a list misread as valid
+			// would download nothing either.
+			if !strings.Contains(out, "leaving addons alone") {
+				t.Errorf("want the list refused, output:\n%s", out)
 			}
 			if !p.exists(filepath.Join(p.retail, "ConsolePort", "ConsolePort.toc")) {
 				t.Error("ConsolePort was uninstalled")
