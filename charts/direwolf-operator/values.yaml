@@ -151,8 +151,10 @@ controllers:
           # a lobby while it stops no longer gets stuck in it (XERK-2440).
           # A pad unplugged mid-join leaves the lobby (XERK-2409). The XERK-1740 fix is now built from
           # upstream gst-wayland-display plus a patch vendored in wolf, not a fork (XERK-2487).
+          # Built on Fedora 44, as upstream is: Ubuntu 25.04 gets no more security updates
+          # (XERK-2494, XERK-2497).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-fefd2c3@sha256:c34be79607ac3f0e6e84498fb9d10cf55e3e5abb7937d1616155c67bf5269e8b
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-2c20f80@sha256:7be3b3aac687e2ff43f061002e2816b297b83e6ac5be730e44c287311e255789
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           # The wowAddons list below, for the Library (--library-wow-addons).
