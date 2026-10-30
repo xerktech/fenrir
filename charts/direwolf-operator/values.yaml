@@ -12,6 +12,11 @@ global:
 #    installed only if it matches GitHub's published SHA256.
 #  - url: one fixed https zip, installed only if it matches the listed sha256
 #    (e.g. a CurseForge CDN file). It never updates; bump url and sha256 together.
+#  - curseforge: the latest retail release of a CurseForge project (its
+#    "Project ID"), installed only if it matches the SHA1 CurseForge publishes.
+#    Retail only. Needs a CurseForge API key in Secret direwolf-curseforge,
+#    key apiKey (read when the Library starts); without it these addons keep
+#    what is installed.
 # Flavors: retail, classic, classic_era.
 wowAddons: []
 #  - name: ConsolePort
@@ -22,6 +27,9 @@ wowAddons: []
 #      type: url
 #      url: https://mediafilez.forgecdn.net/files/9283/553/Pawn-2.14.0.zip
 #      sha256: 16ff6a4351c6f34273c2e36dbfc2dd40e325c702dd632a058386041a517eafcd
+#    flavors: [retail]
+#  - name: Baganator
+#    source: {type: curseforge, project: 914482}
 #    flavors: [retail]
 
 serviceAccount:

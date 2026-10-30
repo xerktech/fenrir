@@ -70,15 +70,22 @@ paths:
   every managed addon. Keep both the operator's and the script's parse strict.
 - Each flavor's `Interface/.direwolf-addons.json` records the folders it installed; anything else
   in AddOns is the user's and is never replaced or removed (a name clash refuses the install).
-- Sources: `github` (latest release, only when the asset matches GitHub's published SHA256) or
-  `url` (one fixed https zip, only when it matches the list's `sha256`; XERK-2486).
-  - `url` is for CurseForge-only addons: its API needs a key, its CDN
+- Sources: `github` (latest release, only when the asset matches GitHub's published SHA256),
+  `url` (one fixed https zip, only when it matches the list's `sha256`; XERK-2486), `curseforge`.
+  - `url` pins a CurseForge file without an API key: its CDN
     (`mediafilez.forgecdn.net/files/<id/1000>/<id%1000>/<name>`) does not. `edge.forgecdn.net`
     302s there and the script's curl has no `-L`, so list the `mediafilez` URL.
   - A `url` addon never updates and, once installed, makes no network call: bump url + sha256.
   - Both parses (operator, script) allow only unreserved URL characters plus `:/?@&+,;=%`.
-- Zips are
-  hostile: no absolute, `..`, backslash, link or root-level entries; capped size and entry count.
+- `curseforge` (XERK-2489): `project` ID; the latest `releaseType` 1 file of `gameVersionTypeId`
+  517 (retail) in `api.curseforge.com/v1/mods/<id>`'s `latestFilesIndexes`, checked against
+  that file's published SHA1 and size, downloaded from the `mediafilez` path above.
+  - Retail only: other flavors are other version types, and one zip serves all flavors per addon.
+  - Key: Secret `direwolf-curseforge` (`apiKey`, optional) → Library env `CURSEFORGE_API_KEY`,
+    set only when a curseforge addon is listed. curl reads the header from stdin, never argv.
+  - The manifest's `sha256` field holds `sha1:<hex>` for these; `download` takes `<algo>:<hex>`.
+  - cfwidget.com was rejected: third party, and it publishes no hash.
+- Zips are hostile: no absolute, `..`, backslash, link or root-level entries; capped size and entry count.
 - Unpacked into `Interface/.direwolf-addons-*` (same filesystem), then swapped in by rename; a
   failed swap puts the old folders and their manifest entry back.
   - The manifest claims old + new folders (no SHA256) before the swap: a run killed mid-swap
