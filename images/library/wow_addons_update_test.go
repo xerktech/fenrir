@@ -25,11 +25,17 @@ const consolePortList = `[{"name":"ConsolePort","source":{"type":"github","repo"
 
 // wowCurlStub serves $FAKE_RELEASE as every repo's latest release and
 // $FAKE_ASSET for every download, logging each download. FAKE_OFFLINE fails both.
+// Like real curl, a download fails without a numeric --max-filesize; it also
+// fails unless held to https through redirects with URL globbing off.
 const wowCurlStub = `[ -n "$FAKE_OFFLINE" ] && exit 6
-for a; do [ "$prev" = -o ] && out=$a; [ "$prev" = --max-filesize ] && max=$a; prev=$a; done
+for a; do [ "$prev" = -o ] && out=$a; [ "$prev" = --max-filesize ] && max=$a
+  [ "$prev $a" = "--proto =https" ] && proto=1; [ "$prev $a" = "--proto-redir =https" ] && redir=1
+  [ "$a" = --globoff ] && globoff=1; prev=$a; done
 [ -z "$out" ] && exec cat "$FAKE_RELEASE"
+case "$max" in ''|*[!0-9]*) echo "curl: option --max-filesize: is badly used here" >&2; exit 2;; esac
+[ -n "$proto$redir$globoff" ] && [ "$proto$redir$globoff" = 111 ] || { echo "curl stub: download not held to https / globoff" >&2; exit 2; }
 echo "download $a" >>"$LOG"
-[ "${max:-0}" -gt 0 ] && [ "$(wc -c <"$FAKE_ASSET")" -gt "$max" ] && exit 63
+[ "$(wc -c <"$FAKE_ASSET")" -gt "$max" ] && exit 63
 cp "$FAKE_ASSET" "$out"`
 
 // wowPod is a Library pod's games volume with WoW installed, kept across runs.
@@ -451,20 +457,6 @@ func TestWoWAddonsInstallsPinnedURL(t *testing.T) {
 		t.Errorf("TomTom.toc = %q, want 4.1.0's", got)
 	}
 	p.assertHandInstalledKept()
-}
-
-// The download stays on https, even through redirects, and never expands
-// curl's URL globs.
-func TestWoWAddonsDownloadsOnlyOverHTTPS(t *testing.T) {
-	script, err := os.ReadFile(wowAddonsUpdate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, arg := range []string{`"--proto", "=https"`, `"--proto-redir", "=https"`, `"--globoff"`} {
-		if !strings.Contains(string(script), arg) {
-			t.Errorf("download must pass %s to curl", arg)
-		}
-	}
 }
 
 // A list the script can't read, or none at all, must not read as "none":
