@@ -133,8 +133,11 @@ controllers:
           # A resumed client that brings other controllers (another number or type, or fewer)
           # no longer leaves the kept pads plugged into the game beside them (XERK-2402); virtual
           # pad threads no longer race (XERK-2412).
+          # A controller plugged or unplugged while its stream joins or leaves a lobby goes to the
+          # right app instead of being left as a ghost pad or missing (XERK-2410); a stream joining
+          # a lobby while it stops no longer gets stuck in it (XERK-2440).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-1131960@sha256:14c2578f3b62b413e936a0bf1c0f5699bf7c2f9831580cab9808d5f0822c8a59
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-0107682@sha256:b3e8f9b5a1e6cd571a5e47806cce82b21cedb15461071f91c5cd46999ad533ff
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           # The wowAddons list below, for the Library (--library-wow-addons).
