@@ -70,8 +70,17 @@ paths:
   every managed addon. Keep both the operator's and the script's parse strict.
 - Each flavor's `Interface/.direwolf-addons.json` records the folders it installed; anything else
   in AddOns is the user's and is never replaced or removed (a name clash refuses the install).
-- Only GitHub releases, installed only when the asset matches GitHub's published SHA256. Zips are
-  hostile: no absolute, `..`, backslash, link or root-level entries; capped size and entry count.
+- Sources: `github` (latest release, installed only when the asset matches GitHub's published
+  SHA256) or `url` (one fixed https URL, installed only when it matches the listed `sha256`).
+  Zips are hostile: no absolute, `..`, backslash, link or root-level entries; capped size and
+  entry count.
+- `url` is for CurseForge-only addons (XERK-2486): CurseForge's API needs a key, but its CDN
+  (`mediafilez.forgecdn.net/files/<id>/<id>/<file>`) serves without one and never changes a file.
+  - A current pinned addon is never fetched; it updates only when the list's URL and pin move.
+  - curl runs `--proto =https --proto-redir =https --globoff`; the URL takes no query or glob
+    characters, in both parsers (keep `wowAddonURL` and the script's `URL` equal).
+  - Each source carries only its own keys (both parsers refuse others). A Library image older
+    than XERK-2486 reads a `url` entry as an invalid list and leaves every addon alone.
 - Unpacked into `Interface/.direwolf-addons-*` (same filesystem), then swapped in by rename; a
   failed swap puts the old folders and their manifest entry back.
   - The manifest claims old + new folders (no SHA256) before the swap: a run killed mid-swap
