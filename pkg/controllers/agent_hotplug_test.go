@@ -515,7 +515,7 @@ func TestAgentLateUnplugSparesUdevEntryOfPartlyReusedDevice(t *testing.T) {
 		return map[string]string{"ACTION": "add", "DEVNAME": "/dev/input/" + event, "MAJOR": "13", "MINOR": minor, "DEVPATH": "/devices/virtual/input/" + input + "/" + event}
 	}
 	ps5 := func(major string) []map[string]string {
-		evs := []map[string]string{node("input9", "event69", "69"), node("input10", "event70", "70")}
+		evs := []map[string]string{node("input9", "event69", "69"), node("input10", "event70", "70"), node("input12", "event71", "71")}
 		for _, e := range evs {
 			e["MAJOR"] = major
 		}
@@ -524,7 +524,7 @@ func TestAgentLateUnplugSparesUdevEntryOfPartlyReusedDevice(t *testing.T) {
 	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
 		SessionID:       "42",
 		UdevEvents:      ps5("13"),
-		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}, {Filename: "c13:70"}},
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}, {Filename: "c13:70"}, {Filename: "c13:71"}},
 	})
 	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
 		SessionID:       "42",
@@ -534,9 +534,10 @@ func TestAgentLateUnplugSparesUdevEntryOfPartlyReusedDevice(t *testing.T) {
 
 	nodes.calls = nil
 	a.handleDeviceUnplug(wolfapi.UnplugDeviceEvent{SessionID: "42", UdevEvents: ps5("0")})
+	// Once each, though both remaining records list them
 	want := []string{
-		"remove /dev/input/event70 13:70", "rm hwdb c13:70",
-		"announce remove /devices/virtual/input/input10/event70",
+		"remove /dev/input/event70 13:70", "remove /dev/input/event71 13:71", "rm hwdb c13:70", "rm hwdb c13:71",
+		"announce remove /devices/virtual/input/input10/event70", "announce remove /devices/virtual/input/input12/event71",
 	}
 	if !slices.Equal(nodes.calls, want) {
 		t.Errorf("calls = %v, want %v", nodes.calls, want)
@@ -571,8 +572,8 @@ func TestAgentPruneSparesUdevEntryOfPartlyReusedDevice(t *testing.T) {
 	}
 	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
 		SessionID:       "42",
-		UdevEvents:      []map[string]string{node("input9", "event69", "69"), node("input10", "event70", "70")},
-		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}, {Filename: "c13:70"}},
+		UdevEvents:      []map[string]string{node("input9", "event69", "69"), node("input10", "event70", "70"), node("input12", "event71", "71")},
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}, {Filename: "c13:70"}, {Filename: "c13:71"}},
 	})
 	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
 		SessionID:       "42",
@@ -585,10 +586,12 @@ func TestAgentPruneSparesUdevEntryOfPartlyReusedDevice(t *testing.T) {
 
 	nodes.calls = nil
 	a.pruneGoneDevices()
+	// Once each, though both gone records list them; map order varies
 	want := []string{
-		"remove /dev/input/event70 13:70", "rm hwdb c13:70",
-		"announce remove /devices/virtual/input/input10/event70",
+		"announce remove /devices/virtual/input/input10/event70", "announce remove /devices/virtual/input/input12/event71",
+		"remove /dev/input/event70 13:70", "remove /dev/input/event71 13:71", "rm hwdb c13:70", "rm hwdb c13:71",
 	}
+	slices.Sort(nodes.calls)
 	if !slices.Equal(nodes.calls, want) {
 		t.Errorf("calls = %v, want %v", nodes.calls, want)
 	}
