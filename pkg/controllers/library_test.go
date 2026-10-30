@@ -574,6 +574,20 @@ func TestLibraryEnsurePodStartsLibrary(t *testing.T) {
 	if env["WOW_ADDONS"] != "[]" {
 		t.Errorf("Library WOW_ADDONS = %q, want [] with no addons configured", env["WOW_ADDONS"])
 	}
+	if _, ok := env["CURSEFORGE_API_KEY"]; ok {
+		t.Error("Library has CURSEFORGE_API_KEY with no curseforge addon listed")
+	}
+	// A curseforge addon brings the API key, optional, from its Secret.
+	f.library.WoWAddons = []WoWAddon{{Name: "Baganator", Source: WoWAddonSource{Type: "curseforge", Project: 914482}, Flavors: []string{"retail"}}}
+	var keyFrom *corev1.SecretKeySelector
+	for _, e := range f.library.buildPod().Spec.Containers[0].Env {
+		if e.Name == "CURSEFORGE_API_KEY" && e.ValueFrom != nil {
+			keyFrom = e.ValueFrom.SecretKeyRef
+		}
+	}
+	if keyFrom == nil || keyFrom.Name != wowAddonsCurseForgeSecret || keyFrom.Key != "apiKey" || keyFrom.Optional == nil || !*keyFrom.Optional {
+		t.Errorf("Library CURSEFORGE_API_KEY from %+v, want optional %s/apiKey", keyFrom, wowAddonsCurseForgeSecret)
+	}
 	// An unreadable list leaves it unset: read as none, it would uninstall them all.
 	f.library.WoWAddonsInvalid = true
 	for _, e := range f.library.buildPod().Spec.Containers[0].Env {

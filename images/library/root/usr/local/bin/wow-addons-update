@@ -8,15 +8,19 @@ script installed that is no longer listed is removed. Run as the desktop user
 (abc), at Library start and then periodically.
 
 A "github" source installs its repo's latest release; a "url" source installs
-one fixed zip pinned by SHA256 (XERK-2486), and needs no network once installed.
+one fixed zip pinned by SHA256 (XERK-2486), and needs no network once installed;
+a "curseforge" source installs its project's latest retail release, found with
+the CurseForge API key in $CURSEFORGE_API_KEY (XERK-2489).
 
 Each flavor's Interface/.direwolf-addons.json records what this script
-installed: an addon's folders and the asset's SHA256. Folders it does not
-record are the user's, and are never replaced or removed.
+installed: an addon's folders and the asset's digest (hex SHA256, or
+sha1:<hex> for a CurseForge file). Folders it does not record are the user's,
+and are never replaced or removed.
 
 A zip is installed only if it matches the SHA256 GitHub publishes for the
-release asset, or the one the list pins, and is treated as hostile: absolute paths, "..", links, files
-outside a folder, and oversized or overlong archives are refused. It is
+release asset, the one the list pins, or the SHA1 and size the CurseForge API
+publishes for the file. It is treated as hostile: absolute paths, "..", links,
+files outside a folder, and oversized or overlong archives are refused. It is
 unpacked into a staging folder beside AddOns, then each folder is swapped in
 by rename; a failure puts the old folders back.
 
@@ -49,6 +53,13 @@ ASSET = re.compile(r"[A-Za-z0-9_.*?+-]{1,128}")
 # Addon folder names, e.g. ConsolePort_Bar or !BugGrabber.
 FOLDER = re.compile(r"[A-Za-z0-9_!][A-Za-z0-9_.!+-]{0,99}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+SHA1 = re.compile(r"[0-9a-f]{40}")
+# A CurseForge file name, URL-quoted into the CDN path.
+CF_FILE = re.compile(r"[A-Za-z0-9_.+() -]{1,128}[.]zip")
+CF_API = "https://api.curseforge.com/v1"
+CF_WOW = 1  # CurseForge's gameId for World of Warcraft
+CF_RETAIL = 517  # its gameVersionTypeId for retail
+CF_RELEASE = 1  # releaseType: not beta or alpha
 # As the operator's: no spaces, quotes, shell metacharacters or fragments.
 URL = re.compile(r"https://[A-Za-z0-9._~:/?@&+,;=%-]+")
 URL_MAX = 2048
@@ -88,19 +99,24 @@ def parse_addons(raw):
     for a in addons:
         src = a["source"]
         github = (
-            src["type"] == "github" and "url" not in src and "sha256" not in src
+            src["type"] == "github" and not {"url", "sha256", "project"} & set(src)
             and isinstance(src["repo"], str) and REPO.fullmatch(src["repo"])
             and ".." not in src["repo"].split("/") and "." not in src["repo"].split("/")
             and isinstance(src["asset"], str) and ASSET.fullmatch(src["asset"])
         )
         pinned = (
-            src["type"] == "url" and "repo" not in src and "asset" not in src
+            src["type"] == "url" and not {"repo", "asset", "project"} & set(src)
             and valid_url(src["url"])
             and isinstance(src["sha256"], str) and SHA256.fullmatch(src["sha256"])
         )
+        curseforge = (
+            src["type"] == "curseforge" and set(src) == {"type", "project"}
+            and type(src["project"]) is int and 0 < src["project"] < 1 << 31
+            and a["flavors"] == ["retail"]
+        )
         if not (
             isinstance(a["name"], str) and NAME.fullmatch(a["name"])
-            and (github or pinned)
+            and (github or pinned or curseforge)
             and isinstance(a["flavors"], list) and a["flavors"]
             and all(f in FLAVORS for f in a["flavors"])
         ):
@@ -139,19 +155,67 @@ def pinned_asset(source):
     return name, name, source["url"], None, source["sha256"]
 
 
+def curseforge_get(path, key):
+    """GET path from the CurseForge API; the key goes to curl on stdin, never
+    in its argv, which any process in the pod can read."""
+    out = subprocess.run(
+        # No -L: curl would send the key header on to wherever a redirect points.
+        ["curl", "-fsS", "--proto", "=https", "--max-time", "30", "-H", "@-", CF_API + path],
+        input=f"x-api-key: {key}\n".encode(), capture_output=True, check=True,
+    ).stdout
+    return json.loads(out)["data"]
+
+
+def curseforge_asset(source):
+    """The project's latest retail release, as latest_asset returns one; its
+    digest is sha1:<hex>, the hash CurseForge publishes."""
+    key = os.environ.get("CURSEFORGE_API_KEY", "")
+    if not key or not key.isprintable() or len(key) > 200:
+        raise Refused("CURSEFORGE_API_KEY is not set")
+    project = source["project"]
+    mod = curseforge_get(f"/mods/{project}", key)
+    if mod["id"] != project or mod["gameId"] != CF_WOW:
+        raise Refused(f"CurseForge project {project} is not a WoW addon")
+    ids = [
+        f["fileId"] for f in mod["latestFilesIndexes"]
+        if isinstance(f, dict) and f.get("gameVersionTypeId") == CF_RETAIL and f.get("releaseType") == CF_RELEASE
+        and type(f.get("fileId")) is int and f["fileId"] > 0
+    ]
+    if not ids:
+        raise Refused(f"CurseForge project {project} has no retail release")
+    file_id = max(ids)
+    f = curseforge_get(f"/mods/{project}/files/{file_id}", key)
+    name, size = f["fileName"], f["fileLength"]
+    sha1 = [h["value"] for h in f["hashes"] if isinstance(h, dict) and h.get("algo") == 1]
+    if f["id"] != file_id or f["modId"] != project or f.get("isAvailable") is False:
+        raise Refused(f"CurseForge file {file_id} is not available")
+    if not isinstance(name, str) or not CF_FILE.fullmatch(name):
+        raise Refused(f"unexpected CurseForge file name {name!r}")
+    if type(size) is not int or not 0 < size <= MAX_DOWNLOAD:
+        raise Refused(f"{name} is {size} bytes; the limit is {MAX_DOWNLOAD}")
+    if len(sha1) != 1 or not isinstance(sha1[0], str) or not SHA1.fullmatch(sha1[0]):
+        raise Refused(f"{name} has no published SHA1")
+    # Built, not the API's downloadUrl: that is null for some projects, and
+    # otherwise an edge.forgecdn.net link that redirects here.
+    url = f"https://mediafilez.forgecdn.net/files/{file_id // 1000}/{file_id % 1000}/{urllib.parse.quote(name)}"
+    return name, name, url, size, "sha1:" + sha1[0]
+
+
 def download(url, size, sha, dest):
-    """size None: unknown, capped at MAX_DOWNLOAD; the SHA256 alone decides."""
+    """size None: unknown, capped at MAX_DOWNLOAD; the digest alone decides.
+    sha is hex SHA256, or <algorithm>:<hex>."""
     subprocess.run(
         ["curl", "-fsSL", "--proto", "=https", "--max-time", "600",
          "--max-filesize", str(size or MAX_DOWNLOAD), "-o", dest, url],
         check=True,
     )
-    h = hashlib.sha256()
+    algo, _, want = sha.rpartition(":")
+    h = hashlib.new(algo or "sha256")
     with open(dest, "rb") as f:
         while chunk := f.read(1 << 20):
             h.update(chunk)
-    if (size is not None and os.path.getsize(dest) != size) or h.hexdigest() != sha:
-        raise Refused(f"{url} does not match its SHA256")
+    if (size is not None and os.path.getsize(dest) != size) or h.hexdigest() != want:
+        raise Refused(f"{url} does not match its {(algo or 'sha256').upper()}")
 
 
 def zip_folders(zf):
@@ -382,16 +446,16 @@ def main():
                 continue
             try:
                 source = a["source"]
-                tag, asset, url, size, sha = (
-                    latest_asset(source) if source["type"] == "github" else pinned_asset(source)
-                )
+                resolve = {"github": latest_asset, "url": pinned_asset, "curseforge": curseforge_asset}
+                tag, asset, url, size, sha = resolve[source["type"]](source)
                 stale = [fl for fl in targets.values() if not fl.current(name, sha)]
                 if not stale:
                     log(f"{name} {tag} is up to date")
                     continue
                 archive = os.path.join(downloads, f"{name}.zip")
                 download(url, size, sha, archive)
-            except (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError, Refused) as e:
+            except (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError,
+                    AttributeError, RecursionError, Refused) as e:
                 log(f"cannot update {name}: {e}; keeping what is installed")
                 continue
             for fl in stale:
