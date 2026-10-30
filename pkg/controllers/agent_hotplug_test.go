@@ -557,3 +557,39 @@ func TestAgentUnplugOfUnrecordedNodeFallsBackToSysfs(t *testing.T) {
 		t.Errorf("calls = %v, want %v", nodes.calls, want)
 	}
 }
+
+// The prune of a gone device whose pad node a new device took (PS5 replaced
+// by Xbox, no unplug) drops its other nodes, but neither the new device's
+// udev entry nor an announce on its node (XERK-2450).
+func TestAgentPruneSparesUdevEntryOfPartlyReusedDevice(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &numberedNodes{}
+	a.bridge = nodes
+	a.sysDevChar = t.TempDir()
+	node := func(input, event, minor string) map[string]string {
+		return map[string]string{"ACTION": "add", "DEVNAME": "/dev/input/" + event, "MAJOR": "13", "MINOR": minor, "DEVPATH": "/devices/virtual/input/" + input + "/" + event}
+	}
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      []map[string]string{node("input9", "event69", "69"), node("input10", "event70", "70")},
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}, {Filename: "c13:70"}},
+	})
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      []map[string]string{node("input11", "event69", "69")},
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69"}},
+	})
+	if err := os.Symlink("../../devices/virtual/input/input11/event69", filepath.Join(a.sysDevChar, "13:69")); err != nil {
+		t.Fatal(err)
+	}
+
+	nodes.calls = nil
+	a.pruneGoneDevices()
+	want := []string{
+		"remove /dev/input/event70 13:70", "rm hwdb c13:70",
+		"announce remove /devices/virtual/input/input10/event70",
+	}
+	if !slices.Equal(nodes.calls, want) {
+		t.Errorf("calls = %v, want %v", nodes.calls, want)
+	}
+}

@@ -491,6 +491,7 @@ func (a *Agent) pruneGoneDevices() {
 	}
 	a.devicesMu.Lock()
 	defer a.devicesMu.Unlock()
+	var gone []publishedDevice
 	for devpath, d := range a.published {
 		target, err := os.Readlink(filepath.Join(a.sysDevChar, d.node["MAJOR"]+":"+d.node["MINOR"]))
 		if err == nil && strings.HasSuffix(target, devpath) {
@@ -500,14 +501,43 @@ func (a *Agent) pruneGoneDevices() {
 		if err := a.nodes().Remove(d.node); err != nil {
 			utilruntime.HandleError(fmt.Errorf("failed to remove device node: %w", err))
 		}
-		for _, f := range d.hwdbFile {
-			if err := a.nodes().RemoveHwDB(f); err != nil {
-				utilruntime.HandleError(fmt.Errorf("failed to remove udev hwdb entry %q: %w", f, err))
-			}
-		}
-		a.announce(d.events, "remove")
 		delete(a.published, devpath)
+		gone = append(gone, d)
 	}
+	done := map[string]bool{}
+	for _, d := range gone {
+		a.dropEntries(d.events, d.hwdbFile, done)
+	}
+}
+
+// dropEntries removes a gone device's udev entries and announces its
+// removal, sparing whatever a published record holds: the kernel reuses
+// eventN (never inputN), so a new device may have taken one of the gone
+// device's nodes, and each of its records lists all the device's entries and
+// events. done holds what was already dropped, across calls.
+func (a *Agent) dropEntries(events []map[string]string, hwdbFiles []string, done map[string]bool) {
+	// DEVNAMEs and "cMAJOR:MINOR" entry names, which never collide.
+	held := map[string]bool{}
+	for _, d := range a.published {
+		held[d.node["DEVNAME"]] = true
+		held["c"+d.node["MAJOR"]+":"+d.node["MINOR"]] = true
+	}
+	for _, f := range hwdbFiles {
+		if held[f] || done[f] {
+			continue
+		}
+		done[f] = true
+		if err := a.nodes().RemoveHwDB(f); err != nil {
+			utilruntime.HandleError(fmt.Errorf("failed to remove udev hwdb entry %q: %w", f, err))
+		}
+	}
+	a.announce(slices.DeleteFunc(slices.Clone(events), func(e map[string]string) bool {
+		if held[e["DEVNAME"]] || done[e["DEVPATH"]] {
+			return true
+		}
+		done[e["DEVPATH"]] = true
+		return false
+	}), "remove")
 }
 
 // announce passes Wolf's udev events for one device on, in Wolf's order (the
@@ -530,18 +560,14 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 	// node takes them, and its udev entries, from what its plug recorded.
 	var hwdbFiles []string
 	recorded := false
-	// The nodes another device holds now (by DEVPATH): the kernel reuses
-	// eventN, never inputN, so a device destroyed before its unplug arrived
-	// may have had its node taken by a new one. Neither removed nor announced.
-	taken := map[string]bool{}
 	for _, udevEvent := range ev.UdevEvents {
 		if d, ok := a.published[udevEvent["DEVPATH"]]; ok {
 			udevEvent["MAJOR"], udevEvent["MINOR"] = d.node["MAJOR"], d.node["MINOR"]
 			hwdbFiles = append(hwdbFiles, d.hwdbFile...)
 			recorded = true
 		} else if a.publishedOn(udevEvent["DEVNAME"]) {
+			// Its device is gone and a new one took the node (see dropEntries)
 			klog.InfoS("Keeping a device node a new device took over", "devname", udevEvent["DEVNAME"], "devpath", udevEvent["DEVPATH"])
-			taken[udevEvent["DEVPATH"]] = true
 			continue
 		} else {
 			fakeudev.ResolveDevNumbers(udevEvent)
@@ -568,26 +594,7 @@ func (a *Agent) handleDeviceUnplug(ev wolfapi.UnplugDeviceEvent) {
 			hwdbFiles = append(hwdbFiles, filename)
 		}
 	}
-	// Each of the device's records lists all its entries, and a taken node's
-	// entry is its new device's now.
-	keep := map[string]bool{}
-	for devpath, d := range a.published {
-		if !slices.ContainsFunc(ev.UdevEvents, func(e map[string]string) bool { return e["DEVPATH"] == devpath }) {
-			keep["c"+d.node["MAJOR"]+":"+d.node["MINOR"]] = true
-		}
-	}
-	for _, filename := range hwdbFiles {
-		if keep[filename] {
-			continue
-		}
-		keep[filename] = true
-		if err := a.nodes().RemoveHwDB(filename); err != nil {
-			utilruntime.HandleError(fmt.Errorf("failed to remove udev hwdb entry %q: %w", filename, err))
-		}
-	}
-	a.announce(slices.DeleteFunc(slices.Clone(ev.UdevEvents), func(e map[string]string) bool {
-		return taken[e["DEVPATH"]]
-	}), "remove")
+	a.dropEntries(ev.UdevEvents, hwdbFiles, map[string]bool{})
 }
 
 // publishedOn reports whether a published record holds the node devname.
