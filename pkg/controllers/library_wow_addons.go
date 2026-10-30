@@ -20,15 +20,24 @@ type WoWAddon struct {
 	Flavors []string       `json:"flavors"`
 }
 
-// WoWAddonSource is where an addon is published. Only GitHub releases are
-// supported: GitHub publishes each asset's SHA256, so a download is checked
-// against it. CurseForge and Wago need API keys and are not supported.
+// WoWAddonSource is where an addon is published. Every download is checked
+// against a SHA256 before it is installed:
+//   - github: the latest release's asset, checked against the SHA256 GitHub
+//     publishes for it.
+//   - url: one fixed https URL, checked against the SHA256 listed here; for
+//     addons published only where an API key is needed to look them up
+//     (CurseForge, whose CDN file URLs never change). It moves only when the
+//     list does.
 type WoWAddonSource struct {
 	Type string `json:"type"`
 	// Repo is the GitHub repository, owner/name; its latest release is used.
-	Repo string `json:"repo"`
+	Repo string `json:"repo,omitempty"`
 	// Asset is a glob that must match exactly one of that release's assets, a zip.
-	Asset string `json:"asset"`
+	Asset string `json:"asset,omitempty"`
+	// URL is the zip's https URL (type url).
+	URL string `json:"url,omitempty"`
+	// SHA256 is the zip's SHA256, lowercase hex (type url).
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 // WoWAddonFlavors are the flavors an addon may list; wow-addons-update maps
@@ -39,6 +48,9 @@ var (
 	wowAddonName  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 	wowAddonRepo  = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9_.-]{1,100}$`)
 	wowAddonAsset = regexp.MustCompile(`^[A-Za-z0-9_.*?+-]{1,128}$`)
+	// No query, fragment, credentials or curl glob characters.
+	wowAddonURL    = regexp.MustCompile(`^https://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?/[A-Za-z0-9._~%+-][A-Za-z0-9._~%/+-]{0,999}$`)
+	wowAddonSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // ParseWoWAddons reads the --library-wow-addons JSON list. Empty means none.
@@ -64,14 +76,11 @@ func ParseWoWAddons(s string) ([]WoWAddon, error) {
 			return nil, fmt.Errorf("addon %d: name %q must match %s", i, a.Name, wowAddonName)
 		case seen[a.Name]:
 			return nil, fmt.Errorf("addon %q is listed twice", a.Name)
-		case a.Source.Type != "github":
-			return nil, fmt.Errorf("addon %q: source type %q is not supported (only github)", a.Name, a.Source.Type)
-		case !wowAddonRepo.MatchString(a.Source.Repo) || path.Clean(a.Source.Repo) != a.Source.Repo:
-			return nil, fmt.Errorf("addon %q: repo %q is not owner/name", a.Name, a.Source.Repo)
-		case !wowAddonAsset.MatchString(a.Source.Asset):
-			return nil, fmt.Errorf("addon %q: asset pattern %q must match %s", a.Name, a.Source.Asset, wowAddonAsset)
 		case len(a.Flavors) == 0:
 			return nil, fmt.Errorf("addon %q lists no flavors", a.Name)
+		}
+		if err := checkWoWAddonSource(&a.Source); err != nil {
+			return nil, fmt.Errorf("addon %q: %w", a.Name, err)
 		}
 		for _, f := range a.Flavors {
 			if !slices.Contains(WoWAddonFlavors, f) {
@@ -81,6 +90,32 @@ func ParseWoWAddons(s string) ([]WoWAddon, error) {
 		seen[a.Name] = true
 	}
 	return addons, nil
+}
+
+func checkWoWAddonSource(s *WoWAddonSource) error {
+	switch s.Type {
+	case "github":
+		switch {
+		case !wowAddonRepo.MatchString(s.Repo) || path.Clean(s.Repo) != s.Repo:
+			return fmt.Errorf("repo %q is not owner/name", s.Repo)
+		case !wowAddonAsset.MatchString(s.Asset):
+			return fmt.Errorf("asset pattern %q must match %s", s.Asset, wowAddonAsset)
+		case s.URL != "" || s.SHA256 != "":
+			return errors.New("a github source takes no url or sha256")
+		}
+	case "url":
+		switch {
+		case !wowAddonURL.MatchString(s.URL):
+			return fmt.Errorf("url %q must match %s", s.URL, wowAddonURL)
+		case !wowAddonSHA256.MatchString(s.SHA256):
+			return fmt.Errorf("sha256 %q is not 64 lowercase hex digits", s.SHA256)
+		case s.Repo != "" || s.Asset != "":
+			return errors.New("a url source takes no repo or asset")
+		}
+	default:
+		return fmt.Errorf("source type %q is not supported (github or url)", s.Type)
+	}
+	return nil
 }
 
 // wowAddonsEnv is the Library pod's WOW_ADDONS: always set, "[]" for none,

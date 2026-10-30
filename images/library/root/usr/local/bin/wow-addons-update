@@ -3,7 +3,7 @@
 
 $WOW_ADDONS is the operator's validated list (chart wowAddons). For each WoW
 flavor installed under $BATTLENET_GAMES/World of Warcraft, every listed addon
-is installed from its source's latest release into Interface/AddOns, and every
+is installed from its source into Interface/AddOns, and every
 addon this script installed that is no longer listed is removed. Run as the
 desktop user (abc), at Library start and then periodically.
 
@@ -11,8 +11,9 @@ Each flavor's Interface/.direwolf-addons.json records what this script
 installed: an addon's folders and the asset's SHA256. Folders it does not
 record are the user's, and are never replaced or removed.
 
-A release asset is installed only if it matches the SHA256 GitHub publishes
-for it, and its zip is treated as hostile: absolute paths, "..", links, files
+Sources: a GitHub repo's latest release asset, installed only if it matches
+the SHA256 GitHub publishes for it; or a fixed https URL, installed only if it
+matches the SHA256 the list pins (nothing is fetched while it is current). A zip is treated as hostile: absolute paths, "..", links, files
 outside a folder, and oversized or overlong archives are refused. It is
 unpacked into a staging folder beside AddOns, then each folder is swapped in
 by rename; a failure puts the old folders back.
@@ -45,6 +46,8 @@ ASSET = re.compile(r"[A-Za-z0-9_.*?+-]{1,128}")
 # Addon folder names, e.g. ConsolePort_Bar or !BugGrabber.
 FOLDER = re.compile(r"[A-Za-z0-9_!][A-Za-z0-9_.!+-]{0,99}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+# The operator's wowAddonURL: no query, credentials or curl glob characters.
+URL = re.compile(r"https://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?/[A-Za-z0-9._~%+-][A-Za-z0-9._~%/+-]{0,999}")
 
 
 class Refused(Exception):
@@ -65,13 +68,9 @@ def parse_addons(raw):
     if not isinstance(addons, list):
         raise ValueError("not a list")
     for a in addons:
-        src = a["source"]
         if not (
             isinstance(a["name"], str) and NAME.fullmatch(a["name"])
-            and src["type"] == "github"
-            and isinstance(src["repo"], str) and REPO.fullmatch(src["repo"])
-            and ".." not in src["repo"].split("/") and "." not in src["repo"].split("/")
-            and isinstance(src["asset"], str) and ASSET.fullmatch(src["asset"])
+            and valid_source(a["source"])
             and isinstance(a["flavors"], list) and a["flavors"]
             and all(f in FLAVORS for f in a["flavors"])
         ):
@@ -79,6 +78,32 @@ def parse_addons(raw):
     if len({a["name"] for a in addons}) != len(addons):
         raise ValueError("an addon is listed twice")
     return addons
+
+
+def valid_source(src):
+    if src["type"] == "github":
+        return (
+            set(src) == {"type", "repo", "asset"}
+            and isinstance(src["repo"], str) and REPO.fullmatch(src["repo"])
+            and ".." not in src["repo"].split("/") and "." not in src["repo"].split("/")
+            and isinstance(src["asset"], str) and ASSET.fullmatch(src["asset"])
+        )
+    if src["type"] == "url":
+        return (
+            set(src) == {"type", "url", "sha256"}
+            and isinstance(src["url"], str) and URL.fullmatch(src["url"])
+            and isinstance(src["sha256"], str) and SHA256.fullmatch(src["sha256"])
+        )
+    return False
+
+
+def source_asset(source):
+    """What to install for a source: (version, url, size or None, sha256)."""
+    if source["type"] == "url":
+        # The file name is the only version a fixed URL has.
+        return source["url"].rsplit("/", 1)[1], source["url"], None, source["sha256"]
+    tag, _, url, size, sha = latest_asset(source)
+    return tag, url, size, sha
 
 
 def latest_asset(source):
@@ -104,16 +129,18 @@ def latest_asset(source):
 
 
 def download(url, size, sha, dest):
+    """Fetches url into dest; size is the published size, or None if unknown."""
     subprocess.run(
-        ["curl", "-fsSL", "--max-time", "600", "--max-filesize", str(size), "-o", dest, url],
+        ["curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--globoff",
+         "--max-time", "600", "--max-filesize", str(size or MAX_DOWNLOAD), "-o", dest, url],
         check=True,
     )
     h = hashlib.sha256()
     with open(dest, "rb") as f:
         while chunk := f.read(1 << 20):
             h.update(chunk)
-    if os.path.getsize(dest) != size or h.hexdigest() != sha:
-        raise Refused(f"{url} does not match its published SHA256")
+    if (size is not None and os.path.getsize(dest) != size) or h.hexdigest() != sha:
+        raise Refused(f"{url} does not match its SHA256")
 
 
 def zip_folders(zf):
@@ -343,7 +370,7 @@ def main():
             if not targets:
                 continue
             try:
-                tag, asset, url, size, sha = latest_asset(a["source"])
+                tag, url, size, sha = source_asset(a["source"])
                 stale = [fl for fl in targets.values() if not fl.current(name, sha)]
                 if not stale:
                     log(f"{name} {tag} is up to date")

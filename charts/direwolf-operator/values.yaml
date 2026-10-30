@@ -7,13 +7,18 @@ global:
 # WoW addons the Library installs into each listed flavor's Interface/AddOns
 # under <library games path>/battlenet/World of Warcraft, and keeps on their
 # latest release while it runs (sessions never download). Dropping an entry
-# uninstalls it; addons installed by hand are never touched. Only GitHub
-# releases: the asset glob must match one asset of the latest release, and it
-# is installed only if it matches GitHub's published SHA256.
+# uninstalls it; addons installed by hand are never touched. Sources:
+#   github: the asset glob must match one asset of the latest release, and it
+#     is installed only if it matches GitHub's published SHA256.
+#   url: one fixed https zip (e.g. a CurseForge CDN file), installed only if it
+#     matches the listed sha256; it changes only when this list does.
 # Flavors: retail, classic, classic_era.
 wowAddons: []
 #  - name: ConsolePort
 #    source: {type: github, repo: seblindfors/ConsolePort, asset: "ConsolePort-*.zip"}
+#    flavors: [retail]
+#  - name: TomTom
+#    source: {type: url, url: "https://mediafilez.forgecdn.net/files/<id>/<id>/<file>.zip", sha256: <hex>}
 #    flavors: [retail]
 
 serviceAccount:

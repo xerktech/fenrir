@@ -410,6 +410,63 @@ func TestWoWAddonsNeverReplacesHandInstalled(t *testing.T) {
 	}
 }
 
+// tomTomList lists TomTom from a fixed URL pinned to asset's SHA256.
+func tomTomList(url string, asset []byte) string {
+	sum := sha256.Sum256(asset)
+	return `[{"name":"TomTom","source":{"type":"url","url":"` + url + `","sha256":"` + hex.EncodeToString(sum[:]) + `"},"flavors":["retail"]}]`
+}
+
+// A url source installs the pinned file, fetches nothing while it is
+// current, and moves only when the list does.
+func TestWoWAddonsInstallsPinnedURL(t *testing.T) {
+	const v1 = "https://mediafilez.forgecdn.net/files/7001/100/TomTom-v4.0.9.zip"
+	p := newWoWPod(t)
+	zip1 := makeZip(t, zipEntry{name: "TomTom/TomTom.toc", body: "4.0.9"})
+	p.assetZip = zip1
+	if calls, _ := p.run(new(tomTomList(v1, zip1))); calls != "download "+v1+"\n" {
+		t.Fatalf("want only the pinned URL downloaded, calls:\n%s", calls)
+	}
+	if got := p.read(filepath.Join(p.retail, "TomTom", "TomTom.toc")); got != "4.0.9" {
+		t.Errorf("TomTom.toc = %q, want 4.0.9's", got)
+	}
+	// Current: no network at all, so offline changes nothing.
+	if calls, out := p.run(new(tomTomList(v1, zip1)), "FAKE_OFFLINE=1"); calls != "" || !strings.Contains(out, "TomTom TomTom-v4.0.9.zip is up to date") {
+		t.Errorf("a current pinned addon must not be fetched, calls:\n%s", calls)
+	}
+	// The file at the URL no longer matching the pin keeps what is installed.
+	p.assetZip = makeZip(t, zipEntry{name: "TomTom/TomTom.toc", body: "tampered"})
+	const v2 = "https://mediafilez.forgecdn.net/files/7002/200/TomTom-v4.1.0.zip"
+	zip2 := makeZip(t, zipEntry{name: "TomTom/TomTom.toc", body: "4.1.0"})
+	if _, out := p.run(new(tomTomList(v2, zip2))); !strings.Contains(out, "does not match its SHA256") {
+		t.Errorf("want the mismatch refused, output:\n%s", out)
+	}
+	if got := p.read(filepath.Join(p.retail, "TomTom", "TomTom.toc")); got != "4.0.9" {
+		t.Errorf("after a mismatch TomTom.toc = %q, want 4.0.9's kept", got)
+	}
+	p.assetZip = zip2
+	if calls, _ := p.run(new(tomTomList(v2, zip2))); calls != "download "+v2+"\n" {
+		t.Fatalf("want the new pin downloaded, calls:\n%s", calls)
+	}
+	if got := p.read(filepath.Join(p.retail, "TomTom", "TomTom.toc")); got != "4.1.0" {
+		t.Errorf("TomTom.toc = %q, want 4.1.0's", got)
+	}
+	p.assertHandInstalledKept()
+}
+
+// The download stays on https, even through redirects, and never expands
+// curl's URL globs.
+func TestWoWAddonsDownloadsOnlyOverHTTPS(t *testing.T) {
+	script, err := os.ReadFile(wowAddonsUpdate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range []string{`"--proto", "=https"`, `"--proto-redir", "=https"`, `"--globoff"`} {
+		if !strings.Contains(string(script), arg) {
+			t.Errorf("download must pass %s to curl", arg)
+		}
+	}
+}
+
 // A list the script can't read, or none at all, must not read as "none":
 // that would uninstall every managed addon.
 func TestWoWAddonsKeepsAddonsWithoutValidList(t *testing.T) {
@@ -420,6 +477,10 @@ func TestWoWAddonsKeepsAddonsWithoutValidList(t *testing.T) {
 		"bad flavor":   new(strings.Replace(consolePortList, `["retail"]`, `["../x"]`, 1)),
 		"path as name": new(strings.Replace(consolePortList, `"ConsolePort"`, `"../ConsolePort"`, 1)),
 		"other source": new(strings.Replace(consolePortList, `"github"`, `"curseforge"`, 1)),
+		"url, no pin":  new(`[{"name":"TomTom","source":{"type":"url","url":"https://a.example/t.zip"},"flavors":["retail"]}]`),
+		"url, http":    new(strings.Replace(tomTomList("https://a.example/t.zip", nil), "https://", "http://", 1)),
+		"url, query":   new(tomTomList("https://a.example/t.zip?x=1", nil)),
+		"url and repo": new(strings.Replace(tomTomList("https://a.example/t.zip", nil), `"url":`, `"repo":"a/b","url":`, 1)),
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := newWoWPod(t)
