@@ -556,6 +556,8 @@ func TestWoWAddonsRefusesOddCurseForgeAnswers(t *testing.T) {
 			p.cfFile = []byte(strings.Replace(string(p.cfFile), `"fileLength":`, `"fileLength":999999999,"was":`, 1))
 		},
 		"not json": func(p *wowPod) { p.cfMod = []byte("<html>") },
+		// RecursionError in Python's json: not an exception the others share.
+		"deep json": func(p *wowPod) { p.cfMod = []byte(strings.Repeat("[", 200000)) },
 		"int index": func(p *wowPod) {
 			p.cfMod = []byte(`{"data":{"id":914482,"gameId":1,"latestFilesIndexes":[7]}}`)
 		},
