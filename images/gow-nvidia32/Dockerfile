@@ -124,6 +124,26 @@ RUN set -eu; \
   # xodus-nexus-update compares releases against this.
   echo "${NEXUS_VERSION#v}" >/opt/xodus-nexus/.direwolf-version
 
+# Ferestre (github.com/icex/ferestre; XERK-2471), trialled as an alternative to
+# Xodus Nexus: its portable release (launcher, GTK window and the Xodus client).
+# The patched Proton runtime is not in it: the window downloads a signed one
+# into the shared home.
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS ferestre-app
+ARG FERESTRE_VERSION=v0.1.14
+# The release's SHA256SUMS line for the .tar.zst; update it with the version.
+ARG FERESTRE_SHA256=587bd05941bd27752ae11ebedb19e6478cde45254d03fb45d9cc63ff0d9892bd
+RUN set -eu; \
+  apt-get update; apt-get install -y --no-install-recommends ca-certificates curl zstd; \
+  name="ferestre-${FERESTRE_VERSION#v}-x86_64"; \
+  curl -fsSL -o /tmp/ferestre.tar.zst \
+    "https://github.com/icex/ferestre/releases/download/${FERESTRE_VERSION}/${name}.tar.zst"; \
+  echo "${FERESTRE_SHA256}  /tmp/ferestre.tar.zst" | sha256sum -c -; \
+  tar --zstd -xf /tmp/ferestre.tar.zst --no-same-owner -C /tmp; \
+  test -x "/tmp/ferestre-${FERESTRE_VERSION#v}/usr/bin/ferestre-gui"; \
+  test -x "/tmp/ferestre-${FERESTRE_VERSION#v}/usr/lib/ferestre/client/xodus-cli"; \
+  chmod -R u=rwX,go=rX "/tmp/ferestre-${FERESTRE_VERSION#v}"; \
+  mv "/tmp/ferestre-${FERESTRE_VERSION#v}" /opt/ferestre
+
 # Proton-CachyOS for Battle.net, the Library's (images/library/Dockerfile,
 # XERK-2361) at the same pin: both run the one prefix in the shared home, and
 # Proton upgrades or warns about a prefix another version last ran. Bump both
@@ -202,4 +222,21 @@ RUN for lib in libfreetype.so.6 libfontconfig.so.1 libldap.so.2; do \
   done \
   && command -v pgrep killall paste python3 swaymsg >/dev/null \
   && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/proton-cachyos' \
+  && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
+
+# Ferestre trial sessions (XERK-2471): the nexus image, so a Nexus install and
+# its keyring are at hand, plus Ferestre and the WebKitGTK its sign-in window
+# needs (loaded at run time, so the ldd check below cannot catch it missing).
+# The App sets DIREWOLF_LAUNCH_COMMAND=ferestre-gui; launch-nexus runs it.
+FROM nexus AS ferestre
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=ferestre-app /opt/ferestre /opt/ferestre
+COPY --chmod=755 root/usr/bin/ferestre-gui /usr/bin/ferestre-gui
+RUN ldconfig -p | grep -q 'libwebkit2gtk-4.1.so.0 (libc6,x86-64)' \
+  && for b in usr/bin/ferestre usr/bin/ferestre-gui usr/lib/ferestre/client/xodus-cli usr/lib/ferestre/client/xodus-service; do \
+    ! ldd "/opt/ferestre/$b" | grep 'not found' || { echo "/opt/ferestre/$b: missing libraries" >&2; exit 1; }; \
+  done \
+  && d='/usr/bin /opt/ferestre' \
   && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
