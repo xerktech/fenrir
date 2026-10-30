@@ -9,6 +9,7 @@ import (
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 )
 
 // WoWAddon is one World of Warcraft addon the Library keeps installed and
@@ -51,13 +52,6 @@ type WoWAddonSource struct {
 // "curseforge" addon needs. Optional: the Library starts without it.
 const wowAddonsCurseForgeSecret = "direwolf-curseforge"
 
-// WoWAddonSource types.
-const (
-	wowAddonGitHub     = "github"
-	wowAddonURL        = "url"
-	wowAddonCurseForge = "curseforge"
-)
-
 // WoWAddonFlavors are the flavors an addon may list; wow-addons-update maps
 // each to its folder under World of Warcraft.
 var WoWAddonFlavors = []string{"retail", "classic", "classic_era"}
@@ -73,6 +67,13 @@ var (
 	wowAddonSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
+// WoWAddonSource types.
+const (
+	wowSourceGitHub     = "github"
+	wowSourceURL        = "url"
+	wowSourceCurseForge = "curseforge"
+)
+
 const wowAddonURLMax = 2048
 
 // validWoWAddonURL reports whether s is a plain https URL to a host, with no
@@ -82,7 +83,15 @@ func validWoWAddonURL(s string) bool {
 		return false
 	}
 	u, err := url.Parse(s)
-	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil //nolint:goconst // URL scheme
+	if err != nil || u.Hostname() == "" || u.User != nil {
+		return false
+	}
+	// The pattern already requires the https scheme; a port must be one curl takes.
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		return err == nil && n >= 1 && n <= 65535
+	}
+	return true
 }
 
 // ParseWoWAddons reads the --library-wow-addons JSON list. Empty means none.
@@ -108,28 +117,28 @@ func ParseWoWAddons(s string) ([]WoWAddon, error) {
 			return nil, fmt.Errorf("addon %d: name %q must match %s", i, a.Name, wowAddonName)
 		case seen[a.Name]:
 			return nil, fmt.Errorf("addon %q is listed twice", a.Name)
-		case a.Source.Type != wowAddonGitHub && a.Source.Type != wowAddonURL && a.Source.Type != wowAddonCurseForge:
+		case a.Source.Type != wowSourceGitHub && a.Source.Type != wowSourceURL && a.Source.Type != wowSourceCurseForge:
 			return nil, fmt.Errorf("addon %q: source type %q is not supported (github, url or curseforge)", a.Name, a.Source.Type)
-		case a.Source.Type != wowAddonCurseForge && a.Source.Project != 0:
+		case a.Source.Type != wowSourceCurseForge && a.Source.Project != 0:
 			return nil, fmt.Errorf("addon %q: only a curseforge source takes a project", a.Name)
-		case a.Source.Type == wowAddonCurseForge && (a.Source.Repo != "" || a.Source.Asset != "" || a.Source.URL != "" || a.Source.SHA256 != ""):
+		case a.Source.Type == wowSourceCurseForge && (a.Source.Repo != "" || a.Source.Asset != "" || a.Source.URL != "" || a.Source.SHA256 != ""):
 			return nil, fmt.Errorf("addon %q: a curseforge source takes only a project", a.Name)
-		case a.Source.Type == wowAddonCurseForge && (a.Source.Project <= 0 || a.Source.Project >= 1<<31):
+		case a.Source.Type == wowSourceCurseForge && (a.Source.Project <= 0 || a.Source.Project >= 1<<31):
 			return nil, fmt.Errorf("addon %q: project %d is not a CurseForge project ID", a.Name, a.Source.Project)
 		// Only retail's file is picked; another flavor may need a different one.
-		case a.Source.Type == wowAddonCurseForge && !slices.Equal(a.Flavors, []string{"retail"}):
+		case a.Source.Type == wowSourceCurseForge && !slices.Equal(a.Flavors, []string{"retail"}):
 			return nil, fmt.Errorf("addon %q: a curseforge source is retail only", a.Name)
-		case a.Source.Type == wowAddonGitHub && (a.Source.URL != "" || a.Source.SHA256 != ""):
+		case a.Source.Type == wowSourceGitHub && (a.Source.URL != "" || a.Source.SHA256 != ""):
 			return nil, fmt.Errorf("addon %q: a github source takes no url or sha256", a.Name)
-		case a.Source.Type == wowAddonGitHub && (!wowAddonRepo.MatchString(a.Source.Repo) || path.Clean(a.Source.Repo) != a.Source.Repo):
+		case a.Source.Type == wowSourceGitHub && (!wowAddonRepo.MatchString(a.Source.Repo) || path.Clean(a.Source.Repo) != a.Source.Repo):
 			return nil, fmt.Errorf("addon %q: repo %q is not owner/name", a.Name, a.Source.Repo)
-		case a.Source.Type == wowAddonGitHub && !wowAddonAsset.MatchString(a.Source.Asset):
+		case a.Source.Type == wowSourceGitHub && !wowAddonAsset.MatchString(a.Source.Asset):
 			return nil, fmt.Errorf("addon %q: asset pattern %q must match %s", a.Name, a.Source.Asset, wowAddonAsset)
-		case a.Source.Type == wowAddonURL && (a.Source.Repo != "" || a.Source.Asset != ""):
+		case a.Source.Type == wowSourceURL && (a.Source.Repo != "" || a.Source.Asset != ""):
 			return nil, fmt.Errorf("addon %q: a url source takes no repo or asset", a.Name)
-		case a.Source.Type == wowAddonURL && !validWoWAddonURL(a.Source.URL):
+		case a.Source.Type == wowSourceURL && !validWoWAddonURL(a.Source.URL):
 			return nil, fmt.Errorf("addon %q: url %q is not a plain https URL", a.Name, a.Source.URL)
-		case a.Source.Type == wowAddonURL && !wowAddonSHA256.MatchString(a.Source.SHA256):
+		case a.Source.Type == wowSourceURL && !wowAddonSHA256.MatchString(a.Source.SHA256):
 			return nil, fmt.Errorf("addon %q: sha256 %q must be 64 lowercase hex digits", a.Name, a.Source.SHA256)
 		case len(a.Flavors) == 0:
 			return nil, fmt.Errorf("addon %q lists no flavors", a.Name)
@@ -160,5 +169,5 @@ func wowAddonsEnv(addons []WoWAddon) string {
 
 // usesCurseForge reports whether any addon needs the CurseForge API key.
 func usesCurseForge(addons []WoWAddon) bool {
-	return slices.ContainsFunc(addons, func(a WoWAddon) bool { return a.Source.Type == wowAddonCurseForge })
+	return slices.ContainsFunc(addons, func(a WoWAddon) bool { return a.Source.Type == wowSourceCurseForge })
 }

@@ -69,7 +69,14 @@ def valid_url(url):
     if not isinstance(url, str) or len(url) > URL_MAX or not URL.fullmatch(url):
         return False
     parts = urllib.parse.urlsplit(url)
-    return parts.scheme == "https" and bool(parts.hostname) and parts.username is None
+    try:
+        port = parts.port  # ValueError past 65535 or not a number
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https" and bool(parts.hostname) and parts.username is None
+        and port != 0
+    )
 
 
 class Refused(Exception):
@@ -188,8 +195,8 @@ def curseforge_asset(source):
         raise Refused(f"{name} is {size} bytes; the limit is {MAX_DOWNLOAD}")
     if len(sha1) != 1 or not isinstance(sha1[0], str) or not SHA1.fullmatch(sha1[0]):
         raise Refused(f"{name} has no published SHA1")
-    # The API's downloadUrl is edge.forgecdn.net, which redirects here (and is
-    # null for some projects); curl follows no redirects.
+    # Built, not the API's downloadUrl: that is null for some projects, and
+    # otherwise an edge.forgecdn.net link that redirects here.
     url = f"https://mediafilez.forgecdn.net/files/{file_id // 1000}/{file_id % 1000}/{urllib.parse.quote(name)}"
     return name, name, url, size, "sha1:" + sha1[0]
 

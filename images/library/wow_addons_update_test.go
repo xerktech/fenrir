@@ -650,6 +650,8 @@ func TestWoWAddonsKeepsAddonsWithoutValidList(t *testing.T) {
 		"cf and url":   new(strings.Replace(cfList, `"project"`, `"url":"https://a.b/c.zip","project"`, 1)),
 		"github proj":  new(strings.Replace(consolePortList, `"type":"github"`, `"type":"github","project":1`, 1)),
 		"url project":  new(strings.Replace(pinnedList(nil), `"type":"url"`, `"type":"url","project":1`, 1)),
+		"url big port": new(strings.Replace(pinnedList(nil), ".net/", ".net:99999/", 1)),
+		"url port 0":   new(strings.Replace(pinnedList(nil), ".net/", ".net:0/", 1)),
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := newWoWPod(t)

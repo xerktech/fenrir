@@ -72,9 +72,9 @@ paths:
   in AddOns is the user's and is never replaced or removed (a name clash refuses the install).
 - Sources: `github` (latest release, only when the asset matches GitHub's published SHA256),
   `url` (one fixed https zip, only when it matches the list's `sha256`; XERK-2486), `curseforge`.
-  - `url` pins a CurseForge file without an API key: its CDN
-    (`mediafilez.forgecdn.net/files/<id/1000>/<id%1000>/<name>`) does not. `edge.forgecdn.net`
-    302s there and the script's curl has no `-L`, so list the `mediafilez` URL.
+  - `url` pins a CurseForge file without an API key, which its CDN
+    (`mediafilez.forgecdn.net/files/<id/1000>/<id%1000>/<name>`) does not need. `edge.forgecdn.net`
+    302s there over https, which curl follows (`-L`, `--proto =https` on every hop).
   - A `url` addon never updates and, once installed, makes no network call: bump url + sha256.
   - Both parses (operator, script) allow only unreserved URL characters plus `:/?@&+,;=%`.
 - `curseforge` (XERK-2489): `project` ID; the latest `releaseType` 1 file of `gameVersionTypeId`
