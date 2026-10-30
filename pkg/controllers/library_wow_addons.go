@@ -9,6 +9,7 @@ import (
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 )
 
 // WoWAddon is one World of Warcraft addon the Library keeps installed and
@@ -71,8 +72,15 @@ func validWoWAddonURL(s string) bool {
 		return false
 	}
 	u, err := url.Parse(s)
-	// The pattern already requires the https scheme.
-	return err == nil && u.Hostname() != "" && u.User == nil
+	if err != nil || u.Hostname() == "" || u.User != nil {
+		return false
+	}
+	// The pattern already requires the https scheme; a port must be one curl takes.
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		return err == nil && n >= 1 && n <= 65535
+	}
+	return true
 }
 
 // ParseWoWAddons reads the --library-wow-addons JSON list. Empty means none.

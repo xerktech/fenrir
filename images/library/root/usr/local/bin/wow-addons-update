@@ -58,7 +58,14 @@ def valid_url(url):
     if not isinstance(url, str) or len(url) > URL_MAX or not URL.fullmatch(url):
         return False
     parts = urllib.parse.urlsplit(url)
-    return parts.scheme == "https" and bool(parts.hostname) and parts.username is None
+    try:
+        port = parts.port  # ValueError past 65535 or not a number
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https" and bool(parts.hostname) and parts.username is None
+        and port != 0
+    )
 
 
 class Refused(Exception):
