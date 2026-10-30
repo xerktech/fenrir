@@ -79,6 +79,11 @@ paths:
 - Wolf sends no unplug when a stream stops: it destroys the devices on StopStream. The agent
   clears both dirs on pause (`clearDevices`), or a stale 0666 node would open whatever device the
   kernel gives that minor next (another session's keyboard). Tests: `TestAgentPauseClearsDevices`.
+- An unplug removes a published node by the numbers its plug recorded, never by sysfs: Wolf
+  sends MAJOR "0", and since xerktech/wolf XERK-2412 the device is gone before the agent hears
+  of the unplug, so sysfs has nothing and the bridge refuses major 0 (QA: stale 0666 nodes in
+  6/6 unplugs, XERK-2402). A refused removal keeps its record for `pruneGoneDevices` to retry.
+  Tests: `TestAgentUnplugUsesThePlugsNumbers`.
 - Except a stream joined to the lobby: Wolf runs with `WOLF_LOBBY_KEEPS_JOYPADS=TRUE`
   (`withWolfLobbyKeepsJoypads`), keeps its joypads plugged into the game, and the next stream's
   `sessions/add` takes them over, so its pause keeps the nodes (XERK-2365).

@@ -393,3 +393,65 @@ func TestAgentPrunesWhileEventStreamIsDown(t *testing.T) {
 		}
 	}
 }
+
+// numberedNodes records what Remove is given, and fails it while refuse is set.
+type numberedNodes struct {
+	recordingNodes
+	refuse bool
+}
+
+func (n *numberedNodes) Remove(p map[string]string) error {
+	n.calls = append(n.calls, "remove "+p["DEVNAME"]+" "+p["MAJOR"]+":"+p["MINOR"])
+	if n.refuse {
+		return errors.New("refused")
+	}
+	return nil
+}
+
+// Wolf destroys a pad before the agent hears of its unplug (XERK-2412 joins
+// inputtino's threads in the destructor), so sysfs can't resolve the unplug's
+// zeroed numbers: the node and its udev entry go by what the plug recorded
+// (XERK-2402). A refused removal keeps the record for pruneGoneDevices.
+func TestAgentUnplugUsesThePlugsNumbers(t *testing.T) {
+	a := hotplugAgent(t, nil)
+	nodes := &numberedNodes{}
+	a.bridge = nodes
+	events := func(major, minor string) []map[string]string {
+		return []map[string]string{
+			{"ACTION": "add", "DEVPATH": "/devices/virtual/input/input9"},
+			{"ACTION": "add", "DEVNAME": "/dev/input/event69", "MAJOR": major, "MINOR": minor, "DEVPATH": "/devices/virtual/input/input9/event69"},
+		}
+	}
+	a.handleDevicePlug(wolfapi.PlugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      events("13", "69"), // resolved from sysfs while the device lived
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c13:69", Content: []string{"E:ID_INPUT_JOYSTICK=1"}}},
+	})
+	unplug := wolfapi.UnplugDeviceEvent{
+		SessionID:       "42",
+		UdevEvents:      events("0", "0"),
+		UdevHwDbEntries: []wolfapi.UdevHwDbEntry{{Filename: "c0:0", Content: []string{"E:ID_INPUT_JOYSTICK=1"}}},
+	}
+
+	nodes.refuse = true
+	nodes.calls = nil
+	a.handleDeviceUnplug(unplug)
+	if len(a.published) != 1 {
+		t.Errorf("a refused removal dropped the record: %v", a.published)
+	}
+
+	nodes.refuse = false
+	nodes.calls = nil
+	unplug.UdevEvents = events("0", "0")
+	a.handleDeviceUnplug(unplug)
+	want := []string{
+		"remove /dev/input/event69 13:69", "rm hwdb c13:69",
+		"announce remove /devices/virtual/input/input9", "announce remove /devices/virtual/input/input9/event69",
+	}
+	if !slices.Equal(nodes.calls, want) {
+		t.Errorf("calls = %v, want %v", nodes.calls, want)
+	}
+	if len(a.published) != 0 {
+		t.Errorf("records after unplug: %v", a.published)
+	}
+}
