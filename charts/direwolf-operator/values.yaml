@@ -130,8 +130,11 @@ controllers:
           # XERK-2365), which wolfCommand requires.
           # With WOLF_HTTP_SERVERS=FALSE the WolfUI hotkeys (Ctrl+Alt+Shift+W, START+UP+RB) reach the
           # game and no longer pull the stream out of its lobby (XERK-2403, XERK-2406).
+          # A resumed client that brings other controllers (another number or type, or fewer)
+          # no longer leaves the kept pads plugged into the game beside them (XERK-2402); virtual
+          # pad threads no longer race (XERK-2412).
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-dd74809@sha256:3296c42a2287200af47136eba86de3dc074c8424fd5f78b9e4e2df4b022b73f1
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-1131960@sha256:14c2578f3b62b413e936a0bf1c0f5699bf7c2f9831580cab9808d5f0822c8a59
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           # The wowAddons list below, for the Library (--library-wow-addons).
