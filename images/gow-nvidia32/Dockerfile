@@ -126,8 +126,11 @@ RUN set -eu; \
 
 # Ferestre (github.com/icex/ferestre; XERK-2471), trialled as an alternative to
 # Xodus Nexus: its portable release (launcher, GTK window and the Xodus client).
-# The patched Proton runtime is not in it: the window downloads a signed one
-# into the shared home.
+# The patched Proton runtime is not in it: on every online start the window
+# installs the latest one its built-in key signs into the shared home
+# (~/.local/state/ferestre/runtimes), so the runtime floats, unlike Nexus.
+# Games go to ~/xbox-games on the home PVC unless XODUS_GAMES_DIR or the
+# window's library folder points at /games.
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS ferestre-app
 ARG FERESTRE_VERSION=v0.1.14
 # The release's SHA256SUMS line for the .tar.zst; update it with the version.
