@@ -335,3 +335,30 @@ func TestLibraryServerProvisionsAllowlistedAndMultiLine(t *testing.T) {
 		})
 	}
 }
+
+// With provisioning on, a request naming no user is a misnamed user header:
+// it never reaches a running shared Library, whatever kind of request it is
+// (XERK-2544). Without provisioning it is the single-user setup and does.
+func TestLibraryServerProvisioningRefusesNamelessRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, target string
+		header               http.Header
+	}{
+		{name: "visit", method: http.MethodGet, target: "/", header: userVisit},
+		{name: "script reload", method: http.MethodGet, target: "/", header: http.Header{"Sec-Fetch-Mode": {"navigate"}}},
+		{name: "websocket", method: http.MethodGet, target: "/websocket", header: http.Header{"Upgrade": {"websocket"}, "Connection": {"Upgrade"}}},
+		{name: "start", method: http.MethodPost, target: libraryStartPath, header: http.Header{"Sec-Fetch-Site": {"same-origin"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := libraryPod(0, true)
+			f := newLibraryFixture(t, []runtime.Object{pod})
+			rec := serveLibraryRequest(f.provisioningServer(t, pod), tc.method, tc.target, "10.1.0.5:5555", tc.header)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("HTTP %d %q, want 403", rec.Code, rec.Body.String())
+			}
+			if n := f.provisionWrites(); n != 0 {
+				t.Errorf("%d User/PVC writes, want none", n)
+			}
+		})
+	}
+}
