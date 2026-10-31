@@ -45,7 +45,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     Anti-Cheat's Linux module ptrace-attaches in its own tree, so without it EAC exits 210
     `Unexpected error. (#1)`. Strace hides this: EAC sees the tracer and bails earlier.
   - Session Apps (`steam`, `heroic`, `nexus`, `battlenet`, `ferestre` targets) are pinned by digest in
-    xerktech/ArgoCD `streaming/direwolf/app-*.yaml` and bumped there by hand: the chart release
+    xerktech/ArgoCD `games/direwolf/app-*.yaml` and bumped there by hand: the chart release
     moves only the operator, Library and moonlight-proxy. A merged change here reaches sessions only after that
     PR (`crane digest ghcr.io/xerktech/fenrir/<target>:main`; check its revision label).
   - Its steam target keeps GoW's NetworkManager off the node's links (XERK-1867): session pods

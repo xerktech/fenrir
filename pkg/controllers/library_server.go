@@ -252,6 +252,15 @@ var errNoSuchUser = errors.New("no such user")
 func (s *LibraryServer) libraryOf(r *http.Request) (LibraryRef, error) {
 	name := r.Header.Get(s.userHeader)
 	_, named := r.Header[http.CanonicalHeaderKey(s.userHeader)]
+	if !named && s.Provisioner != nil {
+		// Provisioning means the proxy names every user: a request naming
+		// nobody is a misconfigured proxyAuth.userHeader, and the shared
+		// desktop is signed in to its users' accounts.
+		s.warnNoUserHeader.Do(func() {
+			klog.Warningf("Library page: a request named no user in %s; with provisioning on it is refused. If the proxy sends the username under another header, fix --library-user-header", s.userHeader)
+		})
+		return LibraryRef{}, fmt.Errorf("%w: no %s header", errNoSuchUser, s.userHeader)
+	}
 	if !named || s.users == nil {
 		if !named {
 			s.warnNoUserHeader.Do(func() {
