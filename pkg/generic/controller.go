@@ -77,10 +77,24 @@ func NewController[T runtime.Object](
 	}
 
 	return &controller[T]{
-		options:      options,
-		informer:     informer,
-		reconciler:   reconciler,
-		queue:        nil,
+		options:    options,
+		informer:   informer,
+		reconciler: reconciler,
+		// Made here, not in Run, so another informer's event handler may
+		// Enqueue before (or without) Run, race-free; Run drains it.
+		//
+		// Same shape as workqueue.DefaultTypedControllerRateLimiter, but with
+		// the per-item exponential backoff capped at 5s instead of 1000s.
+		// Sessions only live for ~1 minute before the dead-session reaper
+		// collects them, so retries (e.g. waiting for wolf-agent to come up)
+		// must stay frequent.
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedMaxOfRateLimiter(
+				workqueue.NewTypedItemExponentialFailureRateLimiter[string](5*time.Millisecond, 5*time.Second),
+				&workqueue.TypedBucketRateLimiter[string]{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
+			),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: options.Name},
+		),
 		hasProcessed: synctrack.NewAsyncTracker[string](options.Name),
 	}
 }
@@ -93,11 +107,6 @@ func (c *controller[T]) Enqueue(namespace, name string) {
 }
 
 func (c *controller[T]) EnqueueAfter(namespace, name string, after time.Duration) {
-	if c.queue == nil {
-		// Not running (a test calling the reconciler directly): Run's
-		// initial list enqueues every object anyway.
-		return
-	}
 	c.queue.AddAfter(cache.ObjectName{
 		Namespace: namespace,
 		Name:      name,
@@ -110,18 +119,6 @@ func (c *controller[T]) EnqueueAfter(namespace, name string, after time.Duration
 func (c *controller[T]) Run(ctx context.Context) error {
 	klog.Infof("starting %s", c.options.Name)
 	defer klog.Infof("stopping %s", c.options.Name)
-
-	// Same shape as workqueue.DefaultTypedControllerRateLimiter, but with the
-	// per-item exponential backoff capped at 5s instead of 1000s. Sessions
-	// only live for ~1 minute before the dead-session reaper collects them,
-	// so retries (e.g. waiting for wolf-agent to come up) must stay frequent.
-	c.queue = workqueue.NewTypedRateLimitingQueueWithConfig(
-		workqueue.NewTypedMaxOfRateLimiter(
-			workqueue.NewTypedItemExponentialFailureRateLimiter[string](5*time.Millisecond, 5*time.Second),
-			&workqueue.TypedBucketRateLimiter[string]{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
-		),
-		workqueue.TypedRateLimitingQueueConfig[string]{Name: c.options.Name},
-	)
 
 	// Forcefully shutdown workqueue. Drop any enqueued items.
 	// Important to do this in a `defer` at the start of `Run`.

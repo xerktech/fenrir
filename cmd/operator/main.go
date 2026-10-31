@@ -278,6 +278,9 @@ func main() {
 				WoWAddonsInvalid: wowAddonsErr != nil,
 			},
 		)
+		if err = libraryController.WatchCloseRequests(pairingInformer, direwolfClient.DirewolfV1alpha1().Pairings(*namespace)); err != nil {
+			klog.Fatalf("Library: %v", err)
+		}
 		if *catalogueSteamApp != "" || *catalogueHeroicApp != "" || *catalogueNexusApp != "" || *catalogueBattlenetApp != "" {
 			libraryController.Catalogue = controllers.NewCatalogue(
 				direwolfClient.DirewolfV1alpha1().Apps(*namespace),

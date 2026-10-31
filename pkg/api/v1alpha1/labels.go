@@ -22,9 +22,14 @@ const LibraryPodLabel = "direwolf/library"
 const LibraryPodLabelValue = "true"
 
 // LibraryPodName is the shared library's Library pod. A fixed name makes
-// concurrent visits converge on one Create (the rest get AlreadyExists), and
-// lets the chart grant moonlight-proxy delete on this pod alone.
+// concurrent visits converge on one Create (the rest get AlreadyExists).
 const LibraryPodName = "direwolf-library"
+
+// LibraryCloseAnnotation, on a Pairing, asks the operator to close the
+// Library pod whose UID it holds ("Close Library" in Moonlight). The operator
+// acts on it only if the Pairing's User plays from that pod's library.
+// moonlight-proxy, which is internet-facing, may not delete pods itself.
+const LibraryCloseAnnotation = "direwolf/library-close"
 
 // LibraryOwnerLabel names the User whose own library (User.spec.library) a
 // Library pod or catalogue App belongs to. Absent: the shared library.
