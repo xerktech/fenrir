@@ -78,13 +78,14 @@ func renderedObjects(t *testing.T) []manifestObject {
 	return objs
 }
 
-// moonlight-proxy is internet-facing: beyond reading pods, it may only delete
-// the Library pod, by name. A pod rule without resourceNames would let it
-// delete (or patch) every pod in the namespace, and one on a subresource
-// (pods/exec, pods/ephemeralcontainers) run code in any of them (XERK-1867).
+// moonlight-proxy is internet-facing: it may only read pods, never write one,
+// even by name. "Close Library" is a request the operator acts on
+// (XERK-2539), so no per-User pod list is needed. A pod write would let it
+// delete (or patch) pods, and a rule on a subresource (pods/exec,
+// pods/ephemeralcontainers) run code in any of them (XERK-1867).
 // What can't be checked fails closed: impersonate, bind and escalate (or "*"),
 // which pass on other permissions, aggregated roles, and List-wrapped objects.
-func TestMoonlightProxyPodWritesAreNamed(t *testing.T) {
+func TestMoonlightProxyHasNoPodWrites(t *testing.T) {
 	objs := renderedObjects(t)
 	// The roles bound to moonlight-proxy's ServiceAccount, whatever they're named.
 	bound := map[string]bool{}
@@ -121,12 +122,12 @@ func TestMoonlightProxyPodWritesAreNamed(t *testing.T) {
 				}
 			}
 			pods, subresource := podAccess(r)
-			if !pods || len(r.ResourceNames) > 0 {
+			if !pods {
 				continue
 			}
 			for _, v := range r.Verbs {
 				if subresource || !slices.Contains(readOnlyVerbs, v) {
-					t.Errorf("%s %s grants %q on pods without resourceNames: %+v", o.Kind, o.Metadata.Name, v, r)
+					t.Errorf("%s %s grants %q on pods: %+v", o.Kind, o.Metadata.Name, v, r)
 				}
 			}
 		}

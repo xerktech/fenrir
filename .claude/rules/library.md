@@ -26,7 +26,6 @@ paths:
   - A session of such a User mounts their claims wherever the App mounts the shared ones
     (`useUserLibrary`); Apps keep naming the shared claims.
   - One password per library: each desktop runs its user's code and can read its own.
-  - moonlight-proxy may delete only named pods: list each such User in chart `libraryUsers`.
   - Tests: `pkg/controllers/library_users_test.go`, `pkg/moonlight/library_users_test.go`.
 - Steam lock: a Library and the game sessions of its library's Users share one Steam home, so
   they never run together. Other libraries' sessions don't count; a session whose User is gone
@@ -186,15 +185,29 @@ paths:
 - Moonlight's "Close Library" tile (`CloseLibraryAppID`, listed only while the Library is open)
   lets any paired user of that library stop it, downloads or not: a tab left open elsewhere keeps
   it up for hours.
-  - moonlight-proxy is internet-facing, so it may only delete that one pod (chart RBAC
-    `resourceNames`); never grant it exec, or patch (a pod's image is mutable).
-  - So the pod's own preStop hook runs the Steam shutdown and relink `stop()` would; keep
-    `libraryTerminationGracePeriod` above the shutdown wait. After `stop()` both are no-ops.
-  - A delete skips `stop()`'s last catalogue scan; the next Library run picks those installs up.
+  - moonlight-proxy is internet-facing, so it holds no pod writes at all (chart RBAC test
+    `TestMoonlightProxyHasNoPodWrites`); never grant it delete, exec, or patch (a pod's image is
+    mutable). It annotates the requester's Pairing with the pod's UID
+    (`LibraryCloseAnnotation`, XERK-2539); the operator then runs `stop()`, so a close works for
+    every User, own library or not, with no per-User chart list.
+  - The request names the UID, not the pod name: a request left on a Pairing never closes a
+    later Library. The operator honours it only if the Pairing's User (read live) plays from
+    that pod's library (`closeRequested`).
+  - A refused request is cleared (JSON patch `test` + `remove`, so a newer one stays): kept, it
+    would close the pod once its User moved to that library.
+  - A failed User read fails the reconcile so it is retried: the client was already told
+    "Closing". Never swallow it; the next look could be an idle timeout away. The idle check and
+    scan still run first: a long API fault must not keep an idle Library up.
+  - `WatchCloseRequests` enqueues the pod from a Pairing event; `generic.Controller` makes its
+    queue in `NewController` so another informer's handler may enqueue before `Run`, race-free.
+  - The pod's own preStop hook still runs the Steam shutdown and relink for deletes that skip
+    `stop()` (manual, drain); keep `libraryTerminationGracePeriod` above the shutdown wait.
   - Its API calls are bounded (`libraryCallTimeout`): /applist is otherwise informer-only, and a
     hung API server must cost only the tile. An App holding `CloseLibraryAppID` wins over the tile.
-  - Tests: `TestLibraryPodShutsSteamDownOnAnyDelete`; `TestPodLibrary*`, `TestCloseLibraryTile*`,
-    `TestAppWithCloseLibraryIDShadowsTile` in `pkg/moonlight/library_test.go`.
+  - Tests: `TestLibraryCloseRequest*`, `TestLibraryWatchCloseRequests` (real informers),
+    `TestLibraryPodShutsSteamDownOnAnyDelete`;
+    `TestPodLibrary*`, `TestCloseLibraryTile*`, `TestAppWithCloseLibraryIDShadowsTile` in
+    `pkg/moonlight/library_test.go`.
 - Only a user-activated page load (`Sec-Fetch-User: ?1`) or the stopped page's Start button
   (POST `libraryStartPath`) starts the Library.
   - Selkies calls `location.reload()` when its stream drops, so a tab left open across an idle

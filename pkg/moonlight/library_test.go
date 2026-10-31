@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -14,13 +13,11 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	"games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
 )
 
 func libraryPod(name string) *corev1.Pod {
@@ -84,48 +81,90 @@ func TestLaunchBacksOutWhenBusyAfterCreate(t *testing.T) {
 	f.waitForSessionCount(t, 0)
 }
 
+// testPairing is the Pairing podLibraryFixture's Close requests are made for.
+const testPairing = "bob-pairing"
+
+// podLibraryFixture is a podLibrary over fake pods (pods) and a fake Pairing
+// testPairing.
+func podLibraryFixture(t *testing.T, pods ...*corev1.Pod) (lib Library, client *k8sfake.Clientset, direwolf *fake.Clientset) {
+	t.Helper()
+	client = k8sfake.NewClientset()
+	for _, p := range pods {
+		if _, err := client.CoreV1().Pods(testNamespace).Create(t.Context(), p, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	direwolf = fake.NewSimpleClientset(&v1alpha1types.Pairing{
+		ObjectMeta: metav1.ObjectMeta{Name: testPairing, Namespace: testNamespace},
+	})
+	return NewPodLibrary(client.CoreV1().Pods(testNamespace), direwolf.DirewolfV1alpha1().Pairings(testNamespace)), client, direwolf
+}
+
+// closeRequest is the Library pod UID testPairing asks to close, or "".
+func closeRequest(t *testing.T, direwolf *fake.Clientset) string {
+	t.Helper()
+	p, err := direwolf.DirewolfV1alpha1().Pairings(testNamespace).Get(t.Context(), testPairing, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p.Annotations[v1alpha1types.LibraryCloseAnnotation]
+}
+
+// Close never deletes a pod (moonlight-proxy may not): it records the open
+// Library's UID on the requester's Pairing for the operator to act on.
 func TestPodLibrary(t *testing.T) {
 	terminating := libraryPod(v1alpha1types.LibraryPodName)
 	terminating.DeletionTimestamp = &metav1.Time{}
 	terminating.Finalizers = []string{"test"}
 	unlabelled := libraryPod(v1alpha1types.LibraryPodName)
 	unlabelled.Labels = nil
+	running := libraryPod(v1alpha1types.LibraryPodName)
+	running.UID = "running-uid"
 
 	for _, tc := range []struct {
 		name        string
 		pod         *corev1.Pod
 		open        bool
 		closing     bool
-		wantDeleted bool
+		wantRequest string
 	}{
 		{name: "no pod"},
 		{name: "unlabelled pod of that name", pod: unlabelled},
-		{name: "running", pod: libraryPod(v1alpha1types.LibraryPodName), open: true, closing: true, wantDeleted: true},
+		{name: "running", pod: running, open: true, closing: true, wantRequest: "running-uid"},
 		{name: "already stopping", pod: terminating, closing: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := k8sfake.NewClientset()
-			pods := client.CoreV1().Pods(testNamespace)
+			var pods []*corev1.Pod
 			if tc.pod != nil {
-				if _, err := pods.Create(t.Context(), tc.pod, metav1.CreateOptions{}); err != nil {
-					t.Fatal(err)
-				}
+				pods = append(pods, tc.pod)
 			}
-			lib := NewPodLibrary(pods)
+			lib, client, direwolf := podLibraryFixture(t, pods...)
 
 			open, err := lib.Open(t.Context(), "")
 			if err != nil || open != tc.open {
 				t.Errorf("Open = %v, %v; want %v", open, err, tc.open)
 			}
-			closing, err := lib.Close(t.Context(), "")
+			closing, err := lib.Close(t.Context(), "", testPairing)
 			if err != nil || closing != tc.closing {
 				t.Errorf("Close = %v, %v; want %v", closing, err, tc.closing)
 			}
-			deleted := slices.ContainsFunc(client.Actions(), func(a k8stesting.Action) bool { return a.GetVerb() == "delete" })
-			if deleted != tc.wantDeleted {
-				t.Errorf("deleted = %v, want %v", deleted, tc.wantDeleted)
+			if got := closeRequest(t, direwolf); got != tc.wantRequest {
+				t.Errorf("close request = %q, want %q", got, tc.wantRequest)
+			}
+			for _, a := range client.Actions() {
+				if a.GetVerb() != "get" && a.GetVerb() != "create" {
+					t.Errorf("Library touched pods with %s", a.GetVerb())
+				}
 			}
 		})
+	}
+}
+
+// A Pairing that can't take the request (revoked mid-request) fails the close.
+func TestPodLibraryCloseFailsWithoutPairing(t *testing.T) {
+	lib, _, _ := podLibraryFixture(t, libraryPod(v1alpha1types.LibraryPodName))
+	if closing, err := lib.Close(t.Context(), "", "gone"); closing || err == nil {
+		t.Errorf("Close = %v, %v; want false and an error", closing, err)
 	}
 }
 
@@ -137,37 +176,9 @@ type stubLibrary struct {
 
 func (l *stubLibrary) Open(context.Context, string) (bool, error) { return l.open, l.err }
 
-func (l *stubLibrary) Close(context.Context, string) (bool, error) {
+func (l *stubLibrary) Close(context.Context, string, string) (bool, error) {
 	l.closed.Add(1)
 	return l.open, l.err
-}
-
-// Close deletes only the pod it read: a Library opened in between (a new UID)
-// is someone's fresh session and is left alone, without an error.
-func TestPodLibraryCloseSparesAReplacedPod(t *testing.T) {
-	client := k8sfake.NewClientset()
-	pods := client.CoreV1().Pods(testNamespace)
-	pod := libraryPod(v1alpha1types.LibraryPodName)
-	pod.UID = "old"
-	if _, err := pods.Create(t.Context(), pod, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	client.PrependReactor("delete", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		del, ok := a.(k8stesting.DeleteActionImpl)
-		if !ok {
-			return false, nil, nil
-		}
-		pre := del.DeleteOptions.Preconditions
-		if pre == nil || pre.UID == nil || *pre.UID != "old" {
-			t.Errorf("delete preconditions = %+v, want UID old", pre)
-		}
-		return true, nil, k8serrors.NewConflict(corev1.Resource("pods"), pod.Name, errors.New("UID mismatch"))
-	})
-
-	closing, err := NewPodLibrary(pods).Close(t.Context(), "")
-	if closing || err != nil {
-		t.Errorf("Close = %v, %v; want false, nil", closing, err)
-	}
 }
 
 // A failed Library check costs only the tile, never the game list; a failed
@@ -262,7 +273,7 @@ func (hungLibrary) Open(ctx context.Context, _ string) (bool, error) {
 	return false, context.Cause(ctx) //nolint:wrapcheck // stands in for a client-go error
 }
 
-func (hungLibrary) Close(ctx context.Context, _ string) (bool, error) {
+func (hungLibrary) Close(ctx context.Context, _, _ string) (bool, error) {
 	<-ctx.Done()
 	return false, context.Cause(ctx) //nolint:wrapcheck // stands in for a client-go error
 }

@@ -2,6 +2,7 @@ package moonlight
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -10,9 +11,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
 )
 
 // libraryBusyMessage is what a launch gets while the Library is open.
@@ -88,20 +91,24 @@ func libraryPodSelector(owner string) (string, error) {
 type Library interface {
 	// Open reports whether owner's Library is running and not already stopping.
 	Open(ctx context.Context, owner string) (bool, error)
-	// Close stops owner's Library, downloads or not. It reports false if
-	// there was no Library to close.
-	Close(ctx context.Context, owner string) (bool, error)
+	// Close asks for owner's Library to be stopped, downloads or not, on
+	// behalf of the named Pairing. It reports false if there was no Library
+	// to close.
+	Close(ctx context.Context, owner, pairing string) (bool, error)
 }
 
 // NewPodLibrary is the Library backed by the operator's Library pod. Close
-// deletes the pod; its preStop hook shuts Steam down cleanly, and the pod's
-// presence keeps launches refused (LibraryBusyCheck) until it is gone.
-func NewPodLibrary(pods corev1client.PodInterface) Library {
-	return podLibrary{pods: pods}
+// never deletes the pod: it records the request on the requester's Pairing
+// (v1alpha1types.LibraryCloseAnnotation), and the operator stops the pod as it
+// does an idle one. The pod's presence keeps launches refused
+// (LibraryBusyCheck) until it is gone.
+func NewPodLibrary(pods corev1client.PodInterface, pairings v1alpha1client.PairingInterface) Library {
+	return podLibrary{pods: pods, pairings: pairings}
 }
 
 type podLibrary struct {
-	pods corev1client.PodInterface
+	pods     corev1client.PodInterface
+	pairings v1alpha1client.PairingInterface
 }
 
 // get returns owner's Library pod, or nil if there is none. It reads the API
@@ -126,7 +133,7 @@ func (l podLibrary) Open(ctx context.Context, owner string) (bool, error) {
 	return pod != nil && pod.DeletionTimestamp == nil, err
 }
 
-func (l podLibrary) Close(ctx context.Context, owner string) (bool, error) {
+func (l podLibrary) Close(ctx context.Context, owner, pairing string) (bool, error) {
 	pod, err := l.get(ctx, owner)
 	if pod == nil || err != nil {
 		return false, err
@@ -134,15 +141,18 @@ func (l podLibrary) Close(ctx context.Context, owner string) (bool, error) {
 	if pod.DeletionTimestamp != nil {
 		return true, nil
 	}
-	err = l.pods.Delete(ctx, pod.Name, metav1.DeleteOptions{
-		Preconditions: &metav1.Preconditions{UID: &pod.UID},
+	// By UID, not name: a Library someone opens after this request is
+	// theirs, and a request left on the Pairing never closes it.
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]string{v1alpha1types.LibraryCloseAnnotation: string(pod.UID)},
+		},
 	})
-	if k8serrors.IsNotFound(err) || k8serrors.IsConflict(err) {
-		// Gone, or replaced by a Library someone just opened: leave that one.
-		return false, nil
-	}
 	if err != nil {
-		return false, fmt.Errorf("failed to delete Library pod: %w", err)
+		return false, fmt.Errorf("encoding close request: %w", err)
+	}
+	if _, err := l.pairings.Patch(ctx, pairing, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return false, fmt.Errorf("failed to record the close request on Pairing %s: %w", pairing, err)
 	}
 	return true, nil
 }

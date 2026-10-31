@@ -17,11 +17,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/klog/v2"
 	"k8s.io/streaming/pkg/httpstream"
@@ -254,7 +256,12 @@ type LibraryController struct {
 	// read live like the Sessions themselves.
 	UserClient  v1alpha1client.UserInterface
 	PodInformer generic.Informer[*corev1.Pod]
-	Exec        PodExecutor
+	// Pairings, if set (WatchCloseRequests), carry moonlight-proxy's "Close
+	// Library" requests (v1alpha1types.LibraryCloseAnnotation).
+	Pairings generic.NamespacedLister[*v1alpha1types.Pairing]
+	// PairingClient clears refused close requests.
+	PairingClient v1alpha1client.PairingInterface
+	Exec          PodExecutor
 	// Catalogue, if set, is scanned while the Library runs and as it stops.
 	Catalogue *Catalogue
 
@@ -346,6 +353,11 @@ func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) e
 		return nil
 	}
 	ctx := context.Background()
+	closing, closeErr := c.closeRequested(ctx, pod, owner)
+	if closing {
+		klog.Infof("Library %s closed from Moonlight, stopping it", name)
+		return c.stop(ctx, pod)
+	}
 	if c.Catalogue != nil && podReady(pod) && c.Catalogue.ScanDue(owner) {
 		c.scanCatalogue(ctx, pod, catalogueArtBudget)
 	}
@@ -356,7 +368,102 @@ func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) e
 	if requeueAfter > 0 {
 		c.controller.EnqueueAfter(namespace, name, requeueAfter)
 	}
-	return err
+	// A close we couldn't check is retried (rate-limited): the user was told
+	// the Library is closing. The idle check and scan still ran meanwhile.
+	return stderrors.Join(closeErr, err)
+}
+
+// WatchCloseRequests acts on moonlight-proxy's "Close Library" requests,
+// which it records on the requester's Pairing: it may not delete pods itself
+// (it is internet-facing), and a close then also goes through stop().
+func (c *LibraryController) WatchCloseRequests(pairings cache.SharedIndexInformer, client v1alpha1client.PairingInterface) error {
+	c.Pairings = generic.NewLister[*v1alpha1types.Pairing](pairings.GetIndexer()).Namespaced(c.Namespace)
+	c.PairingClient = client
+	_, err := pairings.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    c.enqueueCloseRequest,
+		UpdateFunc: func(_, obj any) { c.enqueueCloseRequest(obj) },
+	})
+	if err != nil {
+		return fmt.Errorf("watching Pairings for Library close requests: %w", err)
+	}
+	return nil
+}
+
+// enqueueCloseRequest queues the Library pod a Pairing asks to close, so
+// Reconcile stops it now rather than at its next idle check.
+func (c *LibraryController) enqueueCloseRequest(obj any) {
+	pairing, ok := obj.(*v1alpha1types.Pairing)
+	if !ok {
+		return
+	}
+	uid := pairing.Annotations[v1alpha1types.LibraryCloseAnnotation]
+	if uid == "" {
+		return
+	}
+	pods, err := c.PodInformer.Namespaced(c.Namespace).List(labels.Everything())
+	if err != nil {
+		klog.Errorf("Listing Library pods for a close request: %v", err)
+		return
+	}
+	for _, pod := range pods {
+		if string(pod.UID) == uid {
+			c.controller.Enqueue(pod.Namespace, pod.Name)
+		}
+	}
+}
+
+// closeRequested reports whether a User of owner's library asked, from
+// Moonlight, to close this Library pod. Requests name the pod's UID, so one
+// left on a Pairing never closes a later Library. A request from a Pairing
+// whose User plays from another library (or is gone) is refused and cleared,
+// so it can't take effect if that User later moves to this library. A failed
+// User read is an error, so the caller retries.
+func (c *LibraryController) closeRequested(ctx context.Context, pod *corev1.Pod, owner string) (bool, error) {
+	if c.Pairings == nil {
+		return false, nil
+	}
+	pairings, err := c.Pairings.List(labels.Everything())
+	if err != nil {
+		return false, fmt.Errorf("listing Pairings for Library close requests: %w", err)
+	}
+	for _, pairing := range pairings {
+		if pairing.Annotations[v1alpha1types.LibraryCloseAnnotation] != string(pod.UID) {
+			continue
+		}
+		// Live, like the Steam lock's reads: spec.library may just have changed.
+		user, err := c.UserClient.Get(ctx, pairing.Spec.UserReference.Name, metav1.GetOptions{})
+		switch {
+		case errors.IsNotFound(err):
+			klog.Infof("Refusing Pairing %s's request to close Library %s: its User is gone", pairing.Name, pod.Name)
+		case err != nil:
+			return false, fmt.Errorf("reading the User of Pairing %s for a Library close request: %w", pairing.Name, err)
+		case user.LibraryOwner() == owner:
+			return true, nil
+		default:
+			klog.Infof("Refusing Pairing %s's request to close Library %s: User %s plays from another library", pairing.Name, pod.Name, user.Name)
+		}
+		c.clearCloseRequest(ctx, pairing.Name, string(pod.UID))
+	}
+	return false, nil
+}
+
+// clearCloseRequest removes a refused close request from a Pairing, only if
+// it still names uid: a newer request written meanwhile is kept.
+func (c *LibraryController) clearCloseRequest(ctx context.Context, pairing, uid string) {
+	if c.PairingClient == nil {
+		return
+	}
+	path := "/metadata/annotations/" + strings.ReplaceAll(strings.ReplaceAll(v1alpha1types.LibraryCloseAnnotation, "~", "~0"), "/", "~1")
+	patch, err := json.Marshal([]map[string]string{
+		{"op": "test", "path": path, "value": uid},
+		{"op": "remove", "path": path},
+	})
+	if err == nil {
+		_, err = c.PairingClient.Patch(ctx, pairing, types.JSONPatchType, patch, metav1.PatchOptions{})
+	}
+	if err != nil && !errors.IsNotFound(err) && !errors.IsInvalid(err) && !errors.IsConflict(err) {
+		klog.Errorf("Clearing Pairing %s's refused Library close request: %v", pairing, err)
+	}
 }
 
 // reconcileIdle stops the Library once it is idle, and otherwise says when to
@@ -504,8 +611,8 @@ done
 var steamRelinkCommand = []string{"s6-setuidgid", "abc", "sh", "-c", steamRelinkScript, "sh", libraryHome, libraryHome, AppHomePath}
 
 // libraryPreStopCommand runs stop()'s shutdown and relink on any delete that
-// skips stop(): moonlight-proxy's "Close Library" tile deletes the pod (it may
-// not exec into it), as does a manual delete. After stop() both are no-ops.
+// skips stop(): a manual delete, a drain or an eviction. After stop() both are
+// no-ops.
 var libraryPreStopCommand = []string{"sh", "-c",
 	"(" + steamShutdownScript + "); s6-setuidgid abc sh -c \"$1\" sh " + libraryHome + " " + libraryHome + " " + AppHomePath,
 	"sh", steamRelinkScript,

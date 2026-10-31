@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	stderrors "errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -13,12 +14,16 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/informers"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	dwfake "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
+	"games-on-whales.github.io/direwolf/pkg/generated/informers/externalversions"
 	"games-on-whales.github.io/direwolf/pkg/generic"
 )
 
@@ -582,5 +587,200 @@ func TestLibraryServerSameClaimTwiceIsMisconfigured(t *testing.T) {
 	rec := serveLibrary(f.server(t), "10.1.0.5:5555", http.Header{"Sec-Fetch-User": {"?1"}, DefaultLibraryUserHeader: {"ann"}})
 	if rec.Code != http.StatusConflict || f.podExists(t) {
 		t.Errorf("HTTP %d; want 409 and no Library", rec.Code)
+	}
+}
+
+// closePairing is a Pairing of user asking to close the Library pod uid.
+func closePairing(name, user string, uid types.UID) *v1alpha1types.Pairing {
+	return &v1alpha1types.Pairing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: libraryTestNS,
+			Annotations: map[string]string{v1alpha1types.LibraryCloseAnnotation: string(uid)},
+		},
+		Spec: v1alpha1types.PairingSpec{UserReference: v1alpha1types.UserReference{Name: user}},
+	}
+}
+
+func (f *libraryFixture) withPairings(t *testing.T, pairings ...*v1alpha1types.Pairing) {
+	t.Helper()
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, p := range pairings {
+		if err := indexer.Add(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.library.Pairings = generic.NewLister[*v1alpha1types.Pairing](indexer).Namespaced(libraryTestNS)
+}
+
+// "Close Library" (XERK-2539): moonlight-proxy records the request on the
+// requester's Pairing and the operator stops the Library through stop(), in
+// use and downloading or not. Only a User of that pod's library may close it.
+func TestLibraryCloseRequest(t *testing.T) {
+	pod := libraryPod(0, true) // in use: never idle
+	for _, tc := range []struct {
+		name    string
+		pairing *v1alpha1types.Pairing
+		closed  bool
+	}{
+		{"shared user closes the shared Library", closePairing("p", "alex", pod.UID), true},
+		{"request for an earlier Library", closePairing("p", "alex", "earlier-uid"), false},
+		{"own-library user can't close the shared one", closePairing("p", "sam", pod.UID), false},
+		{"User gone", closePairing("p", "nobody", pod.UID), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLibraryFixture(t, []runtime.Object{pod.DeepCopy()}, libraryUser("alex", false), libraryUser("sam", true))
+			f.exec.steam = "570\n" // downloading: a close doesn't wait for it
+			f.withPairings(t, tc.pairing)
+			if got, err := f.library.closeRequested(context.Background(), pod, ""); got != tc.closed || err != nil {
+				t.Fatalf("closeRequested = %v, %v; want %v", got, err, tc.closed)
+			}
+			if !tc.closed {
+				return
+			}
+			if err := f.library.Reconcile(libraryTestNS, LibraryPodName, pod.DeepCopy()); err != nil {
+				t.Fatal(err)
+			}
+			if f.exec.shutdowns != 1 || f.exec.relinks != 1 || f.podExists(t) {
+				t.Errorf("shutdowns %d, relinks %d, pod kept %v; want the Library stopped through stop()",
+					f.exec.shutdowns, f.exec.relinks, f.podExists(t))
+			}
+		})
+	}
+}
+
+// An own-library User closes their own Library, with no chart change: the
+// operator, not moonlight-proxy, deletes the pod.
+func TestLibraryCloseRequestOwnLibrary(t *testing.T) {
+	pod := libraryPod(0, true)
+	pod.Name = v1alpha1types.LibraryPodNameFor("sam")
+	pod.Labels[v1alpha1types.LibraryOwnerLabel] = "sam"
+	f := newLibraryFixture(t, nil, libraryUser("sam", true), libraryUser("kim", true))
+	f.withPairings(t, closePairing("kim-p", "kim", pod.UID))
+	if closing, err := f.library.closeRequested(context.Background(), pod, "sam"); closing || err != nil {
+		t.Errorf("kim's close of sam's Library = %v, %v", closing, err)
+	}
+	f.withPairings(t, closePairing("sam-p", "sam", pod.UID))
+	if closing, err := f.library.closeRequested(context.Background(), pod, "sam"); !closing || err != nil {
+		t.Errorf("sam's close of their own Library = %v, %v", closing, err)
+	}
+}
+
+// A failed User read fails the reconcile, so it is retried: the user was
+// already told the Library is closing.
+func TestLibraryCloseRequestRetriesFailedUserRead(t *testing.T) {
+	pod := libraryPod(0, true)
+	f := newLibraryFixture(t, []runtime.Object{pod.DeepCopy()}, libraryUser("alex", false))
+	f.withPairings(t, closePairing("p", "alex", pod.UID))
+	f.dw.PrependReactor("get", "users", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("etcd down")
+	})
+	f.library.controller = generic.NewController(generic.NewInformer[*corev1.Pod](
+		cache.NewSharedIndexInformer(&cache.ListWatch{}, &corev1.Pod{}, 0, cache.Indexers{})),
+		f.library.Reconcile, generic.ControllerOptions{})
+	if err := f.library.Reconcile(libraryTestNS, LibraryPodName, pod.DeepCopy()); err == nil {
+		t.Error("Reconcile succeeded over a failed User read: the close would never be retried")
+	}
+	if !f.podExists(t) {
+		t.Error("Library stopped without its User's library being checked")
+	}
+	// The idle check still runs meanwhile: an idle Library is stopped.
+	idle := libraryPod(time.Hour, true)
+	if _, err := f.k8s.CoreV1().Pods(libraryTestNS).Update(context.Background(), idle, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.library.Reconcile(libraryTestNS, LibraryPodName, idle.DeepCopy())
+	if f.podExists(t) {
+		t.Error("an idle Library was kept up by a close request that couldn't be checked")
+	}
+}
+
+// A refused request is cleared, so it can't close the Library once its User
+// moves to that library; a newer request on the Pairing is kept.
+func TestLibraryCloseRequestClearsRefused(t *testing.T) {
+	pod := libraryPod(0, true)
+	refused := closePairing("kim-p", "kim", pod.UID)
+	orphan := closePairing("ghost-p", "ghost", pod.UID) // User gone
+	newer := closePairing("sam-p", "sam", "newer-uid")
+	f := newLibraryFixture(t, nil, libraryUser("kim", true), libraryUser("sam", true), refused, orphan, newer)
+	f.library.PairingClient = f.dw.DirewolfV1alpha1().Pairings(libraryTestNS)
+	stale := newer.DeepCopy()
+	stale.Annotations[v1alpha1types.LibraryCloseAnnotation] = string(pod.UID) // cache lags the newer write
+	f.withPairings(t, refused, orphan, stale)
+	if closing, err := f.library.closeRequested(context.Background(), pod, ""); closing || err != nil {
+		t.Fatalf("closeRequested = %v, %v; want refused", closing, err)
+	}
+	for name, want := range map[string]string{"kim-p": "", "ghost-p": "", "sam-p": "newer-uid"} {
+		p, err := f.dw.DirewolfV1alpha1().Pairings(libraryTestNS).Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := p.Annotations[v1alpha1types.LibraryCloseAnnotation]; got != want {
+			t.Errorf("%s's close request = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// End to end over real informers: a request written before the controller
+// runs (a replica not yet leading registers the handler) and one written
+// while it runs both reach stop(), through the Pairing watch alone.
+func TestLibraryWatchCloseRequests(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	pod := libraryPod(0, false)
+	pod.CreationTimestamp = metav1.Now()
+	pod.Annotations[libraryActivityAnnotation] = time.Now().Format(time.RFC3339)
+	k8s := k8sfake.NewClientset(pod)
+	dw := dwfake.NewSimpleClientset(libraryUser("alex", false), closePairing("p", "alex", "earlier-uid"))
+	kf := informers.NewSharedInformerFactoryWithOptions(k8s, 0, informers.WithNamespace(libraryTestNS))
+	podInformer := kf.Core().V1().Pods().Informer()
+	df := externalversions.NewSharedInformerFactoryWithOptions(dw, 0, externalversions.WithNamespace(libraryTestNS))
+	pairingInformer := df.Direwolf().V1alpha1().Pairings().Informer()
+	kf.Start(ctx.Done())
+	df.Start(ctx.Done())
+	kf.WaitForCacheSync(ctx.Done())
+	df.WaitForCacheSync(ctx.Done())
+	c := NewLibraryController(libraryTestNS, k8s, dw.DirewolfV1alpha1().Sessions(libraryTestNS), dw.DirewolfV1alpha1().Users(libraryTestNS),
+		generic.NewInformer[*corev1.Pod](podInformer), (&fakeLibraryExec{}).exec, LibraryControllerOptions{})
+	pairings := dw.DirewolfV1alpha1().Pairings(libraryTestNS)
+	if err := c.WatchCloseRequests(pairingInformer, pairings); err != nil {
+		t.Fatal(err)
+	}
+	podGone := func(within time.Duration) bool {
+		for deadline := time.Now().Add(within); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if _, err := k8s.CoreV1().Pods(libraryTestNS).Get(ctx, LibraryPodName, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+				return true
+			}
+		}
+		return false
+	}
+	ask := func(uid types.UID) {
+		patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, v1alpha1types.LibraryCloseAnnotation, uid)
+		if _, err := pairings.Patch(ctx, "p", types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ask(pod.UID) // before Run: queued, not dropped
+	go func() { _ = c.Run(ctx) }()
+	if !podGone(5 * time.Second) {
+		t.Fatal("a request made before Run never closed the Library")
+	}
+
+	// A new Library, closed by a request made while the controller runs. Its
+	// first reconcile (the pod add) must see no request, so the Pairing watch
+	// alone has to deliver this one.
+	next := pod.DeepCopy()
+	next.UID = "next-uid"
+	next.ResourceVersion = ""
+	if _, err := k8s.CoreV1().Pods(libraryTestNS).Create(ctx, next, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if podGone(0) {
+		t.Fatal("the earlier request closed the next Library")
+	}
+	ask(next.UID)
+	if !podGone(5 * time.Second) {
+		t.Fatal("a request made while running never closed the Library")
 	}
 }

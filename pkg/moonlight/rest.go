@@ -941,7 +941,14 @@ func streamRefusal(session *v1alpha1types.Session) *streamRefusedError {
 func (s *RESTServer) closeLibrary(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), libraryCallTimeout)
 	defer cancel()
-	closing, err := s.Library.Close(ctx, requestLibraryOwner(r))
+	var closing bool
+	var err error
+	if pairing, ok := r.Context().Value(pairingContextKey{}).(*v1alpha1types.Pairing); ok {
+		closing, err = s.Library.Close(ctx, requestLibraryOwner(r), pairing.Name)
+	} else {
+		// Only a paired client reaches /launch; the close is recorded on its Pairing.
+		err = errors.New("no Pairing on the request")
+	}
 	message := libraryNotOpenMessage
 	switch {
 	case err != nil:
