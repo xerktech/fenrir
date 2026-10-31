@@ -15,7 +15,16 @@ import (
 
 const xodusNexusRuntime = "root/usr/local/bin/xodus-nexus-runtime"
 
-const runtimeName = "xodus-nexus-runtime-11.0-20261022-gf4adc821"
+// Upstream's runtime as domsvoboda/nexus-runtime publishes it, which Nexus
+// prefers, and the launcher repository's older one, its fallback.
+const (
+	runtimeName  = "nexus-runtime-11.0-experimental-ge5afe21e"
+	runtimeTag   = "runtime-11.0-20261028-ge5afe21e"
+	fallbackName = "xodus-nexus-runtime-11.0-20261022-gf4adc821"
+	fallbackTag  = "runtime-11.0-20261022-gf4adc821"
+	runtimeRepo  = "nexus-runtime"
+	launcherRepo = "xodus-nexus"
+)
 
 // runtimeArchive builds a runtime tar.xz whose top directory is top and whose
 // files/bin/wine prints version, and returns its bytes.
@@ -63,10 +72,17 @@ func newRuntimeHost(t *testing.T) *runtimeHost {
 	if err := os.Mkdir(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// The release list for the API URL, else the file named after the URL's
-	// last component, as GitHub serves release assets.
+	// An API URL serves that repository's <repo>.json release list (HTTP 404
+	// without one, or the code in <repo>.status), else the file named after the
+	// URL's last component, as GitHub serves release assets.
 	writeStub(t, filepath.Join(bin, "curl"), `for a; do [ "$prev" = -o ] && out=$a; prev=$a; url=$a; done
-case "$url" in https://api.github.com/*) echo "releases" >>"$LOG"; exec cat "$FAKE_GH/releases.json";; esac
+case "$url" in https://api.github.com/repos/domsvoboda/*/releases*)
+  repo=${url#https://api.github.com/repos/domsvoboda/}; repo=${repo%%/*}
+  echo "releases $repo" >>"$LOG"
+  if [ -f "$FAKE_GH/$repo.status" ]; then cat "$FAKE_GH/$repo.status"; exit 0; fi
+  [ -f "$FAKE_GH/$repo.json" ] || { printf 404; exit 0; }
+  cp "$FAKE_GH/$repo.json" "$out"; printf 200; exit 0;;
+esac
 echo "download ${url##*/}" >>"$LOG"
 f="$FAKE_GH/${url##*/}"; [ -f "$f" ] || exit 22
 if [ -n "$out" ]; then cp "$f" "$out"; else cat "$f"; fi`)
@@ -75,10 +91,16 @@ if [ -n "$out" ]; then cp "$f" "$out"; else cat "$f"; fi`)
 		root: filepath.Join(home, ".local", "share", "xodus-nexus", "runtimes")}
 }
 
-// publish serves archive as runtimeName's x86_64 asset, with sum as its
-// .sha512sum file (the archive's own when empty) and digest as GitHub's
-// SHA256 (the archive's own when empty).
+// publish serves archive as runtimeName's x86_64 asset in nexus-runtime, with
+// sum as its .sha512sum file (the archive's own when empty) and digest as
+// GitHub's SHA256 (the archive's own when empty).
 func (h *runtimeHost) publish(archive []byte, sum, digest string) {
+	h.t.Helper()
+	h.publishTo(runtimeRepo, runtimeName, runtimeTag, archive, sum, digest)
+}
+
+// publishTo is publish into repo's release list, as runtime release tag.
+func (h *runtimeHost) publishTo(repo, runtimeName, tag string, archive []byte, sum, digest string) {
 	t := h.t
 	t.Helper()
 	gh := filepath.Join(h.dir, "gh")
@@ -98,7 +120,7 @@ func (h *runtimeHost) publish(archive []byte, sum, digest string) {
 		{"tag_name": "v0.3.11", "published_at": "2026-10-22T20:01:48Z", "assets": []map[string]any{
 			{"name": "Xodus-Nexus-0.3.11-x86_64.AppImage", "browser_download_url": "https://github.com/x/a", "size": 1, "digest": "sha256:" + strings.Repeat("0", 64)},
 		}},
-		{"tag_name": "runtime-11.0-20261022-gf4adc821", "published_at": "2026-10-22T20:00:27Z", "assets": []map[string]any{
+		{"tag_name": tag, "published_at": "2026-10-22T20:00:27Z", "assets": []map[string]any{
 			{"name": name, "browser_download_url": "https://github.com/x/" + name, "size": len(archive), "digest": digest},
 			{"name": sumName, "browser_download_url": "https://github.com/x/" + sumName, "size": len(sum), "digest": "sha256:" + sha256Hex(sum)},
 		}},
@@ -107,7 +129,7 @@ func (h *runtimeHost) publish(archive []byte, sum, digest string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for f, b := range map[string][]byte{"releases.json": data, name: archive, sumName: []byte(sum)} {
+	for f, b := range map[string][]byte{repo + ".json": data, name: archive, sumName: []byte(sum)} {
 		if err = os.WriteFile(filepath.Join(gh, f), b, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -166,7 +188,7 @@ func TestXodusNexusRuntimeInstallsWhenMissing(t *testing.T) {
 		t.Fatalf("calls:\n%s", calls)
 	}
 	wine := filepath.Join(h.root, "releases", runtimeName, "files", "bin", "wine")
-	if p := h.current(); p["name"] != runtimeName || p["winePath"] != wine || p["commit"] != "runtime-11.0-20261022-gf4adc821" {
+	if p := h.current(); p["name"] != runtimeName || p["winePath"] != wine || p["commit"] != runtimeTag {
 		t.Errorf("current.json %v, want %s at %s", p, runtimeName, wine)
 	}
 	if fi, err := os.Stat(filepath.Join(h.root, "current.json")); err != nil || fi.Mode().Perm() != 0o600 {
@@ -269,5 +291,62 @@ func TestXodusNexusRuntimeReplacesBrokenPointer(t *testing.T) {
 	h.run()
 	if p := h.current(); p["name"] != runtimeName {
 		t.Errorf("current.json %v, want %s", p, runtimeName)
+	}
+}
+
+// Like Nexus's checkNexus: without a nexus-runtime repository, or with no
+// usable release in it, the launcher repository's runtime is installed.
+func TestXodusNexusRuntimeFallsBackToLauncherReleases(t *testing.T) {
+	for test, runtimeList := range map[string]string{
+		"repository missing": "",
+		"no runtime release": `[{"tag_name":"v1","assets":[]}]`,
+	} {
+		t.Run(test, func(t *testing.T) {
+			h := newRuntimeHost(t)
+			h.publishTo(launcherRepo, fallbackName, fallbackTag, runtimeArchive(t, fallbackName, "wine-11.0"), "", "")
+			if runtimeList != "" {
+				if err := os.WriteFile(filepath.Join(h.dir, "gh", runtimeRepo+".json"), []byte(runtimeList), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := h.run()
+			if !strings.Contains(calls, "releases "+runtimeRepo+"\nreleases "+launcherRepo+"\n") {
+				t.Errorf("want nexus-runtime asked first, then xodus-nexus:\n%s", calls)
+			}
+			if p := h.current(); p["name"] != fallbackName || p["commit"] != fallbackTag {
+				t.Errorf("current.json %v, want %s", p, fallbackName)
+			}
+		})
+	}
+}
+
+// With a nexus-runtime release, the launcher repository is never asked: its
+// runtimes are older ones Nexus keeps only as a fallback.
+func TestXodusNexusRuntimePrefersRuntimeRepository(t *testing.T) {
+	h := newRuntimeHost(t)
+	h.publish(runtimeArchive(t, runtimeName, "wine-11.0"), "", "")
+	h.publishTo(launcherRepo, fallbackName, fallbackTag, runtimeArchive(t, fallbackName, "wine-11.0"), "", "")
+	calls := h.run()
+	if strings.Contains(calls, "releases "+launcherRepo) {
+		t.Errorf("asked xodus-nexus despite a nexus-runtime release:\n%s", calls)
+	}
+	if p := h.current(); p["name"] != runtimeName {
+		t.Errorf("current.json %v, want %s", p, runtimeName)
+	}
+}
+
+// Any failure other than a missing nexus-runtime repository installs nothing,
+// as Nexus stops there too, rather than an older fallback runtime.
+func TestXodusNexusRuntimeStopsOnReleaseListError(t *testing.T) {
+	h := newRuntimeHost(t)
+	h.publishTo(launcherRepo, fallbackName, fallbackTag, runtimeArchive(t, fallbackName, "wine-11.0"), "", "")
+	if err := os.WriteFile(filepath.Join(h.dir, "gh", runtimeRepo+".status"), []byte("503"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if calls := h.run(); !strings.Contains(calls, "HTTP 503") || strings.Contains(calls, "releases "+launcherRepo) {
+		t.Errorf("want a stop on HTTP 503 without the fallback:\n%s", calls)
+	}
+	if p := h.current(); p != nil {
+		t.Errorf("current.json written: %v", p)
 	}
 }

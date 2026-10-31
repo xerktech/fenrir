@@ -9,7 +9,9 @@
 #
 # Run as the desktop user by init-xodus-nexus-runtime, before the desktop
 # starts. It does what Nexus's own installNexus (src/main/runtime.ts) does:
-# the newest release carrying xodus-nexus-runtime-*-x86_64.tar.xz, checked
+# the newest release carrying nexus-runtime-*-x86_64.tar.xz in
+# domsvoboda/nexus-runtime, or, only when that repository is missing or has
+# none, xodus-nexus-runtime-*-x86_64.tar.xz in domsvoboda/xodus-nexus, checked
 # against GitHub's published SHA256 and the release's .sha512sum, unpacked
 # into <runtimeRoot>/releases/<name>, then pointed at by current.json, which
 # Nexus reads at start. Paths are absolute under /config; sessions mount the
@@ -20,7 +22,9 @@
 #
 # Never exits non-zero: any failure leaves Nexus asking for its runtime.
 
-releases_url="https://api.github.com/repos/domsvoboda/xodus-nexus/releases?per_page=100"
+# Nexus's checkNexus order: the runtime repository, then the launcher's own as
+# its fallback, each with its archive prefix.
+sources=("domsvoboda/nexus-runtime nexus-runtime" "domsvoboda/xodus-nexus xodus-nexus-runtime")
 
 give_up() {
   echo "xodus-nexus-runtime: $*; Nexus will ask for its runtime in Settings" >&2
@@ -45,19 +49,29 @@ if valid_wine "${wine}"; then
   exit 0
 fi
 
-releases="$(curl -fsSL --max-time 30 "${releases_url}")" || give_up "cannot read the releases"
-# The newest release (by publication: runtime tags don't sort) with a runtime
-# archive and its .sha512sum. Prints the archive's name, the tag, its URL, size
-# and SHA256, and the checksum file's URL, tab-separated.
-fields="$(python3 -I -c '
+releases="$(mktemp)" || give_up "cannot make a temporary file"
+trap 'rm -f "${releases}"' EXIT
+fields=
+for source in "${sources[@]}"; do
+  read -r repo prefix <<<"${source}"
+  status="$(curl -sSL --max-time 30 -o "${releases}" -w '%{http_code}' \
+    "https://api.github.com/repos/${repo}/releases?per_page=100")" || status=000
+  # As Nexus does: a missing runtime repository falls back; any other failure stops.
+  if [[ "${status}" == 404 && "${repo}" == */nexus-runtime ]]; then continue; fi
+  [[ "${status}" == 200 ]] || give_up "cannot read ${repo}'s releases (HTTP ${status})"
+  # The newest release (by publication: runtime tags don't sort) with a runtime
+  # archive and its .sha512sum. Prints the archive's name, the tag, its URL, size
+  # and SHA256, and the checksum file's URL, tab-separated.
+  fields="$(python3 -I -c '
 import json, re, sys
+prefix = sys.argv[1]
 best = None
 for r in json.load(sys.stdin):
     if r.get("draft") or r.get("prerelease") or not re.fullmatch(r"[A-Za-z0-9._-]+", r.get("tag_name") or ""):
         continue
     assets = {a.get("name"): a for a in r.get("assets") or []}
     for name, a in assets.items():
-        if not re.fullmatch(r"xodus-nexus-runtime-[A-Za-z0-9._-]+-x86_64\.tar\.xz", name or ""):
+        if not re.fullmatch(re.escape(prefix) + r"-[A-Za-z0-9._-]+-x86_64\.tar\.xz", name or ""):
             continue
         s = assets.get(name.removesuffix(".tar.xz") + ".sha512sum")
         url, size, digest = a.get("browser_download_url") or "", a.get("size"), a.get("digest") or ""
@@ -70,14 +84,20 @@ for r in json.load(sys.stdin):
         key = r.get("published_at") or ""
         if best is None or key > best[0]:
             best = (key, name, r["tag_name"], url, size, digest.removeprefix("sha256:"), s["browser_download_url"])
+if best is None:
+    sys.exit(1)
 print(*best[1:], sep="\t")
-' <<<"${releases}" 2>/dev/null)" || give_up "cannot find a verifiable runtime release"
+' "${prefix}" <"${releases}" 2>/dev/null)" && break
+  # Nexus also falls back when the runtime repository has no usable release.
+  [[ "${repo}" == */nexus-runtime ]] || give_up "cannot find a verifiable runtime release"
+done
+[[ -n "${fields}" ]] || give_up "cannot find a verifiable runtime release"
 IFS=$'\t' read -r name tag url size sha sum_url <<<"${fields}"
 release="${name%-x86_64.tar.xz}"
 
 mkdir -p "${root}/releases" || give_up "cannot create ${root}"
 staging="$(mktemp -d "${root}/.staging-direwolf-XXXXXX")" || give_up "cannot make a staging directory"
-trap 'rm -rf "${staging}"' EXIT
+trap 'rm -rf "${staging}" "${releases}"' EXIT
 archive="${staging}/${name}"
 
 echo "xodus-nexus-runtime: downloading ${name}"
@@ -97,7 +117,7 @@ tops = {e.split("/")[0] for e in entries}
 if not entries or len(tops) != 1 or any(e.startswith("/") or ".." in e.split("/") for e in entries):
     sys.exit(1)
 top = tops.pop()
-if not re.fullmatch(r"(proton-xodus-|xodus-nexus-runtime-)[A-Za-z0-9._-]+", top):
+if not re.fullmatch(r"(proton-xodus-|xodus-nexus-runtime-|nexus-runtime-)[A-Za-z0-9._-]+", top):
     sys.exit(1)
 print(top)
 ')" || give_up "${name} has an unexpected layout"

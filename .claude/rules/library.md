@@ -87,6 +87,9 @@ paths:
     launch fails "Select a Wine/Xodus Proton binary". `init-xodus-nexus-runtime` (as abc) installs
     the newest runtime release when `<runtimeRoot>/current.json` has no working wine, the way
     Nexus's `installNexus` does (XERK-2289). Install-if-missing only; updates stay in Settings.
+    - Its source order is Nexus's `checkNexus`: domsvoboda/nexus-runtime (`nexus-runtime-*`) first,
+      domsvoboda/xodus-nexus (`xodus-nexus-runtime-*`) only when that repo 404s or has no release.
+      Any other release-list error installs nothing (XERK-2499): the fallback runtimes are older.
     Tests: `images/library/xodus_nexus_runtime_test.go`.
   - Nexus updates its backend only on first run or from Settings, and a launcher on a newer launch
     contract (`linux-run-vNN`) refuses to play with an older backend. `init-xodus-nexus-backend`
