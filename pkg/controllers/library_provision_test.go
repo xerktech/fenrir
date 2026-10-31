@@ -294,3 +294,43 @@ func TestLibraryServerProvisionTimeout(t *testing.T) {
 		t.Errorf("HTTP %d %q, want a refreshing error page without the cause", rec.Code, rec.Body.String())
 	}
 }
+
+// An allowlisted user with no groups at all is provisioned (XERK-2542), as is
+// a member listed on a later groups header line (oauth2-proxy sends one per
+// group); the header names are the server's configured ones.
+func TestLibraryServerProvisionsAllowlistedAndMultiLine(t *testing.T) {
+	for name, tc := range map[string]struct {
+		username string
+		header   http.Header
+		want     string // User created, or "" for a refusal
+	}{
+		"allowlisted, no groups": {"Kim", http.Header{"Remote-User": {"Kim"}}, "kim"},
+		"allowlist is exact":     {"KIM", http.Header{"Remote-User": {"KIM"}}, ""},
+		"member on a later line": {"Sam", http.Header{"Remote-User": {"Sam"}, "Remote-Groups": {"staff", testProvisionGroup}}, "sam"},
+		"neither":                {"Lee", http.Header{"Remote-User": {"Lee"}, "Remote-Groups": {"staff"}}, ""},
+		"default header ignored": {"Kim", http.Header{DefaultLibraryUserHeader: {"Kim"}}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newLibraryFixture(t, nil)
+			s := f.provisioningServer(t)
+			s.userHeader = "Remote-User"
+			s.Provisioner.GroupsHeader, s.Provisioner.GroupsSeparator = "Remote-Groups", ","
+			s.Provisioner.AllowedUsers = []string{"Kim"}
+			tc.header.Set("Sec-Fetch-User", "?1")
+			rec := serveLibrary(s, "10.1.0.5:5555", tc.header)
+			users, err := f.dw.DirewolfV1alpha1().Users(libraryTestNS).List(context.Background(), metav1.ListOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" {
+				if len(users.Items) != 0 {
+					t.Errorf("HTTP %d, Users %v; want none created", rec.Code, users.Items)
+				}
+				return
+			}
+			if len(users.Items) != 1 || users.Items[0].Name != tc.want || !users.Items[0].IsFor(tc.username) {
+				t.Errorf("HTTP %d, Users %v; want only %s", rec.Code, users.Items, tc.want)
+			}
+		})
+	}
+}

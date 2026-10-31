@@ -112,6 +112,7 @@ jobs:
           --set provisioning.games.storageClassName=local-path
           --set provisioning.libraryURL=https://library.example.com/
           --set-json 'provisioning.userTemplate={"resources":{"limits":{"cpu":"8"}}}'
+          --set-json 'provisioning.allowedUsers=["alice","Bob"]'
           > "$RUNNER_TEMP/chart.yaml"
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6

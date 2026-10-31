@@ -29,18 +29,32 @@ wowAddons: []
 #    source: {type: curseforge, project: 914482}
 #    flavors: [retail]
 
-# Provisioning (XERK-2537): a member of `group` who signs in to the Library
-# with no User gets one, with a Steam home and game library of their own
-# (PVCs direwolf-home-<user> / direwolf-games-<user>). Empty group: off. Needs
-# the Library (--library-port). Existing Users are never changed, and nothing
-# is ever deleted: removing someone's data is an admin's call.
-provisioning:
-  group: ""
-  # Authentik's proxy outpost lists the user's groups here, separated by "|".
+# The authenticating proxy in front of the Library page (operator) and the
+# pairing page (moonlight-proxy): the headers it names the signed-in user and
+# their groups in. Defaults are Authentik's proxy outpost. Others are in the
+# README's "Adding users" (oauth2-proxy's headers depend on its mode). The
+# proxy must overwrite all three headers on every request, never pass a
+# client's own through: set all three for your proxy, not just userHeader.
+proxyAuth:
+  userHeader: X-Authentik-Username
   groupsHeader: X-Authentik-Groups
   groupsSeparator: "|"
-  # The Library page's URL. moonlight-proxy's pairing page links a group
-  # member with no User yet here (it cannot create Users: it is internet-facing).
+
+# Provisioning (XERK-2537): someone who signs in to the Library with no User
+# gets one, with a Steam home and game library of their own (PVCs
+# direwolf-home-<user> / direwolf-games-<user>), if they are a member of
+# `group` OR listed in `allowedUsers`. Both empty: off. Needs the Library
+# (--library-port). Existing Users are never changed, and nothing is ever
+# deleted: removing someone's data is an admin's call.
+provisioning:
+  group: ""
+  # Usernames, exactly as proxyAuth.userHeader sends them (case counts), for
+  # proxies with no groups. Removing a name stops only new provisioning: a
+  # User already made keeps playing until an admin deletes it and its PVCs.
+  # No name may contain a comma.
+  allowedUsers: []
+  # The Library page's URL. moonlight-proxy's pairing page links someone
+  # eligible with no User yet here (it cannot create Users: it is internet-facing).
   libraryURL: ""
   # Every provisioned User's spec (resources, volumes, sidecarPolicies; no
   # library), e.g. what a hand-written User sets.
@@ -187,10 +201,18 @@ controllers:
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           # The wowAddons list below, for the Library (--library-wow-addons).
           LIBRARY_WOW_ADDONS: '{{ toJson .Values.wowAddons }}'
-          # The provisioning values above (--provision-*, --library-groups-*).
+          # The proxyAuth and provisioning values above (--library-user-header,
+          # --library-groups-*, --provision-*).
+          LIBRARY_USER_HEADER: '{{ .Values.proxyAuth.userHeader }}'
+          LIBRARY_GROUPS_HEADER: '{{ .Values.proxyAuth.groupsHeader }}'
+          LIBRARY_GROUPS_SEPARATOR: '{{ .Values.proxyAuth.groupsSeparator }}'
           PROVISION_GROUP: '{{ .Values.provisioning.group }}'
-          LIBRARY_GROUPS_HEADER: '{{ .Values.provisioning.groupsHeader }}'
-          LIBRARY_GROUPS_SEPARATOR: '{{ .Values.provisioning.groupsSeparator }}'
+          PROVISION_ALLOWED_USERS: &allowedUsers >-
+            {{ $users := .Values.provisioning.allowedUsers | default list }}
+            {{- if not (kindIs "slice" $users) }}{{ fail "provisioning.allowedUsers must be a list of usernames" }}{{ end }}
+            {{- range $users }}{{ if or (not (kindIs "string" .)) (contains "," (toString .)) }}
+            {{- fail (printf "provisioning.allowedUsers: %v must be a username without a comma" .) }}{{ end }}{{ end }}
+            {{- join "," $users }}
           PROVISION_USER_TEMPLATE: '{{ toJson .Values.provisioning.userTemplate }}'
           PROVISION_HOME_STORAGE_CLASS: '{{ .Values.provisioning.home.storageClassName }}'
           PROVISION_HOME_SIZE: '{{ .Values.provisioning.home.size }}'
@@ -246,12 +268,14 @@ controllers:
               fieldRef:
                 fieldPath: metadata.name
           POD_NAMESPACE: "{{ .Release.Namespace }}"
-          # The provisioning values above (--pin-provision-group, --pin-groups-*,
-          # --pin-library-url), so the pairing page can send an unprovisioned
-          # group member to the Library.
+          # The proxyAuth and provisioning values above (--pin-user-header,
+          # --pin-groups-*, --pin-provision-*, --pin-library-url), so the pairing
+          # page can send an eligible person with no User to the Library.
+          PIN_USER_HEADER: '{{ .Values.proxyAuth.userHeader }}'
+          PIN_GROUPS_HEADER: '{{ .Values.proxyAuth.groupsHeader }}'
+          PIN_GROUPS_SEPARATOR: '{{ .Values.proxyAuth.groupsSeparator }}'
           PIN_PROVISION_GROUP: '{{ .Values.provisioning.group }}'
-          PIN_GROUPS_HEADER: '{{ .Values.provisioning.groupsHeader }}'
-          PIN_GROUPS_SEPARATOR: '{{ .Values.provisioning.groupsSeparator }}'
+          PIN_PROVISION_ALLOWED_USERS: *allowedUsers
           PIN_LIBRARY_URL: '{{ .Values.provisioning.libraryURL }}'
         securityContext:
           allowPrivilegeEscalation: false

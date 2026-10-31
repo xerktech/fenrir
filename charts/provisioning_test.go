@@ -14,12 +14,6 @@ import (
 	"games-on-whales.github.io/direwolf/pkg/moonlight"
 )
 
-// operatorDeployment is the rendered operator Deployment.
-func operatorDeployment(t *testing.T) *appsv1.Deployment {
-	t.Helper()
-	return renderedDeployment(t, "direwolf-operator")
-}
-
 // renderedDeployment is the rendered Deployment named name.
 func renderedDeployment(t *testing.T, name string) *appsv1.Deployment {
 	t.Helper()
@@ -48,13 +42,7 @@ func renderedDeployment(t *testing.T, name string) *appsv1.Deployment {
 // The chart's provisioning values reach the operator (CI renders them set,
 // see build.yml's Render chart), in a form its flags accept.
 func TestProvisioningValuesReachOperator(t *testing.T) {
-	d := operatorDeployment(t)
-	env := map[string]string{}
-	for _, c := range d.Spec.Template.Spec.Containers {
-		for _, e := range c.Env {
-			env[e.Name] = e.Value
-		}
-	}
+	env := deploymentEnv(renderedDeployment(t, "direwolf-operator"))
 	// CI sets this for its render (build.yml), so a lost value fails there
 	// rather than skipping.
 	if os.Getenv("DIREWOLF_CHART_PROVISIONING") == "" {
@@ -62,6 +50,8 @@ func TestProvisioningValuesReachOperator(t *testing.T) {
 	}
 	for name, want := range map[string]string{
 		"PROVISION_GROUP":               "k8x-games",
+		"PROVISION_ALLOWED_USERS":       "alice,Bob",
+		"LIBRARY_USER_HEADER":           controllers.DefaultLibraryUserHeader,
 		"LIBRARY_GROUPS_HEADER":         controllers.DefaultLibraryGroupsHeader,
 		"LIBRARY_GROUPS_SEPARATOR":      controllers.DefaultLibraryGroupsSeparator,
 		"PROVISION_HOME_STORAGE_CLASS":  "local-path",
@@ -79,24 +69,34 @@ func TestProvisioningValuesReachOperator(t *testing.T) {
 	}
 }
 
-// The pairing page gets the same group as the operator, so it can tell an
-// unprovisioned group member to open the Library (XERK-2541).
-func TestProvisioningValuesReachPairingPage(t *testing.T) {
-	d := renderedDeployment(t, "moonlight-proxy")
+// deploymentEnv is every literal env value of d's containers.
+func deploymentEnv(d *appsv1.Deployment) map[string]string {
 	env := map[string]string{}
 	for _, c := range d.Spec.Template.Spec.Containers {
 		for _, e := range c.Env {
 			env[e.Name] = e.Value
 		}
 	}
+	return env
+}
+
+// The pairing page gets the same headers, group and allowlist as the
+// operator, so it can tell an eligible person with no User to open the
+// Library (XERK-2541, XERK-2542).
+func TestProvisioningValuesReachPairingPage(t *testing.T) {
+	env := deploymentEnv(renderedDeployment(t, "moonlight-proxy"))
+	if got := env["PIN_USER_HEADER"]; got != moonlight.DefaultPinUserHeader {
+		t.Errorf("PIN_USER_HEADER = %q, want %q", got, moonlight.DefaultPinUserHeader)
+	}
 	if os.Getenv("DIREWOLF_CHART_PROVISIONING") == "" {
 		t.Skip("DIREWOLF_CHART_PROVISIONING unset: render with build.yml's Render chart values and set it")
 	}
 	for name, want := range map[string]string{
-		"PIN_PROVISION_GROUP":  "k8x-games",
-		"PIN_GROUPS_HEADER":    moonlight.DefaultPinGroupsHeader,
-		"PIN_GROUPS_SEPARATOR": moonlight.DefaultPinGroupsSeparator,
-		"PIN_LIBRARY_URL":      "https://library.example.com/",
+		"PIN_PROVISION_GROUP":         "k8x-games",
+		"PIN_PROVISION_ALLOWED_USERS": "alice,Bob",
+		"PIN_GROUPS_HEADER":           moonlight.DefaultPinGroupsHeader,
+		"PIN_GROUPS_SEPARATOR":        moonlight.DefaultPinGroupsSeparator,
+		"PIN_LIBRARY_URL":             "https://library.example.com/",
 	} {
 		if got, ok := env[name]; !ok || got != want {
 			t.Errorf("%s = %q (set %v), want %q", name, got, ok, want)

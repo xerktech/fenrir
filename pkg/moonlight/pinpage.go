@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -80,6 +81,9 @@ type PinPageOptions struct {
 	// with no User yet is told to open LibraryURL first instead of being
 	// refused outright. Empty: everyone without a User is just refused.
 	ProvisionGroup string
+	// ProvisionAllowedUsers are provisioned whatever their groups (the
+	// operator's --provision-allowed-users), matched exactly.
+	ProvisionAllowedUsers []string
 
 	// GroupsHeader lists the authenticated user's groups, separated by
 	// GroupsSeparator. Read only once the request passed the same checks as
@@ -100,6 +104,7 @@ type pinPageHandler struct {
 	userHeader string
 
 	provisionGroup  string
+	allowedUsers    []string
 	groupsHeader    string
 	groupsSeparator string
 	libraryURL      string
@@ -123,7 +128,7 @@ func NewPinPageHandler(
 	}
 	h := &pinPageHandler{
 		manager: manager, users: users, trusted: opts.TrustedProxies, secret: opts.ProxySecret, userHeader: opts.UserHeader,
-		provisionGroup: opts.ProvisionGroup, groupsHeader: opts.GroupsHeader, groupsSeparator: opts.GroupsSeparator,
+		provisionGroup: opts.ProvisionGroup, allowedUsers: opts.ProvisionAllowedUsers, groupsHeader: opts.GroupsHeader, groupsSeparator: opts.GroupsSeparator,
 		libraryURL: opts.LibraryURL,
 	}
 
@@ -160,7 +165,7 @@ func (h *pinPageHandler) authenticate(w http.ResponseWriter, r *http.Request) *v
 		klog.Warningf("Pairing page: no User %q: %s", username, err)
 		// Only a confirmed miss is "not set up yet"; any other lookup error
 		// (a refused name) is a plain refusal.
-		if apierrors.IsNotFound(err) && h.inProvisionGroup(r) && h.provisionable(username) {
+		if apierrors.IsNotFound(err) && h.eligible(r, username) && h.provisionable(username) {
 			h.notProvisioned(w, r)
 			return nil
 		}
@@ -170,16 +175,23 @@ func (h *pinPageHandler) authenticate(w http.ResponseWriter, r *http.Request) *v
 	return user
 }
 
-// inProvisionGroup reports whether the trusted proxy lists the user in the
-// group whose members are provisioned on their first Library visit. Callers
-// must have checked the peer and the proxy secret: the header is forgeable.
-func (h *pinPageHandler) inProvisionGroup(r *http.Request) bool {
+// eligible reports whether username is provisioned on their first Library
+// visit, as the operator's Provisioner.Eligible decides: allowlisted, or
+// listed by the trusted proxy in the provisioning group (on any groups
+// header line: oauth2-proxy sends one per group). Callers must have checked
+// the peer and the proxy secret: the headers are forgeable.
+func (h *pinPageHandler) eligible(r *http.Request, username string) bool {
+	if slices.Contains(h.allowedUsers, username) {
+		return true
+	}
 	if h.provisionGroup == "" {
 		return false
 	}
-	for g := range strings.SplitSeq(r.Header.Get(h.groupsHeader), h.groupsSeparator) {
-		if strings.TrimSpace(g) == h.provisionGroup {
-			return true
+	for _, line := range r.Header.Values(h.groupsHeader) {
+		for g := range strings.SplitSeq(line, h.groupsSeparator) {
+			if strings.TrimSpace(g) == h.provisionGroup {
+				return true
+			}
 		}
 	}
 	return false

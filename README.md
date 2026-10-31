@@ -295,6 +295,56 @@ However you can change the resources and volume mounts for the sidecars:
 To create a user:  
 `kubectl apply -f examples/generic_devices/user.yaml`
 
+### Adding users
+
+With provisioning on, a person who signs in to the Library page and has no `User` gets one, with
+a Steam home and game library of their own (PVCs `direwolf-home-<user>` /
+`direwolf-games-<user>`). They are eligible if they are in `provisioning.group` OR listed in
+`provisioning.allowedUsers` (chart values); with both empty, provisioning is off. Hand-written
+`User`s are never changed.
+
+The Library page and the pairing page trust the user (and group) headers only from their trusted
+proxy CIDRs with the proxy secret. Whatever proxy you use must overwrite these headers on every
+request: one that passes a client's own `X-Forwarded-User` through lets anyone be anyone.
+
+- **Authentik** (the default): add people to the group named in `provisioning.group`. The
+  outpost sends `X-Authentik-Username` and `X-Authentik-Groups` (separated by `|`).
+- **Another proxy with groups**: set `proxyAuth` to its headers, then `provisioning.group`.
+
+  | Proxy | `userHeader` | `groupsHeader` | `groupsSeparator` |
+  | --- | --- | --- | --- |
+  | oauth2-proxy behind ingress-nginx `auth-url` (`--set-xauthrequest`) | `X-Auth-Request-User` | `X-Auth-Request-Groups` | `,` |
+  | oauth2-proxy as the reverse proxy (`--pass-user-headers`) | `X-Forwarded-User` | `X-Forwarded-Groups` | `,` |
+  | Authelia (forward auth) | `Remote-User` | `Remote-Groups` | `,` |
+  | Pomerium (`jwt_claims_headers` mapping a username claim) | e.g. `X-Pomerium-Claim-Preferred-Username` | `X-Pomerium-Claim-Groups` | `,` |
+
+  Use the headers your proxy's mode actually writes: in auth-request mode oauth2-proxy never
+  touches `X-Forwarded-User`, so naming it lets a client send its own and be anyone.
+  oauth2-proxy sends one groups header line per group; every line is read.
+  With a `,` separator a group name containing a comma (an LDAP DN) never matches: use the
+  group's short name. Pomerium may send IdP group IDs rather than names; set `group` to what it
+  sends. The user header must carry a username (letters, digits, `-`): an email address or an
+  IdP user ID (Pomerium's `user` claim) is refused as a `User` name, so pick a username claim.
+
+- **A proxy with no groups**: set `proxyAuth.userHeader`, leave `group` empty, and list people in
+  `provisioning.allowedUsers`, exactly as the proxy sends their username (case counts; no
+  commas). Add or remove people by editing the values in Git.
+
+Removing someone from the group or the list only stops new provisioning: a `User` already made
+keeps working. To remove a person entirely (namespace `streaming` here; `<name>` is their `User`):
+
+1. Revoke their clients and sessions:
+   `kubectl get pairings -n streaming -o json | jq -r '.items[] | select(.spec.userReference.name=="<name>") | .metadata.name'`,
+   then `kubectl delete pairing -n streaming <each>` (their Sessions end with them).
+2. Close their Library if open: `kubectl delete pod -n streaming direwolf-library-<name>`.
+3. `kubectl delete user -n streaming <name>`. Their catalogue Apps go on the next catalogue scan.
+4. Only if their saves and games may go: `kubectl delete pvc -n streaming direwolf-home-<name>
+   direwolf-games-<name>`, and `kubectl delete secret -n streaming direwolf-library-auth-<name>`.
+   Deleting the `User` alone keeps the PVCs; if they sign in again while still eligible, the new
+   `User` adopts them.
+
+Take them off the group or list first, or step 3 is undone at their next sign-in.
+
 ### Adding an application and pairing with moonlight  
 add the app the to cluster using:  
 `kubectl apply -f examples/testball.yaml`
