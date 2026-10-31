@@ -26,11 +26,15 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
 - Moonlight: add host `10.10.10.34`, start pairing, then open `pair.xerktech.com` (Authentik),
   pick the waiting client and enter the PIN Moonlight shows.
   - The Authentik username must have a `User` CR of the same name, or the PIN is refused.
-- One stream at a time (`--max-concurrent-sessions=1`, counted across Users). Another User's
-  launch, or any launch while the Library is open, is refused with a busy message. A launch by
-  the same User from a second client replaces that User's running session instead.
-- Steam games: install from `library.xerktech.com`; each install becomes its own App (with
-  cover art) after that Library visit. Other apps are `App` CRs in `streaming/direwolf/`.
+- `--max-concurrent-sessions` Users stream at once; one more User's launch is refused with a
+  busy message. A launch by the same User from a second client replaces that User's running
+  session instead.
+- Each User plays from a library: the shared one, or their own (`User.spec.library`: their own
+  Steam/Heroic/Nexus/Battle.net home and games volume). A launch while that library's Library is
+  open is refused; other libraries' Libraries don't matter.
+- Steam games: install from `library.xerktech.com`, which opens the signed-in user's own Library;
+  each install becomes its own App (with cover art) after that Library visit, shown only to the
+  Users of that library. Other apps are `App` CRs in `streaming/direwolf/`.
 - Quit in Moonlight ends the session at once. Closing the client without quitting keeps the
   pod for 10 minutes (`--disconnect-grace-period`); reconnecting in that window resumes the game.
 
