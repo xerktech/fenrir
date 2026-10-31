@@ -334,13 +334,51 @@ func TestProvisionerInGroup(t *testing.T) {
 		"admins,k8x-games":         false,
 		"authentik Admins|k8x-gam": false,
 	} {
-		if got := f.p.InGroup(groups); got != want {
+		if got := f.p.InGroup([]string{groups}); got != want {
 			t.Errorf("InGroup(%q) = %v, want %v", groups, got, want)
 		}
 	}
 	f.p.Group = ""
-	if f.p.InGroup("") {
+	if f.p.InGroup([]string{""}) || f.p.InGroup(nil) {
 		t.Error("InGroup with provisioning off")
+	}
+}
+
+// Eligible matches a group member OR an allowlisted user, with whichever
+// groups separator the proxy uses (Authelia sends commas), and over every
+// header line (oauth2-proxy sends one per group).
+func TestProvisionerEligible(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		group, separator string
+		allowed          []string
+		username         string
+		groups           []string
+		want             bool
+	}{
+		{"group only: member", "k8x-games", "|", nil, "kim", []string{"admins|k8x-games"}, true},
+		{"group only: not a member", "k8x-games", "|", nil, "kim", []string{"admins"}, false},
+		{"group only: no groups sent", "k8x-games", "|", nil, "kim", nil, false},
+		{"comma separator: member", "k8x-games", ",", nil, "kim", []string{"admins,k8x-games"}, true},
+		{"comma separator: spaced", "k8x-games", ",", nil, "kim", []string{"admins, k8x-games"}, true},
+		{"comma separator: pipe list is one group", "k8x-games", ",", nil, "kim", []string{"admins|k8x-games"}, false},
+		{"allowlist only: listed", "", ",", []string{"sam", "kim"}, "kim", nil, true},
+		{"allowlist only: not listed", "", ",", []string{"sam"}, "kim", []string{"k8x-games"}, false},
+		{"allowlist only: exact case", "", ",", []string{"sam"}, "Sam", nil, false},
+		{"allowlist only: no prefix match", "", ",", []string{"sam"}, "sa", nil, false},
+		{"either: listed, not a member", "k8x-games", "|", []string{"kim"}, "kim", []string{"admins"}, true},
+		{"either: member, not listed", "k8x-games", "|", []string{"sam"}, "kim", []string{"k8x-games"}, true},
+		{"multi-line groups: member", "k8x-games", ",", nil, "kim", []string{"admins", "k8x-games"}, true},
+		{"multi-line groups: not a member", "k8x-games", ",", nil, "kim", []string{"admins", "players"}, false},
+		{"no username", "", ",", []string{""}, "", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newProvisionFixture(t, nil)
+			f.p.Group, f.p.GroupsSeparator, f.p.AllowedUsers = tc.group, tc.separator, tc.allowed
+			if got := f.p.Eligible(tc.username, tc.groups); got != tc.want {
+				t.Errorf("Eligible(%q, %q) = %v, want %v", tc.username, tc.groups, got, tc.want)
+			}
+		})
 	}
 }
 

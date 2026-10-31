@@ -784,3 +784,25 @@ func TestLibraryWatchCloseRequests(t *testing.T) {
 		t.Fatal("a request made while running never closed the Library")
 	}
 }
+
+// The page reads the user from whichever header --library-user-header names
+// (oauth2-proxy, Authelia, Pomerium), and ignores Authentik's then: a client
+// could set that one itself, as the proxy only overwrites its own header.
+// (A request without the configured header is the shared library's.)
+func TestLibraryServerUserHeaderFromFlag(t *testing.T) {
+	for _, header := range []string{"X-Forwarded-User", "Remote-User", "X-Pomerium-Claim-Preferred-Username"} {
+		t.Run(header, func(t *testing.T) {
+			f := newLibraryFixture(t, nil, libraryUser("sam", true))
+			s := f.server(t)
+			s.userHeader = header
+			serveLibrary(s, "10.1.0.5:5555", http.Header{"Sec-Fetch-User": {"?1"}, DefaultLibraryUserHeader: {"sam"}})
+			if _, err := f.k8s.CoreV1().Pods(libraryTestNS).Get(context.Background(), "direwolf-library-sam", metav1.GetOptions{}); err == nil {
+				t.Errorf("only %s sent: sam's Library started", DefaultLibraryUserHeader)
+			}
+			serveLibrary(s, "10.1.0.5:5555", http.Header{"Sec-Fetch-User": {"?1"}, header: {"sam"}})
+			if _, err := f.k8s.CoreV1().Pods(libraryTestNS).Get(context.Background(), "direwolf-library-sam", metav1.GetOptions{}); err != nil {
+				t.Errorf("%s: sam's Library not started: %v", header, err)
+			}
+		})
+	}
+}

@@ -376,13 +376,14 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // mayProvision reports whether r's user, who has no User, gets one: only when
-// provisioning is on and the groups header names the group. ServeHTTP has
-// already checked the peer and the proxy secret, so the header is the proxy's.
+// provisioning is on and they are eligible (allowlisted, or a member of the
+// group on any groups header line). ServeHTTP has already checked the peer
+// and the proxy secret, so the headers are the proxy's.
 func (s *LibraryServer) mayProvision(r *http.Request) bool {
 	if s.Provisioner == nil {
 		return false
 	}
-	return s.Provisioner.InGroup(r.Header.Get(s.Provisioner.GroupsHeader))
+	return s.Provisioner.Eligible(r.Header.Get(s.userHeader), r.Header.Values(s.Provisioner.GroupsHeader))
 }
 
 // provision returns r's User from the API server, creating it (and its

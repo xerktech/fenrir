@@ -63,7 +63,7 @@ func main() {
 		"Comma-separated CIDRs of the Ingress controller, the only peers allowed to the Library page. Required with --library-port")
 	libraryProxySecretFile := flag.String("library-proxy-secret-file", "",
 		"File holding the secret the proxy sends in "+controllers.LibraryProxySecretHeader+". Required with --library-port")
-	libraryUserHeader := flag.String("library-user-header", controllers.DefaultLibraryUserHeader,
+	libraryUserHeader := flag.String("library-user-header", cmp.Or(os.Getenv("LIBRARY_USER_HEADER"), controllers.DefaultLibraryUserHeader),
 		"Header the trusted proxy names the signed-in user in; a User of that name with spec.library gets their own Library")
 	libraryImage := flag.String("library-image", cmp.Or(os.Getenv("LIBRARY_IMAGE"), "ghcr.io/games-on-whales/fenrir/library:main"),
 		"Library (Steam + Heroic desktop) image")
@@ -91,7 +91,10 @@ func main() {
 	rommCollection := flag.Int("romm-collection-id", 0,
 		"Only catalogue the ROMs in this RomM collection. 0: every ROM")
 	provisionGroup := flag.String("provision-group", os.Getenv("PROVISION_GROUP"),
-		"Group whose members get a User with a library of their own on first Library sign-in. Empty: off. Needs --library-port")
+		"Group whose members get a User with a library of their own on first Library sign-in. Needs --library-port")
+	provisionAllowedUsers := flag.String("provision-allowed-users", os.Getenv("PROVISION_ALLOWED_USERS"),
+		"Comma-separated usernames (as in --library-user-header) provisioned whatever their groups, for proxies that send none. "+
+			"Off when this and --provision-group are both empty")
 	libraryGroupsHeader := flag.String("library-groups-header", cmp.Or(os.Getenv("LIBRARY_GROUPS_HEADER"), controllers.DefaultLibraryGroupsHeader),
 		"Header the trusted proxy lists the signed-in user's groups in")
 	libraryGroupsSeparator := flag.String("library-groups-separator", cmp.Or(os.Getenv("LIBRARY_GROUPS_SEPARATOR"), controllers.DefaultLibraryGroupsSeparator),
@@ -177,11 +180,11 @@ func main() {
 	}
 
 	var provisionOpts controllers.ProvisionerOptions
-	if *provisionGroup != "" {
+	if *provisionGroup != "" || *provisionAllowedUsers != "" {
 		if *libraryPort == 0 {
-			klog.Fatal("--provision-group needs --library-port: Users are provisioned on Library sign-in")
+			klog.Fatal("--provision-group and --provision-allowed-users need --library-port: Users are provisioned on Library sign-in")
 		}
-		if provisionOpts, err = provisionerOptions(*provisionGroup, *libraryGroupsHeader, *libraryGroupsSeparator,
+		if provisionOpts, err = provisionerOptions(*provisionGroup, *provisionAllowedUsers, *libraryGroupsHeader, *libraryGroupsSeparator,
 			*provisionUserTemplate, *provisionHomeClass, *provisionHomeSize, *provisionGamesClass, *provisionGamesSize); err != nil {
 			klog.Fatalf("provisioning: %v", err)
 		}
@@ -334,7 +337,7 @@ func main() {
 			libraryTrusted,
 			libraryProxySecret,
 		)
-		if provisionOpts.Group != "" {
+		if provisionOpts.Enabled() {
 			libraryServer.Provisioner = controllers.NewProvisioner(
 				*namespace,
 				generic.NewLister[*direwolfv1alpha1.User](userInformer.GetIndexer()).Namespaced(*namespace),
@@ -429,10 +432,32 @@ func readProxySecret(path string) ([]byte, error) {
 }
 
 // provisionerOptions validates the provisioning flags.
-func provisionerOptions(group, groupsHeader, separator, userTemplate, homeClass, homeSize, gamesClass, gamesSize string) (controllers.ProvisionerOptions, error) {
+func provisionerOptions(group, allowedUsers, groupsHeader, separator, userTemplate, homeClass, homeSize, gamesClass, gamesSize string) (controllers.ProvisionerOptions, error) {
 	opts := controllers.ProvisionerOptions{Group: group, GroupsHeader: groupsHeader, GroupsSeparator: separator}
 	if strings.TrimSpace(group) != group {
 		return opts, fmt.Errorf("--provision-group %q has surrounding spaces, so no group would ever match", group)
+	}
+	userNames := map[string]string{}
+	// Spaces around a name are the list's formatting, never part of a
+	// username; empty entries (a trailing comma) are dropped.
+	for u := range strings.SplitSeq(allowedUsers, ",") {
+		if u = strings.TrimSpace(u); u == "" {
+			continue
+		}
+		// Ensure refuses such a username at every sign-in, and a second
+		// username mapping to the same User; say so now.
+		name, err := direwolfv1alpha1.UserNameFor(u)
+		if err != nil {
+			return opts, fmt.Errorf("--provision-allowed-users: %q can never be provisioned: %w", u, err)
+		}
+		if other, dup := userNames[name]; dup {
+			return opts, fmt.Errorf("--provision-allowed-users: %q and %q both map to User %s; only one could ever sign in", other, u, name)
+		}
+		userNames[name] = u
+		opts.AllowedUsers = append(opts.AllowedUsers, u)
+	}
+	if allowedUsers != "" && len(opts.AllowedUsers) == 0 {
+		return opts, fmt.Errorf("--provision-allowed-users %q names no one", allowedUsers)
 	}
 	if groupsHeader == "" || separator == "" {
 		return opts, errors.New("--library-groups-header and --library-groups-separator must not be empty")
