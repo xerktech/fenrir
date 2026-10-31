@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
+
+	dwclient "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned"
 )
 
 // The Library page provisions a group member's User on first sign-in
@@ -194,4 +199,91 @@ func TestLibraryServerProvisionErrors(t *testing.T) {
 			t.Errorf("pods = %v, want none", got)
 		}
 	})
+}
+
+// A request the page refuses anyway never provisions first: the start path
+// takes only a same-site POST.
+func TestLibraryServerStartCheckBeforeProvisioning(t *testing.T) {
+	for name, tc := range map[string]struct {
+		method string
+		site   string
+	}{
+		"GET":             {method: http.MethodGet},
+		"cross-site POST": {method: http.MethodPost, site: "cross-site"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newLibraryFixture(t, nil)
+			h := signIn("Kim", testProvisionGroup, true)
+			if tc.site != "" {
+				h.Set("Sec-Fetch-Site", tc.site)
+			}
+			rec := serveLibraryRequest(f.provisioningServer(t), tc.method, libraryStartPath, "10.1.0.5:5555", h)
+			if rec.Code != http.StatusForbidden || f.provisionWrites() != 0 || len(f.podNames(t)) != 0 {
+				t.Errorf("HTTP %d, %d writes, pods %v; want 403 and nothing", rec.Code, f.provisionWrites(), f.podNames(t))
+			}
+		})
+	}
+}
+
+// A tab's script reload (no user gesture) never creates a User: an admin's
+// delete must stick while the member's tab is open. The stopped page's Start
+// button (a same-site POST) does provision.
+func TestLibraryServerReloadDoesNotProvision(t *testing.T) {
+	f := newLibraryFixture(t, nil)
+	s := f.provisioningServer(t)
+	rec := serveLibrary(s, "10.1.0.5:5555", signIn("Kim", testProvisionGroup, false))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "Start the Library") {
+		t.Errorf("HTTP %d %q, want the stopped page", rec.Code, rec.Body.String())
+	}
+	if n := f.provisionWrites(); n != 0 || len(f.podNames(t)) != 0 {
+		t.Fatalf("%d User/PVC writes, pods %v; want none", n, f.podNames(t))
+	}
+	rec = serveLibraryRequest(s, http.MethodPost, libraryStartPath, "10.1.0.5:5555", signIn("Kim", testProvisionGroup, false))
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("Start: HTTP %d, want 303", rec.Code)
+	}
+	if got := f.podNames(t); len(got) != 1 || got[0] != "direwolf-library-kim" {
+		t.Errorf("Start: pods = %v, want direwolf-library-kim", got)
+	}
+}
+
+// Only a provisioned User skips the user-gesture rule while uncached: a
+// hand-written one the cache hasn't seen yet gets the ordinary stopped page,
+// not a started shared Library.
+func TestLibraryServerUncachedHandWrittenUserNeedsGesture(t *testing.T) {
+	f := newLibraryFixture(t, nil)
+	s := f.provisioningServer(t) // cache built before the User exists
+	if _, err := f.dw.DirewolfV1alpha1().Users(libraryTestNS).Create(context.Background(), libraryUser("kim", false), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	rec := serveLibrary(s, "10.1.0.5:5555", signIn("kim", testProvisionGroup, false))
+	if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "Setting up") || len(f.podNames(t)) != 0 {
+		t.Errorf("HTTP %d %q, pods %v; want the stopped page and no pod", rec.Code, rec.Body.String(), f.podNames(t))
+	}
+}
+
+// A hung API server costs one bounded request and a refreshing error page.
+func TestLibraryServerProvisionTimeout(t *testing.T) {
+	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer hung.Close()
+	client, err := dwclient.NewForConfig(&rest.Config{Host: hung.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := libraryProvisionTimeout
+	libraryProvisionTimeout = 200 * time.Millisecond
+	defer func() { libraryProvisionTimeout = old }()
+
+	f := newLibraryFixture(t, nil)
+	s := f.provisioningServer(t)
+	s.Provisioner.userAPI = client.DirewolfV1alpha1().Users(libraryTestNS)
+	begin := time.Now()
+	rec := serveLibrary(s, "10.1.0.5:5555", signIn("Kim", testProvisionGroup, true))
+	if took := time.Since(begin); took > 5*time.Second {
+		t.Errorf("request took %v, want about the provisioning timeout", took)
+	}
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), `http-equiv="refresh"`) ||
+		strings.Contains(rec.Body.String(), hung.URL) {
+		t.Errorf("HTTP %d %q, want a refreshing error page without the cause", rec.Code, rec.Body.String())
+	}
 }

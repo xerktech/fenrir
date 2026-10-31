@@ -18,6 +18,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -30,7 +31,8 @@ const libraryActivityFlushInterval = 30 * time.Second
 
 // libraryProvisionTimeout bounds a first visit's User creation, so a slow API
 // server costs one refresh of the setup page, not a hung request.
-const libraryProvisionTimeout = 10 * time.Second
+// A var so tests can shorten it.
+var libraryProvisionTimeout = 10 * time.Second
 
 // librarySetupMessage is the page a first visit gets while its User and
 // Library are created.
@@ -273,16 +275,30 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	start := r.URL.Path == libraryStartPath
+	if start && (r.Method != http.MethodPost || r.Header.Get("Sec-Fetch-Site") == "cross-site") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	lib, err := s.libraryOf(r)
-	// provisioning: this visit's User is new (or not yet in the cache).
+	// provisioning: this visit's User was provisioned but is not yet cached.
 	provisioning := false
 	if errors.Is(err, errNoSuchUser) && s.mayProvision(r) {
-		lib, err = s.provision(r)
+		var user *v1alpha1types.User
+		// Only a visit the user asked for creates a User: a tab's script
+		// reload after an admin deleted theirs must not re-create it.
+		user, err = s.provision(r, start || userNavigation(r))
+		if errors.Is(err, errNoSuchUser) {
+			writeLibraryPage(w, http.StatusServiceUnavailable, "The Library is stopped.", false, true)
+			return
+		}
 		if err != nil {
 			s.writeProvisionError(w, err)
 			return
 		}
-		provisioning = true
+		lib = s.library.LibraryFor(user)
+		provisioning = user.Labels[v1alpha1types.ProvisionedLabel] == v1alpha1types.ProvisionedLabelValue
 	}
 	if errors.Is(err, errNoSuchUser) {
 		klog.Warningf("Library page: refusing %v", err)
@@ -299,15 +315,10 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		pod = nil
 	}
-	start := r.URL.Path == libraryStartPath
-	if start && (r.Method != http.MethodPost || r.Header.Get("Sec-Fetch-Site") == "cross-site") {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	if pod == nil {
 		// A provisioning visit starts the Library even from the setup page's
-		// own refresh: it only happens while the new User is not yet cached,
-		// seconds after the sign-in that created it.
+		// own refresh: only while a provisioned User exists live but is not
+		// yet cached, seconds after the sign-in that created it.
 		if !start && !userNavigation(r) && !provisioning {
 			// Selkies reloads its tab when the stream drops, so a tab left
 			// open across an idle shutdown would restart the Library at once.
@@ -374,16 +385,27 @@ func (s *LibraryServer) mayProvision(r *http.Request) bool {
 	return s.Provisioner.InGroup(r.Header.Get(s.Provisioner.GroupsHeader))
 }
 
-// provision creates (or, while the cache lags, finds) r's User and returns
-// its library. Bounded: the setup page refreshes, so a slow call just retries.
-func (s *LibraryServer) provision(r *http.Request) (LibraryRef, error) {
+// provision returns r's User from the API server, creating it (and its
+// claims) when create is set; without create a missing one is errNoSuchUser.
+// The live read covers the seconds a new User takes to reach the cache.
+// Bounded: the setup page refreshes, so a slow call just retries.
+func (s *LibraryServer) provision(r *http.Request, create bool) (*v1alpha1types.User, error) {
 	ctx, cancel := context.WithTimeout(r.Context(), libraryProvisionTimeout)
 	defer cancel()
-	user, err := s.Provisioner.Ensure(ctx, r.Header.Get(s.userHeader))
-	if err != nil {
-		return LibraryRef{}, err
+	username := r.Header.Get(s.userHeader)
+	if create {
+		return s.Provisioner.Ensure(ctx, username)
 	}
-	return s.library.LibraryFor(user), nil
+	user, err := v1alpha1types.LookupUser(func(name string) (*v1alpha1types.User, error) {
+		return s.Provisioner.userAPI.Get(ctx, name, metav1.GetOptions{})
+	}, username)
+	if apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("%w: %q", errNoSuchUser, username)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting user %s: %w", username, err)
+	}
+	return user, nil
 }
 
 func (s *LibraryServer) writeProvisionError(w http.ResponseWriter, err error) {
