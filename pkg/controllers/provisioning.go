@@ -1,9 +1,12 @@
 package controllers
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	stderrors "errors"
 	"fmt"
+	"io"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -11,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/yaml"
@@ -92,6 +96,15 @@ func ParseProvisionUserTemplate(s string) (v1alpha1types.UserSpec, error) {
 	if strings.TrimSpace(s) == "" {
 		return spec, nil
 	}
+	// sigs.k8s.io/yaml reads only the first document; a second (say, one
+	// setting library) would be dropped silently.
+	docs := utilyaml.NewYAMLReader(bufio.NewReader(strings.NewReader(s)))
+	if _, err := docs.Read(); err != nil {
+		return spec, fmt.Errorf("parsing user template: %w", err)
+	}
+	if extra, err := docs.Read(); !stderrors.Is(err, io.EOF) || len(bytes.TrimSpace(extra)) > 0 {
+		return spec, stderrors.New("user template must be a single document")
+	}
 	if err := yaml.UnmarshalStrict([]byte(s), &spec); err != nil {
 		return spec, fmt.Errorf("parsing user template: %w", err)
 	}
@@ -129,6 +142,13 @@ func (p *Provisioner) Ensure(ctx context.Context, username string) (*v1alpha1typ
 	} else if !errors.IsNotFound(getErr) {
 		return nil, fmt.Errorf("getting user %s: %w", name, getErr)
 	}
+	// The cache may lag a User created moments ago; check live before
+	// creating claims it would never use.
+	if live, getErr := p.userAPI.Get(ctx, name, metav1.GetOptions{}); getErr == nil {
+		return existingUserFor(live, username)
+	} else if !errors.IsNotFound(getErr) {
+		return nil, fmt.Errorf("getting user %s: %w", name, getErr)
+	}
 
 	lib := LibraryRef{Owner: name, HomePVC: provisionedHomeClaimPrefix + name, GamesPVC: provisionedGamesClaimPrefix + name}
 	cached, listErr := p.users.List(labels.Everything())
@@ -143,6 +163,18 @@ func (p *Provisioner) Ensure(ctx context.Context, username string) (*v1alpha1typ
 	// it can't start.
 	if conflict := libraryClaimsConflict(lib, p.SharedHomePVC, p.SharedGamesPVC, users); conflict != nil {
 		return nil, fmt.Errorf("%w: %w", errProvisionRefused, conflict)
+	}
+
+	// Refuse a claim someone else holds before creating either, so a refused
+	// username leaves nothing behind.
+	for _, claim := range []string{lib.HomePVC, lib.GamesPVC} {
+		if live, getErr := p.claims.Get(ctx, claim, metav1.GetOptions{}); getErr == nil {
+			if !claimProvisionedFor(live, username) {
+				return nil, fmt.Errorf("%w %q: claim %s exists and is not provisioned for it", errProvisionRefused, username, claim)
+			}
+		} else if !errors.IsNotFound(getErr) {
+			return nil, fmt.Errorf("getting claim %s: %w", claim, getErr)
+		}
 	}
 
 	// Claims first: a User is never left pointing at claims that don't exist,
@@ -212,8 +244,7 @@ func (p *Provisioner) ensureClaim(ctx context.Context, name string, tmpl ClaimTe
 		if getErr != nil {
 			return fmt.Errorf("getting claim %s: %w", name, getErr)
 		}
-		if live.Labels[v1alpha1types.ProvisionedLabel] != v1alpha1types.ProvisionedLabelValue ||
-			live.Annotations[v1alpha1types.UsernameAnnotation] != username {
+		if !claimProvisionedFor(live, username) {
 			return fmt.Errorf("%w %q: claim %s exists and is not provisioned for it", errProvisionRefused, username, name)
 		}
 		return nil
@@ -222,4 +253,10 @@ func (p *Provisioner) ensureClaim(ctx context.Context, name string, tmpl ClaimTe
 		return fmt.Errorf("creating claim %s: %w", name, err)
 	}
 	return nil
+}
+
+// claimProvisionedFor reports whether claim was provisioned for username.
+func claimProvisionedFor(claim *corev1.PersistentVolumeClaim, username string) bool {
+	return claim.Labels[v1alpha1types.ProvisionedLabel] == v1alpha1types.ProvisionedLabelValue &&
+		claim.Annotations[v1alpha1types.UsernameAnnotation] == username
 }

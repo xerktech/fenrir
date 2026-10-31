@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -427,6 +428,9 @@ func readProxySecret(path string) ([]byte, error) {
 // provisionerOptions validates the provisioning flags.
 func provisionerOptions(group, groupsHeader, separator, userTemplate, homeClass, homeSize, gamesClass, gamesSize string) (controllers.ProvisionerOptions, error) {
 	opts := controllers.ProvisionerOptions{Group: group, GroupsHeader: groupsHeader, GroupsSeparator: separator}
+	if strings.TrimSpace(group) != group {
+		return opts, fmt.Errorf("--provision-group %q has surrounding spaces, so no group would ever match", group)
+	}
 	if groupsHeader == "" || separator == "" {
 		return opts, errors.New("--library-groups-header and --library-groups-separator must not be empty")
 	}

@@ -186,6 +186,21 @@ func TestProvisionerEnsureAlreadyExists(t *testing.T) {
 	}
 }
 
+// A User the cache hasn't seen yet is found live, before any claim is made.
+func TestProvisionerEnsureStaleCache(t *testing.T) {
+	f := newProvisionFixture(t, nil)
+	if _, err := f.dw.DirewolfV1alpha1().Users(libraryTestNS).Create(context.Background(), libraryUser("hank", false), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	user, err := f.p.Ensure(context.Background(), "hank")
+	if err != nil || user.Spec.Library != nil {
+		t.Fatalf("Ensure = %+v, %v; want the hand-written User", user, err)
+	}
+	if n := f.claimCount(t); n != 0 {
+		t.Errorf("%d claims created for an existing User", n)
+	}
+}
+
 // Hand-written Users stay authoritative: returned as they are, never changed.
 func TestProvisionerEnsureLeavesHandWrittenUser(t *testing.T) {
 	for _, own := range []bool{false, true} {
@@ -247,6 +262,27 @@ func TestProvisionerEnsureRefusesNameCollision(t *testing.T) {
 			t.Errorf("Ensure(kim) = %v, want refused", err)
 		}
 	})
+	t.Run("claims left by another username", func(t *testing.T) {
+		// A failed "Bob" attempt left its claims and no User.
+		left := make([]runtime.Object, 0, 2)
+		for _, name := range []string{"direwolf-home-bob", "direwolf-games-bob"} {
+			left = append(left, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: libraryTestNS,
+				Labels:      map[string]string{v1alpha1types.ProvisionedLabel: v1alpha1types.ProvisionedLabelValue},
+				Annotations: map[string]string{v1alpha1types.UsernameAnnotation: "Bob"},
+			}})
+		}
+		f := newProvisionFixture(t, left)
+		if _, err := f.p.Ensure(context.Background(), "bob"); !stderrors.Is(err, errProvisionRefused) {
+			t.Errorf("Ensure(bob) = %v, want refused", err)
+		}
+		if _, err := f.dw.DirewolfV1alpha1().Users(libraryTestNS).Get(context.Background(), "bob", metav1.GetOptions{}); err == nil {
+			t.Error("bob got Bob's claims")
+		}
+		if _, err := f.p.Ensure(context.Background(), "Bob"); err != nil {
+			t.Errorf("Ensure(Bob) = %v, want its claims adopted", err)
+		}
+	})
 	t.Run("hand-written claim", func(t *testing.T) {
 		hand := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "direwolf-games-kim", Namespace: libraryTestNS}}
 		f := newProvisionFixture(t, []runtime.Object{hand})
@@ -255,6 +291,10 @@ func TestProvisionerEnsureRefusesNameCollision(t *testing.T) {
 		}
 		if _, err := f.dw.DirewolfV1alpha1().Users(libraryTestNS).Get(context.Background(), "kim", metav1.GetOptions{}); err == nil {
 			t.Error("a User was created on someone else's claim")
+		}
+		// Refused before anything is created.
+		if n := f.claimCount(t); n != 1 {
+			t.Errorf("%d claims, want only the hand-written one", n)
 		}
 	})
 }
@@ -328,6 +368,7 @@ sidecarPolicies:
 		`{"library":{"homeClaimName":"a","gamesClaimName":"b"}}`,
 		`{"resource":{}}`, // typo: would silently drop the limits
 		`[`,
+		"resources: {}\n---\nlibrary: {homeClaimName: a, gamesClaimName: b}\n",
 	} {
 		if _, err := ParseProvisionUserTemplate(bad); err == nil {
 			t.Errorf("ParseProvisionUserTemplate(%s) accepted", bad)

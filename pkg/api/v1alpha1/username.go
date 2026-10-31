@@ -62,13 +62,19 @@ func (u *User) IsFor(username string) bool {
 }
 
 // LookupUser finds username's User through get (a lister's or client's Get).
-// A username with no valid name, or whose name belongs to another username,
-// is NotFound, like a missing User. Every place that turns a signed-in
+// A username whose name belongs to another username is NotFound, like a
+// missing User. Every place that turns a signed-in
 // username into a User must use it, so they agree with the provisioner.
 func LookupUser(get func(name string) (*User, error), username string) (*User, error) {
+	if username == "" {
+		return nil, apierrors.NewNotFound(Resource("users"), username)
+	}
 	name, err := UserNameFor(username)
 	if err != nil {
-		return nil, apierrors.NewNotFound(Resource("users"), username)
+		// No provisioned User can have it, but a hand-written User may carry
+		// any name the API server accepts ("first.last"): IsFor then matches
+		// only that exact name, as before mapping existed.
+		name = username
 	}
 	user, err := get(name)
 	if err != nil {

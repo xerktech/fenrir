@@ -54,6 +54,7 @@ func TestProvisionerOptions(t *testing.T) {
 		t.Errorf("options = %+v", opts)
 	}
 	for name, args := range map[string][8]string{
+		"spaced group":    {" g", "h", "|", "", "", "1Gi", "", "1Gi"},
 		"no header":       {"g", "", "|", "", "", "1Gi", "", "1Gi"},
 		"no separator":    {"g", "h", "", "", "", "1Gi", "", "1Gi"},
 		"bad template":    {"g", "h", "|", `{"library":{}}`, "", "1Gi", "", "1Gi"},

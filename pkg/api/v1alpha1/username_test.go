@@ -33,6 +33,8 @@ func TestLookupUser(t *testing.T) {
 	users := map[string]*User{
 		// Hand-written: only its exact name.
 		"sam": {ObjectMeta: metav1.ObjectMeta{Name: "sam"}},
+		// Hand-written with a name no username maps to: still found by it.
+		"first.last": {ObjectMeta: metav1.ObjectMeta{Name: "first.last"}},
 		// Provisioned for "Kim": only that username.
 		"kim": {ObjectMeta: metav1.ObjectMeta{Name: "kim", Annotations: map[string]string{UsernameAnnotation: "Kim"}}},
 	}
@@ -45,6 +47,7 @@ func TestLookupUser(t *testing.T) {
 	for username, want := range map[string]string{
 		"sam": "sam", "Sam": "", "SAM": "",
 		"Kim": "kim", "kim": "", "KIM": "",
+		"first.last": "first.last", "First.Last": "",
 		"alex": "", "": "", "sam@x": "",
 	} {
 		u, err := LookupUser(get, username)
