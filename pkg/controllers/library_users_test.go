@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	stderrors "errors"
 	"net/http"
 	"slices"
 	"strings"
@@ -9,10 +10,13 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	"games-on-whales.github.io/direwolf/pkg/generic"
@@ -411,5 +415,82 @@ func TestSessionPodRefusedOnOpenLibrarysClaim(t *testing.T) {
 	}
 	if open, err := c.libraryOpenOn(libraryTestNS, spec("home-carol")); err != nil || open != "" {
 		t.Errorf("libraryOpenOn(home-carol) = %q, %v; want none", open, err)
+	}
+}
+
+// Through the session reconcile: a Library open on the App's claim ends the
+// Session before any pod; a failed Library lookup is retried, never ignored.
+func TestOpenLibraryClaimEndsSession(t *testing.T) {
+	library := libraryPod(0, true)
+	library.Namespace = portsTestNS
+	library.Spec.Volumes = []corev1.Volume{{Name: "steam-home", VolumeSource: corev1.VolumeSource{
+		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "steam-home"},
+	}}}
+	for _, tc := range []struct {
+		name      string
+		objs      []runtime.Object
+		listErr   bool
+		wantEnded bool
+	}{
+		{name: "Library open on the claim", objs: []runtime.Object{library}, wantEnded: true},
+		{name: "no Library", wantEnded: false},
+		{name: "Library lookup fails", listErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := podReadySession(f)
+				s.Status.Conditions = s.Status.Conditions[:1] // PortsAllocated only: no pod yet
+				return s
+			}, nil)
+			app, err := f.sc.AppInformer.Namespaced(portsTestNS).Get(f.app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			app.Spec.Template.Spec.Volumes = append(app.Spec.Template.Spec.Volumes, corev1.Volume{Name: "home", VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "steam-home"},
+			}})
+			client := k8sfake.NewClientset(tc.objs...)
+			if tc.listErr {
+				client.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, apierrors.NewServiceUnavailable("down")
+				})
+			}
+			f.sc.K8sClient = client
+			f.sc.Recorder = record.NewFakeRecorder(10)
+			_, err = f.sc.reconcilePod(context.Background(), sess)
+			if ended := stderrors.Is(err, errSessionEnded); ended != tc.wantEnded {
+				t.Fatalf("reconcilePod = %v, want ended %v", err, tc.wantEnded)
+			}
+			if tc.listErr && err == nil {
+				t.Fatal("reconcilePod built a pod without checking for an open Library")
+			}
+			if got := f.sessionExists(t, sess.Name); got == tc.wantEnded {
+				t.Errorf("session exists = %v, want %v", got, !tc.wantEnded)
+			}
+		})
+	}
+}
+
+// Users created in one apply share a creation second: the name decides.
+func TestLibraryClaimsConflictTieBreaksByName(t *testing.T) {
+	bob, carol := libraryUser("bob", true), libraryUser("carol", true)
+	carol.Spec.Library.GamesClaimName = "games-bob"
+	users := []v1alpha1types.User{*bob, *carol}
+	if err := libraryClaimsConflict(LibraryRef{Owner: "bob", HomePVC: "home-bob", GamesPVC: "games-bob"}, "steam-home", "games", users); err != nil {
+		t.Errorf("bob refused: %v", err)
+	}
+	if err := libraryClaimsConflict(LibraryRef{Owner: "carol", HomePVC: "home-carol", GamesPVC: "games-bob"}, "steam-home", "games", users); err == nil {
+		t.Error("carol accepted on bob's claim")
+	}
+}
+
+// One claim for home and games is a misconfiguration too: 409, not 500.
+func TestLibraryServerSameClaimTwiceIsMisconfigured(t *testing.T) {
+	ann := libraryUser("ann", true)
+	ann.Spec.Library.GamesClaimName = ann.Spec.Library.HomeClaimName
+	f := newLibraryFixture(t, nil, ann)
+	rec := serveLibrary(f.server(t), "10.1.0.5:5555", http.Header{"Sec-Fetch-User": {"?1"}, DefaultLibraryUserHeader: {"ann"}})
+	if rec.Code != http.StatusConflict || f.podExists(t) {
+		t.Errorf("HTTP %d; want 409 and no Library", rec.Code)
 	}
 }
