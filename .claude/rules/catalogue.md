@@ -48,7 +48,11 @@ paths:
   - A base App change also reaches existing copies without a scan (XERK-1963): `RunRefresh`
     (leader, on `BaseAppChanges` and every `catalogueRefreshInterval`) re-copies the base.
     It reads each game back from its App; the ID annotation goes into a shell line, so it is
-    checked as a scan would and must still give the App's name. It creates/deletes nothing.
+    checked as a scan would and must still give the App's name. It creates nothing.
+  - Refresh deletes only Apps of a User's own library whose User is gone or lacks `spec.library`
+    (XERK-2502): that Library never scans again. The User is read live, not from the informer
+    (a lagging watch would delete a new User's Apps); a failed read deletes nothing.
+    Tests: `TestCatalogueRefreshDeletesOrphanedOwnApps`.
     Tests: `catalogue_refresh_test.go`.
   - `Catalogue.BaseAppChanges` watches the names from `baseApps`, the list `bases` syncs from:
     a launcher added to `CatalogueOptions` but not there fails

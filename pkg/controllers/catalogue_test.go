@@ -369,6 +369,7 @@ func newCatalogueFixture(t *testing.T, objs ...runtime.Object) *catalogueFixture
 	f := &catalogueFixture{dw: dwfake.NewSimpleClientset(objs...)}
 	f.catalogue = NewCatalogue(f.dw.DirewolfV1alpha1().Apps(libraryTestNS), fixtureExec(t, "testdata/catalogue"), "/games",
 		CatalogueOptions{SteamBaseApp: "steam-base", HeroicBaseApp: "heroic-base"})
+	f.catalogue.Users = f.dw.DirewolfV1alpha1().Users(libraryTestNS)
 	f.catalogue.now = func() time.Time { return libraryTestNow }
 	pngData := testPNG(t)
 	f.catalogue.FetchArt = func(_ context.Context, u string) ([]byte, error) {

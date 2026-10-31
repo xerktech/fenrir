@@ -285,6 +285,7 @@ func main() {
 				*libraryGamesPath,
 				controllers.CatalogueOptions{SteamBaseApp: *catalogueSteamApp, HeroicBaseApp: *catalogueHeroicApp, NexusBaseApp: *catalogueNexusApp, BattlenetBaseApp: *catalogueBattlenetApp},
 			)
+			libraryController.Catalogue.Users = direwolfClient.DirewolfV1alpha1().Users(*namespace)
 			catalogueBaseChanged, err = libraryController.Catalogue.BaseAppChanges(appInformer)
 			if err != nil {
 				klog.Fatalf("Catalogue: %v", err)
