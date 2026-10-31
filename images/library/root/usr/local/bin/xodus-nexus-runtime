@@ -59,46 +59,57 @@ for source in "${sources[@]}"; do
   # As Nexus does: a missing runtime repository falls back; any other failure stops.
   if [[ "${status}" == 404 && "${repo}" == */nexus-runtime ]]; then continue; fi
   [[ "${status}" == 200 ]] || give_up "cannot read ${repo}'s releases (HTTP ${status})"
-  # The newest release (by publication: runtime tags don't sort) with a runtime
-  # archive and its .sha512sum. Prints the archive's name, the tag, its URL, size
-  # and SHA256, and the checksum file's URL, tab-separated.
+  # The release Nexus would pick (newest publication: runtime tags don't sort),
+  # checked further here. Prints the archive's name, the tag, its URL, size and
+  # SHA256, and the checksum file's URL, tab-separated.
   fields="$(python3 -I -c '
-import json, re, sys
+import datetime, json, re, sys
 prefix = sys.argv[1]
-best = None
-seen = False
+
+
+def published(r):
+    try:
+        return datetime.datetime.fromisoformat(r["published_at"].replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return float("-inf")
+
+
+# Exit 1: no release Nexus would take (Nexus falls back to the next repository).
+# Exit 2: an unreadable list, or the release Nexus would take fails the checks
+# here (Nexus throws on the first; falling back would differ on the second).
 try:
-    releases = json.load(sys.stdin)
-except ValueError:
+    pick, newest = None, float("-inf")
+    for r in json.load(sys.stdin):
+        if r.get("draft") or r.get("prerelease"):
+            continue
+        # As Nexus picks: the name pattern, then https archive and .sha512sum
+        # URLs, newest publication first (the first one seen on a tie).
+        assets = [a for a in r.get("assets") or []]
+        names = {a.get("name"): a for a in assets}
+        for a in assets:
+            name, url = a.get("name"), a.get("browser_download_url")
+            if not isinstance(name, str) or not re.fullmatch(re.escape(prefix) + r"-[A-Za-z0-9._-]+-x86_64\.tar\.xz", name):
+                continue
+            s = names.get(name.removesuffix(".tar.xz") + ".sha512sum")
+            if not isinstance(url, str) or not url.startswith("https://") or s is None or \
+                    not isinstance(s.get("browser_download_url"), str) or not s["browser_download_url"].startswith("https://"):
+                continue
+            if pick is None or published(r) > newest:
+                pick, newest = (r, a, s), published(r)
+            break
+except Exception:
     sys.exit(2)
-if not isinstance(releases, list):
+if pick is None:
+    sys.exit(1)
+r, a, s = pick
+tag, url, size, digest = r.get("tag_name"), a["browser_download_url"], a.get("size"), a.get("digest")
+sum_url = s["browser_download_url"]
+if not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", tag) or \
+        not url.startswith("https://github.com/") or not sum_url.startswith("https://github.com/") or \
+        not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or \
+        type(size) is not int or not 0 < size < 4 << 30:
     sys.exit(2)
-for r in releases:
-    if not isinstance(r, dict):
-        sys.exit(2)
-    if r.get("draft") or r.get("prerelease") or not re.fullmatch(r"[A-Za-z0-9._-]+", r.get("tag_name") or ""):
-        continue
-    assets = {a.get("name"): a for a in r.get("assets") or []}
-    for name, a in assets.items():
-        if not re.fullmatch(re.escape(prefix) + r"-[A-Za-z0-9._-]+-x86_64\.tar\.xz", name or ""):
-            continue
-        seen = True
-        s = assets.get(name.removesuffix(".tar.xz") + ".sha512sum")
-        url, size, digest = a.get("browser_download_url") or "", a.get("size"), a.get("digest") or ""
-        if not s or not (s.get("browser_download_url") or "").startswith("https://github.com/"):
-            continue
-        if not url.startswith("https://github.com/") or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-            continue
-        if type(size) is not int or not 0 < size < 4 << 30:
-            continue
-        key = r.get("published_at") or ""
-        if best is None or key > best[0]:
-            best = (key, name, r["tag_name"], url, size, digest.removeprefix("sha256:"), s["browser_download_url"])
-if best is None:
-    # 1: no runtime archive at all (Nexus falls back); 2: one Nexus would take
-    # that fails the checks here (an older fallback would differ from Nexus).
-    sys.exit(2 if seen else 1)
-print(*best[1:], sep="\t")
+print(a["name"], tag, url, size, digest.removeprefix("sha256:"), sum_url, sep="\t")
 ' "${prefix}" <"${releases}" 2>/dev/null)" && break
   found=$?
   # Nexus falls back only when the runtime repository has no runtime release;

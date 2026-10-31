@@ -300,6 +300,10 @@ func TestXodusNexusRuntimeFallsBackToLauncherReleases(t *testing.T) {
 	for test, runtimeList := range map[string]string{
 		"repository missing": "",
 		"no runtime release": `[{"tag_name":"v1","assets":[]}]`,
+		// Nexus skips an archive without an https .sha512sum.
+		"no checksum": `[{"tag_name":"t","assets":[{"name":"` + runtimeName + `-x86_64.tar.xz","browser_download_url":"https://github.com/x/a"}]}]`,
+		"http checksum": `[{"tag_name":"t","assets":[{"name":"` + runtimeName + `-x86_64.tar.xz","browser_download_url":"https://github.com/x/a"},` +
+			`{"name":"` + runtimeName + `-x86_64.sha512sum","browser_download_url":"http://github.com/x/b"}]}]`,
 	} {
 		t.Run(test, func(t *testing.T) {
 			h := newRuntimeHost(t)
@@ -340,8 +344,14 @@ func TestXodusNexusRuntimePrefersRuntimeRepository(t *testing.T) {
 // the first and would install the second).
 func TestXodusNexusRuntimeNoFallbackPastBadRuntimeList(t *testing.T) {
 	for test, runtimeList := range map[string]string{
-		"not JSON":     "<html>oops",
-		"not an array": `{"message":"x"}`,
+		"not JSON":      "<html>oops",
+		"not an array":  `{"message":"x"}`,
+		"not objects":   `[1]`,
+		"null asset":    `[{"tag_name":"t","assets":[null]}]`,
+		"assets object": `[{"tag_name":"t","assets":{"a":1}}]`,
+		"tag Nexus takes, not this script": `[{"tag_name":"release/2026 10","published_at":"2026-10-28T00:00:00Z","assets":[` +
+			`{"name":"` + runtimeName + `-x86_64.tar.xz","browser_download_url":"https://github.com/x/a","size":1,"digest":"sha256:` + strings.Repeat("0", 64) + `"},` +
+			`{"name":"` + runtimeName + `-x86_64.sha512sum","browser_download_url":"https://github.com/x/b","size":1}]}]`,
 		"unverifiable": `[{"tag_name":"` + runtimeTag + `","published_at":"2026-10-28T00:00:00Z","assets":[` +
 			`{"name":"` + runtimeName + `-x86_64.tar.xz","browser_download_url":"https://github.com/x/a","size":1},` +
 			`{"name":"` + runtimeName + `-x86_64.sha512sum","browser_download_url":"https://github.com/x/b","size":1}]}]`,
