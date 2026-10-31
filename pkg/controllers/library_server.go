@@ -71,6 +71,10 @@ type LibraryServer struct {
 	secret []byte
 	proxy  *httputil.ReverseProxy
 
+	// Provisioner creates a group member's User on first sign-in; nil when
+	// provisioning is off (--provision-group).
+	Provisioner *Provisioner
+
 	// states is each library's *libraryState, by owner ("" the shared one).
 	states sync.Map
 }
@@ -236,7 +240,7 @@ func (s *LibraryServer) libraryOf(r *http.Request) (LibraryRef, error) {
 	if !named || s.users == nil {
 		return s.library.LibraryFor(nil), nil
 	}
-	user, err := s.users.Get(name)
+	user, err := v1alpha1types.LookupUser(s.users.Get, name)
 	if apierrors.IsNotFound(err) {
 		return LibraryRef{}, fmt.Errorf("%w: %q", errNoSuchUser, name)
 	}

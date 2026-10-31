@@ -35,6 +35,29 @@ wowAddons: []
 # a working Library but their "Close Library" tile fails.
 libraryUsers: []
 
+# Provisioning (XERK-2537): a member of `group` who signs in to the Library
+# with no User gets one, with a Steam home and game library of their own
+# (PVCs direwolf-home-<user> / direwolf-games-<user>). Empty group: off. Needs
+# the Library (--library-port). Existing Users are never changed, and nothing
+# is ever deleted: removing someone's data is an admin's call.
+provisioning:
+  group: ""
+  # Authentik's proxy outpost lists the user's groups here, separated by "|".
+  groupsHeader: X-Authentik-Groups
+  groupsSeparator: "|"
+  # Every provisioned User's spec (resources, volumes, sidecarPolicies; no
+  # library), e.g. what a hand-written User sets.
+  userTemplate: {}
+  # The PVCs' storage. Empty storageClassName: the cluster's default class.
+  # A WaitForFirstConsumer class (local-path) leaves them Pending until the
+  # user's Library first starts.
+  home:
+    storageClassName: ""
+    size: 100Gi
+  games:
+    storageClassName: ""
+    size: 1Ti
+
 serviceAccount:
   direwolf_operator:
     forceRename: &operatorName direwolf-operator
@@ -167,6 +190,15 @@ controllers:
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           # The wowAddons list below, for the Library (--library-wow-addons).
           LIBRARY_WOW_ADDONS: '{{ toJson .Values.wowAddons }}'
+          # The provisioning values above (--provision-*, --library-groups-*).
+          PROVISION_GROUP: '{{ .Values.provisioning.group }}'
+          LIBRARY_GROUPS_HEADER: '{{ .Values.provisioning.groupsHeader }}'
+          LIBRARY_GROUPS_SEPARATOR: '{{ .Values.provisioning.groupsSeparator }}'
+          PROVISION_USER_TEMPLATE: '{{ toJson .Values.provisioning.userTemplate }}'
+          PROVISION_HOME_STORAGE_CLASS: '{{ .Values.provisioning.home.storageClassName }}'
+          PROVISION_HOME_SIZE: '{{ .Values.provisioning.home.size }}'
+          PROVISION_GAMES_STORAGE_CLASS: '{{ .Values.provisioning.games.storageClassName }}'
+          PROVISION_GAMES_SIZE: '{{ .Values.provisioning.games.size }}'
           ROMM_TOKEN:
             valueFrom:
               secretKeyRef:

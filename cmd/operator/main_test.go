@@ -42,3 +42,27 @@ func TestReadProxySecret(t *testing.T) {
 		}
 	})
 }
+
+func TestProvisionerOptions(t *testing.T) {
+	opts, err := provisionerOptions("k8x-games", "X-Authentik-Groups", "|", `{"resources":{"limits":{"cpu":"8"}}}`,
+		"local-path", "100Gi", "", "1Ti")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Home.Size.String() != "100Gi" || opts.Games.Size.String() != "1Ti" ||
+		opts.Home.StorageClassName != "local-path" || opts.Games.StorageClassName != "" || opts.UserTemplate.Resources == nil {
+		t.Errorf("options = %+v", opts)
+	}
+	for name, args := range map[string][8]string{
+		"no header":       {"g", "", "|", "", "", "1Gi", "", "1Gi"},
+		"no separator":    {"g", "h", "", "", "", "1Gi", "", "1Gi"},
+		"bad template":    {"g", "h", "|", `{"library":{}}`, "", "1Gi", "", "1Gi"},
+		"bad home size":   {"g", "h", "|", "", "", "lots", "", "1Gi"},
+		"zero games size": {"g", "h", "|", "", "", "1Gi", "", "0"},
+		"negative size":   {"g", "h", "|", "", "", "-1Gi", "", "1Gi"},
+	} {
+		if _, err := provisionerOptions(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

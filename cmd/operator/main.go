@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
@@ -88,6 +89,22 @@ func main() {
 		"App copied for each playable RomM ROM (a RetroArch session; its pod template mounts RomM's library at "+controllers.RomMLibraryPath+" and runs $"+controllers.LaunchCommandEnv+"). Required with --romm-url")
 	rommCollection := flag.Int("romm-collection-id", 0,
 		"Only catalogue the ROMs in this RomM collection. 0: every ROM")
+	provisionGroup := flag.String("provision-group", os.Getenv("PROVISION_GROUP"),
+		"Group whose members get a User with a library of their own on first Library sign-in. Empty: off. Needs --library-port")
+	libraryGroupsHeader := flag.String("library-groups-header", cmp.Or(os.Getenv("LIBRARY_GROUPS_HEADER"), controllers.DefaultLibraryGroupsHeader),
+		"Header the trusted proxy lists the signed-in user's groups in")
+	libraryGroupsSeparator := flag.String("library-groups-separator", cmp.Or(os.Getenv("LIBRARY_GROUPS_SEPARATOR"), controllers.DefaultLibraryGroupsSeparator),
+		"Separator between the groups in --library-groups-header")
+	provisionUserTemplate := flag.String("provision-user-template", os.Getenv("PROVISION_USER_TEMPLATE"),
+		"JSON or YAML User spec (resources, volumes, sidecarPolicies; no library) every provisioned User gets")
+	provisionHomeClass := flag.String("provision-home-storage-class", os.Getenv("PROVISION_HOME_STORAGE_CLASS"),
+		"StorageClass of a provisioned User's Steam home PVC. Empty: the cluster default")
+	provisionHomeSize := flag.String("provision-home-size", cmp.Or(os.Getenv("PROVISION_HOME_SIZE"), "100Gi"),
+		"Size of a provisioned User's Steam home PVC")
+	provisionGamesClass := flag.String("provision-games-storage-class", os.Getenv("PROVISION_GAMES_STORAGE_CLASS"),
+		"StorageClass of a provisioned User's game library PVC. Empty: the cluster default")
+	provisionGamesSize := flag.String("provision-games-size", cmp.Or(os.Getenv("PROVISION_GAMES_SIZE"), "1Ti"),
+		"Size of a provisioned User's game library PVC")
 	klog.InitFlags(nil)
 	flag.Parse()
 
@@ -156,6 +173,18 @@ func main() {
 
 	if (*rommURL == "") != (*rommApp == "") {
 		klog.Fatal("--romm-url and --romm-app go together")
+	}
+
+	var provisionOpts controllers.ProvisionerOptions
+	if *provisionGroup != "" {
+		if *libraryPort == 0 {
+			klog.Fatal("--provision-group needs --library-port: Users are provisioned on Library sign-in")
+		}
+		if provisionOpts, err = provisionerOptions(*provisionGroup, *libraryGroupsHeader, *libraryGroupsSeparator,
+			*provisionUserTemplate, *provisionHomeClass, *provisionHomeSize, *provisionGamesClass, *provisionGamesSize); err != nil {
+			klog.Fatalf("provisioning: %v", err)
+		}
+		provisionOpts.SharedHomePVC, provisionOpts.SharedGamesPVC = *libraryHomePVC, *libraryGamesPVC
 	}
 
 	restConfig, err := util.GetRESTConfig()
@@ -301,6 +330,15 @@ func main() {
 			libraryTrusted,
 			libraryProxySecret,
 		)
+		if provisionOpts.Group != "" {
+			libraryServer.Provisioner = controllers.NewProvisioner(
+				*namespace,
+				generic.NewLister[*direwolfv1alpha1.User](userInformer.GetIndexer()).Namespaced(*namespace),
+				direwolfClient.DirewolfV1alpha1().Users(*namespace),
+				k8sClient.CoreV1().PersistentVolumeClaims(*namespace),
+				&provisionOpts,
+			)
+		}
 		go func() {
 			if runErr := libraryServer.Run(appContext, *libraryPort); runErr != nil {
 				klog.Errorf("Library server failed: %v", runErr)
@@ -384,4 +422,28 @@ func readProxySecret(path string) ([]byte, error) {
 		return nil, fmt.Errorf("secret is %d bytes, want at least %d", len(secret), controllers.MinLibraryProxySecretLen)
 	}
 	return secret, nil
+}
+
+// provisionerOptions validates the provisioning flags.
+func provisionerOptions(group, groupsHeader, separator, userTemplate, homeClass, homeSize, gamesClass, gamesSize string) (controllers.ProvisionerOptions, error) {
+	opts := controllers.ProvisionerOptions{Group: group, GroupsHeader: groupsHeader, GroupsSeparator: separator}
+	if groupsHeader == "" || separator == "" {
+		return opts, errors.New("--library-groups-header and --library-groups-separator must not be empty")
+	}
+	var err error
+	if opts.UserTemplate, err = controllers.ParseProvisionUserTemplate(userTemplate); err != nil {
+		return opts, fmt.Errorf("--provision-user-template: %w", err)
+	}
+	opts.Home.StorageClassName, opts.Games.StorageClassName = homeClass, gamesClass
+	for _, c := range []struct {
+		flag, value string
+		into        *resource.Quantity
+	}{{"--provision-home-size", homeSize, &opts.Home.Size}, {"--provision-games-size", gamesSize, &opts.Games.Size}} {
+		q, parseErr := resource.ParseQuantity(c.value)
+		if parseErr != nil || q.Sign() <= 0 {
+			return opts, fmt.Errorf("%s: want a positive quantity, got %q", c.flag, c.value)
+		}
+		*c.into = q
+	}
+	return opts, nil
 }

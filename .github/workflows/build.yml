@@ -103,9 +103,17 @@ jobs:
 
       # helm template defaults to a Kubernetes version below the chart's
       # kubeVersion floor (>=1.28), so it has to be stated. One library user,
-      # so the RBAC checks also see the per-user Library pod Role.
+      # so the RBAC checks also see the per-user Library pod Role; provisioning
+      # set, so its wiring is checked (charts/provisioning_test.go).
       - name: Render chart
-        run: helm template direwolf charts/direwolf-operator --include-crds --kube-version 1.36.0 --set 'libraryUsers={example}' > "$RUNNER_TEMP/chart.yaml"
+        run: >-
+          helm template direwolf charts/direwolf-operator --include-crds --kube-version 1.36.0
+          --set 'libraryUsers={example}'
+          --set provisioning.group=k8x-games
+          --set provisioning.home.storageClassName=local-path
+          --set provisioning.games.storageClassName=local-path
+          --set-json 'provisioning.userTemplate={"resources":{"limits":{"cpu":"8"}}}'
+          > "$RUNNER_TEMP/chart.yaml"
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:

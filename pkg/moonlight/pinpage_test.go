@@ -170,6 +170,9 @@ func TestPinPageRejects(t *testing.T) {
 		{name: "proxy secret from an untrusted peer", peer: "192.0.2.99:1234", user: "alice", body: `{"pin":"1234","secret":"%s"}`, want: http.StatusForbidden},
 		{name: "no identity header", peer: trustedPeer, body: `{"pin":"1234","secret":"%s"}`, want: http.StatusUnauthorized},
 		{name: "identity without a User", peer: trustedPeer, user: "mallory", body: `{"pin":"1234","secret":"%s"}`, want: http.StatusForbidden},
+		// Usernames map to User names as the operator's provisioner maps them:
+		// "Alice" is not the hand-written User "alice" (v1alpha1.LookupUser).
+		{name: "identity naming a User in another case", peer: trustedPeer, user: "Alice", body: `{"pin":"1234","secret":"%s"}`, want: http.StatusForbidden},
 		{name: "form post (CSRF)", peer: trustedPeer, user: "alice", body: `{"pin":"1234","secret":"%s"}`,
 			mutate: func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") }, want: http.StatusUnsupportedMediaType},
 		{name: "cross-site fetch", peer: trustedPeer, user: "alice", body: `{"pin":"1234","secret":"%s"}`,
