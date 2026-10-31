@@ -29,12 +29,6 @@ wowAddons: []
 #    source: {type: curseforge, project: 914482}
 #    flavors: [retail]
 
-# Users with their own library (User.spec.library), by name. moonlight-proxy
-# may delete only named Library pods ("Close Library"); each listed User's
-# pod, direwolf-library-<name>, is added to them. A User missing here keeps
-# a working Library but their "Close Library" tile fails.
-libraryUsers: []
-
 serviceAccount:
   direwolf_operator:
     forceRename: &operatorName direwolf-operator
@@ -312,12 +306,8 @@ rbac:
       - apiGroups: [""]
         resources: ["pods"]
         verbs: ["get", "list", "watch"]
-      # The "Close Library" tile deletes the Library pod, and only it: the
-      # proxy is internet-facing, so no patch (a pod's image is mutable).
-      - apiGroups: [""]
-        resources: ["pods"]
-        resourceNames: ["direwolf-library"]
-        verbs: ["delete"]
+      # No pod writes: the proxy is internet-facing. "Close Library" is a
+      # request on the requester's Pairing that the operator acts on.
       - apiGroups: ["direwolf.games-on-whales.github.io"]
         resources: ["pairings", "sessions"]
         verbs: ["create", "delete", "patch", "update", "get", "list", "watch"]

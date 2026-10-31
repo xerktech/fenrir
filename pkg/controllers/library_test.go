@@ -1013,9 +1013,9 @@ func TestPodExecutorRetriesUpgradeFailure(t *testing.T) {
 	}
 }
 
-// moonlight-proxy's "Close Library" tile only deletes the pod, so the pod
-// itself must shut Steam down and relink its home first, and the kubelet must
-// wait for that before SIGKILL.
+// A delete that skips stop() (manual, drain, eviction) leaves the pod itself
+// to shut Steam down and relink its home first, and the kubelet must wait for
+// that before SIGKILL.
 func TestLibraryPodShutsSteamDownOnAnyDelete(t *testing.T) {
 	f := newLibraryFixture(t, nil)
 	pod := f.library.buildPod(f.library.LibraryFor(nil))

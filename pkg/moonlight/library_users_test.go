@@ -28,6 +28,9 @@ func ownLibraryUser(name string, own bool) *v1alpha1types.User {
 func requestAs(t *testing.T, user *v1alpha1types.User, target string) *http.Request {
 	t.Helper()
 	ctx := context.WithValue(t.Context(), userContextKey{}, user)
+	ctx = context.WithValue(ctx, pairingContextKey{}, &v1alpha1types.Pairing{
+		ObjectMeta: metav1.ObjectMeta{Name: user.Name + "-pairing", Namespace: testNamespace},
+	})
 	return httptest.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
 }
 
@@ -99,34 +102,36 @@ func TestLibraryBusyCheckIsPerLibrary(t *testing.T) {
 	}
 }
 
-// "Close Library" closes the visitor's own Library, never another's.
+// "Close Library" asks to close the visitor's own Library, never another's.
 func TestPodLibraryIsPerOwner(t *testing.T) {
 	own := libraryPod("direwolf-library-sam")
+	own.UID = "sam-uid"
 	own.Labels[v1alpha1types.LibraryOwnerLabel] = "sam"
-	client := k8sfake.NewClientset(own, libraryPod("direwolf-library"))
-	lib := NewPodLibrary(client.CoreV1().Pods(testNamespace))
+	shared := libraryPod("direwolf-library")
+	shared.UID = "shared-uid"
+	lib, _, direwolf := podLibraryFixture(t, own, shared)
 	if open, err := lib.Open(t.Context(), "kim"); open || err != nil {
 		t.Errorf("kim's Library open = %v, %v", open, err)
 	}
-	if closing, err := lib.Close(t.Context(), "sam"); !closing || err != nil {
+	if closing, err := lib.Close(t.Context(), "sam", testPairing); !closing || err != nil {
 		t.Fatalf("Close(sam) = %v, %v", closing, err)
 	}
-	pods, err := client.CoreV1().Pods(testNamespace).List(t.Context(), metav1.ListOptions{})
-	if err != nil || len(pods.Items) != 1 || pods.Items[0].Name != "direwolf-library" {
-		t.Errorf("pods left = %v, %v; want only the shared Library", pods.Items, err)
+	if got := closeRequest(t, direwolf); got != "sam-uid" {
+		t.Errorf("close request = %q, want sam's Library sam-uid", got)
 	}
 }
 
 // ownerLibrary records which library each call was for.
-type ownerLibrary struct{ opened, closed []string }
+type ownerLibrary struct{ opened, closed, pairings []string }
 
 func (l *ownerLibrary) Open(_ context.Context, owner string) (bool, error) {
 	l.opened = append(l.opened, owner)
 	return true, nil
 }
 
-func (l *ownerLibrary) Close(_ context.Context, owner string) (bool, error) {
+func (l *ownerLibrary) Close(_ context.Context, owner, pairing string) (bool, error) {
 	l.closed = append(l.closed, owner)
+	l.pairings = append(l.pairings, pairing)
 	return true, nil
 }
 
@@ -142,17 +147,20 @@ func TestCloseLibraryTileIsTheRequestersLibrary(t *testing.T) {
 	if !slices.Equal(lib.opened, []string{"sam", ""}) || !slices.Equal(lib.closed, []string{"sam", ""}) {
 		t.Errorf("opened %q, closed %q; want each requester's own library", lib.opened, lib.closed)
 	}
+	// The request goes on the requester's own Pairing: the operator checks its User.
+	if !slices.Equal(lib.pairings, []string{"sam-pairing", "alex-pairing"}) {
+		t.Errorf("close requested on Pairings %q, want the requesters'", lib.pairings)
+	}
 }
 
 // A pod by an own Library's name but not labelled its owner's is not theirs.
 func TestPodLibraryChecksOwnerLabel(t *testing.T) {
 	impostor := libraryPod("direwolf-library-sam") // no owner label
-	client := k8sfake.NewClientset(impostor)
-	lib := NewPodLibrary(client.CoreV1().Pods(testNamespace))
+	lib, _, direwolf := podLibraryFixture(t, impostor)
 	if open, err := lib.Open(t.Context(), "sam"); open || err != nil {
 		t.Errorf("Open(sam) = %v, %v; want false", open, err)
 	}
-	if closing, err := lib.Close(t.Context(), "sam"); closing || err != nil {
+	if closing, err := lib.Close(t.Context(), "sam", testPairing); closing || err != nil || closeRequest(t, direwolf) != "" {
 		t.Errorf("Close(sam) = %v, %v; want nothing closed", closing, err)
 	}
 }

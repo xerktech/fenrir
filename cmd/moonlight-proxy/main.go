@@ -149,7 +149,7 @@ func main() {
 			LaunchTimeout:         *launchTimeout,
 			MaxConcurrentSessions: *maxSessions,
 			BusyCheck:             moonlight.LibraryBusyCheck(k8sClient.CoreV1().Pods(*namespace)),
-			Library:               moonlight.NewPodLibrary(k8sClient.CoreV1().Pods(*namespace)),
+			Library:               moonlight.NewPodLibrary(k8sClient.CoreV1().Pods(*namespace), direwolfClient.DirewolfV1alpha1().Pairings(*namespace)),
 			PinPage: moonlight.PinPageOptions{
 				Port:           *pinPort,
 				TrustedProxies: trustedProxies,
