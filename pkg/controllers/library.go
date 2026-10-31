@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"path"
 	"strconv"
@@ -771,24 +772,42 @@ func libraryBusyReasonIf(busy bool) string {
 	return ""
 }
 
+// errLibraryClaims: a User's library is configured on a claim it can't have.
+var errLibraryClaims = stderrors.New("library misconfigured")
+
 // libraryClaimsConflict refuses an own library (lib.Owner set) on a claim of
 // the shared library's or of another User's own library: each library's lock
 // sees only its own Users' sessions and Library, so two libraries on one
-// claim would let two Steams write one home.
+// claim would let two Steams write one home. Of two Users on one claim, the
+// one created first keeps it, so a misconfigured newcomer can't lock out a
+// working User.
 func libraryClaimsConflict(lib LibraryRef, sharedHome, sharedGames string, users []v1alpha1types.User) error {
+	var self *v1alpha1types.User
+	for i := range users {
+		if users[i].Name == lib.Owner {
+			self = &users[i]
+		}
+	}
+	precedes := func(other *v1alpha1types.User) bool {
+		if self == nil {
+			return true
+		}
+		a, b := other.CreationTimestamp.Time, self.CreationTimestamp.Time
+		return a.Before(b) || (a.Equal(b) && other.Name < self.Name)
+	}
 	taken := map[string]string{sharedHome: "the shared library", sharedGames: "the shared library"}
 	for i := range users {
-		if l := users[i].Spec.Library; l != nil && users[i].Name != lib.Owner {
+		if l := users[i].Spec.Library; l != nil && users[i].Name != lib.Owner && precedes(&users[i]) {
 			taken[l.HomeClaimName] = "user " + users[i].Name
 			taken[l.GamesClaimName] = "user " + users[i].Name
 		}
 	}
 	if lib.HomePVC == lib.GamesPVC {
-		return fmt.Errorf("user %s's library uses claim %s for both its home and its games", lib.Owner, lib.HomePVC)
+		return fmt.Errorf("%w: user %s's library uses claim %s for both its home and its games", errLibraryClaims, lib.Owner, lib.HomePVC)
 	}
 	for _, claim := range []string{lib.HomePVC, lib.GamesPVC} {
 		if other, ok := taken[claim]; ok && claim != "" {
-			return fmt.Errorf("user %s's library uses claim %s, which is %s's", lib.Owner, claim, other)
+			return fmt.Errorf("%w: user %s's library uses claim %s, which is %s's", errLibraryClaims, lib.Owner, claim, other)
 		}
 	}
 	return nil

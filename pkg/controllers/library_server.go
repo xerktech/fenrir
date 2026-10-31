@@ -232,7 +232,8 @@ var errNoSuchUser = errors.New("no such user")
 // libraryOf is the library the request's authenticated user plays from.
 func (s *LibraryServer) libraryOf(r *http.Request) (LibraryRef, error) {
 	name := r.Header.Get(s.userHeader)
-	if name == "" || s.users == nil {
+	_, named := r.Header[http.CanonicalHeaderKey(s.userHeader)]
+	if !named || s.users == nil {
 		return s.library.LibraryFor(nil), nil
 	}
 	user, err := s.users.Get(name)
@@ -288,6 +289,11 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var busy string
 		pod, busy, err = s.library.EnsurePod(r.Context(), lib)
+		if errors.Is(err, errLibraryClaims) {
+			klog.Errorf("Not starting the Library: %v", err)
+			writeLibraryPage(w, http.StatusConflict, "Your library's storage is misconfigured. Ask the admin to fix it.", false, false)
+			return
+		}
 		if err != nil {
 			klog.Errorf("Failed to start the Library: %v", err)
 			writeLibraryPage(w, http.StatusInternalServerError, "The Library could not be started. Try again in a minute.", false, false)

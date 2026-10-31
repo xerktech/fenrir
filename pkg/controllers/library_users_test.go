@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -355,5 +356,60 @@ func TestSessionPodUsesUsersLibrary(t *testing.T) {
 		if err := c.useUserLibrary(appSpec(), ann, steam); err == nil {
 			t.Errorf("ann's library %+v accepted", lib)
 		}
+	}
+}
+
+// Of two Users on one claim, the first created keeps working; the newcomer
+// is refused, with a page saying so rather than "try again".
+func TestLibraryClaimsConflictFirstUserKeepsClaim(t *testing.T) {
+	bob, carol := libraryUser("bob", true), libraryUser("carol", true)
+	bob.CreationTimestamp = metav1.NewTime(libraryTestNow.Add(-time.Hour))
+	carol.CreationTimestamp = metav1.NewTime(libraryTestNow)
+	carol.Spec.Library.GamesClaimName = "games-bob"
+	users := []v1alpha1types.User{*bob, *carol}
+	if err := libraryClaimsConflict(LibraryRef{Owner: "bob", HomePVC: "home-bob", GamesPVC: "games-bob"}, "steam-home", "games", users); err != nil {
+		t.Errorf("bob, first on games-bob, refused: %v", err)
+	}
+	if err := libraryClaimsConflict(LibraryRef{Owner: "carol", HomePVC: "home-carol", GamesPVC: "games-bob"}, "steam-home", "games", users); err == nil {
+		t.Error("carol, second on games-bob, accepted")
+	}
+
+	f := newLibraryFixture(t, nil, bob, carol)
+	rec := serveLibrary(f.server(t), "10.1.0.5:5555", http.Header{"Sec-Fetch-User": {"?1"}, DefaultLibraryUserHeader: {"carol"}})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "misconfigured") || f.podExists(t) {
+		t.Errorf("carol's Library: HTTP %d %q; want 409 naming the misconfiguration", rec.Code, rec.Body.String())
+	}
+}
+
+// A header the proxy sent empty names no one it knows: refused, not shared.
+func TestLibraryServerRefusesEmptyUser(t *testing.T) {
+	f := newLibraryFixture(t, nil)
+	rec := serveLibrary(f.server(t), "10.1.0.5:5555", http.Header{"Sec-Fetch-User": {"?1"}, DefaultLibraryUserHeader: {""}})
+	if rec.Code != http.StatusForbidden || f.podExists(t) {
+		t.Errorf("HTTP %d; want 403 and no Library", rec.Code)
+	}
+}
+
+// A session pod is never built on a claim a running Library mounts, even one
+// the User's own Library check wouldn't see (an admin moved claims between
+// Users while that Library ran).
+func TestSessionPodRefusedOnOpenLibrarysClaim(t *testing.T) {
+	bobs := libraryPod(0, true)
+	bobs.Name = "direwolf-library-bob"
+	bobs.Labels[v1alpha1types.LibraryOwnerLabel] = "bob"
+	bobs.Spec.Volumes = []corev1.Volume{{Name: "steam-home", VolumeSource: corev1.VolumeSource{
+		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "home-bob"},
+	}}}
+	c := &SessionController{K8sClient: k8sfake.NewClientset(bobs)}
+	spec := func(claim string) *corev1.PodSpec {
+		return &corev1.PodSpec{Volumes: []corev1.Volume{{Name: "home", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim},
+		}}}}
+	}
+	if open, err := c.libraryOpenOn(libraryTestNS, spec("home-bob")); err != nil || !strings.Contains(open, "direwolf-library-bob") {
+		t.Errorf("libraryOpenOn(home-bob) = %q, %v; want bob's Library named", open, err)
+	}
+	if open, err := c.libraryOpenOn(libraryTestNS, spec("home-carol")); err != nil || open != "" {
+		t.Errorf("libraryOpenOn(home-carol) = %q, %v; want none", open, err)
 	}
 }
