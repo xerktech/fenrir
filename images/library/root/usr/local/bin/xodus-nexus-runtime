@@ -75,8 +75,9 @@ def published(r):
 
 
 # Exit 1: no release Nexus would take (Nexus falls back to the next repository).
-# Exit 2: an unreadable list, or the release Nexus would take fails the checks
-# here (Nexus throws on the first; falling back would differ on the second).
+# Exit 2: an unreadable or misshapen list, or the release Nexus would take fails
+# the checks here. Nexus throws on most bad lists and installs that release, so
+# stopping here, never installing an older fallback, is the safe side of both.
 try:
     pick, newest = None, float("-inf")
     for r in json.load(sys.stdin):
@@ -112,8 +113,8 @@ if not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", tag) or \
 print(a["name"], tag, url, size, digest.removeprefix("sha256:"), sum_url, sep="\t")
 ' "${prefix}" <"${releases}" 2>/dev/null)" && break
   found=$?
-  # Nexus falls back only when the runtime repository has no runtime release;
-  # an unreadable list or an unverifiable release stops, as Nexus throws.
+  # Fall back only as Nexus does, when the runtime repository has no release it
+  # would take; a bad list or a release that fails the checks here stops.
   [[ "${found}" == 1 && "${repo}" == */nexus-runtime ]] ||
     give_up "cannot find a verifiable runtime release in ${repo}"
 done
