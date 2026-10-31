@@ -110,7 +110,7 @@ func (h *pinPageHandler) authenticate(w http.ResponseWriter, r *http.Request) *v
 		return nil
 	}
 
-	user, err := h.users.Get(username)
+	user, err := v1alpha1types.LookupUser(h.users.Get, username)
 	if err != nil {
 		klog.Warningf("Pairing page: no User %q: %s", username, err)
 		http.Error(w, "no direwolf user for "+username, http.StatusForbidden)

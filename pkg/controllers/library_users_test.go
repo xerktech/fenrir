@@ -199,6 +199,38 @@ func TestLibraryServerRefusesUnknownUser(t *testing.T) {
 	}
 }
 
+// The page maps the username as the provisioner does: a provisioned User is
+// found by the username it was made for, a hand-written one by its exact
+// name, and nobody else gets either.
+func TestLibraryServerMapsUsernames(t *testing.T) {
+	kim := provisionedUser("kim", "Kim")
+	for header, wantPod := range map[string]string{
+		"Kim": "direwolf-library-kim",
+		"kim": "",
+		"KIM": "",
+		"sam": "direwolf-library-sam",
+		"Sam": "",
+	} {
+		t.Run(header, func(t *testing.T) {
+			f := newLibraryFixture(t, nil, kim, libraryUser("sam", true))
+			rec := serveLibrary(f.server(t), "10.1.0.5:5555", http.Header{"Sec-Fetch-User": {"?1"}, DefaultLibraryUserHeader: {header}})
+			pods, err := f.k8s.CoreV1().Pods(libraryTestNS).List(context.Background(), metav1.ListOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wantPod == "" {
+				if rec.Code != http.StatusForbidden || len(pods.Items) != 0 {
+					t.Errorf("HTTP %d, %d pods; want 403 and none", rec.Code, len(pods.Items))
+				}
+				return
+			}
+			if len(pods.Items) != 1 || pods.Items[0].Name != wantPod {
+				t.Errorf("HTTP %d, pods %v; want only %s", rec.Code, pods.Items, wantPod)
+			}
+		})
+	}
+}
+
 // Activity is stamped on the visitor's own Library pod, or it idles out.
 func TestLibraryRecordActivityPerOwner(t *testing.T) {
 	sam := libraryPod(0, true)

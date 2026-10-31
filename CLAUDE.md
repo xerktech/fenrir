@@ -190,6 +190,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     Steam + Heroic Library pod on a page visit, proxies it, and stops it when idle.
     It and its library's game sessions never run together (shared Steam home); a User with
     `spec.library` has their own Library and home (XERK-2500). See `.claude/rules/library.md`.
+  - Provisioning (`pkg/controllers/provisioning.go`, off unless `--provision-group`) creates a
+    group member's User and library PVCs; see `.claude/rules/provisioning.md`.
   - The catalogue (`pkg/controllers/catalogue.go`, off unless `--catalogue-*-app`) scans the
     Library pod for Steam/Heroic installs and keeps one App per game; see `.claude/rules/catalogue.md`.
   - RomM sync (`pkg/controllers/romm.go`, off unless `--romm-url`) keeps one RetroArch App per

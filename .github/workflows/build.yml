@@ -102,9 +102,16 @@ jobs:
         run: helm lint --strict charts/direwolf-operator
 
       # helm template defaults to a Kubernetes version below the chart's
-      # kubeVersion floor (>=1.28), so it has to be stated.
+      # kubeVersion floor (>=1.28), so it has to be stated. Provisioning set,
+      # so its wiring is checked (charts/provisioning_test.go).
       - name: Render chart
-        run: helm template direwolf charts/direwolf-operator --include-crds --kube-version 1.36.0 > "$RUNNER_TEMP/chart.yaml"
+        run: >-
+          helm template direwolf charts/direwolf-operator --include-crds --kube-version 1.36.0
+          --set provisioning.group=k8x-games
+          --set provisioning.home.storageClassName=local-path
+          --set provisioning.games.storageClassName=local-path
+          --set-json 'provisioning.userTemplate={"resources":{"limits":{"cpu":"8"}}}'
+          > "$RUNNER_TEMP/chart.yaml"
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
@@ -113,7 +120,7 @@ jobs:
       # Checks on what the chart renders, e.g. moonlight-proxy's RBAC scope.
       # They skip without the manifest, so they only really run here.
       - name: Test rendered chart
-        run: DIREWOLF_CHART_MANIFEST="$RUNNER_TEMP/chart.yaml" go test -count=1 ./charts/
+        run: DIREWOLF_CHART_MANIFEST="$RUNNER_TEMP/chart.yaml" DIREWOLF_CHART_PROVISIONING=1 go test -count=1 ./charts/
 
       - name: Package chart
         run: helm package charts/direwolf-operator -d packaged

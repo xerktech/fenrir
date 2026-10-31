@@ -18,6 +18,8 @@ paths:
     with the proxy secret. A name with no User, or an empty one, is refused (403): it would
     otherwise get the shared desktop, signed in to its users' accounts. No header at all gets the
     shared library.
+  - The header's username maps to a User name by `v1alpha1.LookupUser`, as the provisioner
+    creates them (`.claude/rules/provisioning.md`).
   - No two libraries may share a claim (`libraryClaimsConflict`, in `EnsurePod` and at pod build):
     each one's lock sees only its own Users, so two would let two Steams write one home.
     Of two Users on one claim the first created keeps it, so a newcomer can't lock out a working one.
