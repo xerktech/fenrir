@@ -12,7 +12,18 @@ paths:
 
 - `Provisioner.Ensure(username)` creates a group member's User with `spec.library` on two new PVCs,
   `direwolf-home-<name>` / `direwolf-games-<name>`. Off unless `--provision-group` (chart
-  `provisioning.group`); it needs `--library-port`. The Library page's call is XERK-2540.
+  `provisioning.group`); it needs `--library-port`.
+- The Library page calls it for a name with no User whose groups header lists the group
+  (XERK-2540). The groups header is read only after the peer and proxy-secret checks; the
+  proxy must overwrite it, as it does the username header.
+  - Only a user-gesture visit (`userNavigation`) or the Start POST creates: a tab's script
+    reload after an admin deleted the User must not re-create it (it gets the stopped page).
+    So the start path's method/site check runs before provisioning.
+  - The new User reaches the informer cache seconds later; until then each request reads it live
+    (no writes). Only a User carrying `ProvisionedLabel` then skips the gesture rule, so the setup
+    page's own refresh starts its Library; an uncached hand-written User does not.
+  - Ensure runs under `libraryProvisionTimeout`; a failure gets a refreshing error page, a
+    refused username a 403 asking for the admin. Tests: `library_provision_test.go`.
 - Never modify an existing User, with or without `spec.library`: hand-written Users stay
   authoritative. Ensure returns them as they are.
 - Never delete anything, and give the PVCs no ownerReference: deleting or re-creating a User must
