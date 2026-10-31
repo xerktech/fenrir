@@ -73,6 +73,9 @@ type LibraryServer struct {
 	users   generic.NamespacedLister[*v1alpha1types.User]
 	// userHeader names the authenticated user.
 	userHeader string
+	// warnNoUserHeader logs, once, the first request without userHeader:
+	// a misspelt header otherwise puts everyone on the shared desktop.
+	warnNoUserHeader sync.Once
 	// trusted are the only peers (the ingress controller behind Authentik)
 	// allowed in: the desktop has no login of its own.
 	trusted []netip.Prefix
@@ -250,6 +253,11 @@ func (s *LibraryServer) libraryOf(r *http.Request) (LibraryRef, error) {
 	name := r.Header.Get(s.userHeader)
 	_, named := r.Header[http.CanonicalHeaderKey(s.userHeader)]
 	if !named || s.users == nil {
+		if !named {
+			s.warnNoUserHeader.Do(func() {
+				klog.Warningf("Library page: a request named no user in %s, so it gets the shared Library; if the proxy sends the username under another header, fix --library-user-header", s.userHeader)
+			})
+		}
 		return s.library.LibraryFor(nil), nil
 	}
 	user, err := v1alpha1types.LookupUser(s.users.Get, name)

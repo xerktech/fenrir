@@ -131,7 +131,7 @@ func TestAgentPlugPublishesDevice(t *testing.T) {
 	node := filepath.Join(a.inputDevPath, "event69")
 	st, err := os.Stat(node)
 	switch {
-	case errors.Is(err, os.ErrNotExist) && os.Geteuid() != 0:
+	case errors.Is(err, os.ErrNotExist) && !canMknod(t):
 		t.Skip("node creation needs CAP_MKNOD")
 	case err != nil:
 		t.Fatalf("node: %v", err)

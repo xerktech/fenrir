@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
 	"k8s.io/streaming/pkg/httpstream"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -1049,5 +1050,43 @@ func TestLibraryPodShutsSteamDownOnAnyDelete(t *testing.T) {
 	want := strings.Join(append(slices.Clone(steamRelinkCommand[1:]), ""), "\n")
 	if string(got) != want {
 		t.Errorf("preStop relink args = %q, want %q", got, want)
+	}
+}
+
+// A request naming no user gets the shared Library, as documented, but a
+// misspelt --library-user-header would silently do that to everyone: the
+// first such request logs one warning naming the flag.
+func TestLibraryWarnsOnceWithoutUserHeader(t *testing.T) {
+	out := captureKlog(t)
+	s := newLibraryFixture(t, nil).server(t)
+	const warning = "named no user"
+
+	// Refused requests never reach the library choice.
+	serveLibrary(s, "10.2.0.5:5555", nil)
+	serveLibrary(s, "10.1.0.5:5555", http.Header{LibraryProxySecretHeader: {"nope"}})
+	// The header present, even empty, names the (no) user.
+	serveLibrary(s, "10.1.0.5:5555", http.Header{http.CanonicalHeaderKey(DefaultLibraryUserHeader): {""}})
+	klog.Flush()
+	if strings.Contains(out.String(), warning) {
+		t.Fatalf("warned before a request without the header:\n%s", out)
+	}
+
+	// klog writes a warning once per severity at or below it, so count
+	// lines after the first request rather than expecting exactly one.
+	serveLibrary(s, "10.1.0.5:5555", userVisit)
+	klog.Flush()
+	first := strings.Count(out.String(), warning)
+	if first == 0 {
+		t.Fatalf("no warning for a request without the header:\n%s", out)
+	}
+	for range 3 {
+		serveLibrary(s, "10.1.0.5:5555", userVisit)
+	}
+	klog.Flush()
+	if n := strings.Count(out.String(), warning); n != first {
+		t.Fatalf("warned again: %d lines, want %d:\n%s", n, first, out)
+	}
+	if !strings.Contains(out.String(), "--library-user-header") {
+		t.Errorf("warning does not name the flag:\n%s", out)
 	}
 }

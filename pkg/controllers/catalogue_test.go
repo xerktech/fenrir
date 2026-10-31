@@ -22,7 +22,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -1243,11 +1242,13 @@ func TestCatalogueScanStoreNotRegularFileFails(t *testing.T) {
 	const stateRel = "home/.config/xodus-nexus/launcher-state.json"
 	for name, plant := range map[string]func(string) error{
 		"directory": func(p string) error { return os.Mkdir(p, 0o755) },
-		"fifo":      func(p string) error { return syscall.Mkfifo(p, 0o600) },
+		"fifo":      mkfifo,
 	} {
 		dir := t.TempDir()
 		writeFixture(t, dir, map[string]string{"games/.keep": "", "home/.config/xodus-nexus/.keep": ""})
-		if err := plant(filepath.Join(dir, stateRel)); err != nil {
+		if err := plant(filepath.Join(dir, stateRel)); errors.Is(err, errors.ErrUnsupported) {
+			continue
+		} else if err != nil {
 			t.Fatal(err)
 		}
 		if err := scanFixtureErr(t, dir); err == nil {

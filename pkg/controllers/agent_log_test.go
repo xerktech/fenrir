@@ -53,21 +53,7 @@ func (f *fakeEventsClient) SubscribeToEvents(context.Context) (<-chan *sse.Event
 // Wolf's session events carry the stream's AES key and IV; the agent's event
 // loop must never log them.
 func TestAgentEventLoopOmitsEventData(t *testing.T) {
-	fs := flag.NewFlagSet("klog", flag.ContinueOnError)
-	klog.InitFlags(fs)
-	for k, v := range map[string]string{"logtostderr": "false", "alsologtostderr": "false", "stderrthreshold": "FATAL"} {
-		if err := fs.Set(k, v); err != nil {
-			t.Fatal(err)
-		}
-	}
-	out := &lockedBuffer{}
-	klog.SetOutput(out)
-	t.Cleanup(func() {
-		klog.Flush()
-		klog.SetOutput(os.Stderr)
-		_ = fs.Set("logtostderr", "true")
-		_ = fs.Set("stderrthreshold", "ERROR")
-	})
+	out := captureKlog(t)
 
 	client := &fakeEventsClient{events: make(chan *sse.Event)}
 	agent := NewAgent(client)
@@ -100,4 +86,26 @@ func TestAgentEventLoopOmitsEventData(t *testing.T) {
 			t.Errorf("event data logged (%q): %q", secret, logged)
 		}
 	}
+}
+
+// captureKlog sends klog's output to the returned buffer for the rest of the
+// test. Tests using it must not run in parallel: klog's output is global.
+func captureKlog(t *testing.T) *lockedBuffer {
+	t.Helper()
+	fs := flag.NewFlagSet("klog", flag.ContinueOnError)
+	klog.InitFlags(fs)
+	for k, v := range map[string]string{"logtostderr": "false", "alsologtostderr": "false", "stderrthreshold": "FATAL"} {
+		if err := fs.Set(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := &lockedBuffer{}
+	klog.SetOutput(out)
+	t.Cleanup(func() {
+		klog.Flush()
+		klog.SetOutput(os.Stderr)
+		_ = fs.Set("logtostderr", "true")
+		_ = fs.Set("stderrthreshold", "ERROR")
+	})
+	return out
 }

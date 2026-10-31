@@ -57,6 +57,7 @@ func TestProvisionerOptions(t *testing.T) {
 		"spaced group":    {" g", "h", "|", "", "", "1Gi", "", "1Gi"},
 		"no header":       {"g", "", "|", "", "", "1Gi", "", "1Gi"},
 		"no separator":    {"g", "h", "", "", "", "1Gi", "", "1Gi"},
+		"invalid header":  {"g", "X Bad:", "|", "", "", "1Gi", "", "1Gi"},
 		"bad template":    {"g", "h", "|", `{"library":{}}`, "", "1Gi", "", "1Gi"},
 		"bad home size":   {"g", "h", "|", "", "", "lots", "", "1Gi"},
 		"zero games size": {"g", "h", "|", "", "", "1Gi", "", "0"},

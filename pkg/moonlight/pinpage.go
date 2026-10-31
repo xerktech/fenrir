@@ -164,7 +164,8 @@ func (h *pinPageHandler) authenticate(w http.ResponseWriter, r *http.Request) *v
 			h.notProvisioned(w, r)
 			return nil
 		}
-		http.Error(w, "no direwolf user for "+username, http.StatusForbidden)
+		// The name is logged above, not echoed: it is proxy-supplied text.
+		http.Error(w, "no direwolf user for this account", http.StatusForbidden)
 		return nil
 	}
 	return user
