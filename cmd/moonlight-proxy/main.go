@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"flag"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -38,6 +40,14 @@ func main() {
 	pinTrustedProxies := flag.String("pin-trusted-proxies", "", "Comma-separated CIDRs of the proxy allowed to assert the user via --pin-user-header. Required with --pin-port")
 	pinProxySecretFile := flag.String("pin-proxy-secret-file", "", "File holding the secret the proxy sends in "+moonlight.PinProxySecretHeader+". Required with --pin-port")
 	pinUserHeader := flag.String("pin-user-header", moonlight.DefaultPinUserHeader, "Header carrying the authenticated username; must match a User name")
+	pinProvisionGroup := flag.String("pin-provision-group", os.Getenv("PIN_PROVISION_GROUP"),
+		"Group whose members get a User on their first Library visit (the operator's --provision-group); such a member with no User is told to open the Library instead of refused")
+	pinGroupsHeader := flag.String("pin-groups-header", cmp.Or(os.Getenv("PIN_GROUPS_HEADER"), moonlight.DefaultPinGroupsHeader),
+		"Header the trusted proxy lists the user's groups in; read only with the proxy secret")
+	pinGroupsSeparator := flag.String("pin-groups-separator", cmp.Or(os.Getenv("PIN_GROUPS_SEPARATOR"), moonlight.DefaultPinGroupsSeparator),
+		"Separator between the groups in --pin-groups-header")
+	pinLibraryURL := flag.String("pin-library-url", os.Getenv("PIN_LIBRARY_URL"),
+		"Library page URL the pairing page links a --pin-provision-group member with no User to")
 	mdns := flag.Bool("mdns", true, "Advertise the HTTP port over mDNS (_nvstream._tcp) on every multicast interface, so LAN Moonlight clients find the host")
 	mdnsAddress := flag.String("mdns-address", "", "IPv4 address to advertise over mDNS instead of the node's own, e.g. a LoadBalancer IP in front of the proxy; only links whose subnet holds it answer, as host "+strings.ToLower(moonlight.ServerName)+".local")
 	namespace := flag.String("namespace", os.Getenv("POD_NAMESPACE"), "Namespace to watch")
@@ -89,7 +99,21 @@ func main() {
 			klog.Fatalf("--pin-proxy-secret-file: secret is %d bytes, want at least %d", len(proxySecret), moonlight.MinPinProxySecretLen)
 		}
 	}
+	// As the operator checks its --provision-group: a padded group never
+	// matches, so members would silently get the plain refusal.
+	if *pinProvisionGroup != strings.TrimSpace(*pinProvisionGroup) {
+		klog.Fatalf("--pin-provision-group %q has surrounding whitespace", *pinProvisionGroup)
+	}
+	if *pinProvisionGroup != "" && (*pinGroupsHeader == "" || *pinGroupsSeparator == "") {
+		klog.Fatal("--pin-provision-group needs a non-empty --pin-groups-header and --pin-groups-separator")
+	}
+	if *pinLibraryURL != "" {
+		if u, parseErr := url.Parse(*pinLibraryURL); parseErr != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			klog.Fatalf("--pin-library-url %q is not an absolute http(s) URL", *pinLibraryURL)
+		}
+	}
 	klog.Info("Pairing page port: ", *pinPort)
+	klog.Info("Pairing page provision group: ", *pinProvisionGroup)
 	klog.Info("Pairing page trusted proxies: ", trustedProxies)
 
 	tlsCert, err := util.LoadCertificates(*serverCertPath, *serverKeyPath)
@@ -151,10 +175,14 @@ func main() {
 			BusyCheck:             moonlight.LibraryBusyCheck(k8sClient.CoreV1().Pods(*namespace)),
 			Library:               moonlight.NewPodLibrary(k8sClient.CoreV1().Pods(*namespace), direwolfClient.DirewolfV1alpha1().Pairings(*namespace)),
 			PinPage: moonlight.PinPageOptions{
-				Port:           *pinPort,
-				TrustedProxies: trustedProxies,
-				ProxySecret:    proxySecret,
-				UserHeader:     *pinUserHeader,
+				Port:            *pinPort,
+				TrustedProxies:  trustedProxies,
+				ProxySecret:     proxySecret,
+				UserHeader:      *pinUserHeader,
+				ProvisionGroup:  *pinProvisionGroup,
+				GroupsHeader:    *pinGroupsHeader,
+				GroupsSeparator: *pinGroupsSeparator,
+				LibraryURL:      *pinLibraryURL,
 			},
 		},
 	)

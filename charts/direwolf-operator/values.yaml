@@ -39,6 +39,9 @@ provisioning:
   # Authentik's proxy outpost lists the user's groups here, separated by "|".
   groupsHeader: X-Authentik-Groups
   groupsSeparator: "|"
+  # The Library page's URL. moonlight-proxy's pairing page links a group
+  # member with no User yet here (it cannot create Users: it is internet-facing).
+  libraryURL: ""
   # Every provisioned User's spec (resources, volumes, sidecarPolicies; no
   # library), e.g. what a hand-written User sets.
   userTemplate: {}
@@ -243,6 +246,13 @@ controllers:
               fieldRef:
                 fieldPath: metadata.name
           POD_NAMESPACE: "{{ .Release.Namespace }}"
+          # The provisioning values above (--pin-provision-group, --pin-groups-*,
+          # --pin-library-url), so the pairing page can send an unprovisioned
+          # group member to the Library.
+          PIN_PROVISION_GROUP: '{{ .Values.provisioning.group }}'
+          PIN_GROUPS_HEADER: '{{ .Values.provisioning.groupsHeader }}'
+          PIN_GROUPS_SEPARATOR: '{{ .Values.provisioning.groupsSeparator }}'
+          PIN_LIBRARY_URL: '{{ .Values.provisioning.libraryURL }}'
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

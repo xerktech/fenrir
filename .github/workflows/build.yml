@@ -110,6 +110,7 @@ jobs:
           --set provisioning.group=k8x-games
           --set provisioning.home.storageClassName=local-path
           --set provisioning.games.storageClassName=local-path
+          --set provisioning.libraryURL=https://library.example.com/
           --set-json 'provisioning.userTemplate={"resources":{"limits":{"cpu":"8"}}}'
           > "$RUNNER_TEMP/chart.yaml"
 

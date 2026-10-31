@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Direwolf - Pair</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: rgb(114, 0, 130);
+            background: linear-gradient(132deg, rgba(114, 0, 130, 1) 0%, rgba(63, 0, 195, 1) 50%, rgba(0, 71, 255, 1) 100%);
+        }
+
+        main {
+            color: white;
+            max-width: 28rem;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        a {
+            color: white;
+            font-size: 1.25rem;
+        }
+    </style>
+</head>
+<body>
+<main>
+    {{if .LibraryURL}}
+    <p>Your account is set up the first time you open the Library at <a href="{{.LibraryURL}}">{{.LibraryURL}}</a>.</p>
+    {{else}}
+    <p>Your account is set up the first time you open the Library.</p>
+    {{end}}
+    <p>Open it, then come back to pair.</p>
+    <a href="/pin/">Reload</a>
+</main>
+</body>
+</html>
