@@ -153,8 +153,10 @@ controllers:
           # upstream gst-wayland-display plus a patch vendored in wolf, not a fork (XERK-2487).
           # Built on Fedora 44, as upstream is: Ubuntu 25.04 gets no more security updates
           # (XERK-2494, XERK-2497).
+          # A stream joining the lobby takes the lobby producer's caps, so zero copy no longer kills its
+          # video on CUDA (XERK-2496); fenrir still runs Wolf with zero copy off.
           # Pinned by hand; CI does not set it.
-          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-2c20f80@sha256:7be3b3aac687e2ff43f061002e2816b297b83e6ac5be730e44c287311e255789
+          WOLF_IMAGE: ghcr.io/xerktech/wolf:xerktech-99e167e@sha256:193fb77330cd92476c14827ddc26c79620601743836e5251f025e79ae074fcf2
           AGENT_IMAGE: ghcr.io/games-on-whales/fenrir/wolf-agent:main
           LIBRARY_IMAGE: ghcr.io/games-on-whales/fenrir/library:main
           # The wowAddons list below, for the Library (--library-wow-addons).
