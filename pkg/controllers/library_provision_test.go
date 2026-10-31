@@ -264,7 +264,14 @@ func TestLibraryServerUncachedHandWrittenUserNeedsGesture(t *testing.T) {
 
 // A hung API server costs one bounded request and a refreshing error page.
 func TestLibraryServerProvisionTimeout(t *testing.T) {
-	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	// Gives up after 10s itself, so a lost bound fails the took check below
+	// rather than hanging the suite.
+	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
 	defer hung.Close()
 	client, err := dwclient.NewForConfig(&rest.Config{Host: hung.URL})
 	if err != nil {
