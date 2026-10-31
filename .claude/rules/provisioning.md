@@ -41,5 +41,12 @@ paths:
 - The user template is parsed strictly (`ParseProvisionUserTemplate`): a typo'd field would
   silently drop a limit. It may not set `library`, and must hold one non-empty YAML document:
   sigs.k8s.io/yaml reads only the first, and only a full parser sees a `...` end marker.
+- The pairing page (moonlight-proxy) never creates Users: it is internet-facing. A
+  `--pin-provision-group` member with no User gets a page sending them to `--pin-library-url`
+  (XERK-2541); chart `provisioning.*` feeds both binaries, so the groups agree.
+  - Its groups header is read only after the peer and proxy-secret checks, as the user header is.
+  - "Not set up yet" only for a name `Ensure` would provision (`UserNameFor` accepts it, no User
+    holds it); else the Library refuses it too and the user would loop between the two pages.
+  - Tests: `TestPinPageUnprovisionedGroupMember`, `TestProvisioningValuesReachPairingPage`.
 - Tests: `pkg/controllers/provisioning_test.go`, `pkg/api/v1alpha1/username_test.go`,
   `TestLibraryServerMapsUsernames`.

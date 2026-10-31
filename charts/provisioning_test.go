@@ -11,10 +11,17 @@ import (
 	"k8s.io/apimachinery/pkg/util/yaml"
 
 	"games-on-whales.github.io/direwolf/pkg/controllers"
+	"games-on-whales.github.io/direwolf/pkg/moonlight"
 )
 
 // operatorDeployment is the rendered operator Deployment.
 func operatorDeployment(t *testing.T) *appsv1.Deployment {
+	t.Helper()
+	return renderedDeployment(t, "direwolf-operator")
+}
+
+// renderedDeployment is the rendered Deployment named name.
+func renderedDeployment(t *testing.T, name string) *appsv1.Deployment {
 	t.Helper()
 	renderedObjects(t)                                      // skips without the manifest
 	f, err := os.Open(os.Getenv("DIREWOLF_CHART_MANIFEST")) //nolint:gosec // the manifest CI rendered
@@ -30,11 +37,11 @@ func operatorDeployment(t *testing.T) *appsv1.Deployment {
 		} else if err != nil {
 			t.Fatal(err)
 		}
-		if d.Kind == "Deployment" && d.Name == "direwolf-operator" {
+		if d.Kind == "Deployment" && d.Name == name {
 			return &d
 		}
 	}
-	t.Fatal("no direwolf-operator Deployment rendered")
+	t.Fatalf("no %s Deployment rendered", name)
 	return nil
 }
 
@@ -69,6 +76,31 @@ func TestProvisioningValuesReachOperator(t *testing.T) {
 	spec, err := controllers.ParseProvisionUserTemplate(env["PROVISION_USER_TEMPLATE"])
 	if err != nil || spec.Resources == nil || spec.Resources.Limits.Cpu().String() != "8" {
 		t.Errorf("PROVISION_USER_TEMPLATE %q = %+v, %v; want the rendered template", env["PROVISION_USER_TEMPLATE"], spec, err)
+	}
+}
+
+// The pairing page gets the same group as the operator, so it can tell an
+// unprovisioned group member to open the Library (XERK-2541).
+func TestProvisioningValuesReachPairingPage(t *testing.T) {
+	d := renderedDeployment(t, "moonlight-proxy")
+	env := map[string]string{}
+	for _, c := range d.Spec.Template.Spec.Containers {
+		for _, e := range c.Env {
+			env[e.Name] = e.Value
+		}
+	}
+	if os.Getenv("DIREWOLF_CHART_PROVISIONING") == "" {
+		t.Skip("DIREWOLF_CHART_PROVISIONING unset: render with build.yml's Render chart values and set it")
+	}
+	for name, want := range map[string]string{
+		"PIN_PROVISION_GROUP":  "k8x-games",
+		"PIN_GROUPS_HEADER":    moonlight.DefaultPinGroupsHeader,
+		"PIN_GROUPS_SEPARATOR": moonlight.DefaultPinGroupsSeparator,
+		"PIN_LIBRARY_URL":      "https://library.example.com/",
+	} {
+		if got, ok := env[name]; !ok || got != want {
+			t.Errorf("%s = %q (set %v), want %q", name, got, ok, want)
+		}
 	}
 }
 

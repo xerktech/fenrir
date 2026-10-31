@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/netip"
 	"regexp"
+	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/klog/v2"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -24,12 +26,24 @@ var pinHTML string
 
 var pinTemplate = template.Must(template.New("pin").Parse(pinHTML))
 
+//go:embed pin_unprovisioned.html
+var pinUnprovisionedHTML string
+
+var pinUnprovisionedTemplate = template.Must(template.New("unprovisioned").Parse(pinUnprovisionedHTML))
+
 // Moonlight always displays a 4-digit PIN.
 var pinPattern = regexp.MustCompile(`^\d{4}$`)
 
 // DefaultPinUserHeader is the header Authentik's proxy outpost sets to the
 // authenticated username.
 const DefaultPinUserHeader = "X-Authentik-Username"
+
+// DefaultPinGroupsHeader is the header Authentik's proxy outpost lists the
+// authenticated user's groups in, separated by DefaultPinGroupsSeparator.
+const DefaultPinGroupsHeader = "X-Authentik-Groups"
+
+// DefaultPinGroupsSeparator separates groups in DefaultPinGroupsHeader.
+const DefaultPinGroupsSeparator = "|"
 
 // PinProxySecretHeader carries the secret shared with the proxy. Authentik
 // sets it through a property mapping on the provider (additionalHeaders).
@@ -60,6 +74,22 @@ type PinPageOptions struct {
 	// name of a User in the proxy's namespace. Defaults to
 	// DefaultPinUserHeader.
 	UserHeader string
+
+	// ProvisionGroup is the group whose members get a User the first time
+	// they open the Library (the operator's --provision-group). A member
+	// with no User yet is told to open LibraryURL first instead of being
+	// refused outright. Empty: everyone without a User is just refused.
+	ProvisionGroup string
+
+	// GroupsHeader lists the authenticated user's groups, separated by
+	// GroupsSeparator. Read only once the request passed the same checks as
+	// UserHeader. Default DefaultPinGroupsHeader / DefaultPinGroupsSeparator.
+	GroupsHeader    string
+	GroupsSeparator string
+
+	// LibraryURL is linked from the page shown to a ProvisionGroup member
+	// with no User yet. Empty: the page names no link.
+	LibraryURL string
 }
 
 type pinPageHandler struct {
@@ -68,6 +98,11 @@ type pinPageHandler struct {
 	trusted    []netip.Prefix
 	secret     []byte
 	userHeader string
+
+	provisionGroup  string
+	groupsHeader    string
+	groupsSeparator string
+	libraryURL      string
 }
 
 // NewPinPageHandler serves the page where an authenticated user enters the PIN
@@ -80,7 +115,17 @@ func NewPinPageHandler(
 	if opts.UserHeader == "" {
 		opts.UserHeader = DefaultPinUserHeader
 	}
-	h := &pinPageHandler{manager: manager, users: users, trusted: opts.TrustedProxies, secret: opts.ProxySecret, userHeader: opts.UserHeader}
+	if opts.GroupsHeader == "" {
+		opts.GroupsHeader = DefaultPinGroupsHeader
+	}
+	if opts.GroupsSeparator == "" {
+		opts.GroupsSeparator = DefaultPinGroupsSeparator
+	}
+	h := &pinPageHandler{
+		manager: manager, users: users, trusted: opts.TrustedProxies, secret: opts.ProxySecret, userHeader: opts.UserHeader,
+		provisionGroup: opts.ProvisionGroup, groupsHeader: opts.GroupsHeader, groupsSeparator: opts.GroupsSeparator,
+		libraryURL: opts.LibraryURL,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /pin/", h.page)
@@ -113,10 +158,72 @@ func (h *pinPageHandler) authenticate(w http.ResponseWriter, r *http.Request) *v
 	user, err := v1alpha1types.LookupUser(h.users.Get, username)
 	if err != nil {
 		klog.Warningf("Pairing page: no User %q: %s", username, err)
+		// Only a confirmed miss is "not set up yet"; any other lookup error
+		// (a refused name) is a plain refusal.
+		if apierrors.IsNotFound(err) && h.inProvisionGroup(r) && h.provisionable(username) {
+			h.notProvisioned(w, r)
+			return nil
+		}
 		http.Error(w, "no direwolf user for "+username, http.StatusForbidden)
 		return nil
 	}
 	return user
+}
+
+// inProvisionGroup reports whether the trusted proxy lists the user in the
+// group whose members are provisioned on their first Library visit. Callers
+// must have checked the peer and the proxy secret: the header is forgeable.
+func (h *pinPageHandler) inProvisionGroup(r *http.Request) bool {
+	if h.provisionGroup == "" {
+		return false
+	}
+	for g := range strings.SplitSeq(r.Header.Get(h.groupsHeader), h.groupsSeparator) {
+		if strings.TrimSpace(g) == h.provisionGroup {
+			return true
+		}
+	}
+	return false
+}
+
+// provisionable reports whether the operator's provisioner would create a
+// User for username: its name is valid (v1alpha1.UserNameFor) and no User
+// holds it. Otherwise the Library refuses it too, and sending the user there
+// would loop between the two pages.
+func (h *pinPageHandler) provisionable(username string) bool {
+	name, err := v1alpha1types.UserNameFor(username)
+	if err != nil {
+		return false
+	}
+	_, err = h.users.Get(name)
+	return apierrors.IsNotFound(err)
+}
+
+// notProvisioned tells a group member with no User yet to open the Library,
+// which creates it. moonlight-proxy cannot create Users itself: it is
+// internet-facing, so it holds no User create rights.
+func (h *pinPageHandler) notProvisioned(w http.ResponseWriter, r *http.Request) {
+	const msg = "Your account is set up the first time you open the Library"
+	if r.Method != http.MethodGet {
+		// The page's script shows a POST's body as text.
+		text := msg + "; open it, then come back to pair."
+		if h.libraryURL != "" {
+			text = msg + " at " + h.libraryURL + "; open it, then come back to pair."
+		}
+		http.Error(w, text, http.StatusForbidden)
+		return
+	}
+	setPinPageHeaders(w)
+	w.WriteHeader(http.StatusForbidden)
+	if err := pinUnprovisionedTemplate.Execute(w, struct{ LibraryURL string }{h.libraryURL}); err != nil {
+		klog.Errorf("Pairing page: render: %s", err)
+	}
+}
+
+func setPinPageHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
 }
 
 func (h *pinPageHandler) hasProxySecret(r *http.Request) bool {
@@ -155,10 +262,7 @@ func (h *pinPageHandler) page(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
+	setPinPageHeaders(w)
 	if err := pinTemplate.Execute(w, struct {
 		User    string
 		Pending []pendingView

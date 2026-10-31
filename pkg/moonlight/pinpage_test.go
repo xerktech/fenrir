@@ -2,6 +2,7 @@ package moonlight
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -243,5 +244,120 @@ func TestPendingPairingDroppedWhenClientGivesUp(t *testing.T) {
 	}
 	if p := m.PendingPairings(); len(p) != 0 {
 		t.Fatalf("pending pairings after cancel: %+v", p)
+	}
+}
+
+// A provision-group member with no User yet is sent to the Library, which
+// creates it; anyone else without a User is refused as before, and the group
+// header counts only from a trusted peer with the proxy secret.
+func TestPinPageUnprovisionedGroupMember(t *testing.T) {
+	const libraryURL = "https://library.example.com/"
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	// Hand-written "bob" (no username annotation) belongs to username "bob"
+	// only; the provisioner refuses "Bob".
+	if err := indexer.Add(&v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "bob", Namespace: testNamespace}}); err != nil {
+		t.Fatal(err)
+	}
+	opts := PinPageOptions{
+		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ProxySecret:    []byte(proxySecret),
+		ProvisionGroup: "k8x-games",
+		LibraryURL:     libraryURL,
+	}
+	lister := generic.NewLister[*v1alpha1types.User](indexer).Namespaced(testNamespace)
+	h := NewPinPageHandler(NewPairingManager(tls.Certificate{}, nil), lister, opts)
+	opts.ProvisionGroup = ""
+	off := NewPinPageHandler(NewPairingManager(tls.Certificate{}, nil), lister, opts)
+	const setUp = "Your account is set up the first time you open the Library"
+	cases := []struct {
+		name, method, peer, secret, groups string
+		user                               string       // default "newbie"
+		handler                            http.Handler // default h
+		want                               int
+		wantSetUp                          bool
+	}{
+		{name: "member with spaces around groups", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, groups: "admins | k8x-games ", want: http.StatusForbidden, wantSetUp: true},
+		{name: "provisioning off, empty groups", handler: off, method: http.MethodGet, peer: trustedPeer, secret: proxySecret, want: http.StatusForbidden},
+		{name: "provisioning off, member", handler: off, method: http.MethodGet, peer: trustedPeer, secret: proxySecret, groups: "k8x-games", want: http.StatusForbidden},
+		// The provisioner refuses these, so the Library would never set them up.
+		{name: "member with an unprovisionable name", user: "first.last", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, groups: "k8x-games", want: http.StatusForbidden},
+		{name: "member whose name a hand-written User holds", user: "Bob", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, groups: "k8x-games", want: http.StatusForbidden},
+		{name: "member GET", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, groups: "admins|k8x-games", want: http.StatusForbidden, wantSetUp: true},
+		{name: "member POST", method: http.MethodPost, peer: trustedPeer, secret: proxySecret, groups: "k8x-games", want: http.StatusForbidden, wantSetUp: true},
+		{name: "non-member", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, groups: "admins|k8x-games-old", want: http.StatusForbidden},
+		{name: "no groups", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, want: http.StatusForbidden},
+		{name: "untrusted peer claiming the group", method: http.MethodGet, peer: "192.0.2.99:1234", secret: proxySecret, groups: "k8x-games", want: http.StatusForbidden},
+		{name: "trusted peer without the secret claiming the group", method: http.MethodGet, peer: trustedPeer, groups: "k8x-games", want: http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(t.Context(), tc.method, "/pin/", strings.NewReader(`{"pin":"1234","secret":"x"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.RemoteAddr = tc.peer
+			if tc.secret != "" {
+				req.Header.Set(PinProxySecretHeader, tc.secret)
+			}
+			user := cmp.Or(tc.user, "newbie")
+			req.Header.Set(DefaultPinUserHeader, user)
+			if tc.groups != "" {
+				req.Header.Set(DefaultPinGroupsHeader, tc.groups)
+			}
+			rec := httptest.NewRecorder()
+			cmp.Or[http.Handler](tc.handler, h).ServeHTTP(rec, req)
+			body := rec.Body.String()
+			if rec.Code != tc.want {
+				t.Fatalf("%s = %d %s, want %d", tc.method, rec.Code, body, tc.want)
+			}
+			if got := strings.Contains(body, setUp); got != tc.wantSetUp {
+				t.Fatalf("body mentions setup = %v, want %v:\n%s", got, tc.wantSetUp, body)
+			}
+			if tc.wantSetUp && !strings.Contains(body, libraryURL) {
+				t.Errorf("body does not link the Library:\n%s", body)
+			}
+			if tc.wantSetUp && tc.method == http.MethodGet {
+				for _, header := range []string{"Content-Security-Policy", "X-Frame-Options", "Cache-Control"} {
+					if rec.Header().Get(header) == "" {
+						t.Errorf("setup page has no %s", header)
+					}
+				}
+			}
+			if !tc.wantSetUp && strings.Contains(body, "library") {
+				t.Errorf("refusal mentions the Library:\n%s", body)
+			}
+			// Untrusted callers learn nothing, not even whether the User exists.
+			if tc.secret == "" || tc.peer != trustedPeer {
+				if strings.TrimSpace(body) != "forbidden" {
+					t.Errorf("untrusted caller got %q, want the bare refusal", body)
+				}
+			} else if !tc.wantSetUp && !strings.Contains(body, "no direwolf user for "+user) {
+				t.Errorf("non-member got %q, want the not-allowed refusal", body)
+			}
+		})
+	}
+}
+
+// A provisioned User whose name the username maps to (v1alpha1.UserNameFor)
+// is found, so a member who opened the Library pairs as normal.
+func TestPinPageFindsProvisionedUserByMappedName(t *testing.T) {
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	if err := indexer.Add(&v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{
+		Name: "sam", Namespace: testNamespace, Annotations: map[string]string{v1alpha1types.UsernameAnnotation: "Sam"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewPinPageHandler(
+		NewPairingManager(tls.Certificate{}, nil),
+		generic.NewLister[*v1alpha1types.User](indexer).Namespaced(testNamespace),
+		PinPageOptions{TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")}, ProxySecret: []byte(proxySecret), ProvisionGroup: "k8x-games"},
+	)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pin/", http.NoBody)
+	req.RemoteAddr = trustedPeer
+	req.Header.Set(PinProxySecretHeader, proxySecret)
+	req.Header.Set(DefaultPinUserHeader, "Sam")
+	req.Header.Set(DefaultPinGroupsHeader, "k8x-games")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Signed in as <strong>sam</strong>") {
+		t.Fatalf("GET /pin/ = %d:\n%s", rec.Code, rec.Body)
 	}
 }
