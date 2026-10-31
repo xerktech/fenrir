@@ -48,8 +48,10 @@ func TestProvisioningValuesReachOperator(t *testing.T) {
 			env[e.Name] = e.Value
 		}
 	}
-	if env["PROVISION_GROUP"] == "" {
-		t.Skip("rendered with provisioning off: render with build.yml's Render chart values")
+	// CI sets this for its render (build.yml), so a lost value fails there
+	// rather than skipping.
+	if os.Getenv("DIREWOLF_CHART_PROVISIONING") == "" {
+		t.Skip("DIREWOLF_CHART_PROVISIONING unset: render with build.yml's Render chart values and set it")
 	}
 	for name, want := range map[string]string{
 		"PROVISION_GROUP":               "k8x-games",

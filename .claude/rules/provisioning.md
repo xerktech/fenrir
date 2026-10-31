@@ -36,9 +36,10 @@ paths:
 - Ensure runs `libraryClaimsConflict` on the generated claims first, so it never creates a User
   whose Library would refuse to start.
 - Chart values reach the operator as env (`PROVISION_*`, `LIBRARY_GROUPS_*`), which the flags
-  default from, as `LIBRARY_WOW_ADDONS` does. CI renders them set; `charts/provisioning_test.go`.
+  default from, as `LIBRARY_WOW_ADDONS` does. CI renders them set and sets
+  `DIREWOLF_CHART_PROVISIONING=1`, so `charts/provisioning_test.go` fails, not skips, on a lost value.
 - The user template is parsed strictly (`ParseProvisionUserTemplate`): a typo'd field would
-  silently drop a limit. It may not set `library`, and must be one YAML document (sigs.k8s.io/yaml
-  reads only the first).
+  silently drop a limit. It may not set `library`, and must hold one non-empty YAML document:
+  sigs.k8s.io/yaml reads only the first, and only a full parser sees a `...` end marker.
 - Tests: `pkg/controllers/provisioning_test.go`, `pkg/api/v1alpha1/username_test.go`,
   `TestLibraryServerMapsUsernames`.

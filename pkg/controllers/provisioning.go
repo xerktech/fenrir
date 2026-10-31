@@ -1,20 +1,18 @@
 package controllers
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	stderrors "errors"
 	"fmt"
 	"io"
 	"strings"
 
+	yamlv3 "go.yaml.in/yaml/v3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/yaml"
@@ -96,16 +94,14 @@ func ParseProvisionUserTemplate(s string) (v1alpha1types.UserSpec, error) {
 	if strings.TrimSpace(s) == "" {
 		return spec, nil
 	}
-	// sigs.k8s.io/yaml reads only the first document; a second (say, one
-	// setting library) would be dropped silently.
-	docs := utilyaml.NewYAMLReader(bufio.NewReader(strings.NewReader(s)))
-	if _, err := docs.Read(); err != nil {
-		return spec, fmt.Errorf("parsing user template: %w", err)
+	// sigs.k8s.io/yaml reads only the first document, so a second (say, one
+	// setting library, or after a "..." end marker) would be dropped
+	// silently. Find the one non-empty document with a full YAML parser.
+	doc, err := singleYAMLDocument(s)
+	if err != nil {
+		return spec, err
 	}
-	if extra, err := docs.Read(); !stderrors.Is(err, io.EOF) || len(bytes.TrimSpace(extra)) > 0 {
-		return spec, stderrors.New("user template must be a single document")
-	}
-	if err := yaml.UnmarshalStrict([]byte(s), &spec); err != nil {
+	if err := yaml.UnmarshalStrict(doc, &spec); err != nil {
 		return spec, fmt.Errorf("parsing user template: %w", err)
 	}
 	if spec.Library != nil {
@@ -259,4 +255,37 @@ func (p *Provisioner) ensureClaim(ctx context.Context, name string, tmpl ClaimTe
 func claimProvisionedFor(claim *corev1.PersistentVolumeClaim, username string) bool {
 	return claim.Labels[v1alpha1types.ProvisionedLabel] == v1alpha1types.ProvisionedLabelValue &&
 		claim.Annotations[v1alpha1types.UsernameAnnotation] == username
+}
+
+// singleYAMLDocument returns s's only non-empty YAML document, re-encoded;
+// empty (comment-only or null) documents are skipped, and a second
+// non-empty one is refused.
+func singleYAMLDocument(s string) ([]byte, error) {
+	dec := yamlv3.NewDecoder(strings.NewReader(s))
+	var found *yamlv3.Node
+	for {
+		var node yamlv3.Node
+		err := dec.Decode(&node)
+		if stderrors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parsing user template: %w", err)
+		}
+		if len(node.Content) == 0 || node.Content[0].Tag == "!!null" {
+			continue
+		}
+		if found != nil {
+			return nil, stderrors.New("user template must be a single YAML document")
+		}
+		found = node.Content[0]
+	}
+	if found == nil {
+		return nil, nil
+	}
+	out, err := yamlv3.Marshal(found)
+	if err != nil {
+		return nil, fmt.Errorf("re-encoding user template: %w", err)
+	}
+	return out, nil
 }

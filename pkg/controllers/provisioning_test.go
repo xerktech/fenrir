@@ -361,6 +361,12 @@ sidecarPolicies:
 	if _, err := ParseProvisionUserTemplate(`{"resources":{"limits":{"cpu":"8"}}}`); err != nil {
 		t.Errorf("JSON: %v", err)
 	}
+	// Empty documents around the one that counts are fine.
+	for _, ok := range []string{"# c\n---\nresources: {limits: {cpu: \"8\"}}\n", "---\nresources: {limits: {cpu: \"8\"}}\n---\n"} {
+		if spec, err := ParseProvisionUserTemplate(ok); err != nil || spec.Resources == nil {
+			t.Errorf("ParseProvisionUserTemplate(%q) = %+v, %v", ok, spec, err)
+		}
+	}
 	if spec, err := ParseProvisionUserTemplate(""); err != nil || spec.Resources != nil {
 		t.Errorf("empty = %+v, %v", spec, err)
 	}
@@ -369,6 +375,8 @@ sidecarPolicies:
 		`{"resource":{}}`, // typo: would silently drop the limits
 		`[`,
 		"resources: {}\n---\nlibrary: {homeClaimName: a, gamesClaimName: b}\n",
+		"sidecarPolicies: {}\n...\nresources: {limits: {cpu: \"8\"}}\n",
+		"resources: {}\n...\n---\nlibrary: {homeClaimName: a, gamesClaimName: b}\n",
 	} {
 		if _, err := ParseProvisionUserTemplate(bad); err == nil {
 			t.Errorf("ParseProvisionUserTemplate(%s) accepted", bad)

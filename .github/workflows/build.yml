@@ -122,7 +122,7 @@ jobs:
       # Checks on what the chart renders, e.g. moonlight-proxy's RBAC scope.
       # They skip without the manifest, so they only really run here.
       - name: Test rendered chart
-        run: DIREWOLF_CHART_MANIFEST="$RUNNER_TEMP/chart.yaml" go test -count=1 ./charts/
+        run: DIREWOLF_CHART_MANIFEST="$RUNNER_TEMP/chart.yaml" DIREWOLF_CHART_PROVISIONING=1 go test -count=1 ./charts/
 
       - name: Package chart
         run: helm package charts/direwolf-operator -d packaged
