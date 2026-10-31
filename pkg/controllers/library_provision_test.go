@@ -138,6 +138,7 @@ func TestLibraryServerProvisionRefusals(t *testing.T) {
 			h.Set(LibraryProxySecretHeader, "")
 			return h
 		}()},
+		{name: "no user header", peer: "10.1.0.5:5555", header: http.Header{"Sec-Fetch-User": {"?1"}, DefaultLibraryGroupsHeader: {testProvisionGroup}}},
 		{name: "provisioning off", peer: "10.1.0.5:5555", header: signIn("Kim", testProvisionGroup, true), off: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

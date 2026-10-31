@@ -17,7 +17,8 @@ paths:
   - The page picks the library from `--library-user-header` (Authentik's username), trusted only
     with the proxy secret. A name with no User, or an empty one, is refused (403): it would
     otherwise get the shared desktop, signed in to its users' accounts. No header at all gets the
-    shared library.
+    shared library, unless provisioning is on: then it is a misnamed `--library-user-header`
+    and 403s (XERK-2544). Tests: `TestLibraryServerProvisionRefusals/no_user_header`.
   - Exception: with provisioning on, an eligible person (group or allowlist) gets a User on
     that visit (`.claude/rules/provisioning.md`).
   - The header's username maps to a User name by `v1alpha1.LookupUser`, as the provisioner

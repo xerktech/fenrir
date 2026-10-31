@@ -8,7 +8,7 @@ NOTE: upstream is not in a usable state. This fork runs on talos04 for xerktech;
 ## Operator runbook (xerktech, talos04)
 
 Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps/direwolf.yaml`
-(chart, flags) and `streaming/direwolf/` (User, Apps, Steam storage, backups). Its
+(chart, flags) and `games/direwolf/` (User, Apps, Steam storage, backups). Its
 `.claude/rules/streaming.md` holds the cluster-specific pitfalls and launch-failure guide.
 
 ### Deploy
@@ -25,7 +25,9 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
 
 - Moonlight: add host `10.10.10.34`, start pairing, then open `pair.library.xerktech.com`
   (Authentik), pick the waiting client and enter the PIN Moonlight shows.
-  - The Authentik username must have a `User` CR of the same name, or the PIN is refused.
+  - The Authentik username needs a `User` CR of the same name, or the PIN is refused. A
+    `k8x-games` member without one is sent to `library.xerktech.com` first, which creates it
+    (see [Adding users](#adding-users)).
 - `--max-concurrent-sessions` Users stream at once; one more User's launch is refused with a
   busy message. A launch by the same User from a second client replaces that User's running
   session instead.
@@ -34,16 +36,16 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
   open is refused; other libraries' Libraries don't matter.
 - Steam games: install from `library.xerktech.com`, which opens the signed-in user's own Library;
   each install becomes its own App (with cover art) after that Library visit, shown only to the
-  Users of that library. Other apps are `App` CRs in `streaming/direwolf/`.
+  Users of that library. Other apps are `App` CRs in `games/direwolf/`.
 - Quit in Moonlight ends the session at once. Closing the client without quitting keeps the
   pod for 10 minutes (`--disconnect-grace-period`); reconnecting in that window resumes the game.
 
 ### Administer
 
-- Running sessions: `kubectl get sessions -n streaming`. End one: `kubectl delete session -n
-  streaming <name>`; its pod, GPU claim and wolf-agent Secret go with it. Never delete the pod
+- Running sessions: `kubectl get sessions -n games`. End one: `kubectl delete session -n
+  games <name>`; its pod, GPU claim and wolf-agent Secret go with it. Never delete the pod
   alone expecting a restart: a gone pod ends the Session.
-- Revoke a client: `kubectl delete pairing -n streaming <fingerprint>` (`spec.userReference`
+- Revoke a client: `kubectl delete pairing -n games <fingerprint>` (`spec.userReference`
   names its owner). It is refused from then on, and the operator ends any session it has
   running (pod and stream included).
 - Steam home and library are backed up hourly/daily to NFS; the restore procedure is in the
@@ -71,7 +73,7 @@ These need a real Moonlight client and a gamepad, and are checked by hand:
   own second client takes the stream over.
 - Library: install a game, close the page, it goes idle and stops; a launch while it is open
   is refused; the game appears in Moonlight with its cover.
-- Quit: `kubectl get pods,resourceclaims -n streaming` shows no session pod or claim.
+- Quit: `kubectl get pods,resourceclaims -n games` shows no session pod or claim.
 
 ## High Level Idea
 
@@ -331,19 +333,21 @@ request: one that passes a client's own `X-Forwarded-User` through lets anyone b
   commas). Add or remove people by editing the values in Git.
 
 Removing someone from the group or the list only stops new provisioning: a `User` already made
-keeps working. To remove a person entirely (namespace `streaming` here; `<name>` is their `User`):
+keeps working. To remove a person entirely (namespace `games` here; `<name>` is their `User`):
 
 1. Revoke their clients and sessions:
-   `kubectl get pairings -n streaming -o json | jq -r '.items[] | select(.spec.userReference.name=="<name>") | .metadata.name'`,
-   then `kubectl delete pairing -n streaming <each>` (their Sessions end with them).
-2. Close their Library if open: `kubectl delete pod -n streaming direwolf-library-<name>`.
-3. `kubectl delete user -n streaming <name>`. Their catalogue Apps go on the next catalogue scan.
-4. Only if their saves and games may go: `kubectl delete pvc -n streaming direwolf-home-<name>
-   direwolf-games-<name>`, and `kubectl delete secret -n streaming direwolf-library-auth-<name>`.
+   `kubectl get pairings -n games -o json | jq -r '.items[] | select(.spec.userReference.name=="<name>") | .metadata.name'`,
+   then `kubectl delete pairing -n games <each>` (their Sessions end with them).
+2. Close their Library if open: `kubectl delete pod -n games direwolf-library-<name>`.
+3. `kubectl delete user -n games <name>`. Their catalogue Apps go on the next catalogue scan.
+4. Only if their saves and games may go: `kubectl delete pvc -n games direwolf-home-<name>
+   direwolf-games-<name>`, and `kubectl delete secret -n games direwolf-library-auth-<name>`.
    Deleting the `User` alone keeps the PVCs; if they sign in again while still eligible, the new
    `User` adopts them.
 
-Take them off the group or list first, or step 3 is undone at their next sign-in.
+Take them off the group or list first, or step 3 is undone at their next sign-in (with
+Authentik, also delete or deactivate the account to end its signed-in sessions).
+Here the PVCs use `local-path` with reclaim policy `Delete`: step 4 deletes the data on the node.
 
 ### Adding an application and pairing with moonlight  
 add the app the to cluster using:  
