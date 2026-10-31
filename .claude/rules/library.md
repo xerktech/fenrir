@@ -15,7 +15,10 @@ paths:
   - Launchers allow one login per device and Proton prefixes live in the games volume
     (`steamapps/compatdata`), so two Users never share a home or a games volume.
   - The page picks the library from `--library-user-header` (Authentik's username), trusted only
-    with the proxy secret; an unknown name or none gets the shared library.
+    with the proxy secret. A name with no User is refused (403): it would otherwise get the shared
+    desktop, signed in to its users' accounts. No header at all gets the shared library.
+  - No two libraries may share a claim (`libraryClaimsConflict`, in `EnsurePod` and at pod build):
+    each one's lock sees only its own Users, so two would let two Steams write one home.
   - A session of such a User mounts their claims wherever the App mounts the shared ones
     (`useUserLibrary`); Apps keep naming the shared claims.
   - One password per library: each desktop runs its user's code and can read its own.
@@ -24,6 +27,9 @@ paths:
 - Steam lock: a Library and the game sessions of its library's Users share one Steam home, so
   they never run together. Other libraries' sessions don't count; a session whose User is gone
   counts for every library.
+  - Operator side, a pod also counts if it mounts the library's home or games claim, whatever
+    its User's library is now: `spec.library` can change under a running game (QA, XERK-2500).
+    That covers the split App pod, which carries `direwolf/user` but no session label.
   - Both sides check, create, then check again (`EnsurePod`; `createSession`'s post-create
     `BusyCheck`), so two racing starts can't both survive. Drop either recheck and they can.
   - Both checks read the API server (`List`), never an informer: the other side's object may

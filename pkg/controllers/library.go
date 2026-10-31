@@ -16,7 +16,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
@@ -722,7 +721,16 @@ func (c *LibraryController) EnsurePod(ctx context.Context, lib LibraryRef) (*cor
 	if lib.HomePVC == "" || lib.GamesPVC == "" {
 		return nil, "", fmt.Errorf("library %q has no home or games claim", lib.Owner)
 	}
-	if busy, checkErr := c.gameRunning(ctx, lib.Owner); checkErr != nil || busy {
+	if lib.Owner != "" {
+		users, listErr := c.UserClient.List(ctx, metav1.ListOptions{})
+		if listErr != nil {
+			return nil, "", fmt.Errorf("failed to list users: %w", listErr)
+		}
+		if conflict := libraryClaimsConflict(lib, c.HomePVC, c.GamesPVC, users.Items); conflict != nil {
+			return nil, "", conflict
+		}
+	}
+	if busy, checkErr := c.gameRunning(ctx, lib); checkErr != nil || busy {
 		return nil, libraryBusyReasonIf(busy), checkErr
 	}
 	if _, authErr := c.AuthPassword(ctx, lib.Owner); authErr != nil {
@@ -745,7 +753,7 @@ func (c *LibraryController) EnsurePod(ctx context.Context, lib LibraryRef) (*cor
 
 	// A launch may have passed moonlight-proxy's check before our pod
 	// existed. Whichever side looks second sees the other and backs off.
-	busy, err := c.gameRunning(ctx, lib.Owner)
+	busy, err := c.gameRunning(ctx, lib)
 	if err != nil || busy {
 		delErr := pods.Delete(ctx, pod.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &pod.UID}})
 		if delErr != nil && !errors.IsNotFound(delErr) {
@@ -763,12 +771,38 @@ func libraryBusyReasonIf(busy bool) string {
 	return ""
 }
 
-// gameRunning reports whether a game session of a User playing from owner's
-// library holds its Steam: a Session, or a session pod still terminating
-// after its Session is gone. Read from the API server, not the informer, so a
-// Session created a moment ago counts. A session whose User can't be found
-// counts for every library: its library is unknown.
-func (c *LibraryController) gameRunning(ctx context.Context, owner string) (bool, error) {
+// libraryClaimsConflict refuses an own library (lib.Owner set) on a claim of
+// the shared library's or of another User's own library: each library's lock
+// sees only its own Users' sessions and Library, so two libraries on one
+// claim would let two Steams write one home.
+func libraryClaimsConflict(lib LibraryRef, sharedHome, sharedGames string, users []v1alpha1types.User) error {
+	taken := map[string]string{sharedHome: "the shared library", sharedGames: "the shared library"}
+	for i := range users {
+		if l := users[i].Spec.Library; l != nil && users[i].Name != lib.Owner {
+			taken[l.HomeClaimName] = "user " + users[i].Name
+			taken[l.GamesClaimName] = "user " + users[i].Name
+		}
+	}
+	if lib.HomePVC == lib.GamesPVC {
+		return fmt.Errorf("user %s's library uses claim %s for both its home and its games", lib.Owner, lib.HomePVC)
+	}
+	for _, claim := range []string{lib.HomePVC, lib.GamesPVC} {
+		if other, ok := taken[claim]; ok && claim != "" {
+			return fmt.Errorf("user %s's library uses claim %s, which is %s's", lib.Owner, claim, other)
+		}
+	}
+	return nil
+}
+
+// gameRunning reports whether a game session holds lib's Steam: a Session of
+// a User playing from lib, or a session (or App) pod, still terminating or
+// not, of such a User or mounting lib's home or games claim. The claims
+// count whatever the User's library is now: it may have changed under a
+// running pod. Read from the API server, not the informer, so a Session
+// created a moment ago counts. A session whose User can't be found counts for
+// every library: its library is unknown.
+func (c *LibraryController) gameRunning(ctx context.Context, lib LibraryRef) (bool, error) {
+	owner := lib.Owner
 	sessions, err := c.SessionClient.List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return false, fmt.Errorf("failed to list sessions: %w", err)
@@ -797,16 +831,27 @@ func (c *LibraryController) gameRunning(ctx context.Context, owner string) (bool
 			return busy, holdErr
 		}
 	}
-	pods, err := c.K8sClient.CoreV1().Pods(c.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labels.SelectorFromSet(labels.Set{
-			v1alpha1types.SessionPodLabel: v1alpha1types.SessionPodLabelValue,
-		}).String(),
-	})
-	if err != nil {
-		return false, fmt.Errorf("failed to list session pods: %w", err)
+	// Session pods, and every pod built for a User's session (the App pod
+	// beside a session pod, --app-pod-host-dir, carries only the User's name).
+	var pods []corev1.Pod
+	for _, selector := range []string{v1alpha1types.SessionPodLabel + "=" + v1alpha1types.SessionPodLabelValue, "direwolf/user"} {
+		list, listErr := c.K8sClient.CoreV1().Pods(c.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if listErr != nil {
+			return false, fmt.Errorf("failed to list session pods: %w", listErr)
+		}
+		pods = append(pods, list.Items...)
 	}
-	for i := range pods.Items {
-		if busy, holdErr := holds(pods.Items[i].Labels["direwolf/user"]); holdErr != nil || busy {
+	for i := range pods {
+		pod := &pods[i]
+		if pod.Labels[v1alpha1types.LibraryPodLabel] != "" {
+			continue
+		}
+		for _, v := range pod.Spec.Volumes {
+			if pvc := v.PersistentVolumeClaim; pvc != nil && (pvc.ClaimName == lib.HomePVC || pvc.ClaimName == lib.GamesPVC) {
+				return true, nil
+			}
+		}
+		if busy, holdErr := holds(pod.Labels["direwolf/user"]); holdErr != nil || busy {
 			return busy, holdErr
 		}
 	}

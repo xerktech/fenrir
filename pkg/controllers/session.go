@@ -2582,6 +2582,20 @@ func (c *SessionController) useUserLibrary(spec *corev1.PodSpec, user *v1alpha1t
 	if user.Spec.Library == nil {
 		return nil
 	}
+	users, err := c.UserInformer.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("listing users: %w", err)
+	}
+	others := make([]v1alpha1types.User, 0, len(users))
+	for _, u := range users {
+		if u.Namespace == user.Namespace {
+			others = append(others, *u)
+		}
+	}
+	lib := LibraryRef{Owner: user.Name, HomePVC: user.Spec.Library.HomeClaimName, GamesPVC: user.Spec.Library.GamesClaimName}
+	if err := libraryClaimsConflict(lib, c.LibraryHomePVC, c.LibraryGamesPVC, others); err != nil {
+		return err
+	}
 	for i := range spec.Volumes {
 		pvc := spec.Volumes[i].PersistentVolumeClaim
 		switch {

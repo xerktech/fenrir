@@ -6,12 +6,15 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/cache"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	"games-on-whales.github.io/direwolf/pkg/generic"
 )
 
 // Per-user libraries (User.spec.library, XERK-2500): each User with one has
@@ -29,6 +32,18 @@ func librarySession(user string) *v1alpha1types.Session {
 	return &v1alpha1types.Session{
 		ObjectMeta: metav1.ObjectMeta{Name: user + "-game", Namespace: libraryTestNS},
 		Spec:       v1alpha1types.SessionSpec{UserReference: v1alpha1types.UserReference{Name: user}},
+	}
+}
+
+// claimPod is a split session's App pod (no session label) mounting claim.
+func claimPod(name, user, claim string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: libraryTestNS, Labels: map[string]string{
+			"direwolf/user": user, podRoleLabel: podRoleApp,
+		}},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "home", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim},
+		}}}},
 	}
 }
 
@@ -105,10 +120,27 @@ func TestLibraryLockIsPerLibrary(t *testing.T) {
 			Name: "s1", Namespace: libraryTestNS,
 			Labels: map[string]string{v1alpha1types.SessionPodLabel: v1alpha1types.SessionPodLabelValue, "direwolf/user": "alex"},
 		}}}, owner: "sam"},
+		// alex was moved to their own library while playing from the shared
+		// one: the pod still mounts the shared home, so it still holds it.
+		{name: "pod on shared home after a library change", dwObjs: []runtime.Object{libraryUser("alex", true)}, k8sObjs: []runtime.Object{
+			claimPod("s1-app", "alex", "steam-home"),
+		}, owner: "", wantBusy: true},
+		// Not a session's: the backup Jobs read the home beside a Library.
+		{name: "backup pod on shared home", dwObjs: []runtime.Object{alex}, k8sObjs: []runtime.Object{
+			func() *corev1.Pod {
+				p := claimPod("backup", "", "steam-home")
+				delete(p.Labels, "direwolf/user")
+				return p
+			}(),
+		}, owner: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLibraryFixture(t, tc.k8sObjs, tc.dwObjs...)
-			busy, err := f.library.gameRunning(context.Background(), tc.owner)
+			lib := f.library.LibraryFor(nil)
+			if tc.owner != "" {
+				lib = f.library.LibraryFor(libraryUser(tc.owner, true))
+			}
+			busy, err := f.library.gameRunning(context.Background(), lib)
 			if err != nil || busy != tc.wantBusy {
 				t.Errorf("gameRunning(%q) = %v, %v; want %v", tc.owner, busy, err, tc.wantBusy)
 			}
@@ -117,14 +149,13 @@ func TestLibraryLockIsPerLibrary(t *testing.T) {
 }
 
 // The page serves the signed-in user's own Library, and the shared one to a
-// User without one or an unknown name.
+// User without one (or when the proxy names no one).
 func TestLibraryServerPicksUsersLibrary(t *testing.T) {
 	for _, tc := range []struct {
 		name, header, wantPod string
 	}{
 		{"own library", "sam", "direwolf-library-sam"},
 		{"no own library", "alex", LibraryPodName},
-		{"not a User", "admin", LibraryPodName},
 		{"no header", "", LibraryPodName},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -145,6 +176,61 @@ func TestLibraryServerPicksUsersLibrary(t *testing.T) {
 				t.Errorf("pods = %v, want only %s", pods.Items, tc.wantPod)
 			}
 		})
+	}
+}
+
+// A name with no User is refused rather than given the shared desktop, which
+// is signed in to the shared library's accounts.
+func TestLibraryServerRefusesUnknownUser(t *testing.T) {
+	f := newLibraryFixture(t, nil, libraryUser("sam", true))
+	rec := serveLibrary(f.server(t), "10.1.0.5:5555", http.Header{"Sec-Fetch-User": {"?1"}, DefaultLibraryUserHeader: {"mallory"}})
+	if rec.Code != http.StatusForbidden || f.podExists(t) {
+		t.Errorf("HTTP %d, Library started %v; want 403 and none", rec.Code, f.podExists(t))
+	}
+}
+
+// Activity is stamped on the visitor's own Library pod, or it idles out.
+func TestLibraryRecordActivityPerOwner(t *testing.T) {
+	sam := libraryPod(0, true)
+	sam.Name = "direwolf-library-sam"
+	f := newLibraryFixture(t, []runtime.Object{libraryPod(0, true), sam})
+	at := libraryTestNow.Add(time.Minute)
+	if err := f.library.RecordActivity(context.Background(), "sam", at, at); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"direwolf-library-sam": true, LibraryPodName: false} {
+		pod, err := f.k8s.CoreV1().Pods(libraryTestNS).Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := pod.Annotations[libraryVisitAnnotation] == at.UTC().Format(time.RFC3339); got != want {
+			t.Errorf("%s stamped = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// Two libraries on one claim would each lock only their own Users: refused.
+func TestLibraryClaimsConflict(t *testing.T) {
+	kim := libraryUser("kim", true)
+	for _, tc := range []struct {
+		name string
+		lib  LibraryRef
+		ok   bool
+	}{
+		{"own claims", LibraryRef{Owner: "sam", HomePVC: "home-sam", GamesPVC: "games-sam"}, true},
+		{"kim's own entry", LibraryRef{Owner: "kim", HomePVC: "home-kim", GamesPVC: "games-kim"}, true},
+		{"shared home", LibraryRef{Owner: "sam", HomePVC: "steam-home", GamesPVC: "games-sam"}, false},
+		{"shared games", LibraryRef{Owner: "sam", HomePVC: "home-sam", GamesPVC: "games"}, false},
+		{"kim's games", LibraryRef{Owner: "sam", HomePVC: "home-sam", GamesPVC: "games-kim"}, false},
+		{"one claim for both", LibraryRef{Owner: "sam", HomePVC: "x", GamesPVC: "x"}, false},
+	} {
+		if err := libraryClaimsConflict(tc.lib, "steam-home", "games", []v1alpha1types.User{*kim}); (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok %v", tc.name, err, tc.ok)
+		}
+	}
+	f := newLibraryFixture(t, nil, kim)
+	if _, _, err := f.library.EnsurePod(context.Background(), LibraryRef{Owner: "sam", HomePVC: "home-kim", GamesPVC: "games-sam"}); err == nil || f.podExists(t) {
+		t.Errorf("EnsurePod on kim's home = %v; want refused", err)
 	}
 }
 
@@ -209,7 +295,16 @@ func TestCatalogueOwnedAppName(t *testing.T) {
 }
 
 func TestSessionPodUsesUsersLibrary(t *testing.T) {
-	c := &SessionController{SessionControllerOptions: SessionControllerOptions{LibraryHomePVC: "steam-home-local", LibraryGamesPVC: "games-library"}}
+	users := cache.NewSharedIndexInformer(nil, &v1alpha1types.User{}, 0, cache.Indexers{})
+	for _, u := range []*v1alpha1types.User{libraryUser("sam", true), libraryUser("kim", true), libraryUser("alex", false)} {
+		if err := users.GetStore().Add(u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &SessionController{
+		UserInformer:             generic.NewInformer[*v1alpha1types.User](users),
+		SessionControllerOptions: SessionControllerOptions{LibraryHomePVC: "steam-home-local", LibraryGamesPVC: "games-library"},
+	}
 	appSpec := func() *corev1.PodSpec {
 		return &corev1.PodSpec{Volumes: []corev1.Volume{
 			{Name: "steam-home", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "steam-home-local"}}},
@@ -247,6 +342,18 @@ func TestSessionPodUsesUsersLibrary(t *testing.T) {
 	}{{libraryUser("alex", false), samsGame}, {libraryUser("sam", true), sharedGame}, {libraryUser("kim", true), samsGame}} {
 		if err := c.useUserLibrary(appSpec(), tc.user, tc.app); err == nil {
 			t.Errorf("%s launched %s from another library", tc.user.Name, tc.app.Name)
+		}
+	}
+
+	// A library on the shared home or another User's claim is refused.
+	for _, lib := range []*v1alpha1types.UserLibrary{
+		{HomeClaimName: "steam-home-local", GamesClaimName: "games-ann"},
+		{HomeClaimName: "home-ann", GamesClaimName: "games-sam"},
+	} {
+		ann := libraryUser("ann", true)
+		ann.Spec.Library = lib
+		if err := c.useUserLibrary(appSpec(), ann, steam); err == nil {
+			t.Errorf("ann's library %+v accepted", lib)
 		}
 	}
 }

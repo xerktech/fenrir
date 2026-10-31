@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -113,5 +114,45 @@ func TestPodLibraryIsPerOwner(t *testing.T) {
 	pods, err := client.CoreV1().Pods(testNamespace).List(t.Context(), metav1.ListOptions{})
 	if err != nil || len(pods.Items) != 1 || pods.Items[0].Name != "direwolf-library" {
 		t.Errorf("pods left = %v, %v; want only the shared Library", pods.Items, err)
+	}
+}
+
+// ownerLibrary records which library each call was for.
+type ownerLibrary struct{ opened, closed []string }
+
+func (l *ownerLibrary) Open(_ context.Context, owner string) (bool, error) {
+	l.opened = append(l.opened, owner)
+	return true, nil
+}
+
+func (l *ownerLibrary) Close(_ context.Context, owner string) (bool, error) {
+	l.closed = append(l.closed, owner)
+	return true, nil
+}
+
+// The tile shows and closes the requester's own library's Library.
+func TestCloseLibraryTileIsTheRequestersLibrary(t *testing.T) {
+	lib := &ownerLibrary{}
+	s := appServer(t)
+	s.Library = lib
+	for _, user := range []*v1alpha1types.User{ownLibraryUser("sam", true), ownLibraryUser("alex", false)} {
+		s.appListHandler(httptest.NewRecorder(), requestAs(t, user, "/applist"))
+		s.closeLibrary(httptest.NewRecorder(), requestAs(t, user, "/launch"))
+	}
+	if !slices.Equal(lib.opened, []string{"sam", ""}) || !slices.Equal(lib.closed, []string{"sam", ""}) {
+		t.Errorf("opened %q, closed %q; want each requester's own library", lib.opened, lib.closed)
+	}
+}
+
+// A pod by an own Library's name but not labelled its owner's is not theirs.
+func TestPodLibraryChecksOwnerLabel(t *testing.T) {
+	impostor := libraryPod("direwolf-library-sam") // no owner label
+	client := k8sfake.NewClientset(impostor)
+	lib := NewPodLibrary(client.CoreV1().Pods(testNamespace))
+	if open, err := lib.Open(t.Context(), "sam"); open || err != nil {
+		t.Errorf("Open(sam) = %v, %v; want false", open, err)
+	}
+	if closing, err := lib.Close(t.Context(), "sam"); closing || err != nil {
+		t.Errorf("Close(sam) = %v, %v; want nothing closed", closing, err)
 	}
 }

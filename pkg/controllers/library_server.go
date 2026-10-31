@@ -52,7 +52,9 @@ const DefaultLibraryUserHeader = "X-Authentik-Username"
 //
 // The visitor's library is chosen by userHeader, which only the trusted
 // proxy can set: the User of that name's own (User.spec.library), or the
-// shared one for a User without one, an unknown name or no header.
+// shared one for a User without one. A name with no User is refused: it would
+// otherwise get the shared desktop, signed in to its users' accounts. No
+// header at all (a proxy that names no one) gets the shared one.
 type LibraryServer struct {
 	library *LibraryController
 	pods    generic.NamespacedLister[*corev1.Pod]
@@ -224,6 +226,9 @@ func (st *libraryState) flushActivity(ctx context.Context, library *LibraryContr
 	st.lastFlushed, st.lastFlushedVisit = seen, visit
 }
 
+// errNoSuchUser: the proxy named a user with no User.
+var errNoSuchUser = errors.New("no such user")
+
 // libraryOf is the library the request's authenticated user plays from.
 func (s *LibraryServer) libraryOf(r *http.Request) (LibraryRef, error) {
 	name := r.Header.Get(s.userHeader)
@@ -232,7 +237,7 @@ func (s *LibraryServer) libraryOf(r *http.Request) (LibraryRef, error) {
 	}
 	user, err := s.users.Get(name)
 	if apierrors.IsNotFound(err) {
-		return s.library.LibraryFor(nil), nil
+		return LibraryRef{}, fmt.Errorf("%w: %q", errNoSuchUser, name)
 	}
 	if err != nil {
 		return LibraryRef{}, fmt.Errorf("getting user %s: %w", name, err)
@@ -254,6 +259,11 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	lib, err := s.libraryOf(r)
+	if errors.Is(err, errNoSuchUser) {
+		klog.Warningf("Library page: refusing %v", err)
+		writeLibraryPage(w, http.StatusForbidden, "You have no streaming account here. Ask the admin to add one.", false, false)
+		return
+	}
 	if err != nil {
 		klog.Errorf("Library page: %v", err)
 		writeLibraryPage(w, http.StatusInternalServerError, "The Library is unavailable. Try again in a minute.", false, false)
