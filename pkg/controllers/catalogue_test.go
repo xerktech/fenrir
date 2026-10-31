@@ -1247,6 +1247,7 @@ func TestCatalogueScanStoreNotRegularFileFails(t *testing.T) {
 		dir := t.TempDir()
 		writeFixture(t, dir, map[string]string{"games/.keep": "", "home/.config/xodus-nexus/.keep": ""})
 		if err := plant(filepath.Join(dir, stateRel)); errors.Is(err, errors.ErrUnsupported) {
+			t.Logf("%s: not supported here, skipped: %v", name, err)
 			continue
 		} else if err != nil {
 			t.Fatal(err)
