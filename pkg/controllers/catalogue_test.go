@@ -48,7 +48,7 @@ func fixtureExec(t *testing.T, dir string) PodExecutor {
 	}
 	home, games := filepath.Join(dir, "home"), filepath.Join(dir, "games")
 	return func(ctx context.Context, _, pod, container string, command []string) (string, error) {
-		if pod != LibraryPodName || container != libraryContainer {
+		if !strings.HasPrefix(pod, LibraryPodName) || container != libraryContainer {
 			return "", errors.New("exec into the wrong container")
 		}
 		// The pod runs it as the desktop user; here, as whoever runs the test.
@@ -534,12 +534,12 @@ func TestLibraryScansCatalogue(t *testing.T) {
 	}
 
 	// A periodic scan is rate limited.
-	cf.catalogue.lastScan = libraryTestNow.Add(-time.Minute)
-	if cf.catalogue.ScanDue() {
+	cf.catalogue.lastScan[""] = libraryTestNow.Add(-time.Minute)
+	if cf.catalogue.ScanDue("") {
 		t.Error("scan due a minute after the last one")
 	}
-	cf.catalogue.lastScan = libraryTestNow.Add(-catalogueScanInterval)
-	if !cf.catalogue.ScanDue() {
+	cf.catalogue.lastScan[""] = libraryTestNow.Add(-catalogueScanInterval)
+	if !cf.catalogue.ScanDue("") {
 		t.Error("scan not due after catalogueScanInterval")
 	}
 }

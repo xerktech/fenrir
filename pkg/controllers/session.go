@@ -143,6 +143,11 @@ type SessionControllerOptions struct {
 	// can re-attach to the still-running game. Zero ends the session on
 	// disconnect.
 	DisconnectGracePeriod time.Duration
+	// The shared library's PVCs (--library-home-pvc, --library-games-pvc).
+	// A session of a User with spec.library mounts that User's claims
+	// wherever its App mounts these. Empty: nothing is switched.
+	LibraryHomePVC  string
+	LibraryGamesPVC string
 }
 
 // Session Controller manages the lifecycle of a streaming session for
@@ -1265,6 +1270,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		podToCreate.Spec = *app.Spec.Template.Spec.DeepCopy()
 	}
 	if err := addAppGPUClaim(&podToCreate.Spec, app, session); err != nil {
+		return nil, invalidSpec(err)
+	}
+	if err := c.useUserLibrary(&podToCreate.Spec, user, app); err != nil {
 		return nil, invalidSpec(err)
 	}
 	// Before the operator's own containers are added: only the App's are
@@ -2558,6 +2566,30 @@ func steamRelinkContainer(containers []corev1.Container, image string) *corev1.C
 				},
 				VolumeMounts: []corev1.VolumeMount{home},
 			}
+		}
+	}
+	return nil
+}
+
+// useUserLibrary points the App's volumes on the shared library's PVCs at the
+// User's own library (User.spec.library), so a Steam App runs in that User's
+// Steam home with their games. A game catalogued from another library is
+// refused: it is installed there only (moonlight-proxy hides it as well).
+func (c *SessionController) useUserLibrary(spec *corev1.PodSpec, user *v1alpha1types.User, app *v1alpha1types.App) error {
+	if !v1alpha1types.AppVisibleTo(app, user.LibraryOwner()) {
+		return fmt.Errorf("app %s is a game in another user's library", app.Name)
+	}
+	if user.Spec.Library == nil {
+		return nil
+	}
+	for i := range spec.Volumes {
+		pvc := spec.Volumes[i].PersistentVolumeClaim
+		switch {
+		case pvc == nil:
+		case c.LibraryHomePVC != "" && pvc.ClaimName == c.LibraryHomePVC:
+			pvc.ClaimName = user.Spec.Library.HomeClaimName
+		case c.LibraryGamesPVC != "" && pvc.ClaimName == c.LibraryGamesPVC:
+			pvc.ClaimName = user.Spec.Library.GamesClaimName
 		}
 	}
 	return nil

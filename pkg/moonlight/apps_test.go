@@ -51,10 +51,10 @@ func TestHiddenAppsAreNotListed(t *testing.T) {
 	if strings.Contains(body, "Hidden") || strings.Contains(body, "GPU") {
 		t.Errorf("applist leaks App fields Moonlight doesn't know: %s", body)
 	}
-	if _, err := s.getAppByID("2"); err == nil {
+	if _, err := s.getAppByID("2", ""); err == nil {
 		t.Error("getAppByID found the hidden App")
 	}
-	if _, err := s.getAppByID("1"); err != nil {
+	if _, err := s.getAppByID("1", ""); err != nil {
 		t.Errorf("getAppByID(1): %v", err)
 	}
 }

@@ -220,6 +220,9 @@ type catalogueGame struct {
 	// Launch is the launch command line of a RomM game (core and ROM path);
 	// the other stores' are derived from Store and ID.
 	Launch string
+	// Owner is the User whose own library the game is installed in; "" for
+	// the shared library (and RomM).
+	Owner string
 }
 
 // Catalogue keeps one App per installed game in sync with the Library's Steam
@@ -236,8 +239,10 @@ type Catalogue struct {
 	StoreArt func(ctx context.Context, storeID string) ([]string, error)
 	CatalogueOptions
 
-	now       func() time.Time
-	lastScan  time.Time
+	now func() time.Time
+	// lastScan is per library owner ("" the shared one). Only the
+	// LibraryController's one worker touches it.
+	lastScan  map[string]time.Time
 	artFailed map[string]time.Time
 	// storeArt caches StoreArt per product: its last good URLs and when to
 	// look again (storeCatalogTTL after a success, catalogueArtRetry after a
@@ -257,6 +262,7 @@ func NewCatalogue(apps v1alpha1client.AppInterface, exec PodExecutor, gamesPath 
 		StoreArt:         func(ctx context.Context, id string) ([]string, error) { return storeArt(ctx, client, id) },
 		CatalogueOptions: options,
 		now:              time.Now,
+		lastScan:         map[string]time.Time{},
 		artFailed:        map[string]time.Time{},
 		storeArt:         map[string]storeArtEntry{},
 	}
@@ -314,9 +320,9 @@ func newArtClient() *http.Client {
 	}}
 }
 
-// ScanDue reports whether a periodic scan is due.
-func (c *Catalogue) ScanDue() bool {
-	return c.now().Sub(c.lastScan) >= catalogueScanInterval
+// ScanDue reports whether a periodic scan of owner's library is due.
+func (c *Catalogue) ScanDue(owner string) bool {
+	return c.now().Sub(c.lastScan[owner]) >= catalogueScanInterval
 }
 
 // Scan reads the installed games from the running Library pod and syncs the
@@ -324,7 +330,8 @@ func (c *Catalogue) ScanDue() bool {
 // A scan that can't read or parse every file changes nothing, so a
 // half-written store never uninstalls a game.
 func (c *Catalogue) Scan(ctx context.Context, pod *corev1.Pod, artBudget time.Duration) error {
-	c.lastScan = c.now()
+	owner := v1alpha1types.LibraryOwnerOf(pod.Labels)
+	c.lastScan[owner] = c.now()
 	ctx, cancel := context.WithTimeout(ctx, libraryExecTimeout+artBudget+30*time.Second)
 	defer cancel()
 	execCtx, execCancel := context.WithTimeout(ctx, libraryExecTimeout)
@@ -341,7 +348,7 @@ func (c *Catalogue) Scan(ctx context.Context, pod *corev1.Pod, artBudget time.Du
 	if err != nil {
 		return err
 	}
-	return c.Sync(ctx, games, artBudget)
+	return c.syncLibrary(ctx, owner, games, artBudget)
 }
 
 // catalogueScanCommand tars every appmanifest in the default Steam library
@@ -982,6 +989,18 @@ func firstNonEmpty(s ...string) string {
 // of the real ID appended when the ID had to be changed to be a valid name
 // (Heroic appNames are case-sensitive and may hold '.' or '_').
 func catalogueAppName(store, id string) string {
+	return catalogueOwnedAppName("", store, id)
+}
+
+// catalogueOwnedAppName is catalogueAppName for a game in owner's own
+// library: <owner>-<store>-<id>, so two Users' copies of a game never share
+// a name. The User CRD caps an owner at 40 characters, leaving room for the
+// store and the hash.
+func catalogueOwnedAppName(owner, store, id string) string {
+	prefix := store
+	if owner != "" {
+		prefix = owner + "-" + store
+	}
 	var sb strings.Builder
 	for _, r := range strings.ToLower(id) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
@@ -991,13 +1010,13 @@ func catalogueAppName(store, id string) string {
 		}
 	}
 	safe := strings.Trim(sb.String(), "-")
-	if safe == id && len(store)+1+len(safe) <= 63 {
-		return store + "-" + safe
+	if safe == id && len(prefix)+1+len(safe) <= 63 {
+		return prefix + "-" + safe
 	}
 	h := fnv.New32a()
 	h.Write([]byte(id))
-	safe = strings.TrimRight(safe[:min(len(safe), 63-len(store)-10)], "-")
-	return fmt.Sprintf("%s-%s-%08x", store, safe, h.Sum32())
+	safe = strings.TrimRight(safe[:min(len(safe), max(0, 63-len(prefix)-10))], "-")
+	return fmt.Sprintf("%s-%s-%08x", prefix, safe, h.Sum32())
 }
 
 // catalogueMoonlightID is the game's Moonlight app ID: stable, and in
@@ -1051,13 +1070,19 @@ func truncateTitle(s string) string {
 // the changed and deletes those whose game is gone, for each launcher whose
 // base App is set and readable. Box art is fetched for at most artBudget.
 func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame, artBudget time.Duration) error {
+	return c.syncLibrary(ctx, "", games, artBudget)
+}
+
+// syncLibrary is Sync for the games of owner's library ("" the shared one):
+// only that library's Apps are created, updated or deleted.
+func (c *Catalogue) syncLibrary(ctx context.Context, owner string, games []catalogueGame, artBudget time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	bases, errs := c.bases(ctx)
 	if len(bases) == 0 {
 		return errors.Join(errs...)
 	}
-	existing, err := c.catalogueApps(ctx, bases)
+	existing, err := c.catalogueApps(ctx, owner, bases)
 	if err != nil {
 		return errors.Join(append(errs, err)...)
 	}
@@ -1067,12 +1092,13 @@ func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame, artBudget t
 	wanted := map[string]bool{}
 	ids := map[int]string{}
 	for i := range games {
-		game := &games[i]
+		game := games[i]
+		game.Owner = owner
 		base := bases[game.Store]
 		if base == nil {
 			continue
 		}
-		name := catalogueAppName(game.Store, game.ID)
+		name := catalogueOwnedAppName(owner, game.Store, game.ID)
 		if wanted[name] {
 			continue // the same game in two Steam library folders
 		}
@@ -1084,7 +1110,7 @@ func (c *Catalogue) Sync(ctx context.Context, games []catalogueGame, artBudget t
 			continue
 		}
 		ids[id] = name
-		if err := c.syncApp(ctx, artCtx, base, game, name, existing[name]); err != nil {
+		if err := c.syncApp(ctx, artCtx, base, &game, name, existing[name]); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -1145,7 +1171,8 @@ func (c *Catalogue) bases(ctx context.Context) (map[string]*v1alpha1types.App, [
 	return bases, errs
 }
 
-// catalogueSelector selects the catalogue Apps of the stores in bases.
+// catalogueSelector selects the catalogue Apps of the stores in bases, of
+// every library.
 func catalogueSelector(bases map[string]*v1alpha1types.App) (string, error) {
 	stores := make([]string, 0, len(bases))
 	for s := range bases {
@@ -1158,12 +1185,23 @@ func catalogueSelector(bases map[string]*v1alpha1types.App) (string, error) {
 	return labels.NewSelector().Add(*req).String(), nil
 }
 
-// catalogueApps lists, by name, the catalogue Apps of the stores in bases.
-func (c *Catalogue) catalogueApps(ctx context.Context, bases map[string]*v1alpha1types.App) (map[string]*v1alpha1types.App, error) {
+// catalogueApps lists, by name, the catalogue Apps of the stores in bases
+// made from owner's library ("" the shared one). Another library's are never
+// touched: its games are not in this scan.
+func (c *Catalogue) catalogueApps(ctx context.Context, owner string, bases map[string]*v1alpha1types.App) (map[string]*v1alpha1types.App, error) {
 	selector, err := catalogueSelector(bases)
 	if err != nil {
 		return nil, err
 	}
+	op, values := selection.DoesNotExist, []string(nil)
+	if owner != "" {
+		op, values = selection.Equals, []string{owner}
+	}
+	ownerReq, err := labels.NewRequirement(v1alpha1types.LibraryOwnerLabel, op, values)
+	if err != nil {
+		return nil, fmt.Errorf("building catalogue selector: %w", err)
+	}
+	selector += "," + ownerReq.String()
 	// From the API server, not a cache: a stale list would recreate or keep
 	// Apps the last scan already handled.
 	list, err := c.Apps.List(ctx, metav1.ListOptions{LabelSelector: selector})
@@ -1229,6 +1267,7 @@ func catalogueGameOf(app *v1alpha1types.App) (catalogueGame, error) {
 		Store: app.Labels[v1alpha1types.CatalogueLabel],
 		ID:    app.Annotations[catalogueIDAnnotation],
 		Title: app.Spec.Title,
+		Owner: v1alpha1types.LibraryOwnerOf(app.Labels),
 	}
 	switch game.Store {
 	case v1alpha1types.CatalogueStoreSteam, v1alpha1types.CatalogueStoreRomM:
@@ -1248,7 +1287,7 @@ func catalogueGameOf(app *v1alpha1types.App) (catalogueGame, error) {
 			return game, errors.New("its catalogue ID is not a valid Heroic appName")
 		}
 	}
-	if catalogueAppName(game.Store, game.ID) != app.Name {
+	if catalogueOwnedAppName(game.Owner, game.Store, game.ID) != app.Name {
 		return game, errors.New("its catalogue ID does not match its name")
 	}
 	if game.Store == v1alpha1types.CatalogueStoreRomM {
@@ -1366,6 +1405,11 @@ func (c *Catalogue) syncApp(ctx, artCtx context.Context, base *v1alpha1types.App
 		app.Annotations = map[string]string{}
 	}
 	app.Labels[v1alpha1types.CatalogueLabel] = game.Store
+	if game.Owner != "" {
+		app.Labels[v1alpha1types.LibraryOwnerLabel] = game.Owner
+	} else {
+		delete(app.Labels, v1alpha1types.LibraryOwnerLabel)
+	}
 	app.Annotations[catalogueIDAnnotation] = game.ID
 	// Keep fetched art; the base App's stands in until there is some (the
 	// CRD rejects an empty appAssetWebP).

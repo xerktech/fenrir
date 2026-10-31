@@ -82,7 +82,7 @@ type RESTServerOptions struct {
 
 // BusyCheck reports whether something outside the Session count occupies the
 // host. It returns a human-readable reason when busy, "" when free.
-type BusyCheck func(ctx context.Context) (reason string, err error)
+type BusyCheck func(ctx context.Context, user *v1alpha1types.User) (reason string, err error)
 
 // ClientLaunchTimeout is how long moonlight-qt waits for /launch before giving
 // up on its own. LaunchTimeout must stay below it.
@@ -456,6 +456,15 @@ func (s *RESTServer) unpairHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// requestLibraryOwner is the library the request's paired User plays from
+// ("" the shared one, also for a request with no User).
+func requestLibraryOwner(r *http.Request) string {
+	if user, ok := r.Context().Value(userContextKey{}).(*v1alpha1types.User); ok {
+		return user.LibraryOwner()
+	}
+	return ""
+}
+
 func (s *RESTServer) appListHandler(w http.ResponseWriter, r *http.Request) {
 	apps, err := s.AppLister.List(nil)
 	if err != nil {
@@ -463,9 +472,10 @@ func (s *RESTServer) appListHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	owner := requestLibraryOwner(r)
 	appsList := make([]App, 0, len(apps))
 	for _, app := range apps {
-		if app.Spec.Hidden {
+		if app.Spec.Hidden || !v1alpha1types.AppVisibleTo(app, owner) {
 			continue
 		}
 		appsList = append(appsList, App{
@@ -473,9 +483,9 @@ func (s *RESTServer) appListHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if s.closeLibraryOffered() {
+	if s.closeLibraryOffered(owner) {
 		ctx, cancel := context.WithTimeout(r.Context(), libraryCallTimeout)
-		open, err := s.Library.Open(ctx)
+		open, err := s.Library.Open(ctx, owner)
 		cancel()
 		if err != nil {
 			// The games still list; only the tile is missing.
@@ -559,7 +569,7 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if appID == strconv.Itoa(CloseLibraryAppID) && s.closeLibraryOffered() {
+	if appID == strconv.Itoa(CloseLibraryAppID) && s.closeLibraryOffered(requestLibraryOwner(r)) {
 		s.closeLibrary(w, r)
 		return
 	}
@@ -594,7 +604,7 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	app, err := s.getAppByID(appID)
+	app, err := s.getAppByID(appID, requestLibraryOwner(r))
 	if err != nil {
 		writeErrorResponse(w, 404, err)
 		return
@@ -799,7 +809,7 @@ func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User
 	s.drainCleanups(ctx)
 
 	if s.BusyCheck != nil {
-		reason, err := s.BusyCheck(ctx)
+		reason, err := s.BusyCheck(ctx, user)
 		if err != nil {
 			return nil, "", fmt.Errorf("busy check failed: %w", err)
 		}
@@ -837,7 +847,7 @@ func (s *RESTServer) createSession(ctx context.Context, user *v1alpha1types.User
 	// Library) may have started between the first check and the Create.
 	// It checks for Sessions after creating itself, so whichever side looks
 	// second sees the other. Backing out goes through onCreateError.
-	reason, err := s.BusyCheck(ctx)
+	reason, err := s.BusyCheck(ctx, user)
 	if err != nil || reason != "" {
 		createFailed = true
 		if err != nil {
@@ -924,13 +934,14 @@ func streamRefusal(session *v1alpha1types.Session) *streamRefusedError {
 	return &streamRefusedError{message: cond.Message, generation: cond.ObservedGeneration}
 }
 
-// closeLibrary answers a launch of the "Close Library" tile. Any paired user
-// may close it: the Library is one shared desktop, and while it runs nobody
-// can play. Nothing streams, so the answer is always a message.
+// closeLibrary answers a launch of the "Close Library" tile: it closes the
+// Library of the library the user plays from. Any paired user of the shared
+// library may close its Library: one shared desktop, and while it runs none of
+// them can play. Nothing streams, so the answer is always a message.
 func (s *RESTServer) closeLibrary(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), libraryCallTimeout)
 	defer cancel()
-	closing, err := s.Library.Close(ctx)
+	closing, err := s.Library.Close(ctx, requestLibraryOwner(r))
 	message := libraryNotOpenMessage
 	switch {
 	case err != nil:
@@ -947,13 +958,14 @@ func (s *RESTServer) closeLibrary(w http.ResponseWriter, r *http.Request) {
 	sendXMLWithHTTPStatus(w, http.StatusOK, Response{StatusCode: libraryClosingStatusCode, StatusMessage: message})
 }
 
-// closeLibraryOffered reports whether the "Close Library" tile exists: a
-// Library is configured, and no App claims its ID.
-func (s *RESTServer) closeLibraryOffered() bool {
+// closeLibraryOffered reports whether the "Close Library" tile exists for a
+// User of owner's library: a Library is configured, and no App they can see
+// claims its ID.
+func (s *RESTServer) closeLibraryOffered(owner string) bool {
 	if s.Library == nil {
 		return false
 	}
-	_, err := s.getAppByID(strconv.Itoa(CloseLibraryAppID))
+	_, err := s.getAppByID(strconv.Itoa(CloseLibraryAppID), owner)
 	return err != nil
 }
 
@@ -1178,7 +1190,7 @@ func (s *RESTServer) appAssetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	app, err := s.getAppByID(appID)
+	app, err := s.getAppByID(appID, requestLibraryOwner(r))
 	if err != nil {
 		writeAssetError(w, 404, fmt.Errorf("app not found: %w", err))
 		return
@@ -1497,7 +1509,9 @@ func (s *RESTServer) authenticatedMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (s *RESTServer) getAppByID(appID string) (*v1alpha1types.App, error) {
+// getAppByID is the App with Moonlight ID appID a User of owner's library can
+// see. Two Users' own copies of a catalogued game share its ID.
+func (s *RESTServer) getAppByID(appID, owner string) (*v1alpha1types.App, error) {
 	intParsedAppID, err := strconv.Atoi(appID)
 	if err != nil {
 		return nil, fmt.Errorf("app id must be an integer")
@@ -1510,7 +1524,7 @@ func (s *RESTServer) getAppByID(appID string) (*v1alpha1types.App, error) {
 
 	// A hidden App is not in the app list, so it can't be launched either.
 	for _, app := range apps {
-		if app.Spec.ID == intParsedAppID && !app.Spec.Hidden {
+		if app.Spec.ID == intParsedAppID && !app.Spec.Hidden && v1alpha1types.AppVisibleTo(app, owner) {
 			return app, nil
 		}
 	}

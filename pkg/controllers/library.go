@@ -32,14 +32,17 @@ import (
 )
 
 const (
-	// LibraryPodName is the one Library pod per namespace.
+	// LibraryPodName is the shared library's Library pod; a User with
+	// spec.library has their own (v1alpha1types.LibraryPodNameFor).
 	LibraryPodName = v1alpha1types.LibraryPodName
 
 	libraryContainer = "library"
 	// libraryAuthSecret holds the password Selkies' nginx demands (basic
 	// auth, user libraryAuthUser) on the pod's ports. The operator's proxy
 	// adds it; nothing else knows it, so reaching the pod IP directly gets
-	// nowhere even where NetworkPolicy isn't enforced.
+	// nowhere even where NetworkPolicy isn't enforced. One per library
+	// (libraryAuthSecretFor): every desktop runs its user's code and can
+	// read its own password, which must not open another user's Library.
 	libraryAuthSecret = "direwolf-library-auth"
 	libraryAuthKey    = "password"
 	libraryAuthUser   = "abc"
@@ -210,9 +213,9 @@ func streamCapped(stream func(remotecommand.StreamOptions) error) (string, error
 type LibraryControllerOptions struct {
 	Image string
 	// HomePVC is the shared Steam home (also mounted by Steam game sessions),
-	// mounted at /config.
+	// mounted at /config. A User with spec.library has their own instead.
 	HomePVC string
-	// GamesPVC is the shared game library, mounted at GamesPath.
+	// GamesPVC is the shared game library, mounted at GamesPath; likewise.
 	GamesPVC  string
 	GamesPath string
 
@@ -232,37 +235,71 @@ type LibraryControllerOptions struct {
 	WoWAddonsInvalid bool
 }
 
-// LibraryController owns the on-demand Library pod: it is created by a visit
+// LibraryController owns the on-demand Library pods, one per library (the
+// shared one, and each User with spec.library): a pod is created by a visit
 // to the Library page (LibraryServer), and stopped once the browser has been
 // gone for IdleTimeout (or nobody opened the page for MaxRuntime) and
 // nothing is downloading.
 //
-// The Library and game sessions are mutually exclusive (Steam's single-writer
-// lock on the shared home): the Library is not started while a Session or a
-// session pod exists, and moonlight-proxy refuses launches while the Library
-// pod exists. Both sides check, create, then check again, so two racing
-// starts can't both survive.
+// A Library and its library's game sessions are mutually exclusive (Steam's
+// single-writer lock on the home): the Library is not started while a Session
+// or a session pod of a User playing from it exists, and moonlight-proxy
+// refuses those Users' launches while the Library pod exists. Both sides
+// check, create, then check again, so two racing starts can't both survive.
 type LibraryController struct {
 	Namespace     string
 	K8sClient     kubernetes.Interface
 	SessionClient v1alpha1client.SessionInterface
-	PodInformer   generic.Informer[*corev1.Pod]
-	Exec          PodExecutor
+	// UserClient maps a Session's User to its library for the Steam lock,
+	// read live like the Sessions themselves.
+	UserClient  v1alpha1client.UserInterface
+	PodInformer generic.Informer[*corev1.Pod]
+	Exec        PodExecutor
 	// Catalogue, if set, is scanned while the Library runs and as it stops.
 	Catalogue *Catalogue
 
 	controller generic.Controller[*corev1.Pod]
 	now        func() time.Time
-	// download is the progress last seen on a listed download. Only the
-	// idle check (one worker) touches it; a new leader starts it afresh.
-	download downloadProgress
+	// downloads is the progress last seen on a listed download, per Library
+	// pod. Only the idle check (one worker) touches it; a new leader starts
+	// it afresh.
+	downloads map[types.UID]downloadProgress
 	LibraryControllerOptions
+}
+
+// LibraryRef is one library: the shared one (Owner "") or a User's own.
+type LibraryRef struct {
+	Owner    string
+	HomePVC  string
+	GamesPVC string
+}
+
+// LibraryFor is the library user plays from; a nil user (no User of that
+// name) gets the shared one.
+func (c *LibraryController) LibraryFor(user *v1alpha1types.User) LibraryRef {
+	if user == nil || user.Spec.Library == nil {
+		return LibraryRef{HomePVC: c.HomePVC, GamesPVC: c.GamesPVC}
+	}
+	return LibraryRef{
+		Owner:    user.Name,
+		HomePVC:  user.Spec.Library.HomeClaimName,
+		GamesPVC: user.Spec.Library.GamesClaimName,
+	}
+}
+
+// libraryAuthSecretFor is the basic-auth Secret of owner's Library.
+func libraryAuthSecretFor(owner string) string {
+	if owner == "" {
+		return libraryAuthSecret
+	}
+	return libraryAuthSecret + "-" + owner
 }
 
 func NewLibraryController(
 	namespace string,
 	k8sClient kubernetes.Interface,
 	sessionClient v1alpha1client.SessionInterface,
+	userClient v1alpha1client.UserInterface,
 	podInformer generic.Informer[*corev1.Pod],
 	exec PodExecutor,
 	options LibraryControllerOptions, //nolint:gocritic // built once at startup
@@ -277,9 +314,11 @@ func NewLibraryController(
 		Namespace:                namespace,
 		K8sClient:                k8sClient,
 		SessionClient:            sessionClient,
+		UserClient:               userClient,
 		PodInformer:              podInformer,
 		Exec:                     exec,
 		now:                      time.Now,
+		downloads:                map[types.UID]downloadProgress{},
 		LibraryControllerOptions: options,
 	}
 	c.controller = generic.NewController(podInformer, c.Reconcile, generic.ControllerOptions{
@@ -293,15 +332,21 @@ func (c *LibraryController) Run(ctx context.Context) error {
 	return c.controller.Run(ctx) //nolint:wrapcheck // the caller names the controller
 }
 
-// Reconcile runs the idle check on the Library pod and requeues itself, so
+// Reconcile runs the idle check on a Library pod and requeues itself, so
 // the check keeps running without pod events.
 func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) error {
 	// Load bearing: a missing pod arrives as a typed nil.
-	if pod == nil || name != LibraryPodName || pod.DeletionTimestamp != nil {
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return nil
+	}
+	// Only the pod its owner label names: the label decides which library
+	// the catalogue scan syncs.
+	owner := v1alpha1types.LibraryOwnerOf(pod.Labels)
+	if name != v1alpha1types.LibraryPodNameFor(owner) {
 		return nil
 	}
 	ctx := context.Background()
-	if c.Catalogue != nil && podReady(pod) && c.Catalogue.ScanDue() {
+	if c.Catalogue != nil && podReady(pod) && c.Catalogue.ScanDue(owner) {
 		c.scanCatalogue(ctx, pod, catalogueArtBudget)
 	}
 	requeueAfter, err := c.reconcileIdle(ctx, pod)
@@ -403,6 +448,7 @@ func (c *LibraryController) stop(ctx context.Context, pod *corev1.Pod) error {
 			c.scanCatalogue(ctx, pod, 0)
 		}
 	}
+	delete(c.downloads, pod.UID)
 	err := c.K8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
 		Preconditions: &metav1.Preconditions{UID: &pod.UID},
 	})
@@ -504,7 +550,7 @@ func (c *LibraryController) downloadsInProgress(ctx context.Context, pod *corev1
 		what = append(what, fmt.Sprintf("Heroic: %d queued", queued))
 	}
 	if len(what) == 0 {
-		c.download = downloadProgress{}
+		delete(c.downloads, pod.UID)
 		return "", nil
 	}
 	downloading := strings.Join(what, "; ")
@@ -532,10 +578,10 @@ type downloadProgress struct {
 // Heroic download lands in the game's own folder). First sight counts as
 // progress, so a restarted operator waits a full stall timeout.
 func (c *LibraryController) downloadProgressing(uid types.UID, files string, rx, tx uint64) bool {
-	now, last := c.now(), c.download
+	now, last := c.now(), c.downloads[uid]
 	if last.uid != uid || last.files != files || rx < last.rx || tx < last.tx ||
 		rx-last.rx >= libraryDownloadMinBytes+(tx-last.tx)/libraryStreamAckRatio {
-		c.download = downloadProgress{uid: uid, files: files, rx: rx, tx: tx, at: now}
+		c.downloads[uid] = downloadProgress{uid: uid, files: files, rx: rx, tx: tx, at: now}
 		return true
 	}
 	return now.Sub(last.at) < libraryDownloadStallTimeout
@@ -639,10 +685,10 @@ func libraryAnnotatedTime(pod *corev1.Pod, annotation string) time.Time {
 	return last
 }
 
-// RecordActivity stamps the Library pod with the time of the last browser
-// traffic (see libraryActivityAnnotation) and, unless visit is zero, of the
-// last user-opened page load (libraryVisitAnnotation).
-func (c *LibraryController) RecordActivity(ctx context.Context, at, visit time.Time) error {
+// RecordActivity stamps owner's Library pod with the time of the last
+// browser traffic (see libraryActivityAnnotation) and, unless visit is zero,
+// of the last user-opened page load (libraryVisitAnnotation).
+func (c *LibraryController) RecordActivity(ctx context.Context, owner string, at, visit time.Time) error {
 	annotations := map[string]string{libraryActivityAnnotation: at.UTC().Format(time.RFC3339)}
 	if !visit.IsZero() {
 		annotations[libraryVisitAnnotation] = visit.UTC().Format(time.RFC3339)
@@ -653,18 +699,19 @@ func (c *LibraryController) RecordActivity(ctx context.Context, at, visit time.T
 	if err != nil {
 		return fmt.Errorf("encoding activity patch: %w", err)
 	}
-	_, err = c.K8sClient.CoreV1().Pods(c.Namespace).Patch(ctx, LibraryPodName, types.MergePatchType, patch, metav1.PatchOptions{})
+	_, err = c.K8sClient.CoreV1().Pods(c.Namespace).Patch(ctx, v1alpha1types.LibraryPodNameFor(owner), types.MergePatchType, patch, metav1.PatchOptions{})
 	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("patching Library pod: %w", err)
 	}
 	return nil
 }
 
-// EnsurePod returns the Library pod, creating it unless a game is running, in
-// which case it returns a non-empty reason and no pod.
-func (c *LibraryController) EnsurePod(ctx context.Context) (*corev1.Pod, string, error) {
+// EnsurePod returns lib's Library pod, creating it unless one of its games is
+// running, in which case it returns a non-empty reason and no pod.
+func (c *LibraryController) EnsurePod(ctx context.Context, lib LibraryRef) (*corev1.Pod, string, error) {
 	pods := c.K8sClient.CoreV1().Pods(c.Namespace)
-	pod, err := pods.Get(ctx, LibraryPodName, metav1.GetOptions{})
+	name := v1alpha1types.LibraryPodNameFor(lib.Owner)
+	pod, err := pods.Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
 		return pod, "", nil
 	}
@@ -672,17 +719,20 @@ func (c *LibraryController) EnsurePod(ctx context.Context) (*corev1.Pod, string,
 		return nil, "", fmt.Errorf("failed to get Library pod: %w", err)
 	}
 
-	if busy, checkErr := c.gameRunning(ctx); checkErr != nil || busy {
+	if lib.HomePVC == "" || lib.GamesPVC == "" {
+		return nil, "", fmt.Errorf("library %q has no home or games claim", lib.Owner)
+	}
+	if busy, checkErr := c.gameRunning(ctx, lib.Owner); checkErr != nil || busy {
 		return nil, libraryBusyReasonIf(busy), checkErr
 	}
-	if _, authErr := c.AuthPassword(ctx); authErr != nil {
+	if _, authErr := c.AuthPassword(ctx, lib.Owner); authErr != nil {
 		return nil, "", authErr
 	}
 
-	pod, err = pods.Create(ctx, c.buildPod(), metav1.CreateOptions{})
+	pod, err = pods.Create(ctx, c.buildPod(lib), metav1.CreateOptions{})
 	if errors.IsAlreadyExists(err) {
 		// A concurrent visit created it; that one ran the lock checks.
-		pod, err = pods.Get(ctx, LibraryPodName, metav1.GetOptions{})
+		pod, err = pods.Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to get Library pod: %w", err)
 		}
@@ -691,11 +741,11 @@ func (c *LibraryController) EnsurePod(ctx context.Context) (*corev1.Pod, string,
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create Library pod: %w", err)
 	}
-	klog.Info("Started the Library pod")
+	klog.Infof("Started the Library pod %s", name)
 
 	// A launch may have passed moonlight-proxy's check before our pod
 	// existed. Whichever side looks second sees the other and backs off.
-	busy, err := c.gameRunning(ctx)
+	busy, err := c.gameRunning(ctx, lib.Owner)
 	if err != nil || busy {
 		delErr := pods.Delete(ctx, pod.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &pod.UID}})
 		if delErr != nil && !errors.IsNotFound(delErr) {
@@ -713,36 +763,63 @@ func libraryBusyReasonIf(busy bool) string {
 	return ""
 }
 
-// gameRunning reports whether a game session holds Steam: any Session, or a
-// session pod still terminating after its Session is gone. Read from the API
-// server, not the informer, so a Session created a moment ago counts.
-func (c *LibraryController) gameRunning(ctx context.Context) (bool, error) {
-	sessions, err := c.SessionClient.List(ctx, metav1.ListOptions{Limit: 1})
+// gameRunning reports whether a game session of a User playing from owner's
+// library holds its Steam: a Session, or a session pod still terminating
+// after its Session is gone. Read from the API server, not the informer, so a
+// Session created a moment ago counts. A session whose User can't be found
+// counts for every library: its library is unknown.
+func (c *LibraryController) gameRunning(ctx context.Context, owner string) (bool, error) {
+	sessions, err := c.SessionClient.List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return false, fmt.Errorf("failed to list sessions: %w", err)
 	}
-	if len(sessions.Items) > 0 {
-		return true, nil
+	ownerOf := map[string]string{}
+	holds := func(userName string) (bool, error) {
+		if userName == "" {
+			return true, nil
+		}
+		userOwner, ok := ownerOf[userName]
+		if !ok {
+			user, getErr := c.UserClient.Get(ctx, userName, metav1.GetOptions{})
+			switch {
+			case errors.IsNotFound(getErr):
+				return true, nil
+			case getErr != nil:
+				return false, fmt.Errorf("failed to get user %s: %w", userName, getErr)
+			}
+			userOwner = user.LibraryOwner()
+			ownerOf[userName] = userOwner
+		}
+		return userOwner == owner, nil
+	}
+	for i := range sessions.Items {
+		if busy, holdErr := holds(sessions.Items[i].Spec.UserReference.Name); holdErr != nil || busy {
+			return busy, holdErr
+		}
 	}
 	pods, err := c.K8sClient.CoreV1().Pods(c.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(labels.Set{
 			v1alpha1types.SessionPodLabel: v1alpha1types.SessionPodLabelValue,
 		}).String(),
-		Limit: 1,
 	})
 	if err != nil {
 		return false, fmt.Errorf("failed to list session pods: %w", err)
 	}
-	return len(pods.Items) > 0, nil
+	for i := range pods.Items {
+		if busy, holdErr := holds(pods.Items[i].Labels["direwolf/user"]); holdErr != nil || busy {
+			return busy, holdErr
+		}
+	}
+	return false, nil
 }
 
-func (c *LibraryController) buildPod() *corev1.Pod {
+func (c *LibraryController) buildPod(lib LibraryRef) *corev1.Pod {
 	volumes := []corev1.Volume{
 		{Name: "steam-home", VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: c.HomePVC},
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: lib.HomePVC},
 		}},
 		{Name: "games", VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: c.GamesPVC},
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: lib.GamesPVC},
 		}},
 		// Steam's CEF and Heroic's Electron fall over on the 64Mi default.
 		{Name: "dshm", VolumeSource: corev1.VolumeSource{
@@ -754,7 +831,7 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      LibraryPodName,
+			Name:      v1alpha1types.LibraryPodNameFor(lib.Owner),
 			Namespace: c.Namespace,
 			Labels: map[string]string{
 				v1alpha1types.LibraryPodLabel: v1alpha1types.LibraryPodLabelValue,
@@ -786,7 +863,7 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 					// volume, which steam-backup-saves does not copy.
 					{Name: "BATTLENET_GAMES", Value: path.Join(c.GamesPath, "battlenet")},
 					{Name: "PASSWORD", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: libraryAuthSecret},
+						LocalObjectReference: corev1.LocalObjectReference{Name: libraryAuthSecretFor(lib.Owner)},
 						Key:                  libraryAuthKey,
 					}}},
 				},
@@ -806,6 +883,9 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 				},
 			}},
 		},
+	}
+	if lib.Owner != "" {
+		pod.Labels[v1alpha1types.LibraryOwnerLabel] = lib.Owner
 	}
 	// What the image's wow-addons-update keeps installed in WoW there. Left
 	// unset when the operator's list is unreadable: the Library then leaves
@@ -828,23 +908,24 @@ func (c *LibraryController) buildPod() *corev1.Pod {
 	return pod
 }
 
-// AuthPassword returns the Library's basic-auth password (see
+// AuthPassword returns owner's Library's basic-auth password (see
 // libraryAuthSecret), creating it on first use. It is never rotated by the
 // operator: a running pod keeps the value it started with.
-func (c *LibraryController) AuthPassword(ctx context.Context) (string, error) {
+func (c *LibraryController) AuthPassword(ctx context.Context, owner string) (string, error) {
 	secrets := c.K8sClient.CoreV1().Secrets(c.Namespace)
-	secret, err := secrets.Get(ctx, libraryAuthSecret, metav1.GetOptions{})
+	secretName := libraryAuthSecretFor(owner)
+	secret, err := secrets.Get(ctx, secretName, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		raw := make([]byte, 32)
 		if _, err = rand.Read(raw); err != nil {
 			return "", fmt.Errorf("generating Library password: %w", err)
 		}
 		secret, err = secrets.Create(ctx, &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: libraryAuthSecret, Namespace: c.Namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: c.Namespace},
 			Data:       map[string][]byte{libraryAuthKey: []byte(hex.EncodeToString(raw))},
 		}, metav1.CreateOptions{})
 		if errors.IsAlreadyExists(err) {
-			secret, err = secrets.Get(ctx, libraryAuthSecret, metav1.GetOptions{})
+			secret, err = secrets.Get(ctx, secretName, metav1.GetOptions{})
 		}
 	}
 	if err != nil {
@@ -852,7 +933,7 @@ func (c *LibraryController) AuthPassword(ctx context.Context) (string, error) {
 	}
 	password := string(secret.Data[libraryAuthKey])
 	if password == "" {
-		return "", fmt.Errorf("library auth secret %s has no %q key", libraryAuthSecret, libraryAuthKey)
+		return "", fmt.Errorf("library auth secret %s has no %q key", secretName, libraryAuthKey)
 	}
 	return password, nil
 }

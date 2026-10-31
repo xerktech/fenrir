@@ -381,7 +381,7 @@ func TestLaunchBusyCheck(t *testing.T) {
 	const reason = "The Library is running"
 	f := newLaunchFixture(t, &RESTServerOptions{
 		MaxConcurrentSessions: -1,
-		BusyCheck: func(context.Context) (string, error) {
+		BusyCheck: func(context.Context, *v1alpha1types.User) (string, error) {
 			return reason, nil
 		},
 	})
@@ -396,7 +396,7 @@ func TestLaunchBusyCheck(t *testing.T) {
 
 func TestLaunchBusyCheckError(t *testing.T) {
 	f := newLaunchFixture(t, &RESTServerOptions{
-		BusyCheck: func(context.Context) (string, error) {
+		BusyCheck: func(context.Context, *v1alpha1types.User) (string, error) {
 			return "", errors.New("boom")
 		},
 	})
@@ -503,7 +503,7 @@ func TestLaunchFailureCleanupQueuesForBusySlot(t *testing.T) {
 	var calls atomic.Int32
 	f := newLaunchFixture(t, &RESTServerOptions{
 		LaunchTimeout: 400 * time.Millisecond,
-		BusyCheck: func(context.Context) (string, error) {
+		BusyCheck: func(context.Context, *v1alpha1types.User) (string, error) {
 			// Calls 1-2 are alice's (before and after her Create); call 3
 			// is carol's: she holds the slot while alice fails.
 			if calls.Add(1) == 3 {
@@ -557,7 +557,7 @@ func TestLaunchQueuedBeforeFailureStillDrainsCleanup(t *testing.T) {
 	var calls atomic.Int32
 	f := newLaunchFixture(t, &RESTServerOptions{
 		LaunchTimeout: time.Second,
-		BusyCheck: func(context.Context) (string, error) {
+		BusyCheck: func(context.Context, *v1alpha1types.User) (string, error) {
 			// Calls 1-2 are alice's (before and after her Create); call 3
 			// is carol's: she holds the slot while alice fails.
 			if calls.Add(1) == 3 {
@@ -663,7 +663,7 @@ func TestLaunchWaiterHonoursCancellation(t *testing.T) {
 	// unbuffered send then took the default branch, so the test waited forever.
 	entered := make(chan struct{}, 1)
 	f := newLaunchFixture(t, &RESTServerOptions{
-		BusyCheck: func(context.Context) (string, error) {
+		BusyCheck: func(context.Context, *v1alpha1types.User) (string, error) {
 			select {
 			case entered <- struct{}{}:
 				<-release
@@ -708,7 +708,7 @@ func TestLaunchSlotWorkIsBounded(t *testing.T) {
 	var deadline time.Time
 	var hasDeadline bool
 	f := newLaunchFixture(t, &RESTServerOptions{
-		BusyCheck: func(ctx context.Context) (string, error) {
+		BusyCheck: func(ctx context.Context, _ *v1alpha1types.User) (string, error) {
 			deadline, hasDeadline = ctx.Deadline()
 			return "", nil
 		},
@@ -726,7 +726,7 @@ func TestLaunchDeadlineCoversWholeLaunch(t *testing.T) {
 	var deadline time.Time
 	f := newLaunchFixture(t, &RESTServerOptions{
 		LaunchTimeout: 2 * time.Second,
-		BusyCheck: func(ctx context.Context) (string, error) {
+		BusyCheck: func(ctx context.Context, _ *v1alpha1types.User) (string, error) {
 			deadline, _ = ctx.Deadline()
 			return "", nil
 		},
@@ -803,7 +803,7 @@ func TestLaunchReadinessWaitSharesLaunchDeadline(t *testing.T) {
 	var slept atomic.Bool
 	f := newLaunchFixture(t, &RESTServerOptions{
 		LaunchTimeout: time.Second,
-		BusyCheck: func(context.Context) (string, error) {
+		BusyCheck: func(context.Context, *v1alpha1types.User) (string, error) {
 			// Only the pre-create check is slow.
 			if !slept.Swap(true) {
 				time.Sleep(700 * time.Millisecond)

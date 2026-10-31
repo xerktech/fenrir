@@ -36,7 +36,10 @@ paths:
   - `$home/.local/share/Steam` is a link to the sessions' install (see `library.md`); the
     scan reads through it, so keep `tar -h` and never resolve or reject that link.
   - A launcher whose base App is missing is skipped: its Apps stay, never "uninstalled".
-  - Only Apps labelled `direwolf/catalogue=<store>` are ever updated or deleted.
+  - Only Apps labelled `direwolf/catalogue=<store>` are ever updated or deleted, and a scan only
+    those of its own library (`direwolf/library-owner=<user>`, absent for the shared one).
+  - A User's own-library Apps are named `<user>-<store>-<id>` and keep the shared ID's Moonlight
+    ID; `AppVisibleTo` shows and launches only the right one (proxy and operator both check).
 - Generated Apps are a copy of their store's `--catalogue-<store>-app` base App.
   - The base App's container must run `$DIREWOLF_LAUNCH_COMMAND` (a shell command line).
   - The base should be `hidden: true`; copies reset `hidden` to false on create.

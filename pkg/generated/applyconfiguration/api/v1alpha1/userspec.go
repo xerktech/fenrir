@@ -37,6 +37,10 @@ type UserSpecApplyConfiguration struct {
 	// sidecar containers. If a policy for a sidecar is not defined here, the
 	// operator will use its own built-in default values.
 	SidecarPolicies *SidecarPoliciesApplyConfiguration `json:"sidecarPolicies,omitempty"`
+	// Library gives the User a launcher home and game library of their own
+	// (their own Library pod and catalogue). Unset: the operator's shared
+	// library (--library-home-pvc, --library-games-pvc).
+	Library *UserLibraryApplyConfiguration `json:"library,omitempty"`
 }
 
 // UserSpecApplyConfiguration constructs a declarative configuration of the UserSpec type for use with
@@ -68,5 +72,13 @@ func (b *UserSpecApplyConfiguration) WithVolumes(values ...v1.Volume) *UserSpecA
 // If called multiple times, the SidecarPolicies field is set to the value of the last call.
 func (b *UserSpecApplyConfiguration) WithSidecarPolicies(value *SidecarPoliciesApplyConfiguration) *UserSpecApplyConfiguration {
 	b.SidecarPolicies = value
+	return b
+}
+
+// WithLibrary sets the Library field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Library field is set to the value of the last call.
+func (b *UserSpecApplyConfiguration) WithLibrary(value *UserLibraryApplyConfiguration) *UserSpecApplyConfiguration {
+	b.Library = value
 	return b
 }

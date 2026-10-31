@@ -53,7 +53,7 @@ func TestLibraryBusyCheck(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			reason, err := LibraryBusyCheck(client.CoreV1().Pods(testNamespace))(context.Background())
+			reason, err := LibraryBusyCheck(client.CoreV1().Pods(testNamespace))(context.Background(), &v1alpha1types.User{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -70,7 +70,7 @@ func TestLaunchBacksOutWhenBusyAfterCreate(t *testing.T) {
 	var calls atomic.Int32
 	f := newLaunchFixture(t, &RESTServerOptions{
 		MaxConcurrentSessions: -1,
-		BusyCheck: func(context.Context) (string, error) {
+		BusyCheck: func(context.Context, *v1alpha1types.User) (string, error) {
 			if calls.Add(1) == 1 {
 				return "", nil
 			}
@@ -113,11 +113,11 @@ func TestPodLibrary(t *testing.T) {
 			}
 			lib := NewPodLibrary(pods)
 
-			open, err := lib.Open(t.Context())
+			open, err := lib.Open(t.Context(), "")
 			if err != nil || open != tc.open {
 				t.Errorf("Open = %v, %v; want %v", open, err, tc.open)
 			}
-			closing, err := lib.Close(t.Context())
+			closing, err := lib.Close(t.Context(), "")
 			if err != nil || closing != tc.closing {
 				t.Errorf("Close = %v, %v; want %v", closing, err, tc.closing)
 			}
@@ -135,9 +135,9 @@ type stubLibrary struct {
 	closed atomic.Int32
 }
 
-func (l *stubLibrary) Open(context.Context) (bool, error) { return l.open, l.err }
+func (l *stubLibrary) Open(context.Context, string) (bool, error) { return l.open, l.err }
 
-func (l *stubLibrary) Close(context.Context) (bool, error) {
+func (l *stubLibrary) Close(context.Context, string) (bool, error) {
 	l.closed.Add(1)
 	return l.open, l.err
 }
@@ -164,7 +164,7 @@ func TestPodLibraryCloseSparesAReplacedPod(t *testing.T) {
 		return true, nil, k8serrors.NewConflict(corev1.Resource("pods"), pod.Name, errors.New("UID mismatch"))
 	})
 
-	closing, err := NewPodLibrary(pods).Close(t.Context())
+	closing, err := NewPodLibrary(pods).Close(t.Context(), "")
 	if closing || err != nil {
 		t.Errorf("Close = %v, %v; want false, nil", closing, err)
 	}
@@ -200,7 +200,7 @@ func TestAppWithCloseLibraryIDShadowsTile(t *testing.T) {
 	if body := rec.Body.String(); strings.Contains(body, closeLibraryTitle) || !strings.Contains(body, "<AppTitle>mine</AppTitle>") {
 		t.Errorf("applist = %s, want the App and no tile", body)
 	}
-	if s.closeLibraryOffered() {
+	if s.closeLibraryOffered("") {
 		t.Error("tile still offered for launch")
 	}
 
@@ -257,12 +257,12 @@ func TestCloseLibraryTile(t *testing.T) {
 // server.
 type hungLibrary struct{}
 
-func (hungLibrary) Open(ctx context.Context) (bool, error) {
+func (hungLibrary) Open(ctx context.Context, _ string) (bool, error) {
 	<-ctx.Done()
 	return false, context.Cause(ctx) //nolint:wrapcheck // stands in for a client-go error
 }
 
-func (hungLibrary) Close(ctx context.Context) (bool, error) {
+func (hungLibrary) Close(ctx context.Context, _ string) (bool, error) {
 	<-ctx.Done()
 	return false, context.Cause(ctx) //nolint:wrapcheck // stands in for a client-go error
 }
