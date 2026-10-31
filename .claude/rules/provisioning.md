@@ -16,6 +16,11 @@ paths:
 - The Library page calls it for a name with no User whose groups header lists the group
   (XERK-2540). The groups header is read only after the peer and proxy-secret checks; the
   proxy must overwrite it, as it does the username header.
+  - Authentik's proxy outpost does overwrite it (`headers.Set`, 2026.8.5), so `Header.Get`'s
+    first value is the only one (XERK-2581).
+  - It lists direct memberships only: the `profile` scope mapping sends `user.groups.all()`, not
+    `all_groups()`. A child group's member passes Authentik's group binding but is not
+    provisioned. Add members to the provision group itself; never nest groups under it.
   - Only a user-gesture visit (`userNavigation`) or the Start POST creates: a tab's script
     reload after an admin deleted the User must not re-create it (it gets the stopped page).
     So the start path's method/site check runs before provisioning.
@@ -58,6 +63,9 @@ paths:
   - Its groups header is read only after the peer and proxy-secret checks, as the user header is.
   - "Not set up yet" only for a name `Ensure` would provision (`UserNameFor` accepts it, no User
     holds it); else the Library refuses it too and the user would loop between the two pages.
+  - It cannot see PVCs, so a name whose `direwolf-*-<name>` claim belongs to another username
+    is still sent to the Library, which refuses it with "ask the admin". Accepted (XERK-2581):
+    no loop, and moonlight-proxy holds no PVC read rights.
   - Tests: `TestPinPageUnprovisionedGroupMember`, `TestProvisioningValuesReachPairingPage`.
 - Tests: `pkg/controllers/provisioning_test.go`, `pkg/api/v1alpha1/username_test.go`,
   `TestLibraryServerMapsUsernames`.
