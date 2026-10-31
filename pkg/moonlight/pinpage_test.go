@@ -268,9 +268,13 @@ func TestPinPageUnprovisionedGroupMember(t *testing.T) {
 	h := NewPinPageHandler(NewPairingManager(tls.Certificate{}, nil), lister, opts)
 	opts.ProvisionGroup = ""
 	off := NewPinPageHandler(NewPairingManager(tls.Certificate{}, nil), lister, opts)
+	// An allowlist and no group: a proxy that sends no groups (XERK-2542).
+	opts.ProvisionAllowedUsers = []string{"newbie", "Bob"}
+	listed := NewPinPageHandler(NewPairingManager(tls.Certificate{}, nil), lister, opts)
 	const setUp = "Your account is set up the first time you open the Library"
 	cases := []struct {
 		name, method, peer, secret, groups string
+		groupLines                         []string     // each its own header line, as oauth2-proxy sends them
 		user                               string       // default "newbie"
 		handler                            http.Handler // default h
 		want                               int
@@ -286,6 +290,12 @@ func TestPinPageUnprovisionedGroupMember(t *testing.T) {
 		{name: "member POST", method: http.MethodPost, peer: trustedPeer, secret: proxySecret, groups: "k8x-games", want: http.StatusForbidden, wantSetUp: true},
 		{name: "non-member", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, groups: "admins|k8x-games-old", want: http.StatusForbidden},
 		{name: "no groups", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, want: http.StatusForbidden},
+		{name: "member on a later header line", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, groupLines: []string{"admins", "k8x-games"}, want: http.StatusForbidden, wantSetUp: true},
+		{name: "allowlisted, no groups", handler: listed, method: http.MethodGet, peer: trustedPeer, secret: proxySecret, want: http.StatusForbidden, wantSetUp: true},
+		{name: "allowlisted needs the exact case", handler: listed, user: "NEWBIE", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, want: http.StatusForbidden},
+		{name: "allowlisted whose name a hand-written User holds", handler: listed, user: "Bob", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, want: http.StatusForbidden},
+		{name: "not allowlisted", handler: listed, user: "other", method: http.MethodGet, peer: trustedPeer, secret: proxySecret, groups: "k8x-games", want: http.StatusForbidden},
+		{name: "untrusted peer, allowlisted", handler: listed, method: http.MethodGet, peer: "192.0.2.99:1234", secret: proxySecret, want: http.StatusForbidden},
 		{name: "untrusted peer claiming the group", method: http.MethodGet, peer: "192.0.2.99:1234", secret: proxySecret, groups: "k8x-games", want: http.StatusForbidden},
 		{name: "trusted peer without the secret claiming the group", method: http.MethodGet, peer: trustedPeer, groups: "k8x-games", want: http.StatusForbidden},
 	}
@@ -301,6 +311,9 @@ func TestPinPageUnprovisionedGroupMember(t *testing.T) {
 			req.Header.Set(DefaultPinUserHeader, user)
 			if tc.groups != "" {
 				req.Header.Set(DefaultPinGroupsHeader, tc.groups)
+			}
+			for _, line := range tc.groupLines {
+				req.Header.Add(DefaultPinGroupsHeader, line)
 			}
 			rec := httptest.NewRecorder()
 			cmp.Or[http.Handler](tc.handler, h).ServeHTTP(rec, req)
@@ -359,5 +372,36 @@ func TestPinPageFindsProvisionedUserByMappedName(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Signed in as <strong>sam</strong>") {
 		t.Fatalf("GET /pin/ = %d:\n%s", rec.Code, rec.Body)
+	}
+}
+
+// The page reads the user from whichever header --pin-user-header names, and
+// ignores Authentik's then: the proxy overwrites only its own header.
+func TestPinPageUserHeaderFromFlag(t *testing.T) {
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	if err := indexer.Add(&v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "alice", Namespace: testNamespace}}); err != nil {
+		t.Fatal(err)
+	}
+	h := NewPinPageHandler(NewPairingManager(tls.Certificate{}, nil),
+		generic.NewLister[*v1alpha1types.User](indexer).Namespaced(testNamespace),
+		PinPageOptions{
+			TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+			ProxySecret:    []byte(proxySecret),
+			UserHeader:     "Remote-User",
+		})
+	get := func(header string) int {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/pin/", http.NoBody)
+		req.RemoteAddr = trustedPeer
+		req.Header.Set(PinProxySecretHeader, proxySecret)
+		req.Header.Set(header, "alice")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if code := get("Remote-User"); code != http.StatusOK {
+		t.Errorf("Remote-User: HTTP %d, want 200", code)
+	}
+	if code := get(DefaultPinUserHeader); code == http.StatusOK {
+		t.Errorf("%s with --pin-user-header=Remote-User: HTTP 200, want a refusal", DefaultPinUserHeader)
 	}
 }

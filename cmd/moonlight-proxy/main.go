@@ -38,9 +38,11 @@ func main() {
 	pinPort := flag.Int("pin-port", 0, "Port for the pairing page, to be reached only through the Authentik outpost. 0 disables it")
 	pinTrustedProxies := flag.String("pin-trusted-proxies", "", "Comma-separated CIDRs of the proxy allowed to assert the user via --pin-user-header. Required with --pin-port")
 	pinProxySecretFile := flag.String("pin-proxy-secret-file", "", "File holding the secret the proxy sends in "+moonlight.PinProxySecretHeader+". Required with --pin-port")
-	pinUserHeader := flag.String("pin-user-header", moonlight.DefaultPinUserHeader, "Header carrying the authenticated username; must match a User name")
+	pinUserHeader := flag.String("pin-user-header", cmp.Or(os.Getenv("PIN_USER_HEADER"), moonlight.DefaultPinUserHeader), "Header carrying the authenticated username; must match a User name")
 	pinProvisionGroup := flag.String("pin-provision-group", os.Getenv("PIN_PROVISION_GROUP"),
 		"Group whose members get a User on their first Library visit (the operator's --provision-group); such a member with no User is told to open the Library instead of refused")
+	pinProvisionAllowedUsers := flag.String("pin-provision-allowed-users", os.Getenv("PIN_PROVISION_ALLOWED_USERS"),
+		"Comma-separated usernames provisioned whatever their groups (the operator's --provision-allowed-users); such a user with no User is told to open the Library")
 	pinGroupsHeader := flag.String("pin-groups-header", cmp.Or(os.Getenv("PIN_GROUPS_HEADER"), moonlight.DefaultPinGroupsHeader),
 		"Header the trusted proxy lists the user's groups in; read only with the proxy secret")
 	pinGroupsSeparator := flag.String("pin-groups-separator", cmp.Or(os.Getenv("PIN_GROUPS_SEPARATOR"), moonlight.DefaultPinGroupsSeparator),
@@ -102,6 +104,12 @@ func main() {
 		klog.Fatal(err)
 	}
 	klog.Info("Pairing page port: ", *pinPort)
+	var allowedUsers []string
+	for u := range strings.SplitSeq(*pinProvisionAllowedUsers, ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			allowedUsers = append(allowedUsers, u)
+		}
+	}
 	klog.Info("Pairing page provision group: ", *pinProvisionGroup)
 	klog.Info("Pairing page trusted proxies: ", trustedProxies)
 
@@ -164,14 +172,15 @@ func main() {
 			BusyCheck:             moonlight.LibraryBusyCheck(k8sClient.CoreV1().Pods(*namespace)),
 			Library:               moonlight.NewPodLibrary(k8sClient.CoreV1().Pods(*namespace), direwolfClient.DirewolfV1alpha1().Pairings(*namespace)),
 			PinPage: moonlight.PinPageOptions{
-				Port:            *pinPort,
-				TrustedProxies:  trustedProxies,
-				ProxySecret:     proxySecret,
-				UserHeader:      *pinUserHeader,
-				ProvisionGroup:  *pinProvisionGroup,
-				GroupsHeader:    *pinGroupsHeader,
-				GroupsSeparator: *pinGroupsSeparator,
-				LibraryURL:      *pinLibraryURL,
+				Port:                  *pinPort,
+				TrustedProxies:        trustedProxies,
+				ProxySecret:           proxySecret,
+				UserHeader:            *pinUserHeader,
+				ProvisionGroup:        *pinProvisionGroup,
+				ProvisionAllowedUsers: allowedUsers,
+				GroupsHeader:          *pinGroupsHeader,
+				GroupsSeparator:       *pinGroupsSeparator,
+				LibraryURL:            *pinLibraryURL,
 			},
 		},
 	)

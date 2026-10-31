@@ -5,6 +5,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	yamlv3 "go.yaml.in/yaml/v3"
@@ -47,8 +48,12 @@ type ClaimTemplate struct {
 
 // ProvisionerOptions configure the provisioner (all from operator flags).
 type ProvisionerOptions struct {
-	// Group is the group whose members get a User; empty turns provisioning off.
+	// Group is the group whose members get a User; empty matches no one.
 	Group string
+	// AllowedUsers get a User whatever their groups, for proxies that send
+	// none. Matched exactly against the user header. With Group empty and no
+	// AllowedUsers, provisioning is off.
+	AllowedUsers []string
 	// GroupsHeader lists the signed-in user's groups, set only by the trusted proxy.
 	GroupsHeader string
 	// GroupsSeparator separates GroupsHeader's groups.
@@ -110,14 +115,29 @@ func ParseProvisionUserTemplate(s string) (v1alpha1types.UserSpec, error) {
 	return spec, nil
 }
 
-// InGroup reports whether groups (the GroupsHeader value) names p.Group.
-func (p *Provisioner) InGroup(groups string) bool {
+// Enabled reports whether anyone at all may be provisioned.
+func (o *ProvisionerOptions) Enabled() bool {
+	return o.Group != "" || len(o.AllowedUsers) > 0
+}
+
+// Eligible reports whether username, whose groups are the GroupsHeader
+// values (r.Header.Values), gets a User: a member of p.Group, or on
+// p.AllowedUsers.
+func (p *Provisioner) Eligible(username string, groups []string) bool {
+	return username != "" && (slices.Contains(p.AllowedUsers, username) || p.InGroup(groups))
+}
+
+// InGroup reports whether groups (every GroupsHeader value: oauth2-proxy
+// sends one header line per group, others one separated list) names p.Group.
+func (p *Provisioner) InGroup(groups []string) bool {
 	if p.Group == "" {
 		return false
 	}
-	for g := range strings.SplitSeq(groups, p.GroupsSeparator) {
-		if strings.TrimSpace(g) == p.Group {
-			return true
+	for _, line := range groups {
+		for g := range strings.SplitSeq(line, p.GroupsSeparator) {
+			if strings.TrimSpace(g) == p.Group {
+				return true
+			}
 		}
 	}
 	return false
