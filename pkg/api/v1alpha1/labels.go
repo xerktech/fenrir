@@ -21,10 +21,48 @@ const LibraryPodLabel = "direwolf/library"
 // LibraryPodLabelValue is the value the operator sets for LibraryPodLabel.
 const LibraryPodLabelValue = "true"
 
-// LibraryPodName is the one Library pod per namespace. A fixed name makes
+// LibraryPodName is the shared library's Library pod. A fixed name makes
 // concurrent visits converge on one Create (the rest get AlreadyExists), and
 // lets the chart grant moonlight-proxy delete on this pod alone.
 const LibraryPodName = "direwolf-library"
+
+// LibraryOwnerLabel names the User whose own library (User.spec.library) a
+// Library pod or catalogue App belongs to. Absent: the shared library.
+const LibraryOwnerLabel = "direwolf/library-owner"
+
+// LibraryPodNameFor is the Library pod of owner's library ("" for the shared
+// one), fixed for the same reasons as LibraryPodName.
+func LibraryPodNameFor(owner string) string {
+	if owner == "" {
+		return LibraryPodName
+	}
+	return LibraryPodName + "-" + owner
+}
+
+// LibraryOwnerOf is the library owner a Library pod or catalogue App carries.
+func LibraryOwnerOf(labels map[string]string) string {
+	return labels[LibraryOwnerLabel]
+}
+
+// libraryStores are the catalogue stores read from a Library: their Apps
+// launch from that library's home and games, so only its owner may see them.
+var libraryStores = map[string]bool{
+	CatalogueStoreSteam:     true,
+	CatalogueStoreEpic:      true,
+	CatalogueStoreGOG:       true,
+	CatalogueStoreNexus:     true,
+	CatalogueStoreBattlenet: true,
+}
+
+// AppVisibleTo reports whether a User playing from owner's library ("" the
+// shared one) may see and launch app. A game catalogued from a Library is
+// installed in that library only; every other App is everyone's.
+func AppVisibleTo(app *App, owner string) bool {
+	if appOwner, ok := app.Labels[LibraryOwnerLabel]; ok {
+		return appOwner == owner
+	}
+	return !libraryStores[app.Labels[CatalogueLabel]] || owner == ""
+}
 
 // CatalogueLabel marks an App the operator's catalogue scanner created from
 // an installed game; its value is the store (CatalogueStoreSteam, ...). The

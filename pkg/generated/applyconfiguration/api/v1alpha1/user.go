@@ -29,6 +29,8 @@ import (
 // with apply.
 //
 // Represents a User CRD
+// The name goes into the Library pod's name, its owner label and the
+// catalogue's App names (themselves pod label values, at most 63 characters).
 type UserApplyConfiguration struct {
 	v1.TypeMetaApplyConfiguration `json:""`
 	// Standard object metadata; More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata.

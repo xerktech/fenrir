@@ -36,7 +36,10 @@ paths:
   - `$home/.local/share/Steam` is a link to the sessions' install (see `library.md`); the
     scan reads through it, so keep `tar -h` and never resolve or reject that link.
   - A launcher whose base App is missing is skipped: its Apps stay, never "uninstalled".
-  - Only Apps labelled `direwolf/catalogue=<store>` are ever updated or deleted.
+  - Only Apps labelled `direwolf/catalogue=<store>` are ever updated or deleted, and a scan only
+    those of its own library (`direwolf/library-owner=<user>`, absent for the shared one).
+  - A User's own-library Apps are named `<user>-<store>-<id>` and keep the shared ID's Moonlight
+    ID; `AppVisibleTo` shows and launches only the right one (proxy and operator both check).
 - Generated Apps are a copy of their store's `--catalogue-<store>-app` base App.
   - The base App's container must run `$DIREWOLF_LAUNCH_COMMAND` (a shell command line).
   - The base should be `hidden: true`; copies reset `hidden` to false on create.
@@ -45,7 +48,11 @@ paths:
   - A base App change also reaches existing copies without a scan (XERK-1963): `RunRefresh`
     (leader, on `BaseAppChanges` and every `catalogueRefreshInterval`) re-copies the base.
     It reads each game back from its App; the ID annotation goes into a shell line, so it is
-    checked as a scan would and must still give the App's name. It creates/deletes nothing.
+    checked as a scan would and must still give the App's name. It creates nothing.
+  - Refresh deletes only Apps of a User's own library whose User is gone or lacks `spec.library`
+    (XERK-2502): that Library never scans again. The User is read live, not from the informer
+    (a lagging watch would delete a new User's Apps); a failed read deletes nothing.
+    Tests: `TestCatalogueRefreshDeletesOrphanedOwnApps`.
     Tests: `catalogue_refresh_test.go`.
   - `Catalogue.BaseAppChanges` watches the names from `baseApps`, the list `bases` syncs from:
     a launcher added to `CatalogueOptions` but not there fails

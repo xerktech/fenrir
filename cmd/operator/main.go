@@ -61,6 +61,8 @@ func main() {
 		"Comma-separated CIDRs of the Ingress controller, the only peers allowed to the Library page. Required with --library-port")
 	libraryProxySecretFile := flag.String("library-proxy-secret-file", "",
 		"File holding the secret the proxy sends in "+controllers.LibraryProxySecretHeader+". Required with --library-port")
+	libraryUserHeader := flag.String("library-user-header", controllers.DefaultLibraryUserHeader,
+		"Header the trusted proxy names the signed-in user in; a User of that name with spec.library gets their own Library")
 	libraryImage := flag.String("library-image", cmp.Or(os.Getenv("LIBRARY_IMAGE"), "ghcr.io/games-on-whales/fenrir/library:main"),
 		"Library (Steam + Heroic desktop) image")
 	libraryHomePVC := flag.String("library-home-pvc", "", "PVC holding the shared Steam home. Required with --library-port")
@@ -246,6 +248,8 @@ func main() {
 			SessionNodeSelector: nodeSelector,
 			AppPodHostDir:       *appPodHostDir,
 			SessionTolerations:  tolerations,
+			LibraryHomePVC:      *libraryHomePVC,
+			LibraryGamesPVC:     *libraryGamesPVC,
 
 			DisconnectGracePeriod: *disconnectGracePeriod,
 		},
@@ -258,6 +262,7 @@ func main() {
 			*namespace,
 			k8sClient,
 			direwolfClient.DirewolfV1alpha1().Sessions(*namespace),
+			direwolfClient.DirewolfV1alpha1().Users(*namespace),
 			generic.NewInformer[*corev1.Pod](libraryPodInformer),
 			controllers.NewPodExecutor(restConfig, k8sClient),
 			controllers.LibraryControllerOptions{
@@ -280,6 +285,7 @@ func main() {
 				*libraryGamesPath,
 				controllers.CatalogueOptions{SteamBaseApp: *catalogueSteamApp, HeroicBaseApp: *catalogueHeroicApp, NexusBaseApp: *catalogueNexusApp, BattlenetBaseApp: *catalogueBattlenetApp},
 			)
+			libraryController.Catalogue.Users = direwolfClient.DirewolfV1alpha1().Users(*namespace)
 			catalogueBaseChanged, err = libraryController.Catalogue.BaseAppChanges(appInformer)
 			if err != nil {
 				klog.Fatalf("Catalogue: %v", err)
@@ -290,6 +296,8 @@ func main() {
 		libraryServer := controllers.NewLibraryServer(
 			libraryController,
 			generic.NewLister[*corev1.Pod](libraryPodInformer.GetIndexer()).Namespaced(*namespace),
+			generic.NewLister[*direwolfv1alpha1.User](userInformer.GetIndexer()).Namespaced(*namespace),
+			*libraryUserHeader,
 			libraryTrusted,
 			libraryProxySecret,
 		)

@@ -29,6 +29,9 @@ jobs:
             context: images/library
           - app: retroarch
             context: images/retroarch
+          # fclones for the game-library dedupe CronJob (XERK-2500).
+          - app: dedupe
+            context: images/dedupe
           # GOW Steam/Heroic plus NVIDIA's 32-bit driver libraries (XERK-1930).
           - app: steam
             context: images/gow-nvidia32
@@ -99,9 +102,10 @@ jobs:
         run: helm lint --strict charts/direwolf-operator
 
       # helm template defaults to a Kubernetes version below the chart's
-      # kubeVersion floor (>=1.28), so it has to be stated.
+      # kubeVersion floor (>=1.28), so it has to be stated. One library user,
+      # so the RBAC checks also see the per-user Library pod Role.
       - name: Render chart
-        run: helm template direwolf charts/direwolf-operator --include-crds --kube-version 1.36.0 > "$RUNNER_TEMP/chart.yaml"
+        run: helm template direwolf charts/direwolf-operator --include-crds --kube-version 1.36.0 --set 'libraryUsers={example}' > "$RUNNER_TEMP/chart.yaml"
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:

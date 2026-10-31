@@ -24,6 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
@@ -92,8 +93,10 @@ func newLibraryFixture(t *testing.T, k8sObjs []runtime.Object, dwObjs ...runtime
 		Namespace:     libraryTestNS,
 		K8sClient:     f.k8s,
 		SessionClient: f.dw.DirewolfV1alpha1().Sessions(libraryTestNS),
+		UserClient:    f.dw.DirewolfV1alpha1().Users(libraryTestNS),
 		Exec:          f.exec.exec,
 		now:           func() time.Time { return libraryTestNow },
+		downloads:     map[types.UID]downloadProgress{},
 		LibraryControllerOptions: LibraryControllerOptions{
 			Image:        "library:test",
 			HomePVC:      "steam-home",
@@ -521,7 +524,7 @@ func TestLibraryStopRelinksSteamForSessions(t *testing.T) {
 func TestLibraryEnsurePodStartsLibrary(t *testing.T) {
 	f := newLibraryFixture(t, nil)
 
-	pod, busy, err := f.library.EnsurePod(context.Background())
+	pod, busy, err := f.library.EnsurePod(context.Background(), f.library.LibraryFor(nil))
 	if err != nil || busy != "" {
 		t.Fatalf("EnsurePod = busy %q, err %v", busy, err)
 	}
@@ -580,7 +583,7 @@ func TestLibraryEnsurePodStartsLibrary(t *testing.T) {
 	// A curseforge addon brings the API key, optional, from its Secret.
 	f.library.WoWAddons = []WoWAddon{{Name: "Baganator", Source: WoWAddonSource{Type: "curseforge", Project: 914482}, Flavors: []string{"retail"}}}
 	var keyFrom *corev1.SecretKeySelector
-	for _, e := range f.library.buildPod().Spec.Containers[0].Env {
+	for _, e := range f.library.buildPod(f.library.LibraryFor(nil)).Spec.Containers[0].Env {
 		if e.Name == "CURSEFORGE_API_KEY" && e.ValueFrom != nil {
 			keyFrom = e.ValueFrom.SecretKeyRef
 		}
@@ -590,7 +593,7 @@ func TestLibraryEnsurePodStartsLibrary(t *testing.T) {
 	}
 	// An unreadable list leaves it unset: read as none, it would uninstall them all.
 	f.library.WoWAddonsInvalid = true
-	for _, e := range f.library.buildPod().Spec.Containers[0].Env {
+	for _, e := range f.library.buildPod(f.library.LibraryFor(nil)).Spec.Containers[0].Env {
 		if e.Name == "WOW_ADDONS" {
 			t.Errorf("Library WOW_ADDONS = %q with an unreadable list, want it unset", e.Value)
 		}
@@ -608,7 +611,7 @@ func TestLibraryEnsurePodStartsLibrary(t *testing.T) {
 	}
 
 	// A second visit finds the same pod rather than creating another.
-	again, _, err := f.library.EnsurePod(context.Background())
+	again, _, err := f.library.EnsurePod(context.Background(), f.library.LibraryFor(nil))
 	if err != nil || again.UID != pod.UID {
 		t.Errorf("second EnsurePod = %v, %v; want the existing pod", again, err)
 	}
@@ -633,7 +636,7 @@ func TestLibraryEnsurePodRefusedWhileGameRuns(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLibraryFixture(t, tc.k8sObjs, tc.dwObjs...)
 
-			pod, busy, err := f.library.EnsurePod(context.Background())
+			pod, busy, err := f.library.EnsurePod(context.Background(), f.library.LibraryFor(nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -657,7 +660,7 @@ func TestLibraryEnsurePodBacksOutOfRacingLaunch(t *testing.T) {
 		return false, nil, err //nolint:wrapcheck // test reactor
 	})
 
-	pod, busy, err := f.library.EnsurePod(context.Background())
+	pod, busy, err := f.library.EnsurePod(context.Background(), f.library.LibraryFor(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -678,7 +681,20 @@ func (f *libraryFixture) server(t *testing.T, pods ...*corev1.Pod) *LibraryServe
 		}
 	}
 	lister := generic.NewLister[*corev1.Pod](indexer).Namespaced(libraryTestNS)
-	return NewLibraryServer(f.library, lister, []netip.Prefix{netip.MustParsePrefix("10.1.0.0/16")}, []byte(testLibrarySecret))
+	// The Users the page resolves the username header to: the fixture's.
+	userIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	users, err := f.dw.DirewolfV1alpha1().Users(libraryTestNS).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range users.Items {
+		if err := userIndexer.Add(&users.Items[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return NewLibraryServer(f.library, lister,
+		generic.NewLister[*v1alpha1types.User](userIndexer).Namespaced(libraryTestNS), DefaultLibraryUserHeader,
+		[]netip.Prefix{netip.MustParsePrefix("10.1.0.0/16")}, []byte(testLibrarySecret))
 }
 
 const testLibrarySecret = "0123456789abcdef0123456789abcdef"
@@ -785,7 +801,7 @@ func TestLibraryServer(t *testing.T) {
 	})
 	t.Run("ready pod is proxied", func(t *testing.T) {
 		f := newLibraryFixture(t, nil)
-		wantPassword, err := f.library.AuthPassword(context.Background())
+		wantPassword, err := f.library.AuthPassword(context.Background(), "")
 		if err != nil || wantPassword == "" {
 			t.Fatalf("AuthPassword = %q, %v", wantPassword, err)
 		}
@@ -816,24 +832,24 @@ func TestLibraryServer(t *testing.T) {
 			if err != nil {
 				return nil, err //nolint:wrapcheck // test dialer
 			}
-			return &activityConn{Conn: conn, touch: s.touch}, nil
+			return &activityConn{Conn: conn, touch: s.state("").touch}, nil
 		}
 
 		rec := serveLibrary(s, "10.1.0.5:5555", http.Header{"Authorization": {"Basic YWJjOndyb25n"}})
 		if rec.Body.String() != "selkies" {
 			t.Errorf("HTTP %d %q, want the pod's page", rec.Code, rec.Body.String())
 		}
-		if s.lastSeen.Load() == 0 {
+		if s.state("").lastSeen.Load() == 0 {
 			t.Error("proxied traffic not counted as activity")
 		}
-		if s.lastVisit.Load() != 0 {
+		if s.state("").lastVisit.Load() != 0 {
 			t.Error("a request the user did not open counted as a visit")
 		}
 		// A page load the user asked for restarts the MaxRuntime clock.
 		if rec = serveLibrary(s, "10.1.0.5:5555", userVisit); rec.Body.String() != "selkies" {
 			t.Errorf("user visit: HTTP %d %q, want the pod's page", rec.Code, rec.Body.String())
 		}
-		if s.lastVisit.Load() == 0 {
+		if s.state("").lastVisit.Load() == 0 {
 			t.Error("user-opened page load not counted as a visit")
 		}
 		if _, err = f.k8s.CoreV1().Pods(libraryTestNS).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
@@ -859,17 +875,17 @@ func TestLibraryServer(t *testing.T) {
 		// Another replica records a later visit; this one's traffic must not
 		// write its older visit back over it.
 		later := time.Now().Add(time.Hour)
-		if err = f.library.RecordActivity(context.Background(), later, later); err != nil {
+		if err = f.library.RecordActivity(context.Background(), "", later, later); err != nil {
 			t.Fatal(err)
 		}
-		s.lastSeen.Add(1)
+		s.state("").lastSeen.Add(1)
 		s.flushActivity(context.Background())
 		if got, want := visitAnnotation(), later.UTC().Format(time.RFC3339); got != want {
 			t.Errorf("visit after a stale replica's flush = %s, want %s", got, want)
 		}
 		// A new visit with no new traffic is still flushed.
 		newer := later.Add(time.Hour)
-		s.lastVisit.Store(newer.UnixNano())
+		s.state("").lastVisit.Store(newer.UnixNano())
 		s.flushActivity(context.Background())
 		if got, want := visitAnnotation(), newer.UTC().Format(time.RFC3339); got != want {
 			t.Errorf("visit-only flush = %s, want %s", got, want)
@@ -878,7 +894,7 @@ func TestLibraryServer(t *testing.T) {
 		// A pod started with another password: the stale cache is dropped on
 		// the 401 and the next request re-reads the Secret.
 		stale := "stale"
-		s.password.Store(&stale)
+		s.state("").password.Store(&stale)
 		rec = serveLibrary(s, "10.1.0.5:5555", nil)
 		if rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") != "" {
 			t.Errorf("stale password: HTTP %d, WWW-Authenticate %q; want a 401 without a browser prompt", rec.Code, rec.Header().Get("WWW-Authenticate"))
@@ -1002,7 +1018,7 @@ func TestPodExecutorRetriesUpgradeFailure(t *testing.T) {
 // wait for that before SIGKILL.
 func TestLibraryPodShutsSteamDownOnAnyDelete(t *testing.T) {
 	f := newLibraryFixture(t, nil)
-	pod := f.library.buildPod()
+	pod := f.library.buildPod(f.library.LibraryFor(nil))
 
 	if g := pod.Spec.TerminationGracePeriodSeconds; g == nil || time.Duration(*g)*time.Second < 60*time.Second+libraryExecTimeout {
 		t.Errorf("terminationGracePeriodSeconds = %v, want room for the 60s Steam shutdown and the relink", g)

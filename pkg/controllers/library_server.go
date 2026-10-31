@@ -12,12 +12,15 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/klog/v2"
 
+	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	"games-on-whales.github.io/direwolf/pkg/generic"
 )
 
@@ -37,14 +40,27 @@ const LibraryProxySecretHeader = "X-Direwolf-Proxy-Secret"
 // placeholder or truncated secret file fails at startup.
 const MinLibraryProxySecretLen = 32
 
+// DefaultLibraryUserHeader is the header Authentik's proxy outpost names the
+// signed-in user in.
+const DefaultLibraryUserHeader = "X-Authentik-Username"
+
 // LibraryServer is the Library page's HTTP front end; the Ingress points
 // here, not at the pod. A visit with no pod starts one (unless a game holds
 // the Steam lock) and serves a "Starting…" page until the pod is ready, then
 // reverse-proxies the Selkies page and its WebSocket to the pod, adding the
 // pod's basic-auth credentials.
+//
+// The visitor's library is chosen by userHeader, which only the trusted
+// proxy can set: the User of that name's own (User.spec.library), or the
+// shared one for a User without one. A name with no User is refused: it would
+// otherwise get the shared desktop, signed in to its users' accounts. No
+// header at all (a proxy that names no one) gets the shared one.
 type LibraryServer struct {
 	library *LibraryController
 	pods    generic.NamespacedLister[*corev1.Pod]
+	users   generic.NamespacedLister[*v1alpha1types.User]
+	// userHeader names the authenticated user.
+	userHeader string
 	// trusted are the only peers (the ingress controller behind Authentik)
 	// allowed in: the desktop has no login of its own.
 	trusted []netip.Prefix
@@ -55,6 +71,13 @@ type LibraryServer struct {
 	secret []byte
 	proxy  *httputil.ReverseProxy
 
+	// states is each library's *libraryState, by owner ("" the shared one).
+	states sync.Map
+}
+
+// libraryState is what the server tracks for one library's pod.
+type libraryState struct {
+	owner string
 	// password caches the pod's basic-auth password; cleared on a 401.
 	password atomic.Pointer[string]
 
@@ -66,26 +89,44 @@ type LibraryServer struct {
 	lastFlushedVisit int64
 }
 
+func (st *libraryState) touch() {
+	st.lastSeen.Store(time.Now().UnixNano())
+}
+
 type libraryTargetKey struct{}
 
 type libraryTarget struct {
 	url      *url.URL
 	password string
+	state    *libraryState
 }
 
-func NewLibraryServer(library *LibraryController, pods generic.NamespacedLister[*corev1.Pod], trusted []netip.Prefix, secret []byte) *LibraryServer {
-	s := &LibraryServer{library: library, pods: pods, trusted: trusted, secret: secret}
+func NewLibraryServer(
+	library *LibraryController,
+	pods generic.NamespacedLister[*corev1.Pod],
+	users generic.NamespacedLister[*v1alpha1types.User],
+	userHeader string,
+	trusted []netip.Prefix,
+	secret []byte,
+) *LibraryServer {
+	s := &LibraryServer{library: library, pods: pods, users: users, userHeader: userHeader, trusted: trusted, secret: secret}
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
 		// Every byte through a pod connection, including an upgraded
 		// WebSocket's, counts as browser activity.
+		// Connections are pooled by pod address, so a connection's bytes
+		// are always its own pod's library's.
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			target, ok := ctx.Value(libraryTargetKey{}).(libraryTarget)
+			if !ok {
+				return nil, errors.New("dialing the Library pod: no target")
+			}
 			conn, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				return nil, fmt.Errorf("dialing the Library pod: %w", err)
 			}
-			s.touch()
-			return &activityConn{Conn: conn, touch: s.touch}, nil
+			target.state.touch()
+			return &activityConn{Conn: conn, touch: target.state.touch}, nil
 		},
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
@@ -106,7 +147,9 @@ func NewLibraryServer(library *LibraryController, pods generic.NamespacedLister[
 			if resp.StatusCode == http.StatusUnauthorized {
 				// The pod started with another password; re-read it. The
 				// browser can't answer the challenge, so don't prompt it.
-				s.password.Store(nil)
+				if target, ok := resp.Request.Context().Value(libraryTargetKey{}).(libraryTarget); ok {
+					target.state.password.Store(nil)
+				}
 				resp.Header.Del("WWW-Authenticate")
 			}
 			return nil
@@ -119,8 +162,10 @@ func NewLibraryServer(library *LibraryController, pods generic.NamespacedLister[
 	return s
 }
 
-func (s *LibraryServer) touch() {
-	s.lastSeen.Store(time.Now().UnixNano())
+// state is owner's libraryState, created on first use.
+func (s *LibraryServer) state(owner string) *libraryState {
+	st, _ := s.states.LoadOrStore(owner, &libraryState{owner: owner})
+	return st.(*libraryState) //nolint:forcetypeassert // only libraryStates are stored
 }
 
 // Run serves on port until ctx is done, flushing activity to the pod.
@@ -156,21 +201,49 @@ func (s *LibraryServer) Run(ctx context.Context, port int) error {
 }
 
 func (s *LibraryServer) flushActivity(ctx context.Context) {
-	seen, visit := s.lastSeen.Load(), s.lastVisit.Load()
-	if seen == 0 || (seen == s.lastFlushed && visit == s.lastFlushedVisit) {
+	s.states.Range(func(_, v any) bool {
+		v.(*libraryState).flushActivity(ctx, s.library) //nolint:forcetypeassert // only libraryStates are stored
+		return true
+	})
+}
+
+// flushActivity runs on the one flush goroutine only.
+func (st *libraryState) flushActivity(ctx context.Context, library *LibraryController) {
+	seen, visit := st.lastSeen.Load(), st.lastVisit.Load()
+	if seen == 0 || (seen == st.lastFlushed && visit == st.lastFlushedVisit) {
 		return
 	}
 	// Send the visit only when this replica saw a new one: another replica
 	// may have recorded a later one, and an old one must never overwrite it.
 	var visitAt time.Time
-	if visit != 0 && visit != s.lastFlushedVisit {
+	if visit != 0 && visit != st.lastFlushedVisit {
 		visitAt = time.Unix(0, visit)
 	}
-	if err := s.library.RecordActivity(ctx, time.Unix(0, seen), visitAt); err != nil {
+	if err := library.RecordActivity(ctx, st.owner, time.Unix(0, seen), visitAt); err != nil {
 		klog.Errorf("Failed to record Library activity: %v", err)
 		return
 	}
-	s.lastFlushed, s.lastFlushedVisit = seen, visit
+	st.lastFlushed, st.lastFlushedVisit = seen, visit
+}
+
+// errNoSuchUser: the proxy named a user with no User.
+var errNoSuchUser = errors.New("no such user")
+
+// libraryOf is the library the request's authenticated user plays from.
+func (s *LibraryServer) libraryOf(r *http.Request) (LibraryRef, error) {
+	name := r.Header.Get(s.userHeader)
+	_, named := r.Header[http.CanonicalHeaderKey(s.userHeader)]
+	if !named || s.users == nil {
+		return s.library.LibraryFor(nil), nil
+	}
+	user, err := s.users.Get(name)
+	if apierrors.IsNotFound(err) {
+		return LibraryRef{}, fmt.Errorf("%w: %q", errNoSuchUser, name)
+	}
+	if err != nil {
+		return LibraryRef{}, fmt.Errorf("getting user %s: %w", name, err)
+	}
+	return s.library.LibraryFor(user), nil
 }
 
 func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -186,7 +259,19 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pod, err := s.pods.Get(LibraryPodName)
+	lib, err := s.libraryOf(r)
+	if errors.Is(err, errNoSuchUser) {
+		klog.Warningf("Library page: refusing %v", err)
+		writeLibraryPage(w, http.StatusForbidden, "You have no streaming account here. Ask the admin to add one.", false, false)
+		return
+	}
+	if err != nil {
+		klog.Errorf("Library page: %v", err)
+		writeLibraryPage(w, http.StatusInternalServerError, "The Library is unavailable. Try again in a minute.", false, false)
+		return
+	}
+	st := s.state(lib.Owner)
+	pod, err := s.pods.Get(v1alpha1types.LibraryPodNameFor(lib.Owner))
 	if err != nil {
 		pod = nil
 	}
@@ -203,7 +288,12 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var busy string
-		pod, busy, err = s.library.EnsurePod(r.Context())
+		pod, busy, err = s.library.EnsurePod(r.Context(), lib)
+		if errors.Is(err, errLibraryClaims) {
+			klog.Errorf("Not starting the Library: %v", err)
+			writeLibraryPage(w, http.StatusConflict, "Your library's storage is misconfigured. Ask the admin to fix it.", false, false)
+			return
+		}
 		if err != nil {
 			klog.Errorf("Failed to start the Library: %v", err)
 			writeLibraryPage(w, http.StatusInternalServerError, "The Library could not be started. Try again in a minute.", false, false)
@@ -216,7 +306,7 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if start || userNavigation(r) {
 		// Someone is there: restart the MaxRuntime clock.
-		s.lastVisit.Store(time.Now().UnixNano())
+		st.lastVisit.Store(time.Now().UnixNano())
 	}
 	if start {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -229,16 +319,17 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case !podReady(pod) || pod.Status.PodIP == "":
 		writeLibraryPage(w, http.StatusServiceUnavailable, "Starting the Library…", true, false)
 	default:
-		password, err := s.authPassword(r.Context())
+		password, err := s.authPassword(r.Context(), st)
 		if err != nil {
 			klog.Errorf("Failed to read the Library password: %v", err)
 			writeLibraryPage(w, http.StatusInternalServerError, "The Library is unavailable. Try again in a minute.", false, false)
 			return
 		}
-		s.touch()
+		st.touch()
 		target := libraryTarget{
 			url:      &url.URL{Scheme: "http", Host: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(libraryHTTPPort))},
 			password: password,
+			state:    st,
 		}
 		s.proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), libraryTargetKey{}, target)))
 	}
@@ -251,15 +342,15 @@ func userNavigation(r *http.Request) bool {
 	return r.Method == http.MethodGet && r.Header.Get("Upgrade") == "" && r.Header.Get("Sec-Fetch-User") == "?1"
 }
 
-func (s *LibraryServer) authPassword(ctx context.Context) (string, error) {
-	if p := s.password.Load(); p != nil {
+func (s *LibraryServer) authPassword(ctx context.Context, st *libraryState) (string, error) {
+	if p := st.password.Load(); p != nil {
 		return *p, nil
 	}
-	password, err := s.library.AuthPassword(ctx)
+	password, err := s.library.AuthPassword(ctx, st.owner)
 	if err != nil {
 		return "", err
 	}
-	s.password.Store(&password)
+	st.password.Store(&password)
 	return password, nil
 }
 

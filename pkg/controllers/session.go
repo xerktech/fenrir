@@ -143,6 +143,11 @@ type SessionControllerOptions struct {
 	// can re-attach to the still-running game. Zero ends the session on
 	// disconnect.
 	DisconnectGracePeriod time.Duration
+	// The shared library's PVCs (--library-home-pvc, --library-games-pvc).
+	// A session of a User with spec.library mounts that User's claims
+	// wherever its App mounts these. Empty: nothing is switched.
+	LibraryHomePVC  string
+	LibraryGamesPVC string
 }
 
 // Session Controller manages the lifecycle of a streaming session for
@@ -1266,6 +1271,14 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	}
 	if err := addAppGPUClaim(&podToCreate.Spec, app, session); err != nil {
 		return nil, invalidSpec(err)
+	}
+	if err := c.useUserLibrary(&podToCreate.Spec, user, app); err != nil {
+		return nil, invalidSpec(err)
+	}
+	if open, err := c.libraryOpenOn(session.Namespace, &podToCreate.Spec); err != nil {
+		return nil, err
+	} else if open != "" {
+		return nil, invalidSpec(stderrors.New(open))
 	}
 	// Before the operator's own containers are added: only the App's are
 	// stripped.
@@ -2561,6 +2574,79 @@ func steamRelinkContainer(containers []corev1.Container, image string) *corev1.C
 		}
 	}
 	return nil
+}
+
+// useUserLibrary points the App's volumes on the shared library's PVCs at the
+// User's own library (User.spec.library), so a Steam App runs in that User's
+// Steam home with their games. A game catalogued from another library is
+// refused: it is installed there only (moonlight-proxy hides it as well).
+func (c *SessionController) useUserLibrary(spec *corev1.PodSpec, user *v1alpha1types.User, app *v1alpha1types.App) error {
+	if !v1alpha1types.AppVisibleTo(app, user.LibraryOwner()) {
+		return fmt.Errorf("app %s is a game in another user's library", app.Name)
+	}
+	if user.Spec.Library == nil {
+		return nil
+	}
+	users, err := c.UserInformer.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("listing users: %w", err)
+	}
+	others := make([]v1alpha1types.User, 0, len(users))
+	for _, u := range users {
+		if u.Namespace == user.Namespace {
+			others = append(others, *u)
+		}
+	}
+	lib := LibraryRef{Owner: user.Name, HomePVC: user.Spec.Library.HomeClaimName, GamesPVC: user.Spec.Library.GamesClaimName}
+	if err := libraryClaimsConflict(lib, c.LibraryHomePVC, c.LibraryGamesPVC, others); err != nil {
+		return err
+	}
+	for i := range spec.Volumes {
+		pvc := spec.Volumes[i].PersistentVolumeClaim
+		switch {
+		case pvc == nil:
+		case c.LibraryHomePVC != "" && pvc.ClaimName == c.LibraryHomePVC:
+			pvc.ClaimName = user.Spec.Library.HomeClaimName
+		case c.LibraryGamesPVC != "" && pvc.ClaimName == c.LibraryGamesPVC:
+			pvc.ClaimName = user.Spec.Library.GamesClaimName
+		}
+	}
+	return nil
+}
+
+// libraryOpenOn names a Library pod that mounts a claim the session pod
+// would, or returns "". moonlight-proxy refuses a launch only while the
+// User's own library's Library is open; a Library opened before an admin
+// moved claims between Users would still share a home with this session.
+// Read live, like every Steam lock check.
+func (c *SessionController) libraryOpenOn(namespace string, spec *corev1.PodSpec) (string, error) {
+	claims := map[string]bool{}
+	for _, v := range spec.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			claims[v.PersistentVolumeClaim.ClaimName] = true
+		}
+	}
+	if len(claims) == 0 {
+		return "", nil
+	}
+	ctx := c.runCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pods, err := c.K8sClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: v1alpha1types.LibraryPodLabel + "=" + v1alpha1types.LibraryPodLabelValue,
+	})
+	if err != nil {
+		return "", fmt.Errorf("listing Library pods: %w", err)
+	}
+	for i := range pods.Items {
+		for _, v := range pods.Items[i].Spec.Volumes {
+			if pvc := v.PersistentVolumeClaim; pvc != nil && claims[pvc.ClaimName] {
+				return fmt.Sprintf("the Library %s is open on claim %s", pods.Items[i].Name, pvc.ClaimName), nil
+			}
+		}
+	}
+	return "", nil
 }
 
 func (c *SessionController) podName(session *v1alpha1types.Session) string {

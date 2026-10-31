@@ -22,6 +22,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Non-Go images live in `images/<name>/` (own Dockerfile + context), e.g. `images/library`
   (linuxserver/steam + Heroic), `images/retroarch` (GoW RetroArch + pinned cores).
   CI builds them via matrix `include:` entries carrying `context:`.
+  - `images/dedupe` (fclones) runs ArgoCD's game-volume dedupe CronJob (XERK-2500): Users'
+    own games volumes share identical files by reflink. duperemove can't run unprivileged.
   - `images/gow-nvidia32` (targets `steam`, `heroic`) adds NVIDIA's i386 GL/EGL/Vulkan libs to
     the GoW images: Talos' toolkit extension has no lib32, so a GPU claim injects 64-bit only and
     32-bit games render on lavapipe (XERK-1930). Bump `NVIDIA_VERSION` with the Talos driver; on
@@ -186,7 +188,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
   - Gateway API code in `session.go` is commented-out experimentation.
   - `LibraryController` (`pkg/controllers/library*.go`, off unless `--library-port`) starts the
     Steam + Heroic Library pod on a page visit, proxies it, and stops it when idle.
-    It and game sessions never run together (shared Steam home); see `.claude/rules/library.md`.
+    It and its library's game sessions never run together (shared Steam home); a User with
+    `spec.library` has their own Library and home (XERK-2500). See `.claude/rules/library.md`.
   - The catalogue (`pkg/controllers/catalogue.go`, off unless `--catalogue-*-app`) scans the
     Library pod for Steam/Heroic installs and keeps one App per game; see `.claude/rules/catalogue.md`.
   - RomM sync (`pkg/controllers/romm.go`, off unless `--romm-url`) keeps one RetroArch App per

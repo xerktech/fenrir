@@ -9,7 +9,31 @@ paths:
 
 # Library (on-demand Steam + Heroic desktop)
 
-- Steam lock: the Library and game sessions share one Steam home, so they never run together.
+- Per-user libraries (`User.spec.library`, XERK-2500): a User with one has their own home and
+  games PVCs, Library pod `direwolf-library-<user>` (label `direwolf/library-owner`), auth Secret
+  `direwolf-library-auth-<user>` and catalogue. Everyone else shares `--library-home-pvc`/`-games-pvc`.
+  - Launchers allow one login per device and Proton prefixes live in the games volume
+    (`steamapps/compatdata`), so two Users never share a home or a games volume.
+  - The page picks the library from `--library-user-header` (Authentik's username), trusted only
+    with the proxy secret. A name with no User, or an empty one, is refused (403): it would
+    otherwise get the shared desktop, signed in to its users' accounts. No header at all gets the
+    shared library.
+  - No two libraries may share a claim (`libraryClaimsConflict`, in `EnsurePod` and at pod build):
+    each one's lock sees only its own Users, so two would let two Steams write one home.
+    Of two Users on one claim the first created keeps it, so a newcomer can't lock out a working one.
+  - A session of such a User mounts their claims wherever the App mounts the shared ones
+    (`useUserLibrary`); Apps keep naming the shared claims.
+  - One password per library: each desktop runs its user's code and can read its own.
+  - moonlight-proxy may delete only named pods: list each such User in chart `libraryUsers`.
+  - Tests: `pkg/controllers/library_users_test.go`, `pkg/moonlight/library_users_test.go`.
+- Steam lock: a Library and the game sessions of its library's Users share one Steam home, so
+  they never run together. Other libraries' sessions don't count; a session whose User is gone
+  counts for every library.
+  - Operator side, a pod also counts if it mounts the library's home or games claim, whatever
+    its User's library is now: `spec.library` can change under a running game (QA, XERK-2500).
+    That covers the split App pod, which carries `direwolf/user` but no session label.
+  - Session side, a pod is never built on a claim a running Library mounts (`libraryOpenOn`):
+    the proxy's check sees only the User's own Library, not one opened before claims moved.
   - Both sides check, create, then check again (`EnsurePod`; `createSession`'s post-create
     `BusyCheck`), so two racing starts can't both survive. Drop either recheck and they can.
   - Both checks read the API server (`List`), never an informer: the other side's object may
@@ -158,7 +182,8 @@ paths:
   - Any doubt (exec failure, unparseable Heroic store) keeps the Library up.
   - Shutdown deletes the pod even if `steam -shutdown` fails: a stuck pod would hold the lock.
 - Moonlight's "Close Library" tile (`CloseLibraryAppID`, listed only while the Library is open)
-  lets any paired user stop it, downloads or not: a tab left open elsewhere keeps it up for hours.
+  lets any paired user of that library stop it, downloads or not: a tab left open elsewhere keeps
+  it up for hours.
   - moonlight-proxy is internet-facing, so it may only delete that one pod (chart RBAC
     `resourceNames`); never grant it exec, or patch (a pod's image is mutable).
   - So the pod's own preStop hook runs the Steam shutdown and relink `stop()` would; keep
@@ -172,7 +197,7 @@ paths:
   (POST `libraryStartPath`) starts the Library.
   - Selkies calls `location.reload()` when its stream drops, so a tab left open across an idle
     shutdown would restart it at once. A plain GET or a WebSocket must never start it.
-- The pod's nginx demands basic auth (`PASSWORD` from Secret `direwolf-library-auth`); only the
+- The pod's nginx demands basic auth (`PASSWORD` from Secret `direwolf-library-auth[-<user>]`); only the
   operator's proxy adds it. k8x's flannel does not enforce the chart's NetworkPolicy, so this
   password is the pod's real protection. Selkies itself binds localhost, behind nginx.
 - The page is trusted only from `--library-trusted-proxies` (the Ingress behind Authentik).

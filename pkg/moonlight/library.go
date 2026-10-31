@@ -9,6 +9,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -21,15 +22,17 @@ const libraryBusyMessage = "The game library is open. Close it (or wait for it t
 // (e.g. just after its "Close Library" tile, which is then no longer listed).
 const libraryStoppingMessage = "The game library is closing. Try again in a minute or two"
 
-// LibraryBusyCheck refuses launches while the operator's Library pod exists,
-// terminating or not: the Library and game sessions share one Steam home,
-// which has a single writer. It lists from the API server, not an informer,
-// so a Library pod created a moment ago counts.
+// LibraryBusyCheck refuses a User's launches while the Library pod of the
+// library they play from exists, terminating or not: the Library and its
+// game sessions share one Steam home, which has a single writer. Another
+// library's Library is no obstacle. It lists from the API server, not an
+// informer, so a Library pod created a moment ago counts.
 func LibraryBusyCheck(pods corev1client.PodInterface) BusyCheck {
-	selector := labels.SelectorFromSet(labels.Set{
-		v1alpha1types.LibraryPodLabel: v1alpha1types.LibraryPodLabelValue,
-	}).String()
-	return func(ctx context.Context) (string, error) {
+	return func(ctx context.Context, user *v1alpha1types.User) (string, error) {
+		selector, err := libraryPodSelector(user.LibraryOwner())
+		if err != nil {
+			return "", err
+		}
 		list, err := pods.List(ctx, metav1.ListOptions{LabelSelector: selector, Limit: 1})
 		if err != nil {
 			return "", fmt.Errorf("failed to list Library pods: %w", err)
@@ -65,13 +68,29 @@ const (
 	libraryCloseFailedMessage = "The game library could not be closed. Try again, or wait for it to stop"
 )
 
-// Library is the operator's Library pod as Moonlight users see it.
+// libraryPodSelector selects owner's Library pod ("" the shared one's).
+func libraryPodSelector(owner string) (string, error) {
+	op, values := selection.DoesNotExist, []string(nil)
+	if owner != "" {
+		op, values = selection.Equals, []string{owner}
+	}
+	ownerReq, err := labels.NewRequirement(v1alpha1types.LibraryOwnerLabel, op, values)
+	if err != nil {
+		return "", fmt.Errorf("building Library pod selector: %w", err)
+	}
+	return labels.SelectorFromSet(labels.Set{
+		v1alpha1types.LibraryPodLabel: v1alpha1types.LibraryPodLabelValue,
+	}).Add(*ownerReq).String(), nil
+}
+
+// Library is the operator's Library pods as Moonlight users see them: owner
+// is the library ("" the shared one).
 type Library interface {
-	// Open reports whether the Library is running and not already stopping.
-	Open(ctx context.Context) (bool, error)
-	// Close stops the Library, downloads or not. It reports false if there
-	// was no Library to close.
-	Close(ctx context.Context) (bool, error)
+	// Open reports whether owner's Library is running and not already stopping.
+	Open(ctx context.Context, owner string) (bool, error)
+	// Close stops owner's Library, downloads or not. It reports false if
+	// there was no Library to close.
+	Close(ctx context.Context, owner string) (bool, error)
 }
 
 // NewPodLibrary is the Library backed by the operator's Library pod. Close
@@ -85,29 +104,30 @@ type podLibrary struct {
 	pods corev1client.PodInterface
 }
 
-// get returns the Library pod, or nil if there is none. It reads the API
+// get returns owner's Library pod, or nil if there is none. It reads the API
 // server: the tile should vanish the moment the Library stops.
-func (l podLibrary) get(ctx context.Context) (*corev1.Pod, error) {
-	pod, err := l.pods.Get(ctx, v1alpha1types.LibraryPodName, metav1.GetOptions{})
+func (l podLibrary) get(ctx context.Context, owner string) (*corev1.Pod, error) {
+	pod, err := l.pods.Get(ctx, v1alpha1types.LibraryPodNameFor(owner), metav1.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Library pod: %w", err)
 	}
-	if pod.Labels[v1alpha1types.LibraryPodLabel] != v1alpha1types.LibraryPodLabelValue {
+	if pod.Labels[v1alpha1types.LibraryPodLabel] != v1alpha1types.LibraryPodLabelValue ||
+		v1alpha1types.LibraryOwnerOf(pod.Labels) != owner {
 		return nil, nil
 	}
 	return pod, nil
 }
 
-func (l podLibrary) Open(ctx context.Context) (bool, error) {
-	pod, err := l.get(ctx)
+func (l podLibrary) Open(ctx context.Context, owner string) (bool, error) {
+	pod, err := l.get(ctx, owner)
 	return pod != nil && pod.DeletionTimestamp == nil, err
 }
 
-func (l podLibrary) Close(ctx context.Context) (bool, error) {
-	pod, err := l.get(ctx)
+func (l podLibrary) Close(ctx context.Context, owner string) (bool, error) {
+	pod, err := l.get(ctx, owner)
 	if pod == nil || err != nil {
 		return false, err
 	}

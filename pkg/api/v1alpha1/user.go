@@ -8,6 +8,9 @@ import (
 // Represents a User CRD
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// The name goes into the Library pod's name, its owner label and the
+// catalogue's App names (themselves pod label values, at most 63 characters).
+// +kubebuilder:validation:XValidation:rule="!has(self.spec) || !has(self.spec.library) || size(self.metadata.name) <= 40",message="a User with spec.library must have a name of at most 40 characters"
 type User struct {
 	metav1.TypeMeta `json:",inline"`
 	// Standard object metadata; More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata.
@@ -36,6 +39,36 @@ type UserSpec struct {
 	// operator will use its own built-in default values.
 	// +optional
 	SidecarPolicies *SidecarPolicies `json:"sidecarPolicies,omitempty"`
+	// Library gives the User a launcher home and game library of their own
+	// (their own Library pod and catalogue). Unset: the operator's shared
+	// library (--library-home-pvc, --library-games-pvc).
+	// +optional
+	Library *UserLibrary `json:"library,omitempty"`
+}
+
+// UserLibrary is a User's own Steam/Heroic home and game library. Launchers
+// allow one login per device, and Proton prefixes live in the game library,
+// so two users never share either (XERK-2500).
+type UserLibrary struct {
+	// HomeClaimName is the PVC used in place of --library-home-pvc: the
+	// User's Library pod mounts it, and so does any of the User's sessions
+	// whose App mounts the shared one.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	HomeClaimName string `json:"homeClaimName"`
+	// GamesClaimName is the PVC used in place of --library-games-pvc, the same way.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	GamesClaimName string `json:"gamesClaimName"`
+}
+
+// LibraryOwner is the owner of the library the User plays from: their own
+// name with spec.library, else "" (the shared library).
+func (u *User) LibraryOwner() string {
+	if u.Spec.Library == nil {
+		return ""
+	}
+	return u.Name
 }
 
 // SidecarPolicy defines the policy for a single sidecar container.

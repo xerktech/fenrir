@@ -1,5 +1,5 @@
 {
-  "description": "Represents a User CRD",
+  "description": "Represents a User CRD\nThe name goes into the Library pod's name, its owner label and the\ncatalogue's App names (themselves pod label values, at most 63 characters).",
   "properties": {
     "apiVersion": {
       "description": "APIVersion defines the versioned schema of this representation of an object.\nServers should convert recognized schemas to the latest internal value, and\nmay reject unrecognized values.\nMore info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
@@ -14,6 +14,29 @@
     },
     "spec": {
       "properties": {
+        "library": {
+          "description": "Library gives the User a launcher home and game library of their own\n(their own Library pod and catalogue). Unset: the operator's shared\nlibrary (--library-home-pvc, --library-games-pvc).",
+          "properties": {
+            "gamesClaimName": {
+              "description": "GamesClaimName is the PVC used in place of --library-games-pvc, the same way.",
+              "maxLength": 253,
+              "minLength": 1,
+              "type": "string"
+            },
+            "homeClaimName": {
+              "description": "HomeClaimName is the PVC used in place of --library-home-pvc: the\nUser's Library pod mounts it, and so does any of the User's sessions\nwhose App mounts the shared one.",
+              "maxLength": 253,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "gamesClaimName",
+            "homeClaimName"
+          ],
+          "type": "object",
+          "additionalProperties": false
+        },
         "resources": {
           "description": "Resources defines the maximum resource requests and limits that the app\ncontainer can have. If an app requests exceeds these values,\nthe app will fail to start. It does not cap DRA ResourceClaims\n(App.spec.gpu or the App template's resourceClaims): Apps are\nadmin-authored and trusted to size their own GPU claims.",
           "properties": {
@@ -3015,5 +3038,11 @@
       "type": "object"
     }
   },
-  "type": "object"
+  "type": "object",
+  "x-kubernetes-validations": [
+    {
+      "message": "a User with spec.library must have a name of at most 40 characters",
+      "rule": "!has(self.spec) || !has(self.spec.library) || size(self.metadata.name) <= 40"
+    }
+  ]
 }

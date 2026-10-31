@@ -66,6 +66,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apiv1alpha1.SidecarPolicyApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("User"):
 		return &apiv1alpha1.UserApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("UserLibrary"):
+		return &apiv1alpha1.UserLibraryApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("UserReference"):
 		return &apiv1alpha1.UserReferenceApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("UserSpec"):
