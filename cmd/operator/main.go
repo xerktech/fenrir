@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -147,6 +148,11 @@ func main() {
 		if libraryProxySecret, err = readProxySecret(*libraryProxySecretFile); err != nil {
 			klog.Fatalf("--library-proxy-secret-file: %v", err)
 		}
+	}
+	// An invalid name ("X Bad:") never arrives, so every visitor would get
+	// the shared Library.
+	if *libraryPort != 0 && !httpguts.ValidHeaderFieldName(*libraryUserHeader) {
+		klog.Fatalf("--library-user-header %q is not a valid header name", *libraryUserHeader)
 	}
 	if *libraryPort < 0 || *libraryPort > 65535 {
 		klog.Fatalf("--library-port must be 0-65535, got %d", *libraryPort)
@@ -461,6 +467,10 @@ func provisionerOptions(group, allowedUsers, groupsHeader, separator, userTempla
 	}
 	if groupsHeader == "" || separator == "" {
 		return opts, errors.New("--library-groups-header and --library-groups-separator must not be empty")
+	}
+	// An invalid name ("X Bad:") never arrives, so no member would match.
+	if !httpguts.ValidHeaderFieldName(groupsHeader) {
+		return opts, fmt.Errorf("--library-groups-header %q is not a valid header name", groupsHeader)
 	}
 	var err error
 	if opts.UserTemplate, err = controllers.ParseProvisionUserTemplate(userTemplate); err != nil {

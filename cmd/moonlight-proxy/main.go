@@ -6,7 +6,6 @@ import (
 	"context"
 	"flag"
 	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -101,18 +100,8 @@ func main() {
 			klog.Fatalf("--pin-proxy-secret-file: secret is %d bytes, want at least %d", len(proxySecret), moonlight.MinPinProxySecretLen)
 		}
 	}
-	// As the operator checks its --provision-group: a padded group never
-	// matches, so members would silently get the plain refusal.
-	if *pinProvisionGroup != strings.TrimSpace(*pinProvisionGroup) {
-		klog.Fatalf("--pin-provision-group %q has surrounding whitespace", *pinProvisionGroup)
-	}
-	if *pinProvisionGroup != "" && (*pinGroupsHeader == "" || *pinGroupsSeparator == "") {
-		klog.Fatal("--pin-provision-group needs a non-empty --pin-groups-header and --pin-groups-separator")
-	}
-	if *pinLibraryURL != "" {
-		if u, parseErr := url.Parse(*pinLibraryURL); parseErr != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-			klog.Fatalf("--pin-library-url %q is not an absolute http(s) URL", *pinLibraryURL)
-		}
+	if err = checkPinFlags(*pinUserHeader, *pinProvisionGroup, *pinGroupsHeader, *pinGroupsSeparator, *pinLibraryURL); err != nil {
+		klog.Fatal(err)
 	}
 	klog.Info("Pairing page port: ", *pinPort)
 	var allowedUsers []string

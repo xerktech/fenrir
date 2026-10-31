@@ -342,7 +342,7 @@ func TestPinPageUnprovisionedGroupMember(t *testing.T) {
 				if strings.TrimSpace(body) != "forbidden" {
 					t.Errorf("untrusted caller got %q, want the bare refusal", body)
 				}
-			} else if !tc.wantSetUp && !strings.Contains(body, "no direwolf user for "+user) {
+			} else if !tc.wantSetUp && !strings.Contains(body, "no direwolf user for this account") || strings.Contains(body, user) {
 				t.Errorf("non-member got %q, want the not-allowed refusal", body)
 			}
 		})
