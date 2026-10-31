@@ -5,6 +5,7 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -396,9 +397,9 @@ func TestXodusNexusRuntimeStopsOnReleaseListError(t *testing.T) {
 	}
 }
 
-// runtimeRelease is one release of name with a verifiable archive and
-// .sha512sum served from the fake GitHub.
-func (h *runtimeHost) runtimeRelease(name, tag, published string, extra map[string]any) map[string]any {
+// runtimeAssets serves name's verifiable archive and .sha512sum from the fake
+// GitHub and returns their release assets.
+func (h *runtimeHost) runtimeAssets(name string) []map[string]any {
 	t := h.t
 	t.Helper()
 	archive := runtimeArchive(t, name, "wine-11.0")
@@ -409,14 +410,24 @@ func (h *runtimeHost) runtimeRelease(name, tag, published string, extra map[stri
 			t.Fatal(err)
 		}
 	}
-	r := map[string]any{"tag_name": tag, "published_at": published, "assets": []map[string]any{
+	return []map[string]any{
 		{"name": name + "-x86_64.tar.xz", "browser_download_url": "https://github.com/x/" + name + "-x86_64.tar.xz", "size": len(archive), "digest": "sha256:" + sha256Hex(string(archive))},
 		{"name": name + "-x86_64.sha512sum", "browser_download_url": "https://github.com/x/" + name + "-x86_64.sha512sum", "size": len(sum)},
-	}}
-	for k, v := range extra {
-		r[k] = v
 	}
+}
+
+// release is a release of assets, with extra fields (draft, prerelease) set.
+func release(tag, published string, assets []map[string]any, extra map[string]any) map[string]any {
+	r := map[string]any{"tag_name": tag, "published_at": published, "assets": assets}
+	maps.Copy(r, extra)
 	return r
+}
+
+// runtimeRelease is one release of name with a verifiable archive and
+// .sha512sum served from the fake GitHub.
+func (h *runtimeHost) runtimeRelease(name, tag, published string, extra map[string]any) map[string]any {
+	h.t.Helper()
+	return release(tag, published, h.runtimeAssets(name), extra)
 }
 
 // As Nexus picks: the newest publication, whatever the list order, the first
@@ -444,19 +455,17 @@ func TestXodusNexusRuntimePicksAsNexus(t *testing.T) {
 			return []map[string]any{h.runtimeRelease(older, "t1", "2026-10-26T00:00:00Z", nil), h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", map[string]any{"prerelease": true})}
 		}},
 		"first archive in a release": {want: older, releases: func(h *runtimeHost) []map[string]any {
-			r, n := h.runtimeRelease(older, "t1", "2026-10-28T00:00:00Z", nil), h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", nil)
-			r["assets"] = append(r["assets"].([]map[string]any), n["assets"].([]map[string]any)...)
-			return []map[string]any{r}
+			return []map[string]any{release("t1", "2026-10-28T00:00:00Z", append(h.runtimeAssets(older), h.runtimeAssets(newer)...), nil)}
 		}},
 		"picked release without a digest stops": {want: "", releases: func(h *runtimeHost) []map[string]any {
-			n := h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", nil)
-			delete(n["assets"].([]map[string]any)[0], "digest")
-			return []map[string]any{h.runtimeRelease(older, "t1", "2026-10-26T00:00:00Z", nil), n}
+			assets := h.runtimeAssets(newer)
+			delete(assets[0], "digest")
+			return []map[string]any{h.runtimeRelease(older, "t1", "2026-10-26T00:00:00Z", nil), release("t2", "2026-10-28T00:00:00Z", assets, nil)}
 		}},
 		"newer http archive skipped": {want: older, releases: func(h *runtimeHost) []map[string]any {
-			n := h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", nil)
-			n["assets"].([]map[string]any)[0]["browser_download_url"] = "http://github.com/x/" + newer + "-x86_64.tar.xz"
-			return []map[string]any{h.runtimeRelease(older, "t1", "2026-10-26T00:00:00Z", nil), n}
+			assets := h.runtimeAssets(newer)
+			assets[0]["browser_download_url"] = "http://github.com/x/" + newer + "-x86_64.tar.xz"
+			return []map[string]any{h.runtimeRelease(older, "t1", "2026-10-26T00:00:00Z", nil), release("t2", "2026-10-28T00:00:00Z", assets, nil)}
 		}},
 	} {
 		t.Run(test, func(t *testing.T) {
