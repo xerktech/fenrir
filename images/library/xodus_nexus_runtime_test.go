@@ -345,9 +345,12 @@ func TestXodusNexusRuntimePrefersRuntimeRepository(t *testing.T) {
 // [1], it would fall back, and stopping is the safer of the two.)
 func TestXodusNexusRuntimeNoFallbackPastBadRuntimeList(t *testing.T) {
 	for test, runtimeList := range map[string]string{
-		"not JSON":      "<html>oops",
-		"not an array":  `{"message":"x"}`,
-		"not objects":   `[1]`,
+		"not JSON":     "<html>oops",
+		"not an array": `{"message":"x"}`,
+		"not objects":  `[1]`,
+		"malformed digest": `[{"tag_name":"t","published_at":"2026-10-28T00:00:00Z","assets":[` +
+			`{"name":"` + runtimeName + `-x86_64.tar.xz","browser_download_url":"https://github.com/x/a","size":1,"digest":"md5:00"},` +
+			`{"name":"` + runtimeName + `-x86_64.sha512sum","browser_download_url":"https://github.com/x/b","size":1}]}]`,
 		"null asset":    `[{"tag_name":"t","assets":[null]}]`,
 		"assets object": `[{"tag_name":"t","assets":{"a":1}}]`,
 		"tag Nexus takes, not this script": `[{"tag_name":"release/2026 10","published_at":"2026-10-28T00:00:00Z","assets":[` +
