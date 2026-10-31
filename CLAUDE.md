@@ -22,6 +22,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Non-Go images live in `images/<name>/` (own Dockerfile + context), e.g. `images/library`
   (linuxserver/steam + Heroic), `images/retroarch` (GoW RetroArch + pinned cores).
   CI builds them via matrix `include:` entries carrying `context:`.
+  - `images/dedupe` (fclones) runs ArgoCD's game-volume dedupe CronJob (XERK-2500): Users'
+    own games volumes share identical files by reflink. duperemove can't run unprivileged.
   - `images/gow-nvidia32` (targets `steam`, `heroic`) adds NVIDIA's i386 GL/EGL/Vulkan libs to
     the GoW images: Talos' toolkit extension has no lib32, so a GPU claim injects 64-bit only and
     32-bit games render on lavapipe (XERK-1930). Bump `NVIDIA_VERSION` with the Talos driver; on
