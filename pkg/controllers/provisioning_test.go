@@ -376,6 +376,12 @@ sidecarPolicies:
 		`[`,
 		"resources: {}\n---\nlibrary: {homeClaimName: a, gamesClaimName: b}\n",
 		"sidecarPolicies: {}\n...\nresources: {limits: {cpu: \"8\"}}\n",
+		// Two documents, neither setting library: refused for being two.
+		"resources: {limits: {cpu: \"8\"}}\n---\nsidecarPolicies: {}\n",
+		// A "!!null" tag on a mapping does not make it empty.
+		"--- !!null\nresources: {limits: {cpu: \"8\"}}\n",
+		"--- !!null\nresources: {limits: {cpu: \"8\"}}\n---\nsidecarPolicies: {}\n",
+		"--- !!null\nlibrary: {homeClaimName: a, gamesClaimName: b}\n",
 		"resources: {}\n...\n---\nlibrary: {homeClaimName: a, gamesClaimName: b}\n",
 	} {
 		if _, err := ParseProvisionUserTemplate(bad); err == nil {

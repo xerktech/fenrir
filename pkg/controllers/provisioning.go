@@ -272,8 +272,14 @@ func singleYAMLDocument(s string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parsing user template: %w", err)
 		}
-		if len(node.Content) == 0 || node.Content[0].Tag == "!!null" {
+		// Only a scalar null is empty: yaml.v3 keeps a "!!null" tag on a
+		// mapping, whose content must still count.
+		if len(node.Content) == 0 || (node.Content[0].Kind == yamlv3.ScalarNode && node.Content[0].Tag == "!!null") {
 			continue
+		}
+		if node.Content[0].Tag == "!!null" {
+			// Re-encoded, it would read as null: its fields would be dropped.
+			return nil, stderrors.New("user template must not tag a mapping or list !!null")
 		}
 		if found != nil {
 			return nil, stderrors.New("user template must be a single YAML document")
