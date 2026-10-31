@@ -246,7 +246,7 @@ func TestCatalogueScanOwnLibrary(t *testing.T) {
 		Name: "steam-999", Namespace: libraryTestNS, UID: "u999",
 		Labels: map[string]string{v1alpha1types.CatalogueLabel: v1alpha1types.CatalogueStoreSteam},
 	}}
-	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil), shared)
+	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil), shared, libraryUser("sam", true))
 	pod := libraryPod(0, true)
 	pod.Name = "direwolf-library-sam"
 	pod.Labels[v1alpha1types.LibraryOwnerLabel] = "sam"
@@ -281,6 +281,64 @@ func TestCatalogueScanOwnLibrary(t *testing.T) {
 	}
 	if v1alpha1types.LibraryOwnerOf(f.app(t, "sam-steam-570").Labels) != "sam" {
 		t.Error("refresh dropped sam's App's owner")
+	}
+}
+
+// Refresh deletes a User's own-library Apps once that User, or their
+// spec.library, is gone (XERK-2502): that Library never scans again. A
+// failed User lookup deletes nothing.
+func TestCatalogueRefreshDeletesOrphanedOwnApps(t *testing.T) {
+	scanOwn := func(t *testing.T, f *catalogueFixture, owner string) {
+		t.Helper()
+		pod := libraryPod(0, true)
+		pod.Name = "direwolf-library-" + owner
+		pod.Labels[v1alpha1types.LibraryOwnerLabel] = owner
+		if err := f.catalogue.Scan(context.Background(), pod, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exists := func(f *catalogueFixture, name string) bool {
+		_, err := f.dw.DirewolfV1alpha1().Apps(libraryTestNS).Get(context.Background(), name, metav1.GetOptions{})
+		return err == nil
+	}
+	f := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil),
+		libraryUser("sam", true), libraryUser("bob", true), libraryUser("eve", true))
+	for _, owner := range []string{"sam", "bob", "eve"} {
+		scanOwn(t, f, owner)
+	}
+	if err := f.catalogue.Scan(context.Background(), libraryPod(0, true), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// bob is deleted; eve loses spec.library; sam keeps hers.
+	userClient := f.dw.DirewolfV1alpha1().Users(libraryTestNS)
+	if err := userClient.Delete(context.Background(), "bob", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := userClient.Update(context.Background(), libraryUser("eve", false), metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.catalogue.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	for name, want := range map[string]bool{"sam-steam-570": true, "steam-570": true, "bob-steam-570": false, "eve-steam-570": false} {
+		if got := exists(f, name); got != want {
+			t.Errorf("after Refresh, %s exists = %v, want %v", name, got, want)
+		}
+	}
+
+	// A failed lookup keeps the App (and still re-copies the base onto it).
+	if err := userClient.Delete(context.Background(), "sam", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	f.dw.PrependReactor("get", "users", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, stderrors.New("apiserver down")
+	})
+	if err := f.catalogue.Refresh(context.Background()); err == nil {
+		t.Error("Refresh hid the failed User lookup")
+	}
+	if !exists(f, "sam-steam-570") {
+		t.Error("a failed User lookup deleted sam-steam-570")
 	}
 }
 

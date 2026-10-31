@@ -229,7 +229,10 @@ type catalogueGame struct {
 // and Heroic installs. Scan is driven by the LibraryController (one worker);
 // Sync and Refresh may run concurrently with it.
 type Catalogue struct {
-	Apps      v1alpha1client.AppInterface
+	Apps v1alpha1client.AppInterface
+	// Users, when set, lets Refresh delete the Apps of a User's own library
+	// once that User or their spec.library is gone (XERK-2502).
+	Users     v1alpha1client.UserInterface
 	Exec      PodExecutor
 	GamesPath string
 	// FetchArt returns the image at url; fetchArt by default.
@@ -1218,8 +1221,10 @@ func (c *Catalogue) catalogueApps(ctx context.Context, owner string, bases map[s
 // Refresh re-copies each base App onto the catalogue Apps made from it,
 // without a scan, so a base App change reaches the games before the Library
 // next runs (XERK-1963). Each App's game is read back from the App itself
-// (store label, ID annotation, title, launch command); it creates and
-// deletes nothing and fetches no art.
+// (store label, ID annotation, title, launch command); it creates nothing
+// and fetches no art. It deletes only the Apps of a User's own library whose
+// User is gone or no longer has spec.library (XERK-2502): no scan of that
+// library will ever run again to remove them.
 func (c *Catalogue) Refresh(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1235,6 +1240,7 @@ func (c *Catalogue) Refresh(ctx context.Context) error {
 	// them all held every cover twice over (JSON and decoded) on top of the
 	// App informer's copy, every catalogueRefreshInterval.
 	opts := metav1.ListOptions{LabelSelector: selector, Limit: catalogueRefreshPageSize}
+	ownerGone := map[string]bool{}
 	for {
 		list, err := c.Apps.List(ctx, opts)
 		if err != nil {
@@ -1242,6 +1248,26 @@ func (c *Catalogue) Refresh(ctx context.Context) error {
 		}
 		for i := range list.Items {
 			app := &list.Items[i]
+			if owner := v1alpha1types.LibraryOwnerOf(app.Labels); owner != "" && c.Users != nil {
+				gone, known := ownerGone[owner]
+				if !known {
+					gone, err = c.libraryGone(ctx, owner)
+					if err != nil {
+						// Fail closed: keep the App, and re-copy the base onto it.
+						errs = append(errs, err)
+					} else {
+						ownerGone[owner] = gone
+					}
+				}
+				if gone {
+					klog.Infof("Catalogue: %s (%s) is from %s's own library, which is gone; deleting its App", app.Spec.Title, app.Name, owner)
+					err := c.Apps.Delete(ctx, app.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &app.UID}})
+					if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+						errs = append(errs, fmt.Errorf("deleting App %s: %w", app.Name, err))
+					}
+					continue
+				}
+			}
 			game, err := catalogueGameOf(app)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("catalogue App %s: %w", app.Name, err))
@@ -1257,6 +1283,20 @@ func (c *Catalogue) Refresh(ctx context.Context) error {
 		}
 		opts.Continue = list.Continue
 	}
+}
+
+// libraryGone reports whether owner's own library is gone: no User owner, or
+// one without spec.library. Read live, not from a cache: a lagging User watch
+// would delete the Apps of a User just created or given a library.
+func (c *Catalogue) libraryGone(ctx context.Context, owner string) (bool, error) {
+	user, err := c.Users.Get(ctx, owner, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("looking up library owner %s: %w", owner, err)
+	}
+	return user.LibraryOwner() != owner, nil
 }
 
 // catalogueGameOf is the game a catalogue App was made for, as a scan would
