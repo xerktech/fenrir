@@ -339,9 +339,10 @@ func TestXodusNexusRuntimePrefersRuntimeRepository(t *testing.T) {
 	}
 }
 
-// A nexus-runtime list that doesn't parse, or a runtime there that fails the
-// checks, installs nothing rather than the older fallback (Nexus throws on
-// the first and would install the second).
+// A nexus-runtime list that doesn't parse or has the wrong shape, or the
+// release Nexus would pick failing the checks here, installs nothing rather
+// than the older fallback. (Nexus throws on most of these; on a few, such as
+// [1], it would fall back, and stopping is the safer of the two.)
 func TestXodusNexusRuntimeNoFallbackPastBadRuntimeList(t *testing.T) {
 	for test, runtimeList := range map[string]string{
 		"not JSON":      "<html>oops",
@@ -362,8 +363,12 @@ func TestXodusNexusRuntimeNoFallbackPastBadRuntimeList(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(h.dir, "gh", runtimeRepo+".json"), []byte(runtimeList), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if calls := h.run(); strings.Contains(calls, "releases "+launcherRepo) {
+			calls := h.run()
+			if strings.Contains(calls, "releases "+launcherRepo) {
 				t.Errorf("fell back to xodus-nexus:\n%s", calls)
+			}
+			if strings.Contains(calls, "download ") || !strings.Contains(calls, "cannot find a verifiable runtime release in domsvoboda/nexus-runtime") {
+				t.Errorf("want a stop before any download:\n%s", calls)
 			}
 			if p := h.current(); p != nil {
 				t.Errorf("current.json written: %v", p)
@@ -385,5 +390,88 @@ func TestXodusNexusRuntimeStopsOnReleaseListError(t *testing.T) {
 	}
 	if p := h.current(); p != nil {
 		t.Errorf("current.json written: %v", p)
+	}
+}
+
+// runtimeRelease is one release of name with a verifiable archive and
+// .sha512sum served from the fake GitHub.
+func (h *runtimeHost) runtimeRelease(name, tag, published string, extra map[string]any) map[string]any {
+	t := h.t
+	t.Helper()
+	archive := runtimeArchive(t, name, "wine-11.0")
+	s := sha512.Sum512(archive)
+	sum := hex.EncodeToString(s[:]) + "  " + name + "-x86_64.tar.xz\n"
+	for f, b := range map[string][]byte{name + "-x86_64.tar.xz": archive, name + "-x86_64.sha512sum": []byte(sum)} {
+		if err := os.WriteFile(filepath.Join(h.dir, "gh", f), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := map[string]any{"tag_name": tag, "published_at": published, "assets": []map[string]any{
+		{"name": name + "-x86_64.tar.xz", "browser_download_url": "https://github.com/x/" + name + "-x86_64.tar.xz", "size": len(archive), "digest": "sha256:" + sha256Hex(string(archive))},
+		{"name": name + "-x86_64.sha512sum", "browser_download_url": "https://github.com/x/" + name + "-x86_64.sha512sum", "size": len(sum)},
+	}}
+	for k, v := range extra {
+		r[k] = v
+	}
+	return r
+}
+
+// As Nexus picks: the newest publication, whatever the list order, the first
+// on a tie, never a draft or prerelease, and never an archive whose own URL
+// is not https (Nexus then takes the next release).
+func TestXodusNexusRuntimePicksAsNexus(t *testing.T) {
+	const older, newer = "nexus-runtime-11.0-experimental-gaaaaaaa", "nexus-runtime-11.0-experimental-gbbbbbbb"
+	for test, tc := range map[string]struct {
+		releases func(h *runtimeHost) []map[string]any
+		want     string
+	}{
+		"newest publication, listed last": {want: newer, releases: func(h *runtimeHost) []map[string]any {
+			return []map[string]any{h.runtimeRelease(older, "t1", "2026-10-26T00:00:00Z", nil), h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", nil)}
+		}},
+		"newest publication, listed first": {want: newer, releases: func(h *runtimeHost) []map[string]any {
+			return []map[string]any{h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", nil), h.runtimeRelease(older, "t1", "2026-10-26T00:00:00Z", nil)}
+		}},
+		"first on a tie": {want: older, releases: func(h *runtimeHost) []map[string]any {
+			return []map[string]any{h.runtimeRelease(older, "t1", "2026-10-28T00:00:00Z", nil), h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", nil)}
+		}},
+		"newer draft skipped": {want: older, releases: func(h *runtimeHost) []map[string]any {
+			return []map[string]any{h.runtimeRelease(older, "t1", "2026-10-26T00:00:00Z", nil), h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", map[string]any{"draft": true})}
+		}},
+		"newer prerelease skipped": {want: older, releases: func(h *runtimeHost) []map[string]any {
+			return []map[string]any{h.runtimeRelease(older, "t1", "2026-10-26T00:00:00Z", nil), h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", map[string]any{"prerelease": true})}
+		}},
+		"first archive in a release": {want: older, releases: func(h *runtimeHost) []map[string]any {
+			r, n := h.runtimeRelease(older, "t1", "2026-10-28T00:00:00Z", nil), h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", nil)
+			r["assets"] = append(r["assets"].([]map[string]any), n["assets"].([]map[string]any)...)
+			return []map[string]any{r}
+		}},
+		"picked release without a digest stops": {want: "", releases: func(h *runtimeHost) []map[string]any {
+			n := h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", nil)
+			delete(n["assets"].([]map[string]any)[0], "digest")
+			return []map[string]any{h.runtimeRelease(older, "t1", "2026-10-26T00:00:00Z", nil), n}
+		}},
+		"newer http archive skipped": {want: older, releases: func(h *runtimeHost) []map[string]any {
+			n := h.runtimeRelease(newer, "t2", "2026-10-28T00:00:00Z", nil)
+			n["assets"].([]map[string]any)[0]["browser_download_url"] = "http://github.com/x/" + newer + "-x86_64.tar.xz"
+			return []map[string]any{h.runtimeRelease(older, "t1", "2026-10-26T00:00:00Z", nil), n}
+		}},
+	} {
+		t.Run(test, func(t *testing.T) {
+			h := newRuntimeHost(t)
+			if err := os.MkdirAll(filepath.Join(h.dir, "gh"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(tc.releases(h))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(filepath.Join(h.dir, "gh", runtimeRepo+".json"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			calls := h.run()
+			if p := h.current(); p["name"] != tc.want {
+				t.Errorf("current.json %v, want %s:\n%s", p, tc.want, calls)
+			}
+		})
 	}
 }

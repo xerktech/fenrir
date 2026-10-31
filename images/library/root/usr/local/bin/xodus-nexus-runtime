@@ -55,7 +55,7 @@ fields=
 for source in "${sources[@]}"; do
   read -r repo prefix <<<"${source}"
   status="$(curl -sSL --max-time 30 -o "${releases}" -w '%{http_code}' \
-    "https://api.github.com/repos/${repo}/releases?per_page=100")" || status=000
+    "https://api.github.com/repos/${repo}/releases?per_page=30")" || status=000
   # As Nexus does: a missing runtime repository falls back; any other failure stops.
   if [[ "${status}" == 404 && "${repo}" == */nexus-runtime ]]; then continue; fi
   [[ "${status}" == 200 ]] || give_up "cannot read ${repo}'s releases (HTTP ${status})"
