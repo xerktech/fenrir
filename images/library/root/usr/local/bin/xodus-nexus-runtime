@@ -66,13 +66,23 @@ for source in "${sources[@]}"; do
 import json, re, sys
 prefix = sys.argv[1]
 best = None
-for r in json.load(sys.stdin):
+seen = False
+try:
+    releases = json.load(sys.stdin)
+except ValueError:
+    sys.exit(2)
+if not isinstance(releases, list):
+    sys.exit(2)
+for r in releases:
+    if not isinstance(r, dict):
+        sys.exit(2)
     if r.get("draft") or r.get("prerelease") or not re.fullmatch(r"[A-Za-z0-9._-]+", r.get("tag_name") or ""):
         continue
     assets = {a.get("name"): a for a in r.get("assets") or []}
     for name, a in assets.items():
         if not re.fullmatch(re.escape(prefix) + r"-[A-Za-z0-9._-]+-x86_64\.tar\.xz", name or ""):
             continue
+        seen = True
         s = assets.get(name.removesuffix(".tar.xz") + ".sha512sum")
         url, size, digest = a.get("browser_download_url") or "", a.get("size"), a.get("digest") or ""
         if not s or not (s.get("browser_download_url") or "").startswith("https://github.com/"):
@@ -85,11 +95,16 @@ for r in json.load(sys.stdin):
         if best is None or key > best[0]:
             best = (key, name, r["tag_name"], url, size, digest.removeprefix("sha256:"), s["browser_download_url"])
 if best is None:
-    sys.exit(1)
+    # 1: no runtime archive at all (Nexus falls back); 2: one Nexus would take
+    # that fails the checks here (an older fallback would differ from Nexus).
+    sys.exit(2 if seen else 1)
 print(*best[1:], sep="\t")
 ' "${prefix}" <"${releases}" 2>/dev/null)" && break
-  # Nexus also falls back when the runtime repository has no usable release.
-  [[ "${repo}" == */nexus-runtime ]] || give_up "cannot find a verifiable runtime release"
+  found=$?
+  # Nexus falls back only when the runtime repository has no runtime release;
+  # an unreadable list or an unverifiable release stops, as Nexus throws.
+  [[ "${found}" == 1 && "${repo}" == */nexus-runtime ]] ||
+    give_up "cannot find a verifiable runtime release in ${repo}"
 done
 [[ -n "${fields}" ]] || give_up "cannot find a verifiable runtime release"
 IFS=$'\t' read -r name tag url size sha sum_url <<<"${fields}"

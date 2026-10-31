@@ -335,6 +335,33 @@ func TestXodusNexusRuntimePrefersRuntimeRepository(t *testing.T) {
 	}
 }
 
+// A nexus-runtime list that doesn't parse, or a runtime there that fails the
+// checks, installs nothing rather than the older fallback (Nexus throws on
+// the first and would install the second).
+func TestXodusNexusRuntimeNoFallbackPastBadRuntimeList(t *testing.T) {
+	for test, runtimeList := range map[string]string{
+		"not JSON":     "<html>oops",
+		"not an array": `{"message":"x"}`,
+		"unverifiable": `[{"tag_name":"` + runtimeTag + `","published_at":"2026-10-28T00:00:00Z","assets":[` +
+			`{"name":"` + runtimeName + `-x86_64.tar.xz","browser_download_url":"https://github.com/x/a","size":1},` +
+			`{"name":"` + runtimeName + `-x86_64.sha512sum","browser_download_url":"https://github.com/x/b","size":1}]}]`,
+	} {
+		t.Run(test, func(t *testing.T) {
+			h := newRuntimeHost(t)
+			h.publishTo(launcherRepo, fallbackName, fallbackTag, runtimeArchive(t, fallbackName, "wine-11.0"), "", "")
+			if err := os.WriteFile(filepath.Join(h.dir, "gh", runtimeRepo+".json"), []byte(runtimeList), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if calls := h.run(); strings.Contains(calls, "releases "+launcherRepo) {
+				t.Errorf("fell back to xodus-nexus:\n%s", calls)
+			}
+			if p := h.current(); p != nil {
+				t.Errorf("current.json written: %v", p)
+			}
+		})
+	}
+}
+
 // Any failure other than a missing nexus-runtime repository installs nothing,
 // as Nexus stops there too, rather than an older fallback runtime.
 func TestXodusNexusRuntimeStopsOnReleaseListError(t *testing.T) {
