@@ -28,6 +28,14 @@ import (
 // written to the pod. Far below the idle timeout, so the lag doesn't matter.
 const libraryActivityFlushInterval = 30 * time.Second
 
+// libraryProvisionTimeout bounds a first visit's User creation, so a slow API
+// server costs one refresh of the setup page, not a hung request.
+const libraryProvisionTimeout = 10 * time.Second
+
+// librarySetupMessage is the page a first visit gets while its User and
+// Library are created.
+const librarySetupMessage = "Setting up your account — creating your game library. This takes about a minute on first visit."
+
 // libraryStartPath is where the stopped page's Start button posts.
 const libraryStartPath = "/.direwolf/library/start"
 
@@ -54,7 +62,9 @@ const DefaultLibraryUserHeader = "X-Authentik-Username"
 // proxy can set: the User of that name's own (User.spec.library), or the
 // shared one for a User without one. A name with no User is refused: it would
 // otherwise get the shared desktop, signed in to its users' accounts. No
-// header at all (a proxy that names no one) gets the shared one.
+// header at all (a proxy that names no one) gets the shared one. With a
+// Provisioner, a name with no User whose groups header lists the provisioning
+// group gets a User (and its own library) created on that visit instead.
 type LibraryServer struct {
 	library *LibraryController
 	pods    generic.NamespacedLister[*corev1.Pod]
@@ -264,6 +274,16 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	lib, err := s.libraryOf(r)
+	// provisioning: this visit's User is new (or not yet in the cache).
+	provisioning := false
+	if errors.Is(err, errNoSuchUser) && s.mayProvision(r) {
+		lib, err = s.provision(r)
+		if err != nil {
+			s.writeProvisionError(w, err)
+			return
+		}
+		provisioning = true
+	}
 	if errors.Is(err, errNoSuchUser) {
 		klog.Warningf("Library page: refusing %v", err)
 		writeLibraryPage(w, http.StatusForbidden, "You have no streaming account here. Ask the admin to add one.", false, false)
@@ -285,7 +305,10 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if pod == nil {
-		if !start && !userNavigation(r) {
+		// A provisioning visit starts the Library even from the setup page's
+		// own refresh: it only happens while the new User is not yet cached,
+		// seconds after the sign-in that created it.
+		if !start && !userNavigation(r) && !provisioning {
 			// Selkies reloads its tab when the stream drops, so a tab left
 			// open across an idle shutdown would restart the Library at once.
 			writeLibraryPage(w, http.StatusServiceUnavailable, "The Library is stopped.", false, true)
@@ -320,6 +343,8 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case pod.DeletionTimestamp != nil:
 		writeLibraryPage(w, http.StatusServiceUnavailable, "The Library is shutting down…", true, false)
+	case provisioning && (!podReady(pod) || pod.Status.PodIP == ""):
+		writeLibraryPage(w, http.StatusServiceUnavailable, librarySetupMessage, true, false)
 	case !podReady(pod) || pod.Status.PodIP == "":
 		writeLibraryPage(w, http.StatusServiceUnavailable, "Starting the Library…", true, false)
 	default:
@@ -337,6 +362,40 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), libraryTargetKey{}, target)))
 	}
+}
+
+// mayProvision reports whether r's user, who has no User, gets one: only when
+// provisioning is on and the groups header names the group. ServeHTTP has
+// already checked the peer and the proxy secret, so the header is the proxy's.
+func (s *LibraryServer) mayProvision(r *http.Request) bool {
+	if s.Provisioner == nil {
+		return false
+	}
+	return s.Provisioner.InGroup(r.Header.Get(s.Provisioner.GroupsHeader))
+}
+
+// provision creates (or, while the cache lags, finds) r's User and returns
+// its library. Bounded: the setup page refreshes, so a slow call just retries.
+func (s *LibraryServer) provision(r *http.Request) (LibraryRef, error) {
+	ctx, cancel := context.WithTimeout(r.Context(), libraryProvisionTimeout)
+	defer cancel()
+	user, err := s.Provisioner.Ensure(ctx, r.Header.Get(s.userHeader))
+	if err != nil {
+		return LibraryRef{}, err
+	}
+	return s.library.LibraryFor(user), nil
+}
+
+func (s *LibraryServer) writeProvisionError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errProvisionRefused) {
+		klog.Warningf("Library page: not provisioning: %v", err)
+		writeLibraryPage(w, http.StatusForbidden,
+			"Your account name can't be used for a streaming account. Ask the admin to set one up for you.", false, false)
+		return
+	}
+	klog.Errorf("Library page: provisioning failed: %v", err)
+	writeLibraryPage(w, http.StatusInternalServerError,
+		"Setting up your account failed. Retrying in a moment; if this keeps happening, ask the admin.", true, false)
 }
 
 // userNavigation reports whether r is a page load the user asked for (typed

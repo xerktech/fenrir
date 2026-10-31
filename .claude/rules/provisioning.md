@@ -12,7 +12,16 @@ paths:
 
 - `Provisioner.Ensure(username)` creates a group member's User with `spec.library` on two new PVCs,
   `direwolf-home-<name>` / `direwolf-games-<name>`. Off unless `--provision-group` (chart
-  `provisioning.group`); it needs `--library-port`. The Library page's call is XERK-2540.
+  `provisioning.group`); it needs `--library-port`.
+- The Library page calls it for a name with no User whose groups header lists the group
+  (XERK-2540). The groups header is read only after the peer and proxy-secret checks; the
+  proxy must overwrite it, as it does the username header.
+  - The new User reaches the informer cache seconds later; until then each refresh calls Ensure
+    again, whose live GET returns the User with no writes. A User in the cache never calls it.
+  - Such a visit starts the Library without `Sec-Fetch-User`: the setup page's own refresh must
+    start it, and the cache gap is too short for an idle-shutdown reload to fall in it.
+  - Ensure runs under `libraryProvisionTimeout`; a failure gets a refreshing error page, a
+    refused username a 403 asking for the admin. Tests: `library_provision_test.go`.
 - Never modify an existing User, with or without `spec.library`: hand-written Users stay
   authoritative. Ensure returns them as they are.
 - Never delete anything, and give the PVCs no ownerReference: deleting or re-creating a User must
