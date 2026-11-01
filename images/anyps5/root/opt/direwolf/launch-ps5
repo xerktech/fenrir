@@ -5,11 +5,16 @@
 #
 # AnyPS5's relinker converts the dump into a native program once per AnyPS5
 # version and dump, cached in ~/.cache/anyps5/<version>/<title ID>; a newer
-# image (a Renovate bump) converts again. Saves and other game data live in
-# ~/.local/share/anyps5/<title ID>, which no AnyPS5 version owns, so they
-# survive a bump. The title ID comes from env rather than the command line
-# because sway's exec re-splits arguments.
+# image (a Renovate bump) converts again.
+#
+# AnyPS5 takes the working directory as the console's root: /app0 is
+# ./app0, and the game's data (/data, /download0, saves) is created beside it.
+# So the game runs in ~/.local/share/anyps5/<title ID>, which no AnyPS5 version
+# owns, with ./app0 linked to the current conversion's: a bump replaces the
+# program and keeps the saves. The title ID comes from env rather than the
+# command line because sway's exec re-splits arguments.
 set -euo pipefail
+shopt -s dotglob nullglob
 
 anyps5=${ANYPS5_HOME:-/opt/anyps5}
 title=${PS5_TITLE_ID:-}
@@ -20,9 +25,12 @@ fail() {
   exit 1
 }
 
-# The ID names directories that get deleted (below), so it must be exactly a
-# PS5 title ID: no slashes, no dots.
+# The ID and version name directories that get deleted (below), so neither may
+# be a path: the ID is exactly a PS5 title ID, the version starts with a
+# letter or digit (never "." or "..").
 [[ $title =~ ^[A-Z]{4}[0-9]{5}$ ]] || fail "PS5_TITLE_ID must be a title ID like PPSA01234, not '$title'"
+version=$(cat "$anyps5/VERSION")
+[[ $version =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "bad AnyPS5 version '$version'"
 
 dump=$games/$title
 [ -f "$dump/eboot.bin" ] || fail "no game at $dump (expected $dump/eboot.bin)"
@@ -31,66 +39,71 @@ dump=$games/$title
 [ "$(head -c 4 "$dump/eboot.bin" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] ||
   fail "$dump/eboot.bin is not a decrypted ELF; dump the game with decryption on"
 
-version=$(cat "$anyps5/VERSION")
-[[ $version =~ ^[A-Za-z0-9._-]+$ ]] || fail "bad AnyPS5 version '$version'"
 cache=$HOME/.cache/anyps5
 out=$cache/$version/$title
+partial=$out.partial
 state=$HOME/.local/share/anyps5/$title
 
 # What the conversion depends on: the AnyPS5 version (in the path) and the
-# dump's executable and modules. A changed dump (a game update) converts again.
+# dump's executable and modules, links followed. A changed dump (a game
+# update) converts again.
 module_dirs=()
 for d in sce_module sce_modules prx; do
   [ -d "$dump/$d" ] && module_dirs+=("$d")
 done
-stamp=$(cd "$dump" && find eboot.bin "${module_dirs[@]}" -maxdepth 1 -type f -printf '%p %s %T@\n' | sort)
+stamp=$(cd "$dump" && find -L eboot.bin "${module_dirs[@]}" -maxdepth 1 -type f -printf '%p %s %T@\n' | sort)
 
+mkdir -p "$cache/$version"
+# One conversion of a title at a time: every PS5 session shares this home, and
+# a second launch must not replace a conversion the first is running or
+# building. Released before the game runs.
+exec 9>"$out.lock"
+flock 9
 if [ ! -f "$out/.converted" ] || [ "$(cat "$out/.converted")" != "$stamp" ]; then
   echo "launch-ps5: converting $title with AnyPS5 $version" >&2
-  mkdir -p "$cache/$version"
-  # Built aside and moved into place, so a failed or concurrent conversion
-  # never leaves a half-written program at $out.
-  tmp=$(mktemp -d "$out.XXXXXX")
-  trap 'rm -rf "$tmp"' EXIT
-  args=()
-  # The relinker requires a module directory; a dump without one gets an
-  # empty one.
+  # Built aside and moved into place, so a failed conversion never leaves a
+  # half-written program at $out; a killed one's is cleared here next time.
+  rm -rf "$partial"
+  mkdir "$partial"
+  input=$dump/eboot.bin
+  # The relinker needs a module directory beside its input, and refuses one
+  # anywhere else; a dump without one is relinked from a copy that has one.
   if [ ${#module_dirs[@]} -eq 0 ]; then
-    mkdir "$tmp/no-modules"
-    args+=(--module-dir "$tmp/no-modules")
+    mkdir -p "$partial/src/sce_module"
+    cp "$dump/eboot.bin" "$partial/src/eboot.bin"
+    input=$partial/src/eboot.bin
   fi
-  "$anyps5/relinker" "${args[@]}" "$dump/eboot.bin" "$tmp/app.elf"
-  rm -rf "$tmp/no-modules"
+  "$anyps5/relinker" "$input" "$partial/app.elf"
+  rm -rf "$partial/src"
   # Converted modules are under app0/; the game's own files join them by link
   # (the dump is read-only and large). Titles look for /app0/eboot.bin, so the
   # original stays there too. Top-level links only: AnyPS5 follows those.
-  mkdir -p "$tmp/app0"
-  for entry in "$dump"/* "$dump"/.[!.]*; do
-    [ -e "$entry" ] || continue
+  mkdir -p "$partial/app0"
+  for entry in "$dump"/*; do
     name=${entry##*/}
-    [ -e "$tmp/app0/$name" ] || ln -s "$entry" "$tmp/app0/$name"
+    [ -e "$partial/app0/$name" ] || [ -L "$partial/app0/$name" ] || ln -s "$entry" "$partial/app0/$name"
   done
-  ln -s "$anyps5/libs" "$tmp/libs"
-  printf '%s\n' "$stamp" > "$tmp/.converted"
+  ln -s "$anyps5/libs" "$partial/libs"
+  printf '%s\n' "$stamp" > "$partial/.converted"
   rm -rf "$out"
-  # A concurrent launch may have won the move; its conversion is the same.
-  mv -T "$tmp" "$out" 2>/dev/null || true
-  trap - EXIT
-  rm -rf "$tmp"
+  mv -T "$partial" "$out"
 fi
 # Marks this conversion in use, for the sweep below.
 touch "$out/.converted"
+exec 9>&-
 
 # Drops conversions not launched for a week, which is how older AnyPS5
 # versions' go: no session runs that long, so none is in use by a session still
 # on an older image. A game not played for a week just converts again.
 find "$cache" -mindepth 3 -maxdepth 3 -name .converted -mtime +7 -printf '%h\n' |
   while read -r old; do
-    [ "$old" = "$out" ] || rm -rf "$old"
+    [ "$old" = "$out" ] || rm -rf "$old" "$old.lock"
   done
+find "$cache" -mindepth 2 -maxdepth 2 -type d -name '*.partial' -mtime +7 -exec rm -rf {} +
 find "$cache" -mindepth 1 -maxdepth 1 -type d -empty -delete
 
 mkdir -p "$state"
+ln -sfn "$out/app0" "$state/app0"
 cd "$state"
 export ANYPS5_SYSTEM_FONTS=${ANYPS5_SYSTEM_FONTS:-/usr/share/anyps5-fonts}
 export ANYPS5_SHADER_CACHE_DIR=${ANYPS5_SHADER_CACHE_DIR:-$cache/shader_cache/$title}

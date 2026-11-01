@@ -56,6 +56,14 @@ FROM ghcr.io/games-on-whales/base-app:edge-fedora@sha256:56e5dcaab59ec827d411e18
 RUN dnf5 install -y --setopt=install_weak_deps=False pulseaudio-utils && dnf5 clean all
 
 COPY --from=anyps5 /out/anyps5/ /opt/anyps5/
+# Bumps merge themselves, so the build is the only check that a new release
+# still loads here: a library needing a newer glibc or libstdc++ than the base
+# has, or a library the base lacks, fails the build instead of every launch.
+RUN set -eu && \
+  /opt/anyps5/relinker --version && \
+  for f in /opt/anyps5/libs/*.prx; do ldd "$f"; done > /tmp/ldd.txt 2>&1 && \
+  if grep -E 'not found' /tmp/ldd.txt; then echo "AnyPS5 libraries do not load on this base" >&2; exit 1; fi && \
+  rm /tmp/ldd.txt
 COPY --from=anyps5 /out/fonts/ /usr/share/anyps5-fonts/
 COPY --chmod=755 root/ /
 

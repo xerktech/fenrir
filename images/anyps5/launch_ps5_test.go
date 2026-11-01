@@ -14,16 +14,24 @@ const launchPS5 = "root/opt/direwolf/launch-ps5"
 
 // stubRelinker stands in for AnyPS5's relinker: it logs its arguments, writes
 // the "converted program" (a script that logs where and how it ran) and a
-// converted module under app0/, as the real one does beside its output.
+// converted module under app0/, as the real one does beside its output. Like
+// the real one (v0.1.4, NativeModules.cpp), it refuses an input with no module
+// directory beside it and any --module-dir outside the input's directory.
 const stubRelinker = `#!/bin/sh
 echo "relinker $*" >>"$STUB_LOG"
+case " $* " in *" --module-dir "*) echo "FAIL: --module-dir must be a directory inside the guest module parent directory" >&2; exit 2 ;; esac
 for out; do :; done
+in=$1
+src=$(dirname "$in")
+[ -d "$src/sce_module" ] || [ -d "$src/sce_modules" ] || [ -d "$src/prx" ] || { echo "FAIL: no module directory beside $in" >&2; exit 2; }
 dir=$(dirname "$out")
 mkdir -p "$dir/app0/sce_module"
 echo converted >"$dir/app0/sce_module/libgame.guest.prx"
 cat >"$out" <<'EOF'
 #!/bin/sh
-echo "game pwd=$(pwd) fonts=$ANYPS5_SYSTEM_FONTS cache=$ANYPS5_SHADER_CACHE_DIR fullscreen=$ANYPS5_FULLSCREEN" >>"$STUB_LOG"
+app0=absent; [ -f app0/eboot.bin ] && app0=$(cat app0/eboot.bin)
+mkdir -p data && echo saved >data/save.dat
+echo "game pwd=$(pwd) app0=$app0 fonts=$ANYPS5_SYSTEM_FONTS cache=$ANYPS5_SHADER_CACHE_DIR fullscreen=$ANYPS5_FULLSCREEN" >>"$STUB_LOG"
 exit "${GAME_STATUS:-0}"
 EOF
 chmod +x "$out"
@@ -178,10 +186,18 @@ func TestLaunchPS5ConvertsOnceAndRuns(t *testing.T) {
 	if !strings.Contains(log, "relinker "+dump+"/eboot.bin "+out+".") {
 		t.Errorf("relinker not given the dump's eboot.bin and a temporary output beside %s:\n%s", out, log)
 	}
-	wantGame := "game pwd=" + state + " fonts=/usr/share/anyps5-fonts cache=" +
+	wantGame := "game pwd=" + state + " app0=\x7fELF-game fonts=/usr/share/anyps5-fonts cache=" +
 		filepath.Join(e.home, ".cache", "anyps5", "shader_cache", "PPSA01234") + " fullscreen=1"
 	if !strings.Contains(log, wantGame) {
-		t.Errorf("game did not run in its state dir with the image's settings; want %q in:\n%s", wantGame, log)
+		t.Errorf("game did not run in its state dir, with app0 reachable and the image's settings; want %q in:\n%s", wantGame, log)
+	}
+	// AnyPS5 makes the working directory the console's root: ./app0 is the
+	// conversion's, and what the game writes (data/, saves) stays outside it.
+	if target, err := os.Readlink(filepath.Join(state, "app0")); err != nil || target != filepath.Join(out, "app0") {
+		t.Errorf("state app0: link to %q, %v; want the conversion's app0", target, err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "data", "save.dat")); err != nil {
+		t.Errorf("game data not kept in the state dir: %v", err)
 	}
 
 	// The converted module stays; the game's files are links into the dump.
@@ -196,6 +212,11 @@ func TestLaunchPS5ConvertsOnceAndRuns(t *testing.T) {
 	}
 	if target, err := os.Readlink(filepath.Join(out, "libs")); err != nil || target != filepath.Join(e.anyps5, "libs") {
 		t.Errorf("libs: link to %q, %v; want the image's libraries", target, err)
+	}
+
+	// Only the program is cached per version; saves are not in it.
+	if _, err := os.Stat(filepath.Join(out, "data")); !os.IsNotExist(err) {
+		t.Errorf("game data written into the versioned conversion: %v", err)
 	}
 
 	// The same dump and version: no conversion, the game runs again.
@@ -254,19 +275,110 @@ func TestLaunchPS5ConvertsAgainForNewVersionAndSweepsStaleOnes(t *testing.T) {
 	}
 }
 
-func TestLaunchPS5GivesModulelessDumpAnEmptyModuleDir(t *testing.T) {
+func TestLaunchPS5ConvertsModulelessDumpFromACopy(t *testing.T) {
 	e := newPS5Env(t)
-	e.addGame("PPSA01234", false)
+	dump := e.addGame("PPSA01234", false)
 	if o, err := e.run("PPSA01234"); err != nil {
 		t.Fatalf("launch: %v\n%s", err, o)
 	}
 	log := e.log()
-	if !strings.Contains(log, "relinker --module-dir ") || !strings.Contains(log, "/no-modules ") {
-		t.Errorf("relinker not given an empty --module-dir for a dump without modules:\n%s", log)
+	if strings.Contains(log, "--module-dir") || strings.Contains(log, "relinker "+dump+"/eboot.bin") {
+		t.Errorf("relinker should get a copy of eboot.bin beside an empty sce_module:\n%s", log)
+	}
+	if !strings.Contains(log, "game pwd=") {
+		t.Errorf("game did not run:\n%s", log)
 	}
 	out := filepath.Join(e.home, ".cache", "anyps5", "v0.1.4", "PPSA01234")
-	if _, err := os.Stat(filepath.Join(out, "no-modules")); !os.IsNotExist(err) {
-		t.Errorf("empty module dir left in the conversion: %v", err)
+	if _, err := os.Stat(filepath.Join(out, "src")); !os.IsNotExist(err) {
+		t.Errorf("staging copy left in the conversion: %v", err)
+	}
+	if target, err := os.Readlink(filepath.Join(out, "app0", "eboot.bin")); err != nil || target != filepath.Join(dump, "eboot.bin") {
+		t.Errorf("app0/eboot.bin: link to %q, %v; want the dump's", target, err)
+	}
+}
+
+func TestLaunchPS5RejectsPathLikeVersions(t *testing.T) {
+	for _, v := range []string{"..", ".", ".hidden", "v1/../..", ""} {
+		e := newPS5Env(t)
+		e.addGame("PPSA01234", true)
+		keep := filepath.Join(e.home, ".cache", "PPSA01234", "keep")
+		e.write(keep, "x", 0o644)
+		e.setVersion(v)
+		if out, err := e.run("PPSA01234"); err == nil || !strings.Contains(out, "bad AnyPS5 version") {
+			t.Errorf("version %q: err %v, output %q", v, err, out)
+		}
+		if _, err := os.Stat(keep); err != nil {
+			t.Errorf("version %q: file outside the cache removed: %v", v, err)
+		}
+	}
+}
+
+func TestLaunchPS5LinksDotfilesAndFollowsLinkedEboot(t *testing.T) {
+	e := newPS5Env(t)
+	dump := e.addGame("PPSA01234", true)
+	e.write(filepath.Join(dump, "..hidden"), "x", 0o644)
+	e.write(filepath.Join(dump, ".dot"), "x", 0o644)
+	// eboot.bin as a link to the real file, as some dump layouts have.
+	target := filepath.Join(e.games, "store", "eboot-v1.bin")
+	e.write(target, "\x7fELF-game", 0o644)
+	if err := os.Remove(filepath.Join(dump, "eboot.bin")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dump, "eboot.bin")); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := e.run("PPSA01234"); err != nil {
+		t.Fatalf("launch: %v\n%s", err, o)
+	}
+	out := filepath.Join(e.home, ".cache", "anyps5", "v0.1.4", "PPSA01234")
+	for _, name := range []string{"..hidden", ".dot"} {
+		if _, err := os.Readlink(filepath.Join(out, "app0", name)); err != nil {
+			t.Errorf("app0/%s not linked: %v", name, err)
+		}
+	}
+	// Updating the linked file (a game update) converts again.
+	e.write(target, "\x7fELF-game-v2", 0o644)
+	e.resetLog()
+	if o, err := e.run("PPSA01234"); err != nil {
+		t.Fatalf("relaunch: %v\n%s", err, o)
+	}
+	if got := strings.Count(e.log(), "relinker "); got != 1 {
+		t.Errorf("relinker ran %d times after the linked eboot changed, want 1", got)
+	}
+}
+
+func TestLaunchPS5ClearsAKilledConversion(t *testing.T) {
+	e := newPS5Env(t)
+	e.addGame("PPSA01234", true)
+	partial := filepath.Join(e.home, ".cache", "anyps5", "v0.1.4", "PPSA01234.partial")
+	e.write(filepath.Join(partial, "app.elf"), "half", 0o644)
+	if o, err := e.run("PPSA01234"); err != nil {
+		t.Fatalf("launch: %v\n%s", err, o)
+	}
+	if _, err := os.Stat(partial); !os.IsNotExist(err) {
+		t.Errorf("killed conversion's leftovers kept: %v", err)
+	}
+}
+
+func TestLaunchPS5ConcurrentFirstLaunchesConvertOnce(t *testing.T) {
+	e := newPS5Env(t)
+	e.addGame("PPSA01234", true)
+	// A slow relinker, so the second launch arrives mid-conversion.
+	e.write(filepath.Join(e.anyps5, "relinker"), strings.Replace(stubRelinker, "for out;", "sleep 1\nfor out;", 1), 0o755)
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := e.run("PPSA01234")
+			errs <- err
+		}()
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Errorf("launch: %v", err)
+		}
+	}
+	if got := strings.Count(e.log(), "relinker "); got != 1 {
+		t.Errorf("relinker ran %d times for two concurrent first launches, want 1", got)
 	}
 }
 

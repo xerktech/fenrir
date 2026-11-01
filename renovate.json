@@ -40,7 +40,7 @@
       "allowedVersions": "!/^v?0\\.4\\.1$/"
     },
     {
-      "description": "AnyPS5 (images/anyps5, XERK-2616): each upstream release bumps the relinker and libraries together (their two ARG pairs), and the PR merges itself once CI is green; builder.yml then publishes anyps5:<version> and ArgoCD's Renovate deploys it. The operator chose full automation over a reviewed deploy step (2026-11-01). The repo has no branch protection, so Renovate merges on its next run, not the instant CI passes.",
+      "description": "AnyPS5 (images/anyps5, XERK-2616): each upstream release bumps the relinker and libraries together (their two ARG pairs), and the PR merges itself once CI is green; builder.yml then publishes anyps5:<version> and ArgoCD's Renovate deploys it. The operator chose full automation over a reviewed deploy step (2026-11-01). The main ruleset requires a PR but no approval, and repo auto-merge is off, so Renovate merges a green PR itself on its next hourly run.",
       "matchPackageNames": [
         "boykopovar/AnyPS5"
       ],
