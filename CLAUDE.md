@@ -22,6 +22,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Non-Go images live in `images/<name>/` (own Dockerfile + context), e.g. `images/library`
   (linuxserver/steam + Heroic), `images/retroarch` (GoW RetroArch + pinned cores).
   CI builds them via matrix `include:` entries carrying `context:`.
+  - `images/anyps5` runs dumped PS5 games through AnyPS5 on a Fedora 44 base; Renovate bumps it
+    and ArgoCD deploys it with no hand step. See `.claude/rules/anyps5.md` (XERK-2616).
   - `images/dedupe` (fclones) runs ArgoCD's game-volume dedupe CronJob (XERK-2500): Users'
     own games volumes share identical files by reflink. duperemove can't run unprivileged.
   - `images/gow-nvidia32` (targets `steam`, `heroic`) adds NVIDIA's i386 GL/EGL/Vulkan libs to

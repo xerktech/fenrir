@@ -101,6 +101,10 @@ jobs:
             context: images/library
           - app: retroarch
             context: images/retroarch
+          # PS5 games through AnyPS5 (XERK-2616); also tagged with AnyPS5's release.
+          - app: anyps5
+            context: images/anyps5
+            version_arg: ANYPS5_VERSION
           # fclones for the game-library dedupe CronJob (XERK-2500).
           - app: dedupe
             context: images/dedupe
@@ -155,6 +159,24 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # An image that packages an upstream release (matrix version_arg) is
+      # also tagged with that release, read from its Dockerfile, so a
+      # deployed digest names the version it runs.
+      - name: Read upstream version
+        id: upstream
+        if: ${{ matrix.version_arg }}
+        env:
+          DOCKERFILE: ${{ matrix.context }}/Dockerfile
+          VERSION_ARG: ${{ matrix.version_arg }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n "s/^ARG ${VERSION_ARG}=//p" "$DOCKERFILE")
+          if ! [[ $version =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$DOCKERFILE: ARG $VERSION_ARG is '$version', not one release version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Generate docker image tags
         id: metadata
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -164,6 +186,13 @@ jobs:
             latest=false
           images: |
             name=ghcr.io/${{ github.repository_owner }}/fenrir/${{ matrix.app == 'operator' && 'direwolf-operator' || matrix.app }}
+          # metadata-action's defaults, plus the upstream release when there is one.
+          tags: |
+            type=schedule
+            type=ref,event=branch
+            type=ref,event=tag
+            type=ref,event=pr
+            type=raw,value=${{ steps.upstream.outputs.version }},enable=${{ steps.upstream.outputs.version != '' }}
 
       - name: Build and push image
         id: build

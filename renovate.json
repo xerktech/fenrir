@@ -9,7 +9,9 @@
     {
       "customType": "regex",
       "description": "ARG versions in images/*/Dockerfile annotated with a # renovate: comment, and the asset SHA256 ARG right after one",
-      "managerFilePatterns": ["/^images/.+/Dockerfile$/"],
+      "managerFilePatterns": [
+        "/^images/.+/Dockerfile$/"
+      ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+ARG \\S+=(?<currentValue>\\S+)(?:\\s+ARG \\S+_SHA256=(?<currentDigest>[0-9a-f]{64}))?"
       ]
@@ -17,14 +19,37 @@
   ],
   "packageRules": [
     {
+      "description": "Default off (XERK-2616). Renovate first ran on xerktech/fenrir for AnyPS5; every other dependency (Go modules, actions, base images, Heroic, Nexus) stays hand-bumped as before, so turning it on did not also open a PR per dependency. Rules after this one must set enabled: true: packageRules merge cumulatively.",
+      "matchPackageNames": [
+        "*"
+      ],
+      "enabled": false
+    },
+    {
       "description": "cmd/nri-input/containerd226 pins the NRI talos04's containerd vendors; bump it with the node's containerd, by hand",
-      "matchFileNames": ["cmd/nri-input/containerd226/go.mod"],
+      "matchFileNames": [
+        "cmd/nri-input/containerd226/go.mod"
+      ],
       "enabled": false
     },
     {
       "description": "Xodus Nexus v0.4.1 quits game shortcut launches (domsvoboda/xodus-nexus#457); images hold v0.4.0 via /opt/xodus-nexus.hold. Drop this rule with the hold.",
-      "matchPackageNames": ["domsvoboda/xodus-nexus"],
+      "matchPackageNames": [
+        "domsvoboda/xodus-nexus"
+      ],
       "allowedVersions": "!/^v?0\\.4\\.1$/"
+    },
+    {
+      "description": "AnyPS5 (images/anyps5, XERK-2616): each upstream release bumps the relinker and libraries together (their two ARG pairs), and the PR merges itself once CI is green; builder.yml then publishes anyps5:<version> and ArgoCD's Renovate deploys it. The operator chose full automation over a reviewed deploy step (2026-11-01). The repo has no branch protection, so Renovate merges on its next run, not the instant CI passes.",
+      "matchPackageNames": [
+        "boykopovar/AnyPS5"
+      ],
+      "enabled": true,
+      "groupName": "AnyPS5",
+      "automerge": true,
+      "automergeType": "pr"
     }
-  ]
+  ],
+  "dependencyDashboard": false,
+  "rebaseWhen": "conflicted"
 }

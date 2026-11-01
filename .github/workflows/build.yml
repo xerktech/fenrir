@@ -29,6 +29,10 @@ jobs:
             context: images/library
           - app: retroarch
             context: images/retroarch
+          # PS5 games through AnyPS5 (XERK-2616); also tagged with AnyPS5's release.
+          - app: anyps5
+            context: images/anyps5
+            version_arg: ANYPS5_VERSION
           # fclones for the game-library dedupe CronJob (XERK-2500).
           - app: dedupe
             context: images/dedupe

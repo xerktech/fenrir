@@ -1,0 +1,7 @@
+#!/bin/sh
+# Runs the game, then stops sway whatever its exit status, which ends the
+# container and so the Session.
+/opt/direwolf/launch-ps5
+status=$?
+killall sway
+exit "$status"
