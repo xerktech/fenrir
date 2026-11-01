@@ -111,8 +111,12 @@ for entry in "$out/app0"/*; do
   if [ -L "$entry" ]; then target=$(readlink "$entry"); else target=$entry; fi
   link=$state/app0/$name
   if [ -L "$link" ] || [ ! -e "$link" ]; then
-    ln -s "$target" "$state/app0/.direwolf-link"
-    mv -T "$state/app0/.direwolf-link" "$link"
+    # Made beside app0, not in it (no dump name can collide), and cleared
+    # first: a launch killed here leaves it, and ln would otherwise fail on
+    # it, or write into the directory it points at.
+    rm -f "$state/.app0-link"
+    ln -s "$target" "$state/.app0-link"
+    mv -T "$state/.app0-link" "$link"
   fi
 done
 for link in "$state/app0"/*; do

@@ -34,6 +34,7 @@ cat >"$out" <<'EOF'
 app0=absent; [ -f app0/eboot.bin ] && app0=$(cat app0/eboot.bin)
 mkdir -p data && echo saved >data/save.dat
 fd9=closed; [ -e /proc/$$/fd/9 ] && fd9=open
+[ -e /proc/$$/fd/8 ] && fd9=fd8-open
 app0type=link; [ -d app0 ] && [ ! -L app0 ] && app0type=dir
 echo "game pwd=$(pwd) app0=$app0 app0type=$app0type fd9=$fd9 fonts=$ANYPS5_SYSTEM_FONTS cache=$ANYPS5_SHADER_CACHE_DIR fullscreen=$ANYPS5_FULLSCREEN" >>"$STUB_LOG"
 exit "${GAME_STATUS:-0}"
@@ -312,8 +313,129 @@ func TestLaunchPS5App0FollowsTheConversion(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(state, "app0", "written-by-game")); err != nil {
 		t.Errorf("non-link entry in app0 removed: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(state, "app0", ".direwolf-link")); !os.IsNotExist(err) {
-		t.Errorf("temporary link left in app0: %v", err)
+}
+
+// Anything in app0 that is not a link stays, even under a name the dump has.
+func TestLaunchPS5KeepsNonLinksInApp0(t *testing.T) {
+	e := newPS5Env(t)
+	e.addGame("PPSA01234", true)
+	state := filepath.Join(e.home, ".local", "share", "anyps5", "PPSA01234")
+	e.write(filepath.Join(state, "app0", "data.pak"), "mine", 0o644)
+	if o, err := e.run("PPSA01234"); err != nil {
+		t.Fatalf("launch: %v\n%s", err, o)
+	}
+	if b, err := os.ReadFile(filepath.Join(state, "app0", "data.pak")); err != nil || string(b) != "mine" {
+		t.Errorf("non-link app0/data.pak replaced: %q, %v", b, err)
+	}
+}
+
+// A launch killed mid-rebuild leaves its temporary link; the next launch
+// must clear it, whether it points at a file or a directory, and never write
+// through it.
+func TestLaunchPS5ClearsAKilledApp0Rebuild(t *testing.T) {
+	for _, into := range []string{"eboot.bin", "sce_sys"} {
+		e := newPS5Env(t)
+		dump := e.addGame("PPSA01234", true)
+		state := filepath.Join(e.home, ".local", "share", "anyps5", "PPSA01234")
+		if err := os.MkdirAll(state, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(dump, into), filepath.Join(state, ".app0-link")); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.ReadDir(filepath.Join(dump, "sce_sys"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if o, runErr := e.run("PPSA01234"); runErr != nil {
+			t.Errorf("leftover link to %s: launch failed: %v\n%s", into, runErr, o)
+		}
+		after, err := os.ReadDir(filepath.Join(dump, "sce_sys"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(after) != len(before) {
+			t.Errorf("leftover link to %s: launch wrote into the dump: %d entries, want %d", into, len(after), len(before))
+		}
+		if _, err := os.Lstat(filepath.Join(state, ".app0-link")); !os.IsNotExist(err) {
+			t.Errorf("leftover link to %s: temporary link kept: %v", into, err)
+		}
+	}
+}
+
+// Relaunches rebuild app0 under a running game: no entry may ever be missing.
+func TestLaunchPS5App0NeverMissesAnEntry(t *testing.T) {
+	e := newPS5Env(t)
+	dump := e.addGame("PPSA01234", true)
+	for i := range 50 {
+		e.write(filepath.Join(dump, "file"+strconv.Itoa(i)), "x", 0o644)
+	}
+	if o, err := e.run("PPSA01234"); err != nil {
+		t.Fatalf("launch: %v\n%s", err, o)
+	}
+	app0 := filepath.Join(e.home, ".local", "share", "anyps5", "PPSA01234", "app0")
+	entries, err := os.ReadDir(app0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	missing := make(chan int)
+	go func() {
+		n := 0
+		for {
+			select {
+			case <-stop:
+				missing <- n
+				return
+			default:
+			}
+			for _, entry := range entries {
+				if _, err := os.Lstat(filepath.Join(app0, entry.Name())); err != nil {
+					n++
+				}
+			}
+		}
+	}()
+	for range 10 {
+		if o, err := e.run("PPSA01234"); err != nil {
+			t.Errorf("relaunch: %v\n%s", err, o)
+		}
+	}
+	close(stop)
+	if n := <-missing; n != 0 {
+		t.Errorf("app0 entries missing %d times during relaunches", n)
+	}
+}
+
+// The sweep rechecks staleness once it holds the lock: a launch may have used
+// the conversion between find and flock. A flock wrapper stands in for that
+// launch, touching the conversion just before the sweep's flock -n.
+func TestLaunchPS5SweepRechecksUnderTheLock(t *testing.T) {
+	e := newPS5Env(t)
+	e.addGame("PPSA01234", true)
+	e.addGame("PPSA05678", true)
+	for _, title := range []string{"PPSA01234", "PPSA05678"} {
+		if o, err := e.run(title); err != nil {
+			t.Fatalf("launch %s: %v\n%s", title, err, o)
+		}
+	}
+	cache := filepath.Join(e.home, ".cache", "anyps5", "v0.1.4")
+	stamp := filepath.Join(cache, "PPSA05678", ".converted")
+	stale := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(stamp, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	realFlock, err := exec.LookPath("flock")
+	if err != nil {
+		t.Skip("no flock")
+	}
+	bin := filepath.Join(t.TempDir(), "bin")
+	writeFile(t, filepath.Join(bin, "flock"), "#!/bin/sh\n[ \"$1\" = -n ] && touch "+stamp+"\nexec "+realFlock+" \"$@\"\n", 0o755)
+	if o, err := e.run("PPSA01234", "PATH="+bin+":"+os.Getenv("PATH")); err != nil {
+		t.Fatalf("launch: %v\n%s", err, o)
+	}
+	if _, err := os.Stat(filepath.Join(cache, "PPSA05678", "app.elf")); err != nil {
+		t.Errorf("conversion used after find looked was swept: %v", err)
 	}
 }
 
