@@ -24,15 +24,18 @@ paths:
   - Never run it from the conversion dir: saves (`_sd/`, `data/`, trophies) would go with a bump.
   - `app0` must be a real directory of links, never a link itself: AnyPS5's `chdir` refuses any
     path whose canonical form leaves the root, so a linked `app0` breaks `chdir("/app0")`.
-    A chdir into a dump subdirectory (linked from outside) still fails; copying dumps is the
-    only way round that.
+    A chdir into a dump subdirectory (linked from outside) still fails; only chdir checks the
+    canonical path, so a link farm (real dirs, file links) would fix it without copying dumps.
+  - `app0` is shared by every AnyPS5 version's launches of a title: it is rebuilt under the
+    per-title `~/.local/share/anyps5/<title>.lock`, links replaced by rename, never removed first.
 - The relinker refuses a `--module-dir` outside its input's directory and an input with no
   `sce_module`/`sce_modules`/`prx` beside it; a moduleless dump is relinked from a staged copy.
   The test stub enforces both, so keep it in step with the real relinker.
 - Conversions of one title are serialised by `flock` on `<version>/<title>.lock` (every PS5
   session shares one home); the lock is closed before the game starts.
-  - The week-old sweep removes a conversion only under `flock -n` of its lock, and never removes
-    lock files: a removed lock lets a second launch lock a fresh file beside a held one.
+  - The week-old sweep removes a conversion only under `flock -n` of its lock, rechecking its age
+    there, and never removes lock files: a removed lock lets a second launch lock a fresh file
+    beside a held one.
 - The title ID and VERSION name directories that get deleted: keep both regexes (no `.`/`..`).
 - `ps5-session` kills sway however the game exits: GoW's launcher appends `&& killall sway`, so
   a crashed game (AnyPS5 exits on anything unsupported) would leave an empty session running.

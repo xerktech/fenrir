@@ -92,41 +92,55 @@ if [ ! -f "$out/.converted" ] || [ "$(cat "$out/.converted")" != "$stamp" ]; the
 fi
 # Marks this conversion in use, for the sweep below.
 touch "$out/.converted"
+exec 9>&-
 
-# The game's app0, rebuilt from this conversion under the lock (two sessions
-# on different AnyPS5 versions share it). Only links are replaced; anything
-# else there is left alone.
+# The game's app0, brought in line with this conversion. It is shared by
+# every AnyPS5 version's launches of this title, so it has its own lock, not
+# the version's. Each link is replaced by rename, never deleted first, so a
+# running game never finds an entry missing; links this conversion lacks are
+# removed after. Anything that is not a link is left alone.
 mkdir -p "$state"
+exec 8>>"$state.lock"
+flock 8
 [ -L "$state/app0" ] && rm -f "$state/app0"
 mkdir -p "$state/app0"
-find "$state/app0" -mindepth 1 -maxdepth 1 -type l -delete
+declare -A want=()
 for entry in "$out/app0"/*; do
   name=${entry##*/}
-  [ -e "$state/app0/$name" ] && continue
-  if [ -L "$entry" ]; then
-    ln -s "$(readlink "$entry")" "$state/app0/$name"
-  else
-    ln -s "$entry" "$state/app0/$name"
+  want[$name]=1
+  if [ -L "$entry" ]; then target=$(readlink "$entry"); else target=$entry; fi
+  link=$state/app0/$name
+  if [ -L "$link" ] || [ ! -e "$link" ]; then
+    ln -s "$target" "$state/app0/.direwolf-link"
+    mv -T "$state/app0/.direwolf-link" "$link"
   fi
 done
-exec 9>&-
+for link in "$state/app0"/*; do
+  [ -L "$link" ] && [ -z "${want[${link##*/}]:-}" ] && rm -f "$link"
+done
+exec 8>&-
 
 # Drops conversions not launched for a week, which is how older AnyPS5
 # versions' go: no session runs that long, so none is in use by a session still
 # on an older image. A game not played for a week just converts again. Each is
 # removed only while its title's lock is free (a launch may be converting it
-# again); lock files are never removed, or a second launch would get a fresh
+# again), and only if still stale then (a launch may have used it since find
+# looked). Lock files are never removed, or a second launch would get a fresh
 # lock beside a held one.
 sweep() {
-  (flock -n 9 || exit 0; rm -rf "$1") 9>>"$2"
+  (
+    flock -n 9 || exit 0
+    [ -n "$(find "$3" -maxdepth 0 -mtime +7)" ] || exit 0
+    rm -rf "$1"
+  ) 9>>"$2"
 }
 find "$cache" -mindepth 3 -maxdepth 3 -name .converted -mtime +7 -printf '%h\n' |
   while read -r old; do
-    [ "$old" = "$out" ] || sweep "$old" "$old.lock"
+    [ "$old" = "$out" ] || sweep "$old" "$old.lock" "$old/.converted"
   done
 find "$cache" -mindepth 2 -maxdepth 2 -type d -name '*.partial' -mtime +7 -printf '%p\n' |
   while read -r old; do
-    sweep "$old" "${old%.partial}.lock"
+    sweep "$old" "${old%.partial}.lock" "$old"
   done
 
 cd "$state"

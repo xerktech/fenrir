@@ -2,9 +2,11 @@ package anyps5
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -278,6 +280,73 @@ func TestLaunchPS5ConvertsAgainForNewVersionAndSweepsStaleOnes(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cache, "v0.1.4", "PPSA05678")); !os.IsNotExist(err) {
 		t.Errorf("week-old conversion kept: %v", err)
+	}
+	// The game's app0 now points at the new conversion's modules.
+	state := filepath.Join(e.home, ".local", "share", "anyps5", "PPSA01234")
+	want := filepath.Join(cache, "v0.1.5", "PPSA01234", "app0", "sce_module")
+	if target, err := os.Readlink(filepath.Join(state, "app0", "sce_module")); err != nil || target != want {
+		t.Errorf("app0/sce_module after a bump: link to %q, %v; want %q", target, err, want)
+	}
+}
+
+// app0 drops links the current conversion lacks (a file removed from the dump)
+// and keeps anything that is not a link.
+func TestLaunchPS5App0FollowsTheConversion(t *testing.T) {
+	e := newPS5Env(t)
+	dump := e.addGame("PPSA01234", true)
+	state := filepath.Join(e.home, ".local", "share", "anyps5", "PPSA01234")
+	if o, err := e.run("PPSA01234"); err != nil {
+		t.Fatalf("launch: %v\n%s", err, o)
+	}
+	if err := os.Remove(filepath.Join(dump, "data.pak")); err != nil {
+		t.Fatal(err)
+	}
+	e.write(filepath.Join(dump, "eboot.bin"), "\x7fELF-game-v2", 0o644)
+	e.write(filepath.Join(state, "app0", "written-by-game"), "x", 0o644)
+	if o, err := e.run("PPSA01234"); err != nil {
+		t.Fatalf("relaunch: %v\n%s", err, o)
+	}
+	if _, err := os.Lstat(filepath.Join(state, "app0", "data.pak")); !os.IsNotExist(err) {
+		t.Errorf("link to a removed dump file kept: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "app0", "written-by-game")); err != nil {
+		t.Errorf("non-link entry in app0 removed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(state, "app0", ".direwolf-link")); !os.IsNotExist(err) {
+		t.Errorf("temporary link left in app0: %v", err)
+	}
+}
+
+// A session on the old image and one on the new start the same game together
+// during a rollout: both must run.
+func TestLaunchPS5ConcurrentLaunchesAcrossVersions(t *testing.T) {
+	e := newPS5Env(t)
+	e.addGame("PPSA01234", true)
+	for i := range 40 {
+		e.write(filepath.Join(e.games, "PPSA01234", "file"+strconv.Itoa(i)), "x", 0o644)
+	}
+	other := filepath.Join(t.TempDir(), "opt-anyps5-new")
+	e.write(filepath.Join(other, "relinker"), stubRelinker, 0o755)
+	e.write(filepath.Join(other, "VERSION"), "v0.1.5\n", 0o644)
+	if err := os.MkdirAll(filepath.Join(other, "libs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for trial := range 5 {
+		errs := make(chan error, 2)
+		for _, home := range []string{e.anyps5, other} {
+			go func() {
+				o, err := e.run("PPSA01234", "ANYPS5_HOME="+home)
+				if err != nil {
+					err = fmt.Errorf("%w: %s", err, o)
+				}
+				errs <- err
+			}()
+		}
+		for range 2 {
+			if err := <-errs; err != nil {
+				t.Errorf("trial %d: %v", trial, err)
+			}
+		}
 	}
 }
 
