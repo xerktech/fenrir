@@ -326,8 +326,11 @@ jobs:
           CHART_VERSION: ${{ steps.get_version.outputs.version }}
         run: |
           set -euo pipefail
-          chart_file=$(ls packaged/*.tgz | head -n1)
-          if [ -z "$chart_file" ]; then
+          # A glob, not `ls`: under pipefail a failed `ls` would exit before the message below.
+          # An unmatched glob stays literal, so the -f check catches it.
+          chart_files=(packaged/*.tgz)
+          chart_file=${chart_files[0]}
+          if [ ! -f "$chart_file" ]; then
             echo "No packaged chart found" >&2
             exit 1
           fi
