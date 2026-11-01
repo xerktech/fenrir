@@ -31,7 +31,9 @@ cat >"$out" <<'EOF'
 #!/bin/sh
 app0=absent; [ -f app0/eboot.bin ] && app0=$(cat app0/eboot.bin)
 mkdir -p data && echo saved >data/save.dat
-echo "game pwd=$(pwd) app0=$app0 fonts=$ANYPS5_SYSTEM_FONTS cache=$ANYPS5_SHADER_CACHE_DIR fullscreen=$ANYPS5_FULLSCREEN" >>"$STUB_LOG"
+fd9=closed; [ -e /proc/$$/fd/9 ] && fd9=open
+app0type=link; [ -d app0 ] && [ ! -L app0 ] && app0type=dir
+echo "game pwd=$(pwd) app0=$app0 app0type=$app0type fd9=$fd9 fonts=$ANYPS5_SYSTEM_FONTS cache=$ANYPS5_SHADER_CACHE_DIR fullscreen=$ANYPS5_FULLSCREEN" >>"$STUB_LOG"
 exit "${GAME_STATUS:-0}"
 EOF
 chmod +x "$out"
@@ -186,15 +188,19 @@ func TestLaunchPS5ConvertsOnceAndRuns(t *testing.T) {
 	if !strings.Contains(log, "relinker "+dump+"/eboot.bin "+out+".") {
 		t.Errorf("relinker not given the dump's eboot.bin and a temporary output beside %s:\n%s", out, log)
 	}
-	wantGame := "game pwd=" + state + " app0=\x7fELF-game fonts=/usr/share/anyps5-fonts cache=" +
+	wantGame := "game pwd=" + state + " app0=\x7fELF-game app0type=dir fd9=closed fonts=/usr/share/anyps5-fonts cache=" +
 		filepath.Join(e.home, ".cache", "anyps5", "shader_cache", "PPSA01234") + " fullscreen=1"
 	if !strings.Contains(log, wantGame) {
 		t.Errorf("game did not run in its state dir, with app0 reachable and the image's settings; want %q in:\n%s", wantGame, log)
 	}
-	// AnyPS5 makes the working directory the console's root: ./app0 is the
-	// conversion's, and what the game writes (data/, saves) stays outside it.
-	if target, err := os.Readlink(filepath.Join(state, "app0")); err != nil || target != filepath.Join(out, "app0") {
-		t.Errorf("state app0: link to %q, %v; want the conversion's app0", target, err)
+	// AnyPS5 makes the working directory the console's root: ./app0 is a real
+	// directory there (a chdir into it must stay inside the root) of links to
+	// the conversion's entries, and what the game writes stays outside it.
+	if target, err := os.Readlink(filepath.Join(state, "app0", "sce_module")); err != nil || target != filepath.Join(out, "app0", "sce_module") {
+		t.Errorf("state app0/sce_module: link to %q, %v; want the conversion's", target, err)
+	}
+	if target, err := os.Readlink(filepath.Join(state, "app0", "data.pak")); err != nil || target != filepath.Join(dump, "data.pak") {
+		t.Errorf("state app0/data.pak: link to %q, %v; want the dump's", target, err)
 	}
 	if _, err := os.Stat(filepath.Join(state, "data", "save.dat")); err != nil {
 		t.Errorf("game data not kept in the state dir: %v", err)
@@ -379,6 +385,106 @@ func TestLaunchPS5ConcurrentFirstLaunchesConvertOnce(t *testing.T) {
 	}
 	if got := strings.Count(e.log(), "relinker "); got != 1 {
 		t.Errorf("relinker ran %d times for two concurrent first launches, want 1", got)
+	}
+}
+
+// The sweep must not remove a conversion while a launch holds its title's
+// lock (it may be converting that title again), nor the lock file itself.
+func TestLaunchPS5SweepSkipsLockedConversions(t *testing.T) {
+	e := newPS5Env(t)
+	e.addGame("PPSA01234", true)
+	e.addGame("PPSA05678", true)
+	for _, title := range []string{"PPSA01234", "PPSA05678"} {
+		if o, err := e.run(title); err != nil {
+			t.Fatalf("launch %s: %v\n%s", title, err, o)
+		}
+	}
+	cache := filepath.Join(e.home, ".cache", "anyps5", "v0.1.4")
+	stale := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(filepath.Join(cache, "PPSA05678", ".converted"), stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	// Another launch of PPSA05678 holds its lock for the whole run below.
+	lock := filepath.Join(cache, "PPSA05678.lock")
+	// One process holding the lock (flock(1) would leave it held by its child).
+	holder := exec.CommandContext(t.Context(), "bash", "-c", `exec 9>>"$1"; flock 9; exec sleep 30`, "holder", lock)
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+	deadline := time.Now().Add(5 * time.Second)
+	for exec.CommandContext(t.Context(), "flock", "-n", lock, "true").Run() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("lock holder never took the lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if o, err := e.run("PPSA01234"); err != nil {
+		t.Fatalf("launch: %v\n%s", err, o)
+	}
+	if _, err := os.Stat(filepath.Join(cache, "PPSA05678", "app.elf")); err != nil {
+		t.Errorf("conversion swept while its lock was held: %v", err)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Errorf("lock file removed: %v", err)
+	}
+	// Once the lock is free, the week-old conversion goes; its lock file stays.
+	_ = holder.Process.Kill()
+	_ = holder.Wait()
+	if o, err := e.run("PPSA01234"); err != nil {
+		t.Fatalf("launch: %v\n%s", err, o)
+	}
+	if _, err := os.Stat(filepath.Join(cache, "PPSA05678")); !os.IsNotExist(err) {
+		t.Errorf("unlocked week-old conversion kept: %v", err)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Errorf("lock file removed: %v", err)
+	}
+}
+
+// A stale .partial of another title is swept; a fresh one is kept.
+func TestLaunchPS5SweepsStalePartials(t *testing.T) {
+	e := newPS5Env(t)
+	e.addGame("PPSA01234", true)
+	cache := filepath.Join(e.home, ".cache", "anyps5", "v0.1.4")
+	stalePartial := filepath.Join(cache, "PPSA05678.partial")
+	freshPartial := filepath.Join(cache, "PPSA09999.partial")
+	e.write(filepath.Join(stalePartial, "app.elf"), "half", 0o644)
+	e.write(filepath.Join(freshPartial, "app.elf"), "half", 0o644)
+	stale := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(stalePartial, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := e.run("PPSA01234"); err != nil {
+		t.Fatalf("launch: %v\n%s", err, o)
+	}
+	if _, err := os.Stat(stalePartial); !os.IsNotExist(err) {
+		t.Errorf("week-old partial kept: %v", err)
+	}
+	if _, err := os.Stat(freshPartial); err != nil {
+		t.Errorf("fresh partial swept: %v", err)
+	}
+}
+
+// A state dir from a build that linked app0 whole becomes a real directory.
+func TestLaunchPS5ReplacesALinkedApp0(t *testing.T) {
+	e := newPS5Env(t)
+	e.addGame("PPSA01234", true)
+	state := filepath.Join(e.home, ".local", "share", "anyps5", "PPSA01234")
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(e.games, filepath.Join(state, "app0")); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := e.run("PPSA01234"); err != nil {
+		t.Fatalf("launch: %v\n%s", err, o)
+	}
+	if !strings.Contains(e.log(), "app0type=dir") {
+		t.Errorf("app0 still a link:\n%s", e.log())
+	}
+	if _, err := os.Stat(filepath.Join(e.games, "PPSA01234", "eboot.bin")); err != nil {
+		t.Errorf("replacing the old app0 link touched its target: %v", err)
 	}
 }
 

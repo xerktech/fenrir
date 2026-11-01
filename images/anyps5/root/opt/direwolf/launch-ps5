@@ -8,11 +8,13 @@
 # image (a Renovate bump) converts again.
 #
 # AnyPS5 takes the working directory as the console's root: /app0 is
-# ./app0, and the game's data (/data, /download0, saves) is created beside it.
-# So the game runs in ~/.local/share/anyps5/<title ID>, which no AnyPS5 version
-# owns, with ./app0 linked to the current conversion's: a bump replaces the
-# program and keeps the saves. The title ID comes from env rather than the
-# command line because sway's exec re-splits arguments.
+# ./app0, and the game's data (/data, /download0, saves under _sd/, trophies)
+# is created beside it. So the game runs in ~/.local/share/anyps5/<title ID>,
+# which no AnyPS5 version owns: a bump replaces the program and keeps the saves.
+# Its app0 is a real directory of links to the current conversion's entries,
+# never itself a link: AnyPS5 refuses a chdir whose real path leaves the root,
+# so a linked app0 would break a game's chdir("/app0"). The title ID comes from
+# env rather than the command line because sway's exec re-splits arguments.
 set -euo pipefail
 shopt -s dotglob nullglob
 
@@ -90,20 +92,43 @@ if [ ! -f "$out/.converted" ] || [ "$(cat "$out/.converted")" != "$stamp" ]; the
 fi
 # Marks this conversion in use, for the sweep below.
 touch "$out/.converted"
+
+# The game's app0, rebuilt from this conversion under the lock (two sessions
+# on different AnyPS5 versions share it). Only links are replaced; anything
+# else there is left alone.
+mkdir -p "$state"
+[ -L "$state/app0" ] && rm -f "$state/app0"
+mkdir -p "$state/app0"
+find "$state/app0" -mindepth 1 -maxdepth 1 -type l -delete
+for entry in "$out/app0"/*; do
+  name=${entry##*/}
+  [ -e "$state/app0/$name" ] && continue
+  if [ -L "$entry" ]; then
+    ln -s "$(readlink "$entry")" "$state/app0/$name"
+  else
+    ln -s "$entry" "$state/app0/$name"
+  fi
+done
 exec 9>&-
 
 # Drops conversions not launched for a week, which is how older AnyPS5
 # versions' go: no session runs that long, so none is in use by a session still
-# on an older image. A game not played for a week just converts again.
+# on an older image. A game not played for a week just converts again. Each is
+# removed only while its title's lock is free (a launch may be converting it
+# again); lock files are never removed, or a second launch would get a fresh
+# lock beside a held one.
+sweep() {
+  (flock -n 9 || exit 0; rm -rf "$1") 9>>"$2"
+}
 find "$cache" -mindepth 3 -maxdepth 3 -name .converted -mtime +7 -printf '%h\n' |
   while read -r old; do
-    [ "$old" = "$out" ] || rm -rf "$old" "$old.lock"
+    [ "$old" = "$out" ] || sweep "$old" "$old.lock"
   done
-find "$cache" -mindepth 2 -maxdepth 2 -type d -name '*.partial' -mtime +7 -exec rm -rf {} +
-find "$cache" -mindepth 1 -maxdepth 1 -type d -empty -delete
+find "$cache" -mindepth 2 -maxdepth 2 -type d -name '*.partial' -mtime +7 -printf '%p\n' |
+  while read -r old; do
+    sweep "$old" "${old%.partial}.lock"
+  done
 
-mkdir -p "$state"
-ln -sfn "$out/app0" "$state/app0"
 cd "$state"
 export ANYPS5_SYSTEM_FONTS=${ANYPS5_SYSTEM_FONTS:-/usr/share/anyps5-fonts}
 export ANYPS5_SHADER_CACHE_DIR=${ANYPS5_SHADER_CACHE_DIR:-$cache/shader_cache/$title}
