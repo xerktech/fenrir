@@ -329,8 +329,8 @@ request: one that passes a client's own `X-Forwarded-User` through lets anyone b
   IdP user ID (Pomerium's `user` claim) is refused as a `User` name, so pick a username claim.
 
 - **A proxy with no groups**: set `proxyAuth.userHeader`, leave `group` empty, and list people in
-  `provisioning.allowedUsers`, exactly as the proxy sends their username (case counts; no
-  commas). Add or remove people by editing the values in Git.
+  `provisioning.allowedUsers`, exactly as the proxy sends their username (case counts; at most
+  40 ASCII letters, digits and inner dashes; no two differing only in case, or the render fails). Add or remove people by editing the values in Git.
 
 Removing someone from the group or the list only stops new provisioning: a `User` already made
 keeps working. To remove a person entirely (namespace `games` here; `<name>` is their `User`):

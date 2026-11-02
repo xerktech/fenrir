@@ -330,8 +330,9 @@ class Flavor:
                 remove(os.path.join(self.interface, leftover))
         self.manifest = load_manifest(self.manifest_path)
 
-    def owned_elsewhere(self, name):
-        return {f for n, e in self.manifest.items() if n != name for f in e["folders"]}
+    def owners_elsewhere(self, name):
+        """Maps each folder another listed addon installed to that addon."""
+        return {f: n for n, e in self.manifest.items() if n != name for f in e["folders"]}
 
     def uninstall(self, name):
         for f in self.manifest[name]["folders"]:
@@ -352,8 +353,14 @@ class Flavor:
         try:
             with zipfile.ZipFile(archive) as zf:
                 new = zip_folders(zf)
+                owners = self.owners_elsewhere(name)
+                clash = sorted(new & owners.keys())
+                if clash:
+                    raise Refused(
+                        f"would replace {', '.join(clash)}, installed by direwolf for "
+                        + ", ".join(sorted({owners[f] for f in clash}))
+                    )
                 taken = {f for f in new - old if os.path.lexists(os.path.join(self.addons, f))}
-                taken |= new & self.owned_elsewhere(name)
                 if taken:
                     raise Refused(f"would replace {', '.join(sorted(taken))}, not installed by direwolf")
                 staged = os.path.join(work, "new")

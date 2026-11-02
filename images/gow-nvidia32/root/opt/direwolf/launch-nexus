@@ -11,4 +11,12 @@ if [ -n "${game}" ] && [ -z "${VKD3D_SHADER_CACHE_PATH:-}" ]; then
     export VKD3D_SHADER_CACHE_PATH="${cache}"
   fi
 fi
-exec sh -c "${DIREWOLF_LAUNCH_COMMAND:-xodus-nexus}"
+# GoW's launcher runs `<this> && killall sway` under sway, so a failed launch
+# would leave the session on an empty desktop until disconnect and grace. End
+# it here instead, as launch-battlenet does; hence no exec.
+sh -c "${DIREWOLF_LAUNCH_COMMAND:-xodus-nexus}"
+status=$?
+if [ "${status}" -ne 0 ] && [ "${SWAY_STOP_ON_APP_EXIT:-}" = yes ]; then
+  killall sway
+fi
+exit "${status}"

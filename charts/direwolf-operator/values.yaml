@@ -51,7 +51,9 @@ provisioning:
   # Usernames, exactly as proxyAuth.userHeader sends them (case counts), for
   # proxies with no groups. Removing a name stops only new provisioning: a
   # User already made keeps playing until an admin deletes it and its PVCs.
-  # No name may contain a comma.
+  # Each must be at most 40 ASCII letters, digits and inner dashes, and no two
+  # may differ only in case (one User); rendering fails otherwise, as the
+  # operator would refuse to start.
   allowedUsers: []
   # The Library page's URL. moonlight-proxy's pairing page links someone
   # eligible with no User yet here (it cannot create Users: it is internet-facing).
@@ -210,8 +212,14 @@ controllers:
           PROVISION_ALLOWED_USERS: &allowedUsers >-
             {{ $users := .Values.provisioning.allowedUsers | default list }}
             {{- if not (kindIs "slice" $users) }}{{ fail "provisioning.allowedUsers must be a list of usernames" }}{{ end }}
-            {{- range $users }}{{ if or (not (kindIs "string" .)) (contains "," (toString .)) }}
-            {{- fail (printf "provisioning.allowedUsers: %v must be a username without a comma" .) }}{{ end }}{{ end }}
+            {{- /* As v1alpha1.UserNameFor, which lowercases only A-Z (never sprig's
+              lower: it maps the Kelvin sign to k): at most 40 ASCII letters, digits and
+              inner dashes, and no two names one User. The operator exits at start on either. */}}
+            {{- $seen := dict }}
+            {{- range $users }}{{ if or (not (kindIs "string" .)) (gt (len .) 40) (not (regexMatch "^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$" .)) }}
+            {{- fail (printf "provisioning.allowedUsers: %v can never be provisioned: a username must be at most 40 letters, digits and inner dashes" .) }}{{ end }}
+            {{- if hasKey $seen (lower .) }}{{ fail (printf "provisioning.allowedUsers: %v and %v are the same User" (get $seen (lower .)) .) }}{{ end }}
+            {{- $_ := set $seen (lower .) . }}{{ end }}
             {{- join "," $users }}
           PROVISION_USER_TEMPLATE: '{{ toJson .Values.provisioning.userTemplate }}'
           PROVISION_HOME_STORAGE_CLASS: '{{ .Values.provisioning.home.storageClassName }}'

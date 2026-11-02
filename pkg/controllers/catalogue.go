@@ -732,9 +732,12 @@ func parseHeroic(files map[string][]byte) ([]catalogueGame, error) {
 		}
 		return m
 	}
+	// Logged as a count and a few names, not a line each: the files are the
+	// desktop user's, and 8 MiB of bad appNames logged ~41 MB every scan.
+	unusable := map[string][]string{}
 	game := func(store, appName, title string, lib map[string]heroicLibraryGame) (catalogueGame, bool) {
 		if !heroicAppName.MatchString(appName) {
-			klog.Warningf("Catalogue: skipping %s game with unusable appName %q", store, appName)
+			unusable[store] = append(unusable[store], appName)
 			return catalogueGame{}, false
 		}
 		info := lib[appName]
@@ -766,8 +769,25 @@ func parseHeroic(files map[string][]byte) ([]catalogueGame, error) {
 			games = append(games, c)
 		}
 	}
+	for store, names := range unusable {
+		logUnusableIDs(store+" game appName", names)
+	}
 	sort.Slice(games, func(i, j int) bool { return games[i].Store+games[i].ID < games[j].Store+games[j].ID })
 	return games, nil
+}
+
+// logUnusableIDs logs one line for IDs a scan skipped: their count and the
+// first few, each cut to 64 characters, as the store files are user-written.
+func logUnusableIDs(what string, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	sort.Strings(ids)
+	shown := make([]string, 0, 5)
+	for _, id := range ids[:min(len(ids), 5)] {
+		shown = append(shown, fmt.Sprintf("%.64q", id))
+	}
+	klog.Warningf("Catalogue: skipping %d games with an unusable %s (%s)", len(ids), what, strings.Join(shown, ", "))
 }
 
 // parseNexus reads the games Xodus Nexus has installed from its launcher
@@ -796,12 +816,14 @@ func parseNexus(files map[string][]byte) ([]catalogueGame, error) {
 		return nil, fmt.Errorf("parsing %s: no games list", nexusState)
 	}
 	var games []catalogueGame
+	var unusable []string
+	defer func() { logUnusableIDs("Nexus game ID", unusable) }()
 	for _, g := range *state.Games {
 		if g.InstallState != "ready" {
 			continue
 		}
 		if !nexusGameID.MatchString(g.ID) {
-			klog.Warningf("Catalogue: skipping Nexus game with unusable ID %q", g.ID)
+			unusable = append(unusable, g.ID)
 			continue
 		}
 		c := catalogueGame{Store: v1alpha1types.CatalogueStoreNexus, ID: g.ID, Title: firstNonEmpty(g.Title, g.ID)}
