@@ -24,7 +24,9 @@ paths:
   - It lists direct memberships only: the `profile` scope mapping sends `user.groups.all()`, not
     `all_groups()`. A child group's member passes Authentik's group binding but is not
     provisioned. Add members to the provision group itself; never nest groups under it.
-  - The chart joins `allowedUsers` with commas and `fail`s on a name containing one.
+  - The chart joins `allowedUsers` with commas and `fail`s on a name `UserNameFor` refuses, or
+    two that map to one User: the operator exits at start on either (all streaming down).
+    It matches raw ASCII, never sprig `lower` (Kelvin sign → k). CI: "Reject bad allowedUsers".
   - Only a user-gesture visit (`userNavigation`) or the Start POST creates: a tab's script
     reload after an admin deleted the User must not re-create it (it gets the stopped page).
     So the start path's method/site check runs before provisioning.

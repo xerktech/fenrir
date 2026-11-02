@@ -115,6 +115,25 @@ jobs:
           --set-json 'provisioning.allowedUsers=["alice","Bob"]'
           > "$RUNNER_TEMP/chart.yaml"
 
+      # Each must fail the render: the operator would crash-loop on it
+      # (UserNameFor refuses it, or two names map to one User).
+      - name: Reject bad allowedUsers
+        run: |
+          for users in '["QA.Allowed"]' '["a,b"]' '["-bob"]' '["\u212abob"]' '["\u0130bob"]' \
+            '["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]' '[1]' '["Bob","bob"]'; do
+            if helm template direwolf charts/direwolf-operator --kube-version 1.36.0 \
+              --set provisioning.group=g --set provisioning.libraryURL=https://l.example/ \
+              --set provisioning.home.storageClassName=x --set provisioning.games.storageClassName=x \
+              --set-json "provisioning.allowedUsers=$users" >/dev/null 2>&1; then
+              echo "::error::allowedUsers $users rendered"; exit 1
+            fi
+          done
+          # Same flags, a good list: the loop above failed for its names alone.
+          helm template direwolf charts/direwolf-operator --kube-version 1.36.0 \
+            --set provisioning.group=g --set provisioning.libraryURL=https://l.example/ \
+            --set provisioning.home.storageClassName=x --set provisioning.games.storageClassName=x \
+            --set-json 'provisioning.allowedUsers=["alice","Bob"]' >/dev/null
+
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
