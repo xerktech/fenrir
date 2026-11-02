@@ -42,7 +42,7 @@ paths:
   - It installs nothing: a missing client, a patch or an expired sign-in end the session after
     `BATTLENET_LAUNCH_TIMEOUT` (300s) with Battle.net's window on screen meanwhile.
   - Every launch the client takes starts another copy, which logs the last one out (seen live).
-    So it sends `--exec="<code>"` (`launch WoW`, `launch_uid wowf`) once, 5s after the client's
+    So it sends `--exec="launch <code>"` once, 5s after the client's
     WebServer listens on 127.0.0.1:22885 (`/proc/net/tcp`; after 60s regardless), then only
     every 90s without a game.
   - That the listening WebServer means the client takes a launch is unmeasured.
@@ -53,6 +53,9 @@ paths:
     Live it is `Z:\games\battlenet\World of Warcraft\_retail_\WoW.exe -launcherlogin -uid wow`:
     capital O, so a case-sensitive `Wow.exe` never matched and each resend started another WoW.
     Other command lines (a shell, a crash reporter) name the path in their arguments.
+  - Retail and Forever are both `Wow.exe` (any case), so a directory must end in the product's
+    folder and a `-uid` must name the product; a bare `Wow.exe` still counts.
+    Tests: `TestLaunchBattlenetTellsWoWVersionsApart`.
   - It refuses the host user namespace (identity `uid_map`): only the App pod
     (`spec.requireAppPod`) keeps the client's listeners off the node's loopback.
   - The product never joins sway's exec line: the startup runs the script bare.
@@ -207,10 +210,12 @@ paths:
 
 - WoW Forever (uid `wowf`, `World of Warcraft/_forever_/Wow.exe`) was installed after this;
   the catalogue skipped it until it got a case (`launch-battlenet does not play (["wowf"])`).
-  - It shares the World of Warcraft product page (a version in its dropdown), so `launch WoW`
-    would start whichever version was last picked: it is sent `launch_uid wowf` instead.
-  - uid, folder and exe are from bizkut/ps5-forever, not a live file. That a running client
-    starts the game on `launch_uid` is unverified; check `sent launch` vs `wowf is running`.
+  - It is a version on retail's product page; `launch_uid wowf` only selects it
+    (bizkut/ps5-forever `forever-maintenance.c`), and that `launch WoW` starts the selected
+    version is unverified. So `launch-battlenet` starts `_forever_/Wow.exe -launcherlogin -uid
+    wowf` itself, from its folder, once the client is up, as ps5-forever does.
+  - uid, folder and exe are from ps5-forever and the live log, not a live file. That the direct
+    start signs in through the running client here is unverified: check `wowf is running`.
   - It shows retail's cover: no portrait Forever cover is published on `artHosts`.
 - Only WoW retail was run. The other titles (Classic, D4, OW2, SC2, HS, D2R, D3) are not
   installed and have no App: their uids, launch codes and exes are still unrecorded.
