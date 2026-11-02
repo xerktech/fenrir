@@ -29,6 +29,11 @@ paths:
   - A session of such a User mounts their claims wherever the App mounts the shared ones
     (`useUserLibrary`); Apps keep naming the shared claims.
   - One password per library: each desktop runs its user's code and can read its own.
+  - An own Library whose User is gone or lost `spec.library` is stopped at its next reconcile,
+    in use or not, with no final scan (XERK-2641): nobody can reach it (the page routes by the
+    User as it is now), and a scan re-creates the Apps catalogue Refresh deletes.
+    The User is read live; a failed read skips the scan and retries.
+    Tests: `TestLibraryStopsOrphanedOwnLibrary`.
   - Tests: `pkg/controllers/library_users_test.go`, `pkg/moonlight/library_users_test.go`.
 - Steam lock: a Library and the game sessions of its library's Users share one Steam home, so
   they never run together. Other libraries' sessions don't count; a session whose User is gone

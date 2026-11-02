@@ -806,3 +806,72 @@ func TestLibraryServerUserHeaderFromFlag(t *testing.T) {
 		})
 	}
 }
+
+// A User's own Library whose User is deleted, or loses spec.library, is
+// stopped (Steam shut down cleanly) with no catalogue scan: a scan would
+// re-create the Apps Catalogue.Refresh deletes (XERK-2641). A failed User
+// read scans nothing and is retried; a User still on that library is scanned.
+func TestLibraryStopsOrphanedOwnLibrary(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		user    *v1alpha1types.User // nil: deleted
+		readErr bool
+		stopped bool
+		scanned bool
+		wantErr bool
+	}{
+		{name: "user deleted", stopped: true},
+		{name: "spec.library cleared", user: libraryUser("sam", false), stopped: true},
+		{name: "user read fails", user: libraryUser("sam", true), readErr: true, wantErr: true},
+		{name: "still sam's library", user: libraryUser("sam", true), scanned: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := libraryPod(0, true)
+			pod.Name = v1alpha1types.LibraryPodNameFor("sam")
+			pod.Labels[v1alpha1types.LibraryOwnerLabel] = "sam"
+			var dwObjs []runtime.Object
+			if tc.user != nil {
+				dwObjs = append(dwObjs, tc.user)
+			}
+			f := newLibraryFixture(t, []runtime.Object{pod.DeepCopy()}, dwObjs...)
+			if tc.readErr {
+				f.dw.PrependReactor("get", "users", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, apierrors.NewServiceUnavailable("etcd down")
+				})
+			}
+			shutdowns := 0
+			f.library.Exec = func(_ context.Context, _, _, _ string, command []string) (string, error) {
+				if strings.Contains(strings.Join(command, " "), "-shutdown") {
+					shutdowns++
+				}
+				return "", nil
+			}
+			cf := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil))
+			scans := 0
+			fixture := fixtureExec(t, "testdata/catalogue")
+			cf.catalogue.Exec = func(ctx context.Context, ns, p, ctr string, command []string) (string, error) {
+				scans++
+				return fixture(ctx, ns, p, ctr, command)
+			}
+			f.library.Catalogue = cf.catalogue
+			f.library.controller = generic.NewController(generic.NewInformer[*corev1.Pod](
+				cache.NewSharedIndexInformer(&cache.ListWatch{}, &corev1.Pod{}, 0, cache.Indexers{})),
+				f.library.Reconcile, generic.ControllerOptions{})
+
+			err := f.library.Reconcile(libraryTestNS, pod.Name, pod.DeepCopy())
+			if (err != nil) != tc.wantErr {
+				t.Errorf("Reconcile = %v, want error %v", err, tc.wantErr)
+			}
+			_, getErr := f.k8s.CoreV1().Pods(libraryTestNS).Get(context.Background(), pod.Name, metav1.GetOptions{})
+			if stopped := apierrors.IsNotFound(getErr); stopped != tc.stopped {
+				t.Errorf("pod stopped = %v, want %v", stopped, tc.stopped)
+			}
+			if tc.stopped && shutdowns != 1 {
+				t.Errorf("steam -shutdown ran %d times, want once", shutdowns)
+			}
+			if (scans > 0) != tc.scanned {
+				t.Errorf("%d catalogue scans, want scanned %v", scans, tc.scanned)
+			}
+		})
+	}
+}
