@@ -51,7 +51,8 @@ provisioning:
   # Usernames, exactly as proxyAuth.userHeader sends them (case counts), for
   # proxies with no groups. Removing a name stops only new provisioning: a
   # User already made keeps playing until an admin deletes it and its PVCs.
-  # No name may contain a comma.
+  # Each must be at most 40 letters, digits and inner dashes (a User name once
+  # lowercased); rendering fails on any other, which the operator would refuse.
   allowedUsers: []
   # The Library page's URL. moonlight-proxy's pairing page links someone
   # eligible with no User yet here (it cannot create Users: it is internet-facing).
@@ -210,8 +211,10 @@ controllers:
           PROVISION_ALLOWED_USERS: &allowedUsers >-
             {{ $users := .Values.provisioning.allowedUsers | default list }}
             {{- if not (kindIs "slice" $users) }}{{ fail "provisioning.allowedUsers must be a list of usernames" }}{{ end }}
-            {{- range $users }}{{ if or (not (kindIs "string" .)) (contains "," (toString .)) }}
-            {{- fail (printf "provisioning.allowedUsers: %v must be a username without a comma" .) }}{{ end }}{{ end }}
+            {{- /* As v1alpha1.UserNameFor: lowercased, a DNS-1123 label of at most 40
+              characters. The operator exits at start on a name it can never provision. */}}
+            {{- range $users }}{{ if or (not (kindIs "string" .)) (gt (len .) 40) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (lower .))) }}
+            {{- fail (printf "provisioning.allowedUsers: %v can never be provisioned: a username must be at most 40 letters, digits and inner dashes" .) }}{{ end }}{{ end }}
             {{- join "," $users }}
           PROVISION_USER_TEMPLATE: '{{ toJson .Values.provisioning.userTemplate }}'
           PROVISION_HOME_STORAGE_CLASS: '{{ .Values.provisioning.home.storageClassName }}'
