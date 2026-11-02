@@ -395,7 +395,7 @@ func TestLaunchBattlenetSeesTheGameByEitherPath(t *testing.T) {
 // slow to appear.
 func TestLaunchBattlenetLaunchesOnceTheClientIsUp(t *testing.T) {
 	r := runLaunchBattlenet(t, true, []string{"wow"}, "GAME_SECONDS=3", "GAME_DELAY=6",
-		"CLIENT_UP_AFTER=3", "BATTLENET_RESEND_INTERVAL=15")
+		"CLIENT_UP_AFTER=3", "BATTLENET_RESEND_INTERVAL=40") // well past GAME_DELAY, even under load
 	if r.code != 0 {
 		t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
 	}
