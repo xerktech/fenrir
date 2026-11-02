@@ -136,6 +136,12 @@ enable_wow_gamepad() {
     log "turned on WoW's gamepad mode in ${wtf}"
 }
 games="${BATTLENET_GAMES:-/games/battlenet}"
+# A game started directly (no code) must be installed: the client would only
+# be waited on until the timeout, which reads as patching or a sign-in.
+if [ -z "${code}" ] && [ ! -f "${games}/${game_dir}/${exe}" ]; then
+  log "${product} is not installed in ${games}/${game_dir}; install it from the Library"
+  exit 1
+fi
 if [ "${product}" = wow ] || [ "${product}" = wowf ]; then
   enable_wow_gamepad "${games}/${game_dir}" ||
     log "could not turn on WoW's gamepad mode; a pad needs /console GamePadEnable 1"
@@ -152,9 +158,16 @@ fi
 # the game's own folder, and a -uid argument must name this product: else the
 # other version would count as this one.
 game='^(([A-Za-z]:)?[\\/](([^ ]| [^-])*[\\/])?'"${game_dir##*/}"'[\\/])?'"${exe//./\\.}"'( |$)'
+# Proton's own wrappers carry a direct start's path as an argument
+# (wine-preloader ... steam.exe /games/.../Wow.exe -launcherlogin ...), which
+# the space-crossing directory above would take in: a program part with a
+# second path in it (a space, then / \ or a drive) is not the game.
 game_running() {
   local cmd
   while read -r _ cmd; do
+    if [[ " ${cmd%% -*}" =~ .\ ([A-Za-z]:)?[\\/] ]]; then
+      continue
+    fi
     if [[ " ${cmd,,} " =~ \ -uid\ ([^ ]+)\  ]] && [ "${BASH_REMATCH[1]}" != "${product}" ]; then
       continue
     fi

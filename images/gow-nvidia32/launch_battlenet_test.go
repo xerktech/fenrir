@@ -231,9 +231,7 @@ func TestLaunchBattlenetPlaysWoWForever(t *testing.T) {
 	r := runLaunchBattlenetWith(t, true, func(games string) {
 		game = filepath.Join(games, "World of Warcraft", "_forever_")
 		wtf = filepath.Join(game, "WTF", "Config.wtf")
-		if err := os.MkdirAll(game, 0o755); err != nil {
-			t.Fatal(err)
-		}
+		installForever(t, games)
 	}, []string{"wowf"}, "GAME_SECONDS=3",
 		`GAME_ARGV0=Z:\games\battlenet\World of Warcraft\_forever_\Wow.exe -launcherlogin -uid wowf`)
 	if r.code != 0 || !strings.Contains(r.out, "wowf is running") {
@@ -271,14 +269,55 @@ func TestLaunchBattlenetTellsWoWVersionsApart(t *testing.T) {
 		{"wowf", `Z:/games/battlenet/World of Warcraft/_FOREVER_/WOW.EXE`, true},
 		{"wowf", `Wow.exe -launcherlogin -uid WOWF`, true},
 	} {
-		r := runLaunchBattlenetWith(t, true, func(games string) {
-			if err := os.MkdirAll(filepath.Join(games, "World of Warcraft", "_forever_"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}, []string{tc.product}, "GAME_SECONDS=3", "BATTLENET_LAUNCH_TIMEOUT=4", "GAME_ARGV0="+tc.argv0)
+		r := runLaunchBattlenetWith(t, true, func(games string) { installForever(t, games) }, []string{tc.product}, "GAME_SECONDS=3", "BATTLENET_LAUNCH_TIMEOUT=4", "GAME_ARGV0="+tc.argv0)
 		if seen := strings.Contains(r.out, tc.product+" is running"); seen != tc.seen {
 			t.Errorf("%s with %s: seen %v, want %v\n%s", tc.product, tc.argv0, seen, tc.seen, r.out)
 		}
+	}
+}
+
+// installForever puts a WoW Forever executable on the games volume.
+func installForever(t *testing.T, games string) {
+	t.Helper()
+	game := filepath.Join(games, "World of Warcraft", "_forever_")
+	if err := os.MkdirAll(game, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(game, "Wow.exe"), nil, 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+}
+
+// Forever is started directly, so without it there is nothing to wait for.
+func TestLaunchBattlenetNeedsWoWForeverInstalled(t *testing.T) {
+	r := runLaunchBattlenet(t, true, []string{"wowf"}, "GAME_SECONDS=3")
+	if r.code != 1 || !strings.Contains(r.out, "wowf is not installed") {
+		t.Fatalf("exit %d, want 1 for a missing game\n%s", r.code, r.out)
+	}
+	if calls := r.calls(t); !slices.Equal(calls, []string{"killall sway"}) {
+		t.Errorf("calls %q, want only the session ended", calls)
+	}
+}
+
+// Proton's wrappers for a direct start name the game's path with its
+// arguments, as Proton's run and Wine show them; they are not the game.
+func TestLaunchBattlenetIgnoresDirectStartWrappers(t *testing.T) {
+	for _, argv0 := range []string{
+		`/opt/proton-cachyos/files/lib/wine/x86_64-unix/wine-preloader /opt/proton-cachyos/files/lib/wine c:\windows\system32\steam.exe /games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`,
+		`c:\windows\system32\steam.exe /games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`,
+		`C:\windows\system32\steam.exe Z:\games\battlenet\World of Warcraft\_forever_\Wow.exe -launcherlogin -uid wowf`,
+		`/usr/bin/python3 /opt/proton-cachyos/proton run /games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`,
+	} {
+		decoy := exec.CommandContext(t.Context(), "bash", "-c", `exec -a "$0" sleep 30`, argv0)
+		if err := decoy.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = decoy.Process.Kill(); _ = decoy.Wait() })
+	}
+	r := runLaunchBattlenetWith(t, true, func(games string) { installForever(t, games) }, []string{"wowf"},
+		"BATTLENET_LAUNCH_TIMEOUT=3")
+	if r.code != 1 {
+		t.Fatalf("exit %d, want 1: a wrapper counted as the game\n%s", r.code, r.out)
 	}
 }
 

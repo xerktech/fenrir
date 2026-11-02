@@ -56,6 +56,10 @@ paths:
   - Retail and Forever are both `Wow.exe` (any case), so a directory must end in the product's
     folder and a `-uid` must name the product; a bare `Wow.exe` still counts.
     Tests: `TestLaunchBattlenetTellsWoWVersionsApart`.
+  - Proton's `run` wrappers (`wine-preloader ... steam.exe <game path> -launcherlogin ...`) stay
+    up beside a direct start: a program part holding a second path is not the game.
+    The stub's wrappers are short-lived, so only `TestLaunchBattlenetIgnoresDirectStartWrappers`
+    (decoy processes) sees this.
   - It refuses the host user namespace (identity `uid_map`): only the App pod
     (`spec.requireAppPod`) keeps the client's listeners off the node's loopback.
   - The product never joins sway's exec line: the startup runs the script bare.
