@@ -244,10 +244,10 @@ func TestLaunchBattlenetPlaysWoWForever(t *testing.T) {
 	}
 	client := filepath.Join(r.prefix, "pfx", "drive_c", "Program Files (x86)", "Battle.net", "Battle.net.exe")
 	want := []string{
-		"proton run " + client,
+		"proton [run] [" + client + "]",
 		"client VKD3D_SHADER_CACHE_PATH=" + filepath.Join(r.home, ".cache", "vkd3d-proton", "battlenet-wowf") +
 			" DXVK_STATE_CACHE_PATH=" + filepath.Join(r.home, ".cache", "dxvk", "battlenet-wowf"),
-		"proton run " + filepath.Join(game, "Wow.exe") + " -launcherlogin -uid wowf",
+		"proton [run] [" + filepath.Join(game, "Wow.exe") + "] [-launcherlogin] [-uid] [wowf]",
 		"game cwd " + game,
 		"wineserver -k WINEPREFIX=" + filepath.Join(r.prefix, "pfx"),
 	}
