@@ -73,6 +73,7 @@ func TestParseBattlenet(t *testing.T) {
 		want []string
 	}{
 		"installed":                {pbBytes(1, pbInstall("wow", true)), []string{"wow"}},
+		"WoW Forever":              {pbBytes(1, pbInstall("wowf", true)), []string{"wowf"}},
 		"not installed":            {pbBytes(1, pbInstall("wow", false)), nil},
 		"no cached state":          {pbBytes(1, pbBytes(1, []byte("wow"))), nil},
 		"only the client":          {slices.Concat(pbBytes(1, pbInstall("agent", true)), pbBytes(1, pbInstall("battle.net", true))), nil},

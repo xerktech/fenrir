@@ -19,7 +19,8 @@ const launchBattlenet = "root/opt/direwolf/launch-battlenet"
 
 // stubProton stands in for Proton. `run <client>` is the client: it listens
 // on $BATTLENET_WEB_PORT after $CLIENT_UP_AFTER seconds (never with
-// $CLIENT_NEVER_UP) and stays up until wineserver -k. `run <client> --exec=...`
+// $CLIENT_NEVER_UP) and stays up until wineserver -k. `run <client> --exec=...`,
+// or `run <game> -launcherlogin ...` (logged with its working directory),
 // starts a fake game process, whose command line is Wine's for WoW, for
 // $GAME_SECONDS (none if unset), $GAME_DELAY seconds after the launch. Like
 // the real client, it ignores a launch sent before it is up; with
@@ -32,7 +33,8 @@ printf 'proton' >>"$STUB_LOG"
 printf ' [%s]' "$@" >>"$STUB_LOG"
 echo >>"$STUB_LOG"
 case "$*" in
-*--exec=*)
+*--exec=*|*" -launcherlogin "*)
+  case "$*" in *" -launcherlogin "*) echo "game cwd $PWD" >>"$STUB_LOG" ;; esac
   if [ -n "${IGNORE_FIRST:-}" ] && [ ! -f "$STUB_DIR/ignored" ]; then
     touch "$STUB_DIR/ignored"
   elif { [ -f "$STUB_DIR/up" ] || [ -n "${CLIENT_NEVER_UP:-}" ]; } && [ -n "${GAME_SECONDS:-}" ]; then
@@ -223,6 +225,104 @@ func TestLaunchBattlenetPlaysTheGameThenStopsBattlenet(t *testing.T) {
 		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 			t.Errorf("cache directory %s not created: %v", dir, err)
 		}
+	}
+}
+
+// WoW Forever is a version on retail's product page, which no --exec code
+// selects, so its _forever_/Wow.exe is started directly beside the client,
+// from its own folder; it also gets the gamepad CVar.
+func TestLaunchBattlenetPlaysWoWForever(t *testing.T) {
+	var wtf, game string
+	r := runLaunchBattlenetWith(t, true, func(games string) {
+		game = filepath.Join(games, "World of Warcraft", "_forever_")
+		wtf = filepath.Join(game, "WTF", "Config.wtf")
+		installForever(t, games)
+	}, []string{"wowf"}, "GAME_SECONDS=3",
+		`GAME_ARGV0=Z:\games\battlenet\World of Warcraft\_forever_\Wow.exe -launcherlogin -uid wowf`)
+	if r.code != 0 || !strings.Contains(r.out, "wowf is running") {
+		t.Fatalf("exit %d, want 0 with the game seen\n%s", r.code, r.out)
+	}
+	client := filepath.Join(r.prefix, "pfx", "drive_c", "Program Files (x86)", "Battle.net", "Battle.net.exe")
+	want := []string{
+		"proton [run] [" + client + "]",
+		"client VKD3D_SHADER_CACHE_PATH=" + filepath.Join(r.home, ".cache", "vkd3d-proton", "battlenet-wowf") +
+			" DXVK_STATE_CACHE_PATH=" + filepath.Join(r.home, ".cache", "dxvk", "battlenet-wowf"),
+		"proton [run] [" + filepath.Join(game, "Wow.exe") + "] [-launcherlogin] [-uid] [wowf]",
+		"game cwd " + game,
+		"wineserver -k WINEPREFIX=" + filepath.Join(r.prefix, "pfx"),
+	}
+	if calls := r.calls(t); !slices.Equal(calls, want) {
+		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
+	}
+	if got, err := os.ReadFile(wtf); err != nil || string(got) != "SET GamePadEnable \"1\"\n" {
+		t.Errorf("Config.wtf %q (%v), want the gamepad CVar", got, err)
+	}
+}
+
+// Retail and Forever are both Wow.exe: the other version's process, by its
+// folder or its -uid, is not this game, while a bare one still counts.
+func TestLaunchBattlenetTellsWoWVersionsApart(t *testing.T) {
+	for _, tc := range []struct {
+		product, argv0 string
+		seen           bool
+	}{
+		{"wowf", `Z:\games\battlenet\World of Warcraft\_retail_\WoW.exe -launcherlogin -uid wow`, false},
+		{"wowf", `Wow.exe -launcherlogin -uid wow`, false},
+		{"wow", `Z:\games\battlenet\World of Warcraft\_forever_\Wow.exe -launcherlogin -uid wowf`, false},
+		{"wow", `Z:/games/battlenet/World of Warcraft/_forever_/Wow.exe`, false},
+		{"wowf", `/games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`, true},
+		{"wowf", `Z:/games/battlenet/World of Warcraft/_FOREVER_/WOW.EXE`, true},
+		{"wowf", `Wow.exe -launcherlogin -uid WOWF`, true},
+	} {
+		r := runLaunchBattlenetWith(t, true, func(games string) { installForever(t, games) }, []string{tc.product}, "GAME_SECONDS=3", "BATTLENET_LAUNCH_TIMEOUT=4", "GAME_ARGV0="+tc.argv0)
+		if seen := strings.Contains(r.out, tc.product+" is running"); seen != tc.seen {
+			t.Errorf("%s with %s: seen %v, want %v\n%s", tc.product, tc.argv0, seen, tc.seen, r.out)
+		}
+	}
+}
+
+// installForever puts a WoW Forever executable on the games volume.
+func installForever(t *testing.T, games string) {
+	t.Helper()
+	game := filepath.Join(games, "World of Warcraft", "_forever_")
+	if err := os.MkdirAll(game, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(game, "Wow.exe"), nil, 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+}
+
+// Forever is started directly, so without it there is nothing to wait for.
+func TestLaunchBattlenetNeedsWoWForeverInstalled(t *testing.T) {
+	r := runLaunchBattlenet(t, true, []string{"wowf"}, "GAME_SECONDS=3")
+	if r.code != 1 || !strings.Contains(r.out, "wowf is not installed") {
+		t.Fatalf("exit %d, want 1 for a missing game\n%s", r.code, r.out)
+	}
+	if calls := r.calls(t); !slices.Equal(calls, []string{"killall sway"}) {
+		t.Errorf("calls %q, want only the session ended", calls)
+	}
+}
+
+// Proton's wrappers for a direct start name the game's path with its
+// arguments, as Proton's run and Wine show them; they are not the game.
+func TestLaunchBattlenetIgnoresDirectStartWrappers(t *testing.T) {
+	for _, argv0 := range []string{
+		`/opt/proton-cachyos/files/lib/wine/x86_64-unix/wine-preloader /opt/proton-cachyos/files/lib/wine c:\windows\system32\steam.exe /games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`,
+		`c:\windows\system32\steam.exe /games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`,
+		`C:\windows\system32\steam.exe Z:\games\battlenet\World of Warcraft\_forever_\Wow.exe -launcherlogin -uid wowf`,
+		`/usr/bin/python3 /opt/proton-cachyos/proton run /games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`,
+	} {
+		decoy := exec.CommandContext(t.Context(), "bash", "-c", `exec -a "$0" sleep 30`, argv0)
+		if err := decoy.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = decoy.Process.Kill(); _ = decoy.Wait() })
+	}
+	r := runLaunchBattlenetWith(t, true, func(games string) { installForever(t, games) }, []string{"wowf"},
+		"BATTLENET_LAUNCH_TIMEOUT=3")
+	if r.code != 1 {
+		t.Fatalf("exit %d, want 1: a wrapper counted as the game\n%s", r.code, r.out)
 	}
 }
 

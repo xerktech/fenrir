@@ -34,15 +34,17 @@ paths:
 
 ## In a game session (`battlenet` target of `images/gow-nvidia32`, XERK-2363)
 
-- `launch-battlenet` (`$BATTLENET_PRODUCT`, allowlist `wow`) runs the Library's prefix and client
-  with a Proton at the Library's pin: one prefix, bump both (`TestBattlenetProtonMatchesLibrary`).
+- `launch-battlenet` (`$BATTLENET_PRODUCT`, allowlist `wow`, `wowf`) runs the Library's prefix
+  and client with a Proton at the Library's pin: one prefix, bump both
+  (`TestBattlenetProtonMatchesLibrary`).
   - Its allowlist must equal the catalogue's `battlenetProducts`: add a game to both
     (`TestBattlenetProductsLaunchable`). Catalogue Apps name it in `BATTLENET_PRODUCT`.
   - It installs nothing: a missing client, a patch or an expired sign-in end the session after
     `BATTLENET_LAUNCH_TIMEOUT` (300s) with Battle.net's window on screen meanwhile.
   - Every launch the client takes starts another copy, which logs the last one out (seen live).
-    So it sends `--exec="launch <code>"` once, 5s after the client's WebServer listens on
-    127.0.0.1:22885 (`/proc/net/tcp`; after 60s regardless), then only every 90s without a game.
+    So it sends `--exec="launch <code>"` once, 5s after the client's
+    WebServer listens on 127.0.0.1:22885 (`/proc/net/tcp`; after 60s regardless), then only
+    every 90s without a game.
   - That the listening WebServer means the client takes a launch is unmeasured.
     Each send runs in the background: whether its `proton run` returns is unmeasured.
   - Under sway, GoW's launcher kills sway only on exit 0 (`<cmd> && killall sway`), so each failure
@@ -51,6 +53,13 @@ paths:
     Live it is `Z:\games\battlenet\World of Warcraft\_retail_\WoW.exe -launcherlogin -uid wow`:
     capital O, so a case-sensitive `Wow.exe` never matched and each resend started another WoW.
     Other command lines (a shell, a crash reporter) name the path in their arguments.
+  - Retail and Forever are both `Wow.exe` (any case), so a directory must end in the product's
+    folder and a `-uid` must name the product; a bare `Wow.exe` still counts.
+    Tests: `TestLaunchBattlenetTellsWoWVersionsApart`.
+  - Proton's `run` wrappers (`wine-preloader ... steam.exe <game path> -launcherlogin ...`) stay
+    up beside a direct start: a program part holding a second path is not the game.
+    The stub's wrappers are short-lived, so only `TestLaunchBattlenetIgnoresDirectStartWrappers`
+    (decoy processes) sees this.
   - It refuses the host user namespace (identity `uid_map`): only the App pod
     (`spec.requireAppPod`) keeps the client's listeners off the node's loopback.
   - The product never joins sway's exec line: the startup runs the script bare.
@@ -203,6 +212,15 @@ paths:
 
 ## Acceptance matrix (XERK-2368, talos04, 2026-10-30, PC Moonlight client)
 
+- WoW Forever (uid `wowf`, `World of Warcraft/_forever_/Wow.exe`) was installed after this;
+  the catalogue skipped it until it got a case (`launch-battlenet does not play (["wowf"])`).
+  - It is a version on retail's product page; `launch_uid wowf` only selects it
+    (bizkut/ps5-forever `forever-maintenance.c`), and that `launch WoW` starts the selected
+    version is unverified. So `launch-battlenet` starts `_forever_/Wow.exe -launcherlogin -uid
+    wowf` itself, from its folder, once the client is up, as ps5-forever does.
+  - uid, folder and exe are from ps5-forever and the live log, not a live file. That the direct
+    start signs in through the running client here is unverified: check `wowf is running`.
+  - It shows retail's cover: no portrait Forever cover is published on `artHosts`.
 - Only WoW retail was run. The other titles (Classic, D4, OW2, SC2, HS, D2R, D3) are not
   installed and have no App: their uids, launch codes and exes are still unrecorded.
 - WoW retail (`battlenet-wow`, App pod), all from Moonlight:

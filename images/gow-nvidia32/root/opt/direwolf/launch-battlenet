@@ -40,12 +40,17 @@ trap end_session EXIT
 
 product="${1:-${BATTLENET_PRODUCT:-}}"
 # Only games known to launch this way: the code goes into Battle.net's command
-# line, the product into a process pattern. Each: --exec code, executable,
+# line, the product into a process pattern. Each: --exec command, executable,
 # and the game's own folder under the games volume.
+# WoW Forever is a version on retail's product page: "launch WoW" starts
+# whichever version that page has selected, and "launch_uid wowf" only selects
+# it (bizkut/ps5-forever). So it has no code: its executable is started
+# directly with the client's own arguments, beside the running client.
 case "${product}" in
-  wow) code=WoW exe=WoW.exe game_dir="World of Warcraft/_retail_" ;;  # World of Warcraft (retail), XERK-2360
+  wow) code="launch WoW" exe=WoW.exe game_dir="World of Warcraft/_retail_" ;;  # World of Warcraft (retail), XERK-2360
+  wowf) code="" exe=Wow.exe game_dir="World of Warcraft/_forever_" ;;  # World of Warcraft: Forever
   *)
-    log "unknown product '${product}'; expected one of: wow"
+    log "unknown product '${product}'; expected one of: wow, wowf"
     exit 2
     ;;
 esac
@@ -130,8 +135,15 @@ enable_wow_gamepad() {
   printf 'SET GamePadEnable "1"%s' "${eol}" >>"${wtf}" &&
     log "turned on WoW's gamepad mode in ${wtf}"
 }
-if [ "${product}" = wow ]; then
-  enable_wow_gamepad "${BATTLENET_GAMES:-/games/battlenet}/${game_dir}" ||
+games="${BATTLENET_GAMES:-/games/battlenet}"
+# A game started directly (no code) must be installed: the client would only
+# be waited on until the timeout, which reads as patching or a sign-in.
+if [ -z "${code}" ] && [ ! -f "${games}/${game_dir}/${exe}" ]; then
+  log "${product} is not installed in ${games}/${game_dir}; install it from the Library"
+  exit 1
+fi
+if [ "${product}" = wow ] || [ "${product}" = wowf ]; then
+  enable_wow_gamepad "${games}/${game_dir}" ||
     log "could not turn on WoW's gamepad mode; a pad needs /console GamePadEnable 1"
 fi
 
@@ -142,8 +154,27 @@ fi
 # Either separator, any case, with or without a drive and directory. Only the
 # program, the start of the line up to the first " -": other command lines
 # (a crash reporter, a shell) may name the game in their arguments.
-game='^([A-Za-z]:[\\/](([^ ]| [^-])*[\\/])?)?'"${exe//./\\.}"'( |$)'
-game_running() { pgrep -u "$(id -u)" -f -i "${game}" >/dev/null; }
+# Retail and Forever are both Wow.exe in any case, so a directory must end in
+# the game's own folder, and a -uid argument must name this product: else the
+# other version would count as this one.
+game='^(([A-Za-z]:)?[\\/](([^ ]| [^-])*[\\/])?'"${game_dir##*/}"'[\\/])?'"${exe//./\\.}"'( |$)'
+# Proton's own wrappers carry a direct start's path as an argument
+# (wine-preloader ... steam.exe /games/.../Wow.exe -launcherlogin ...), which
+# the space-crossing directory above would take in: a program part with a
+# second path in it (a space, then / \ or a drive) is not the game.
+game_running() {
+  local cmd
+  while read -r _ cmd; do
+    if [[ " ${cmd%% -*}" =~ .\ ([A-Za-z]:)?[\\/] ]]; then
+      continue
+    fi
+    if [[ " ${cmd,,} " =~ \ -uid\ ([^ ]+)\  ]] && [ "${BASH_REMATCH[1]}" != "${product}" ]; then
+      continue
+    fi
+    return 0
+  done < <(pgrep -a -u "$(id -u)" -f -i "${game}")
+  return 1
+}
 
 # Whether the client is up: its WebServer listens (state 0A) on web_port.
 client_ready() {
@@ -234,7 +265,11 @@ until game_running; do
   if [ -n "${next_send}" ] && ((SECONDS >= next_send)); then
     # In the background: if this wrapper stays up too, it must not hold the
     # loop. wineserver -k ends it with the rest.
-    "${PROTON}" run "${client}" --exec="launch ${code}" &
+    if [ -n "${code}" ]; then
+      "${PROTON}" run "${client}" --exec="${code}" &
+    else
+      (cd "${games}/${game_dir}" && exec "${PROTON}" run "${games}/${game_dir}/${exe}" -launcherlogin -uid "${product}") &
+    fi
     sends=$((sends + 1))
     log "sent launch ${sends} for ${product}"
     next_send=$((SECONDS + resend))
