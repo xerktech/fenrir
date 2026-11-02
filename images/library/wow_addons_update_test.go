@@ -407,6 +407,25 @@ func TestWoWAddonsFollowsFlavors(t *testing.T) {
 	}
 }
 
+// Two listed addons shipping one folder: the second is refused, and the
+// message names the addon direwolf installed it for, not the user.
+func TestWoWAddonsNamesTheOwnerOfAClashingFolder(t *testing.T) {
+	p := newWoWPod(t)
+	p.publish("3.3.12", consolePortZip(t, "3.3.12", "ConsolePort"), "")
+	list := strings.TrimSuffix(consolePortList, "]") + "," +
+		strings.Replace(strings.Trim(consolePortList, "[]"), `"name":"ConsolePort"`, `"name":"Other"`, 1) + "]"
+	_, out := p.run(&list)
+	if !strings.Contains(out, "would replace ConsolePort, installed by direwolf for ConsolePort") {
+		t.Errorf("want Other refused naming ConsolePort as the owner, output:\n%s", out)
+	}
+	if strings.Contains(out, "not installed by direwolf") {
+		t.Errorf("a folder direwolf installed was called hand-installed, output:\n%s", out)
+	}
+	if got := p.read(filepath.Join(p.retail, "ConsolePort", "ConsolePort.toc")); got != "ConsolePort 3.3.12" {
+		t.Errorf("ConsolePort.toc = %q, want ConsolePort's install kept", got)
+	}
+}
+
 // A folder the user installed by hand is never replaced or removed, even
 // when it has a listed addon's name.
 func TestWoWAddonsNeverReplacesHandInstalled(t *testing.T) {
