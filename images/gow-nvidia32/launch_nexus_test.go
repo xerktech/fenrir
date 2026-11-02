@@ -1,6 +1,7 @@
 package gownvidia32
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,41 @@ func TestLaunchNexusKeepsAnExplicitShaderCache(t *testing.T) {
 		`DIREWOLF_LAUNCH_COMMAND=printf %s "$VKD3D_SHADER_CACHE_PATH" # --launch-game 96b3e5b429ea88ce`)
 	if got != "/user/cache" {
 		t.Fatalf("VKD3D_SHADER_CACHE_PATH = %q, want the caller's", got)
+	}
+}
+
+// A launch that fails ends the session under sway (GoW only kills sway after a
+// success), keeping its exit status; a successful one leaves that to GoW.
+func TestLaunchNexusEndsTheSessionWhenTheLaunchFails(t *testing.T) {
+	for _, tc := range []struct {
+		name, launch, sway string
+		code               int
+		killed             bool
+	}{
+		{"failed under sway", "exit 3", "yes", 3, true},
+		{"succeeded under sway", "exit 0", "yes", 0, false},
+		{"failed outside sway", "exit 3", "", 3, false},
+	} {
+		bin := t.TempDir()
+		log := filepath.Join(bin, "log")
+		if err := os.WriteFile(filepath.Join(bin, "killall"), []byte("#!/bin/sh\necho \"killall $*\" >>\""+log+"\"\n"), 0o755); err != nil { //nolint:gosec // test stub must be executable
+			t.Fatal(err)
+		}
+		cmd := exec.CommandContext(t.Context(), "sh", launchNexus)
+		cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=" + t.TempDir(),
+			"DIREWOLF_LAUNCH_COMMAND=" + tc.launch, "SWAY_STOP_ON_APP_EXIT=" + tc.sway}
+		err := cmd.Run()
+		code := 0
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		calls, _ := os.ReadFile(log)
+		if code != tc.code || (string(calls) == "killall sway\n") != tc.killed {
+			t.Errorf("%s: exit %d, calls %q; want exit %d, sway killed %v", tc.name, code, calls, tc.code, tc.killed)
+		}
 	}
 }
 
