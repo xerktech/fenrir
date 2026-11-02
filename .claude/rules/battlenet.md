@@ -35,14 +35,16 @@ paths:
 ## In a game session (`battlenet` target of `images/gow-nvidia32`, XERK-2363)
 
 - `launch-battlenet` (`$BATTLENET_PRODUCT`, allowlist `wow`, `wowf`) runs the Library's prefix
-  and client with a Proton at the Library's pin: one prefix, bump both (`TestBattlenetProtonMatchesLibrary`).
+  and client with a Proton at the Library's pin: one prefix, bump both
+  (`TestBattlenetProtonMatchesLibrary`).
   - Its allowlist must equal the catalogue's `battlenetProducts`: add a game to both
     (`TestBattlenetProductsLaunchable`). Catalogue Apps name it in `BATTLENET_PRODUCT`.
   - It installs nothing: a missing client, a patch or an expired sign-in end the session after
     `BATTLENET_LAUNCH_TIMEOUT` (300s) with Battle.net's window on screen meanwhile.
   - Every launch the client takes starts another copy, which logs the last one out (seen live).
     So it sends `--exec="<code>"` (`launch WoW`, `launch_uid wowf`) once, 5s after the client's
-    WebServer listens on 127.0.0.1:22885 (`/proc/net/tcp`; after 60s regardless), then only every 90s without a game.
+    WebServer listens on 127.0.0.1:22885 (`/proc/net/tcp`; after 60s regardless), then only
+    every 90s without a game.
   - That the listening WebServer means the client takes a launch is unmeasured.
     Each send runs in the background: whether its `proton run` returns is unmeasured.
   - Under sway, GoW's launcher kills sway only on exit 0 (`<cmd> && killall sway`), so each failure
