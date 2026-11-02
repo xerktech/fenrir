@@ -221,6 +221,30 @@ func TestLaunchBattlenetPlaysTheGameThenStopsBattlenet(t *testing.T) {
 	}
 }
 
+// WoW Forever shares retail's product page, so it is launched by uid, and
+// its game is _forever_/Wow.exe, which also gets the gamepad CVar.
+func TestLaunchBattlenetPlaysWoWForever(t *testing.T) {
+	var wtf string
+	r := runLaunchBattlenetWith(t, true, func(games string) {
+		game := filepath.Join(games, "World of Warcraft", "_forever_")
+		wtf = filepath.Join(game, "WTF", "Config.wtf")
+		if err := os.MkdirAll(game, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}, []string{"wowf"}, "GAME_SECONDS=3",
+		`GAME_ARGV0=Z:\games\battlenet\World of Warcraft\_forever_\Wow.exe -launcherlogin -uid wowf`)
+	if r.code != 0 || !strings.Contains(r.out, "wowf is running") {
+		t.Fatalf("exit %d, want 0 with the game seen\n%s", r.code, r.out)
+	}
+	client := filepath.Join(r.prefix, "pfx", "drive_c", "Program Files (x86)", "Battle.net", "Battle.net.exe")
+	if calls := r.calls(t); !slices.Contains(calls, "proton run "+client+" --exec=launch_uid wowf") {
+		t.Errorf("calls %q, want the launch by uid", calls)
+	}
+	if got, err := os.ReadFile(wtf); err != nil || string(got) != "SET GamePadEnable \"1\"\n" {
+		t.Errorf("Config.wtf %q (%v), want the gamepad CVar", got, err)
+	}
+}
+
 // A patch, an expired sign-in or a client that ignores the launch must end
 // the session rather than leave it on Battle.net's window forever.
 func TestLaunchBattlenetEndsWhenTheGameNeverStarts(t *testing.T) {

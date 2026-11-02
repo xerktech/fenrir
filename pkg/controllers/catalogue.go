@@ -147,6 +147,12 @@ var battlenetProducts = map[string]battlenetProduct{
 		"https://upload.wikimedia.org/wikipedia/en/e/e1/World_of_Warcraft_Midnight_cover_art.jpg",
 		"https://blz-contentstack-images.akamaized.net/v3/assets/blta8f9a8e092360c6c/blt32d88afeaf869b25/68a34c30a317901872445d82/WoW_12.0_600x800.png",
 	}},
+	// WoW Forever installs as its own product (_forever_). No portrait cover
+	// of it is published on artHosts yet, so it shows retail's.
+	"wowf": {"World of Warcraft: Forever", []string{
+		"https://upload.wikimedia.org/wikipedia/en/e/e1/World_of_Warcraft_Midnight_cover_art.jpg",
+		"https://blz-contentstack-images.akamaized.net/v3/assets/blta8f9a8e092360c6c/blt32d88afeaf869b25/68a34c30a317901872445d82/WoW_12.0_600x800.png",
+	}},
 }
 
 // battlenetUID is what a product.db uid may look like to be logged by name.

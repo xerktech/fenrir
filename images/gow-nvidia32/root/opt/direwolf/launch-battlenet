@@ -40,12 +40,15 @@ trap end_session EXIT
 
 product="${1:-${BATTLENET_PRODUCT:-}}"
 # Only games known to launch this way: the code goes into Battle.net's command
-# line, the product into a process pattern. Each: --exec code, executable,
+# line, the product into a process pattern. Each: --exec command, executable,
 # and the game's own folder under the games volume.
+# WoW Forever shares the World of Warcraft product page with retail, so it is
+# launched by its uid (launch_uid), not by the page's code.
 case "${product}" in
-  wow) code=WoW exe=WoW.exe game_dir="World of Warcraft/_retail_" ;;  # World of Warcraft (retail), XERK-2360
+  wow) code="launch WoW" exe=WoW.exe game_dir="World of Warcraft/_retail_" ;;  # World of Warcraft (retail), XERK-2360
+  wowf) code="launch_uid wowf" exe=Wow.exe game_dir="World of Warcraft/_forever_" ;;  # World of Warcraft: Forever
   *)
-    log "unknown product '${product}'; expected one of: wow"
+    log "unknown product '${product}'; expected one of: wow, wowf"
     exit 2
     ;;
 esac
@@ -130,7 +133,7 @@ enable_wow_gamepad() {
   printf 'SET GamePadEnable "1"%s' "${eol}" >>"${wtf}" &&
     log "turned on WoW's gamepad mode in ${wtf}"
 }
-if [ "${product}" = wow ]; then
+if [ "${product}" = wow ] || [ "${product}" = wowf ]; then
   enable_wow_gamepad "${BATTLENET_GAMES:-/games/battlenet}/${game_dir}" ||
     log "could not turn on WoW's gamepad mode; a pad needs /console GamePadEnable 1"
 fi
@@ -234,7 +237,7 @@ until game_running; do
   if [ -n "${next_send}" ] && ((SECONDS >= next_send)); then
     # In the background: if this wrapper stays up too, it must not hold the
     # loop. wineserver -k ends it with the rest.
-    "${PROTON}" run "${client}" --exec="launch ${code}" &
+    "${PROTON}" run "${client}" --exec="${code}" &
     sends=$((sends + 1))
     log "sent launch ${sends} for ${product}"
     next_send=$((SECONDS + resend))
