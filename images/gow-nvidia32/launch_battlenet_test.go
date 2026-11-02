@@ -145,7 +145,9 @@ func runLaunchBattlenetWith(t *testing.T, install bool, setup func(games string)
 		setup(games)
 	}
 	// A script that leaves the stub client up would otherwise hang the test.
-	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	// The launch wait is generous: under a loaded host's full -race suite the
+	// game was once not seen within 20s. Tests of the timeout set a short one.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", append([]string{launchBattlenet}, args...)...) //nolint:gosec // the script under test
 	cmd.WaitDelay = time.Second
@@ -154,7 +156,7 @@ func runLaunchBattlenetWith(t *testing.T, install bool, setup func(games string)
 		"STUB_LOG=" + r.log, "STUB_DIR=" + stub,
 		"BATTLENET_PROTON=" + filepath.Join(stub, "proton"), "BATTLENET_UID_MAP=" + uidMap,
 		"BATTLENET_WEB_PORT=" + freePort(t), "BATTLENET_SETTLE=0", "BATTLENET_READY_WAIT=10",
-		"BATTLENET_RESEND_INTERVAL=30", "BATTLENET_LAUNCH_TIMEOUT=20"}, env...)
+		"BATTLENET_RESEND_INTERVAL=30", "BATTLENET_LAUNCH_TIMEOUT=45"}, env...)
 	out, err := cmd.CombinedOutput()
 	r.out = string(out)
 	var exitErr *exec.ExitError
