@@ -205,6 +205,11 @@ func TestCatalogueSyncBattlenetGame(t *testing.T) {
 	if len(app.Spec.AppAssetWebP) == 0 || bytes.Equal(app.Spec.AppAssetWebP, []byte("base-art")) {
 		t.Error("battlenet-wow has no cover of its own")
 	}
+	// The box art with the game's logo comes first; Blizzard's textless key
+	// art is only the fallback (XERK-2625).
+	if u, err := url.Parse(battlenetProducts["wow"].art[0]); err != nil || u.Host != "upload.wikimedia.org" {
+		t.Errorf("WoW's first cover is %s, want the box art on upload.wikimedia.org", battlenetProducts["wow"].art[0])
+	}
 	if !slices.Contains(f.fetched, battlenetProducts["wow"].art[0]) {
 		t.Errorf("WoW cover not fetched; fetched %v", f.fetched)
 	}
