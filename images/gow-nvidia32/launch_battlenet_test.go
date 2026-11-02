@@ -24,8 +24,13 @@ const launchBattlenet = "root/opt/direwolf/launch-battlenet"
 // $GAME_SECONDS (none if unset), $GAME_DELAY seconds after the launch. Like
 // the real client, it ignores a launch sent before it is up; with
 // $IGNORE_FIRST it also ignores the first one sent after.
+//
+// It logs each argument in brackets, so a call split or joined differently
+// from the script's quoting shows in the log.
 const stubProton = `#!/bin/sh
-echo "proton $*" >>"$STUB_LOG"
+printf 'proton' >>"$STUB_LOG"
+printf ' [%s]' "$@" >>"$STUB_LOG"
+echo >>"$STUB_LOG"
 case "$*" in
 *--exec=*)
   if [ -n "${IGNORE_FIRST:-}" ] && [ ! -f "$STUB_DIR/ignored" ]; then
@@ -201,9 +206,9 @@ func TestLaunchBattlenetPlaysTheGameThenStopsBattlenet(t *testing.T) {
 	vkd3d := filepath.Join(r.home, ".cache", "vkd3d-proton", "battlenet-wow")
 	dxvk := filepath.Join(r.home, ".cache", "dxvk", "battlenet-wow")
 	want := []string{
-		"proton run " + client,
+		"proton [run] [" + client + "]",
 		"client VKD3D_SHADER_CACHE_PATH=" + vkd3d + " DXVK_STATE_CACHE_PATH=" + dxvk,
-		"proton run " + client + " --exec=launch WoW",
+		"proton [run] [" + client + "] [--exec=launch WoW]",
 		"wineserver -k WINEPREFIX=" + filepath.Join(r.prefix, "pfx"),
 	}
 	if len(calls) != len(want) {
