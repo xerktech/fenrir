@@ -106,7 +106,10 @@ paths:
     an App launch-battlenet refuses only ends its session. Add a game to both at once.
   - The battlenet image's startup reads the uid from `BATTLENET_PRODUCT`, never a shell line, so
     syncApp sets it beside `$DIREWOLF_LAUNCH_COMMAND` (`/opt/direwolf/launch-battlenet <uid>`).
-  - Covers are fixed URLs in `battlenetProducts` (Blizzard's CDN, exact host in `artHosts`).
+  - Covers are fixed URLs in `battlenetProducts`, best first (exact hosts in `artHosts`).
+    WoW's is Wikipedia's copy of the Midnight box art: Blizzard's sites publish no portrait
+    cover with the logo. Blizzard's textless key art is the fallback.
+  - Art fetches send `artUserAgent`: Wikimedia answers Go's default User-Agent with 403.
   - Tests: `catalogue_battlenet_test.go` (fixture product.db in `testdata/catalogue`).
 - The CRD rejects an empty `appAssetWebP` (the fake clientset doesn't): a catalogue App shows
   the base App's cover until its own is fetched.

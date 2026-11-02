@@ -56,7 +56,7 @@ func TestCatalogueScanBattlenet(t *testing.T) {
 			got = append(got, g)
 		}
 	}
-	want := []catalogueGame{{Store: v1alpha1types.CatalogueStoreBattlenet, ID: "wow", Title: "World of Warcraft", ArtURL: []string{battlenetProducts["wow"].art}}}
+	want := []catalogueGame{{Store: v1alpha1types.CatalogueStoreBattlenet, ID: "wow", Title: "World of Warcraft", ArtURL: battlenetProducts["wow"].art}}
 	if !slices.EqualFunc(got, want, func(a, b catalogueGame) bool {
 		return a.ID == b.ID && a.Title == b.Title && slices.Equal(a.ArtURL, b.ArtURL)
 	}) {
@@ -171,8 +171,13 @@ func TestBattlenetProductsLaunchable(t *testing.T) {
 		if !battlenetUID.MatchString(uid) || catalogueAppName(v1alpha1types.CatalogueStoreBattlenet, uid) != "battlenet-"+uid {
 			t.Errorf("uid %q is not safe in a shell line and an App name", uid)
 		}
-		if u, err := url.Parse(p.art); err != nil || checkArtURL(u) != nil {
-			t.Errorf("%s art %s is not on artHosts", uid, p.art)
+		if len(p.art) == 0 {
+			t.Errorf("%s has no art", uid)
+		}
+		for _, a := range p.art {
+			if u, err := url.Parse(a); err != nil || checkArtURL(u) != nil {
+				t.Errorf("%s art %s is not on artHosts", uid, a)
+			}
 		}
 	}
 }
@@ -200,7 +205,12 @@ func TestCatalogueSyncBattlenetGame(t *testing.T) {
 	if len(app.Spec.AppAssetWebP) == 0 || bytes.Equal(app.Spec.AppAssetWebP, []byte("base-art")) {
 		t.Error("battlenet-wow has no cover of its own")
 	}
-	if !slices.Contains(f.fetched, battlenetProducts["wow"].art) {
+	// The box art with the game's logo comes first; Blizzard's textless key
+	// art is only the fallback (XERK-2625).
+	if u, err := url.Parse(battlenetProducts["wow"].art[0]); err != nil || u.Host != "upload.wikimedia.org" {
+		t.Errorf("WoW's first cover is %s, want the box art on upload.wikimedia.org", battlenetProducts["wow"].art[0])
+	}
+	if !slices.Contains(f.fetched, battlenetProducts["wow"].art[0]) {
 		t.Errorf("WoW cover not fetched; fetched %v", f.fetched)
 	}
 	if _, err := f.dw.DirewolfV1alpha1().Apps(libraryTestNS).Get(t.Context(), "battlenet-wow-classic", metav1.GetOptions{}); err == nil {
