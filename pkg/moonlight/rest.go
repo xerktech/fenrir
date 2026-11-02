@@ -15,6 +15,7 @@ import (
 	"image/png"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -78,6 +79,9 @@ type RESTServerOptions struct {
 	// shutdownTimeout bounds graceful shutdown; defaults to 5s. Overridden by
 	// tests.
 	shutdownTimeout time.Duration
+	// listen binds a server's address; defaults to TCP. Tests hand in
+	// listeners they bound first, so no other test can take the port meanwhile.
+	listen func(ctx context.Context, addr string) (net.Listener, error)
 }
 
 // BusyCheck reports whether something outside the Session count occupies the
@@ -241,34 +245,33 @@ func (s *RESTServer) Run(ctx context.Context) error {
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
+	listen := s.listen
+	if listen == nil {
+		listen = func(ctx context.Context, addr string) (net.Listener, error) {
+			return (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
+		}
+	}
 	var error atomic.Pointer[error]
-	go func() {
+	serve := func(name string, srv *http.Server, useTLS bool) {
 		defer cancel()
-		klog.Infof("HTTP server listening on %s", server.Addr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, context.Canceled) {
-			klog.Errorf("HTTP Server failed: %s", err)
-			error.CompareAndSwap(nil, &err)
-		}
-	}()
-
-	go func() {
-		defer cancel()
-		klog.Infof("HTTPS server listening on %s", secureServer.Addr)
-		if err := secureServer.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, context.Canceled) {
-			klog.Errorf("HTTPS Server failed: %s", err)
-			error.CompareAndSwap(nil, &err)
-		}
-	}()
-
-	if pinServer != nil {
-		go func() {
-			defer cancel()
-			klog.Infof("Pairing page listening on %s", pinServer.Addr)
-			if err := pinServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				klog.Errorf("Pairing page server failed: %s", err)
-				error.CompareAndSwap(nil, &err)
+		l, err := listen(ctx, srv.Addr)
+		if err == nil {
+			klog.Infof("%s listening on %s", name, srv.Addr)
+			if useTLS {
+				err = srv.ServeTLS(l, "", "")
+			} else {
+				err = srv.Serve(l)
 			}
-		}()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, context.Canceled) {
+			klog.Errorf("%s failed: %s", name, err)
+			error.CompareAndSwap(nil, &err)
+		}
+	}
+	go serve("HTTP server", server, false)
+	go serve("HTTPS server", secureServer, true)
+	if pinServer != nil {
+		go serve("Pairing page", pinServer, false)
 	}
 
 	<-ctx.Done()

@@ -15,18 +15,32 @@ import (
 	"games-on-whales.github.io/direwolf/pkg/util"
 )
 
-func freePort(t *testing.T) int {
+// boundListeners binds n loopback ports and returns them with a listen func
+// RESTServer uses to serve on them. Binding first, rather than probing a free
+// port and closing it, keeps a parallel test from taking one in between.
+func boundListeners(t *testing.T, n int) (ports []int, listen func(context.Context, string) (net.Listener, error)) {
 	t.Helper()
-	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	byAddr := map[string]net.Listener{}
+	ports = make([]int, 0, n)
+	for range n {
+		l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { l.Close() })
+		addr, ok := l.Addr().(*net.TCPAddr)
+		if !ok {
+			t.Fatalf("unexpected addr %T", l.Addr())
+		}
+		ports = append(ports, addr.Port)
+		byAddr[fmt.Sprintf(":%d", addr.Port)] = l
 	}
-	defer l.Close()
-	addr, ok := l.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("unexpected addr %T", l.Addr())
+	return ports, func(_ context.Context, addr string) (net.Listener, error) {
+		if l, ok := byAddr[addr]; ok {
+			return l, nil
+		}
+		return nil, fmt.Errorf("no test listener for %s", addr)
 	}
-	return addr.Port
 }
 
 func waitListening(t *testing.T, port int) {
@@ -54,13 +68,15 @@ func TestRunShutdownIsBoundedAndConcurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	port, securePort, pinPort := freePort(t), freePort(t), freePort(t)
+	ports, listen := boundListeners(t, 3)
+	port, securePort, pinPort := ports[0], ports[1], ports[2]
 	s := NewRESTServer(NewPairingManager(cert, nil), nil, nil, nil, nil, nil, nil, RESTServerOptions{
 		Port:            port,
 		SecurePort:      securePort,
 		Cert:            cert,
 		PinPage:         PinPageOptions{Port: pinPort},
 		shutdownTimeout: 300 * time.Millisecond,
+		listen:          listen,
 	})
 
 	ctx, cancel := context.WithCancel(t.Context())
