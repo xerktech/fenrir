@@ -278,6 +278,11 @@ func TestFetchArt(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/ok.png":
+			// Wikimedia answers Go's default User-Agent with 403.
+			if r.UserAgent() != artUserAgent {
+				http.Error(w, "no User-Agent", http.StatusForbidden)
+				return
+			}
 			_, _ = w.Write(pngData)
 		case "/big.png":
 			_, _ = w.Write(append(slices.Clone(pngData), make([]byte, catalogueMaxArtBytes)...))

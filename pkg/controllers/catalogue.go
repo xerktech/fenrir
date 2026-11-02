@@ -132,7 +132,7 @@ const battlenetProductDB = libraryHome + "/.local/share/battlenet/pfx/drive_c/Pr
 // battlenetProduct is a Blizzard game the catalogue makes an App for.
 type battlenetProduct struct {
 	title string
-	art   string // a fixed URL on artHosts: never one from the Library's files
+	art   []string // fixed URLs on artHosts, best first: never from the Library's files
 }
 
 // battlenetProducts are the games catalogued, by their uid in product.db.
@@ -140,7 +140,13 @@ type battlenetProduct struct {
 // TestBattlenetProductsLaunchable): any other would be an App that only
 // ends its session. The uid goes into a shell line and BATTLENET_PRODUCT.
 var battlenetProducts = map[string]battlenetProduct{
-	"wow": {"World of Warcraft", "https://blz-contentstack-images.akamaized.net/v3/assets/blta8f9a8e092360c6c/blt32d88afeaf869b25/68a34c30a317901872445d82/WoW_12.0_600x800.png"},
+	// Blizzard's Midnight box art, which carries the game's logo (Wikipedia's
+	// copy: Blizzard's sites only publish it landscape or without the logo),
+	// then Blizzard's textless 12.0 key art if that copy moves.
+	"wow": {"World of Warcraft", []string{
+		"https://upload.wikimedia.org/wikipedia/en/e/e1/World_of_Warcraft_Midnight_cover_art.jpg",
+		"https://blz-contentstack-images.akamaized.net/v3/assets/blta8f9a8e092360c6c/blt32d88afeaf869b25/68a34c30a317901872445d82/WoW_12.0_600x800.png",
+	}},
 }
 
 // battlenetUID is what a product.db uid may look like to be logged by name.
@@ -181,12 +187,12 @@ const steamFullyInstalled = 4
 // services and read the reply back as an App's box art.
 // RomM's covers come from its metadata sources (IGDB, SteamGridDB, libretro
 // thumbnails, MobyGames); Nexus's from the Microsoft Store and Xbox image CDNs;
-// Battle.net's from Blizzard's (battlenetProducts, fixed in code).
+// Battle.net's from Blizzard's and Wikipedia's (battlenetProducts, fixed in code).
 var artHosts = []string{
 	"steamstatic.com", "akamaihd.net", "epicgames.com", "unrealengine.com", "gog-statics.com", "gog.com",
 	"igdb.com", "steamgriddb.com", "libretro.com", "mobygames.com",
 	"s-microsoft.com", "xboxlive.com",
-	"blz-contentstack-images.akamaized.net",
+	"blz-contentstack-images.akamaized.net", "upload.wikimedia.org",
 }
 
 type CatalogueOptions struct {
@@ -862,7 +868,7 @@ func parseBattlenet(files map[string][]byte) ([]catalogueGame, error) {
 		case !known:
 			unusable++
 		default:
-			games = append(games, catalogueGame{Store: v1alpha1types.CatalogueStoreBattlenet, ID: uid, Title: product.title, ArtURL: []string{product.art}})
+			games = append(games, catalogueGame{Store: v1alpha1types.CatalogueStoreBattlenet, ID: uid, Title: product.title, ArtURL: product.art})
 		}
 	}
 	if len(skipped) > 0 || unusable > 0 {
@@ -1651,6 +1657,9 @@ func checkArtURL(u *url.URL) error {
 	return fmt.Errorf("box art host %q is not allowed", host)
 }
 
+// artUserAgent identifies box art fetches, as Wikimedia's policy asks.
+const artUserAgent = "direwolf-catalogue/1.0 (https://github.com/xerktech/fenrir)"
+
 // fetchArt downloads a box art image: from an allowed host, at most
 // catalogueMaxArtBytes, and a PNG, JPEG or WebP (what moonlight-proxy can
 // serve as the cover).
@@ -1666,6 +1675,8 @@ func fetchArt(ctx context.Context, client *http.Client, rawURL string) ([]byte, 
 	if err != nil {
 		return nil, fmt.Errorf("building box art request: %w", err)
 	}
+	// Wikimedia refuses Go's default User-Agent (403).
+	req.Header.Set("User-Agent", artUserAgent)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching box art: %w", err)
