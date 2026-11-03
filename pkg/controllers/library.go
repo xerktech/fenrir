@@ -274,6 +274,12 @@ type LibraryController struct {
 	LibraryControllerOptions
 }
 
+// The Library pod's volumes of its library's home and games claims.
+const (
+	libraryHomeVolume  = "steam-home"
+	libraryGamesVolume = "games"
+)
+
 // LibraryRef is one library: the shared one (Owner "") or a User's own.
 type LibraryRef struct {
 	Owner    string
@@ -353,9 +359,9 @@ func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) e
 		return nil
 	}
 	ctx := context.Background()
-	orphaned, ownerErr := c.ownerGone(ctx, owner)
+	orphaned, ownerErr := c.ownerGone(ctx, pod, owner)
 	if orphaned {
-		klog.Infof("Library %s's User is gone or plays from another library, stopping it", name)
+		klog.Infof("Library %s's User is gone or plays from another library, or its claims moved, stopping it", name)
 		return c.stopWithoutScan(ctx, pod)
 	}
 	closing, closeErr := c.closeRequested(ctx, pod, owner)
@@ -381,15 +387,19 @@ func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) e
 	return stderrors.Join(ownerErr, closeErr, err)
 }
 
-// ownerGone reports whether owner's own Library has lost its library: its
-// User is deleted or no longer has spec.library (XERK-2641). Nobody can reach
-// that pod any more (the page picks the library from the User as it is now),
-// and its scans would re-create Apps Catalogue.Refresh deletes. The User is
-// read live, as in closeRequested: a lagging watch would stop a new User's
-// Library. The shared library (owner "") is never gone.
-func (c *LibraryController) ownerGone(ctx context.Context, owner string) (bool, error) {
+// ownerGone reports whether a Library pod has lost its library: an own
+// library's User is deleted or no longer has spec.library (XERK-2641), or the
+// pod mounts other home or games claims than its library names now
+// (XERK-2646): spec.library's claims, or for the shared library (owner "")
+// the --library-*-pvc flags, which a restarted operator may have changed
+// under a pod that outlived it. Nobody can reach such a pod as their library
+// (the page picks the library as it is now), and its scans would re-create
+// Apps Catalogue.Refresh deletes, or sync Apps from a games volume sessions
+// no longer mount. The User is read live, as in closeRequested: a lagging
+// watch would stop a new User's Library.
+func (c *LibraryController) ownerGone(ctx context.Context, pod *corev1.Pod, owner string) (bool, error) {
 	if owner == "" {
-		return false, nil
+		return libraryClaimsMoved(pod, c.LibraryFor(nil)), nil
 	}
 	user, err := c.UserClient.Get(ctx, owner, metav1.GetOptions{})
 	switch {
@@ -398,7 +408,25 @@ func (c *LibraryController) ownerGone(ctx context.Context, owner string) (bool, 
 	case err != nil:
 		return false, fmt.Errorf("reading Library %s's User: %w", owner, err)
 	}
-	return user.LibraryOwner() != owner, nil
+	return user.LibraryOwner() != owner || libraryClaimsMoved(pod, c.LibraryFor(user)), nil
+}
+
+// libraryClaimsMoved reports whether pod mounts other home or games claims
+// than lib. The volume names are those of every Library pod ever built
+// (TestLibraryPodClaimVolumeNames): renaming them would stop every Library.
+func libraryClaimsMoved(pod *corev1.Pod, lib LibraryRef) bool {
+	return libraryPodClaim(pod, libraryHomeVolume) != lib.HomePVC ||
+		libraryPodClaim(pod, libraryGamesVolume) != lib.GamesPVC
+}
+
+// libraryPodClaim is the claim a Library pod mounts as volume, "" for none.
+func libraryPodClaim(pod *corev1.Pod, volume string) string {
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == volume && v.PersistentVolumeClaim != nil {
+			return v.PersistentVolumeClaim.ClaimName
+		}
+	}
+	return ""
 }
 
 // WatchCloseRequests acts on moonlight-proxy's "Close Library" requests,
@@ -1029,10 +1057,10 @@ func (c *LibraryController) gameRunning(ctx context.Context, lib LibraryRef) (bo
 
 func (c *LibraryController) buildPod(lib LibraryRef) *corev1.Pod {
 	volumes := []corev1.Volume{
-		{Name: "steam-home", VolumeSource: corev1.VolumeSource{
+		{Name: libraryHomeVolume, VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: lib.HomePVC},
 		}},
-		{Name: "games", VolumeSource: corev1.VolumeSource{
+		{Name: libraryGamesVolume, VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: lib.GamesPVC},
 		}},
 		// Steam's CEF and Heroic's Electron fall over on the 64Mi default.
@@ -1091,8 +1119,8 @@ func (c *LibraryController) buildPod(lib LibraryRef) *corev1.Pod {
 					PeriodSeconds: 2,
 				},
 				VolumeMounts: []corev1.VolumeMount{
-					{Name: "steam-home", MountPath: libraryHome},
-					{Name: "games", MountPath: c.GamesPath},
+					{Name: libraryHomeVolume, MountPath: libraryHome},
+					{Name: libraryGamesVolume, MountPath: c.GamesPath},
 					{Name: "dshm", MountPath: "/dev/shm"},
 				},
 			}},
