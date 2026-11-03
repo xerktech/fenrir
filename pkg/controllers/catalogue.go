@@ -1544,6 +1544,9 @@ func (c *Catalogue) art(ctx context.Context, game *catalogueGame, fetchedFrom st
 		if ctx.Err() != nil {
 			return nil, ""
 		}
+		if failed, ok := c.artFailed[game.Logo]; game.Logo != "" && ok && c.now().Sub(failed) < catalogueArtRetry {
+			return nil, "" // no cover without its logo; retried with the logo
+		}
 		if parsed, err := url.Parse(u); err != nil || checkArtURL(parsed) != nil {
 			continue
 		}
@@ -1553,6 +1556,14 @@ func (c *Catalogue) art(ctx context.Context, game *catalogueGame, fetchedFrom st
 		data, err := c.FetchArt(ctx, u)
 		if err == nil && game.Logo != "" {
 			data, err = c.withLogo(ctx, data, game.Logo)
+			if errors.Is(err, errLogo) {
+				// The logo's fault, not the art's: every candidate needs it.
+				klog.V(2).Infof("Catalogue: no box art for %s: %v", game.Title, err)
+				if ctx.Err() == nil {
+					c.artFailed[game.Logo] = c.now()
+				}
+				return nil, ""
+			}
 		}
 		if err != nil {
 			if ctx.Err() != nil {
@@ -1584,7 +1595,7 @@ func artSource(u, logo string) string {
 func (c *Catalogue) withLogo(ctx context.Context, art []byte, logoURL string) ([]byte, error) {
 	logoData, err := c.FetchArt(ctx, logoURL)
 	if err != nil {
-		return nil, fmt.Errorf("logo %s: %w", logoURL, err)
+		return nil, fmt.Errorf("%w %s: %w", errLogo, logoURL, err)
 	}
 	bg, err := decodeCover(art)
 	if err != nil {
@@ -1592,27 +1603,37 @@ func (c *Catalogue) withLogo(ctx context.Context, art []byte, logoURL string) ([
 	}
 	logo, err := decodeCover(logoData)
 	if err != nil {
-		return nil, fmt.Errorf("logo %s: %w", logoURL, err)
+		return nil, fmt.Errorf("%w %s: %w", errLogo, logoURL, err)
 	}
+	// ApproxBiLinear, as moonlight-proxy's fitWithin: the kernel scalers
+	// allocate a float buffer of dst width x src height, hundreds of MB for a
+	// 4096px source, against the operator's 256Mi limit.
 	// Draw at the size served (moonlight-proxy fits covers in 600x800), so
 	// the App stores no more than is shown.
 	b := bg.Bounds()
 	scale := min(1, float64(logoCoverWidth)/float64(b.Dx()), float64(logoCoverHeight)/float64(b.Dy()))
 	cover := image.NewRGBA(image.Rect(0, 0, max(1, int(float64(b.Dx())*scale)), max(1, int(float64(b.Dy())*scale))))
-	xdraw.CatmullRom.Scale(cover, cover.Bounds(), bg, b, xdraw.Src, nil)
+	xdraw.ApproxBiLinear.Scale(cover, cover.Bounds(), bg, b, xdraw.Src, nil)
 	// The logo spans 85% of the width, a small margin below the top edge.
 	cw, ch := cover.Bounds().Dx(), cover.Bounds().Dy()
 	lb := logo.Bounds()
 	lw := cw * 85 / 100
 	lh := max(1, lw*lb.Dy()/lb.Dx())
+	if lh > ch/2 { // a tall logo: at most half the cover, same aspect
+		lh = max(1, ch/2)
+		lw = max(1, lh*lb.Dx()/lb.Dy())
+	}
 	at := image.Rect((cw-lw)/2, ch*4/100, (cw-lw)/2+lw, ch*4/100+lh)
-	xdraw.CatmullRom.Scale(cover, at, logo, lb, xdraw.Over, nil)
+	xdraw.ApproxBiLinear.Scale(cover, at, logo, lb, xdraw.Over, nil)
 	var out bytes.Buffer
 	if err := jpeg.Encode(&out, cover, &jpeg.Options{Quality: 90}); err != nil {
 		return nil, fmt.Errorf("encoding cover: %w", err)
 	}
 	return out.Bytes(), nil
 }
+
+// errLogo marks a withLogo failure caused by the logo, not the art.
+var errLogo = errors.New("logo")
 
 // decodeCover decodes an image fetchArt accepted (PNG, JPEG or WebP).
 func decodeCover(data []byte) (image.Image, error) {

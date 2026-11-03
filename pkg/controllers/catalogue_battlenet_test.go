@@ -314,8 +314,14 @@ func TestCatalogueArtDrawsBattlenetLogo(t *testing.T) {
 		return d(r, want.R) && d(g, want.G) && d(b, want.B)
 	}
 	w, h := img.Bounds().Dx(), img.Bounds().Dy()
-	if !near(img.At(w/2, h/10), red) || !near(img.At(w/2, h*9/10), blue) || !near(img.At(2, h/10), blue) {
-		t.Errorf("logo not drawn across the top: top %v, bottom %v, top edge %v", img.At(w/2, h/10), img.At(w/2, h*9/10), img.At(2, h/10))
+	// 85% of the width: 7.5% to 92.5%.
+	for _, p := range []struct {
+		x, y int
+		want color.RGBA
+	}{{w / 2, h / 10, red}, {w * 10 / 100, h / 10, red}, {w * 90 / 100, h / 10, red}, {w * 4 / 100, h / 10, blue}, {w * 96 / 100, h / 10, blue}, {w / 2, h * 9 / 10, blue}} {
+		if !near(img.At(p.x, p.y), p.want) {
+			t.Errorf("cover at %d,%d is %v, want %v: logo not drawn across 85%% of the top", p.x, p.y, img.At(p.x, p.y), p.want)
+		}
 	}
 
 	// Already drawn: nothing fetched.
@@ -326,9 +332,27 @@ func TestCatalogueArtDrawsBattlenetLogo(t *testing.T) {
 
 	// A logo that fails leaves the App's cover alone rather than storing
 	// textless art as if the logo were on it.
+	// and blames the logo, not the art (fetched once, retried with it).
 	delete(files, logoURL)
 	c.artFailed = map[string]time.Time{}
+	game.ArtURL = []string{artURL, "https://upload.wikimedia.org/art2.png"}
+	files["https://upload.wikimedia.org/art2.png"] = files[artURL]
+	fetched = nil
 	if art, from := c.art(t.Context(), game, ""); art != nil {
 		t.Errorf("cover stored from %q without its logo", from)
+	}
+	if _, ok := c.artFailed[logoURL]; !ok || len(c.artFailed) != 1 || !slices.Equal(fetched, []string{artURL, logoURL}) {
+		t.Errorf("logo down: failed %v, fetched %v; want only the logo failed, fetched once", c.artFailed, fetched)
+	}
+	fetched = nil
+	if art, _ := c.art(t.Context(), game, ""); art != nil || len(fetched) != 0 {
+		t.Errorf("fetched %v while the logo is down", fetched)
+	}
+
+	// A logo far taller than wide stays within the cover.
+	files[logoURL] = solidPNG(t, 1, 4096, red)
+	c.artFailed = map[string]time.Time{}
+	if art, _ := c.art(t.Context(), game, ""); art == nil {
+		t.Error("no cover with a tall logo")
 	}
 }
