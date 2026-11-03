@@ -111,6 +111,10 @@ paths:
     cover with the logo. Blizzard's textless key art is the fallback.
   - No two products share an art URL (`TestBattlenetProductsLaunchable`): WoW Forever reusing
     retail's cover showed as two identical tiles. Forever's is its Blizzard page's key art.
+  - A product's `logo` is drawn across the top of its art (`withLogo`), for a game whose only
+    portrait art is textless (Forever). The annotation records art and logo URLs, so adding or
+    changing a logo re-fetches; a logo that fails stores nothing rather than textless art.
+    Tests: `TestCatalogueArtDrawsBattlenetLogo`.
   - Art fetches send `artUserAgent`: Wikimedia answers Go's default User-Agent with 403.
   - Tests: `catalogue_battlenet_test.go` (fixture product.db in `testdata/catalogue`).
 - The CRD rejects an empty `appAssetWebP` (the fake clientset doesn't): a catalogue App shows
