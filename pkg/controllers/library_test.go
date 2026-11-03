@@ -139,6 +139,15 @@ func libraryPod(lastActivity time.Duration, ready bool) *corev1.Pod {
 				libraryActivityAnnotation: libraryTestNow.Add(-lastActivity).Format(time.RFC3339),
 			},
 		},
+		// The shared claims newLibraryFixture configures: other claims are drift.
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{
+			{Name: libraryHomeVolume, VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "steam-home"},
+			}},
+			{Name: libraryGamesVolume, VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "games"},
+			}},
+		}},
 		Status: corev1.PodStatus{
 			PodIP:      "10.0.0.9",
 			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: status}},

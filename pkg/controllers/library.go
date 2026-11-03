@@ -361,7 +361,7 @@ func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) e
 	ctx := context.Background()
 	orphaned, ownerErr := c.ownerGone(ctx, pod, owner)
 	if orphaned {
-		klog.Infof("Library %s's User is gone, plays from another library or moved its library's claims, stopping it", name)
+		klog.Infof("Library %s's User is gone or plays from another library, or its claims moved, stopping it", name)
 		return c.stopWithoutScan(ctx, pod)
 	}
 	closing, closeErr := c.closeRequested(ctx, pod, owner)
@@ -387,18 +387,19 @@ func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) e
 	return stderrors.Join(ownerErr, closeErr, err)
 }
 
-// ownerGone reports whether owner's own Library pod has lost its library: its
-// User is deleted or no longer has spec.library (XERK-2641), or names other
-// home or games claims than the pod mounts (XERK-2646). Nobody can reach that
-// pod as their library any more (the page picks the library from the User as
-// it is now), its scans would re-create Apps Catalogue.Refresh deletes, or
-// sync the User's Apps from a games volume their sessions no longer mount.
-// The User is read live, as in closeRequested: a lagging watch would stop a
-// new User's Library. The shared library (owner "") is never gone: its claims
-// are flags, fixed for the operator's life.
+// ownerGone reports whether a Library pod has lost its library: an own
+// library's User is deleted or no longer has spec.library (XERK-2641), or the
+// pod mounts other home or games claims than its library names now
+// (XERK-2646): spec.library's claims, or for the shared library (owner "")
+// the --library-*-pvc flags, which a restarted operator may have changed
+// under a pod that outlived it. Nobody can reach such a pod as their library
+// (the page picks the library as it is now), and its scans would re-create
+// Apps Catalogue.Refresh deletes, or sync Apps from a games volume sessions
+// no longer mount. The User is read live, as in closeRequested: a lagging
+// watch would stop a new User's Library.
 func (c *LibraryController) ownerGone(ctx context.Context, pod *corev1.Pod, owner string) (bool, error) {
 	if owner == "" {
-		return false, nil
+		return libraryClaimsMoved(pod, c.LibraryFor(nil)), nil
 	}
 	user, err := c.UserClient.Get(ctx, owner, metav1.GetOptions{})
 	switch {
@@ -407,12 +408,15 @@ func (c *LibraryController) ownerGone(ctx context.Context, pod *corev1.Pod, owne
 	case err != nil:
 		return false, fmt.Errorf("reading Library %s's User: %w", owner, err)
 	}
-	if user.LibraryOwner() != owner {
-		return true, nil
-	}
-	lib := c.LibraryFor(user)
+	return user.LibraryOwner() != owner || libraryClaimsMoved(pod, c.LibraryFor(user)), nil
+}
+
+// libraryClaimsMoved reports whether pod mounts other home or games claims
+// than lib. The volume names are those of every Library pod ever built
+// (TestLibraryPodClaimVolumeNames): renaming them would stop every Library.
+func libraryClaimsMoved(pod *corev1.Pod, lib LibraryRef) bool {
 	return libraryPodClaim(pod, libraryHomeVolume) != lib.HomePVC ||
-		libraryPodClaim(pod, libraryGamesVolume) != lib.GamesPVC, nil
+		libraryPodClaim(pod, libraryGamesVolume) != lib.GamesPVC
 }
 
 // libraryPodClaim is the claim a Library pod mounts as volume, "" for none.

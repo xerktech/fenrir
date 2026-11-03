@@ -34,9 +34,12 @@ paths:
     User as it is now), and a scan re-creates the Apps catalogue Refresh deletes.
     The User is read live; a failed read skips the scan and retries.
     Tests: `TestLibraryStopsOrphanedOwnLibrary`.
-  - So is one whose pod mounts other home/games claims than `spec.library` names now (XERK-2646):
-    sessions mount the new ones, so its desktop and scans would serve the old volumes.
-    `EnsurePod` still returns the running pod as is; the reconcile catches it.
+  - So is any Library pod mounting other home/games claims than its library names now
+    (XERK-2646): `spec.library`'s, or the shared flags (the bare pod outlives an operator restart).
+    Sessions mount the new ones, so its desktop and scans would serve the old volumes.
+    `EnsurePod` still returns the running pod as is; the reconcile catches it (<= 2m with the
+    catalogue on: nothing watches Users). Never rename the `steam-home`/`games` volumes: the
+    check finds claims by them, so a rename stops every Library (`TestLibraryPodClaimVolumeNames`).
   - Tests: `pkg/controllers/library_users_test.go`, `pkg/moonlight/library_users_test.go`.
 - Steam lock: a Library and the game sessions of its library's Users share one Steam home, so
   they never run together. Other libraries' sessions don't count; a session whose User is gone

@@ -4,6 +4,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -895,5 +896,64 @@ func TestLibraryStopsOrphanedOwnLibrary(t *testing.T) {
 				t.Errorf("%d catalogue scans, want scanned %v", scans, tc.scanned)
 			}
 		})
+	}
+}
+
+// A shared Library pod that outlived an operator restarted with other
+// --library-*-pvc flags is stopped, with no final scan, like an own one whose
+// claims moved (XERK-2646): sessions mount the new claims. One on the current
+// flags is kept.
+func TestLibraryStopsSharedLibraryOnMovedClaims(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		home, games string
+		wantStopped bool
+	}{
+		{name: "current flags", home: "steam-home", games: "games"},
+		{name: "home flag changed", home: "steam-home-2", games: "games", wantStopped: true},
+		{name: "games flag changed", home: "steam-home", games: "games-2", wantStopped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := libraryPod(0, true)
+			f := newLibraryFixture(t, []runtime.Object{pod.DeepCopy()})
+			f.library.HomePVC, f.library.GamesPVC = tc.home, tc.games
+			cf := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil))
+			scans := 0
+			fixture := fixtureExec(t, "testdata/catalogue")
+			cf.catalogue.Exec = func(ctx context.Context, ns, p, ctr string, command []string) (string, error) {
+				scans++
+				return fixture(ctx, ns, p, ctr, command)
+			}
+			f.library.Catalogue = cf.catalogue
+			f.library.controller = generic.NewController(generic.NewInformer[*corev1.Pod](
+				cache.NewSharedIndexInformer(&cache.ListWatch{}, &corev1.Pod{}, 0, cache.Indexers{})),
+				f.library.Reconcile, generic.ControllerOptions{})
+
+			if err := f.library.Reconcile(libraryTestNS, LibraryPodName, pod.DeepCopy()); err != nil {
+				t.Fatal(err)
+			}
+			if stopped := !f.podExists(t); stopped != tc.wantStopped {
+				t.Errorf("pod stopped = %v, want %v", stopped, tc.wantStopped)
+			}
+			if scanned := scans > 0; scanned == tc.wantStopped {
+				t.Errorf("%d catalogue scans, want scanned %v", scans, !tc.wantStopped)
+			}
+		})
+	}
+}
+
+// The claim check finds the claims by volume name, so these names are those
+// of every Library pod already running: renaming them would stop them all.
+func TestLibraryPodClaimVolumeNames(t *testing.T) {
+	f := newLibraryFixture(t, nil)
+	pod := f.library.buildPod(LibraryRef{Owner: "sam", HomePVC: "home-sam", GamesPVC: "games-sam"})
+	claims := map[string]string{}
+	for _, v := range pod.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			claims[v.Name] = v.PersistentVolumeClaim.ClaimName
+		}
+	}
+	if want := map[string]string{"steam-home": "home-sam", "games": "games-sam"}; !maps.Equal(claims, want) {
+		t.Errorf("Library pod claims by volume = %v, want %v", claims, want)
 	}
 }
