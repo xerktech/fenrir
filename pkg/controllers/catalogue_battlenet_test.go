@@ -168,7 +168,15 @@ func TestBattlenetProductsLaunchable(t *testing.T) {
 	if len(launchable) == 0 || !slices.Equal(catalogued, launchable) {
 		t.Errorf("battlenetProducts %v, launch-battlenet plays %v; want the same", catalogued, launchable)
 	}
+	// Two products sharing a cover show as two identical Moonlight tiles.
+	coverOf := map[string]string{}
 	for uid, p := range battlenetProducts {
+		for _, a := range p.art {
+			if other, ok := coverOf[a]; ok {
+				t.Errorf("%s and %s share art %s; give each its own", other, uid, a)
+			}
+			coverOf[a] = uid
+		}
 		if !battlenetUID.MatchString(uid) || catalogueAppName(v1alpha1types.CatalogueStoreBattlenet, uid) != "battlenet-"+uid {
 			t.Errorf("uid %q is not safe in a shell line and an App name", uid)
 		}

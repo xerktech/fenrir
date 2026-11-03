@@ -147,11 +147,13 @@ var battlenetProducts = map[string]battlenetProduct{
 		"https://upload.wikimedia.org/wikipedia/en/e/e1/World_of_Warcraft_Midnight_cover_art.jpg",
 		"https://blz-contentstack-images.akamaized.net/v3/assets/blta8f9a8e092360c6c/blt32d88afeaf869b25/68a34c30a317901872445d82/WoW_12.0_600x800.png",
 	}},
-	// WoW Forever installs as its own product (_forever_). No portrait cover
-	// of it is published on artHosts yet, so it shows retail's.
+	// WoW Forever installs as its own product (_forever_). Its tile must not
+	// reuse retail's cover, or Moonlight shows two identical WoW tiles. Its
+	// portrait key art (960x1880, textless) from Blizzard's Forever page, then
+	// that page's near-square cut of the same painting.
 	"wowf": {"World of Warcraft: Forever", []string{
-		"https://upload.wikimedia.org/wikipedia/en/e/e1/World_of_Warcraft_Midnight_cover_art.jpg",
-		"https://blz-contentstack-images.akamaized.net/v3/assets/blta8f9a8e092360c6c/blt32d88afeaf869b25/68a34c30a317901872445d82/WoW_12.0_600x800.png",
+		"https://blz-contentstack-images.akamaized.net/v3/assets/blt9c12f249ac15c7ec/blt09d4f876d494a584/6aa1ead14b66aa844291d284/masthead-bg-sm.jpg",
+		"https://blz-contentstack-images.akamaized.net/v3/assets/blt9c12f249ac15c7ec/blt27ce9eca34bd523d/6aa1eb902c0580208d273e42/masthead-art-md.jpg",
 	}},
 }
 
