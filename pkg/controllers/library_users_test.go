@@ -811,7 +811,14 @@ func TestLibraryServerUserHeaderFromFlag(t *testing.T) {
 // stopped (Steam shut down cleanly) with no catalogue scan: a scan would
 // re-create the Apps Catalogue.Refresh deletes (XERK-2641). A failed User
 // read scans nothing and is retried; a User still on that library is scanned.
+// So is one whose spec.library now names other claims than the pod mounts
+// (XERK-2646): its scans would sync the User's Apps from the old games volume.
 func TestLibraryStopsOrphanedOwnLibrary(t *testing.T) {
+	renamedClaims := func(home, games string) *v1alpha1types.User {
+		u := libraryUser("sam", true)
+		u.Spec.Library.HomeClaimName, u.Spec.Library.GamesClaimName = home, games
+		return u
+	}
 	for _, tc := range []struct {
 		name    string
 		user    *v1alpha1types.User // nil: deleted
@@ -826,6 +833,10 @@ func TestLibraryStopsOrphanedOwnLibrary(t *testing.T) {
 		{name: "user read fails", user: libraryUser("sam", true), readErr: true, wantErr: true},
 		{name: "user read fails, idle", user: libraryUser("sam", true), idle: true, readErr: true, stopped: true, wantErr: true},
 		{name: "still sam's library", user: libraryUser("sam", true), scanned: true},
+		// XERK-2646: the pod keeps the claims it was built on; sessions mount the new ones.
+		{name: "home claim renamed", user: renamedClaims("home-sam2", "games-sam"), stopped: true},
+		{name: "games claim renamed", user: renamedClaims("home-sam", "games-sam2"), stopped: true},
+		{name: "claims swapped", user: renamedClaims("games-sam", "home-sam"), stopped: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var lastActivity time.Duration
@@ -840,6 +851,8 @@ func TestLibraryStopsOrphanedOwnLibrary(t *testing.T) {
 				dwObjs = append(dwObjs, tc.user)
 			}
 			f := newLibraryFixture(t, []runtime.Object{pod.DeepCopy()}, dwObjs...)
+			// Built on sam's claims as first configured.
+			pod.Spec.Volumes = f.library.buildPod(f.library.LibraryFor(libraryUser("sam", true))).Spec.Volumes
 			if tc.readErr {
 				f.dw.PrependReactor("get", "users", func(k8stesting.Action) (bool, runtime.Object, error) {
 					return true, nil, apierrors.NewServiceUnavailable("etcd down")
