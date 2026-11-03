@@ -2,7 +2,14 @@ package controllers
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/jpeg"
+	"image/png"
 	"maps"
 	"net/url"
 	"os"
@@ -10,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -183,7 +191,10 @@ func TestBattlenetProductsLaunchable(t *testing.T) {
 		if len(p.art) == 0 {
 			t.Errorf("%s has no art", uid)
 		}
-		for _, a := range p.art {
+		for _, a := range append(slices.Clip(p.art), p.logo) {
+			if a == "" {
+				continue
+			}
 			if u, err := url.Parse(a); err != nil || checkArtURL(u) != nil {
 				t.Errorf("%s art %s is not on artHosts", uid, a)
 			}
@@ -251,5 +262,124 @@ func TestCatalogueGameOfBattlenetID(t *testing.T) {
 		if _, err := catalogueGameOf(app(tc.name, tc.id)); err == nil {
 			t.Errorf("forged Battle.net App %s (ID %q) accepted", tc.name, tc.id)
 		}
+	}
+}
+
+// solidPNG is a w x h PNG of one colour, for covers and logos.
+func solidPNG(t *testing.T, w, h int, c color.Color) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: c}, image.Point{}, draw.Src)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// A product with a logo gets it drawn across the top of its art, at the size
+// moonlight-proxy serves; the annotation names both, so a logo added to a
+// game whose art is already fetched draws it on the next scan, and a cover
+// already drawn is not fetched again.
+func TestCatalogueArtDrawsBattlenetLogo(t *testing.T) {
+	const artURL, logoURL = "https://upload.wikimedia.org/art.png", "https://upload.wikimedia.org/logo.png"
+	red, blue := color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255}
+	files := map[string][]byte{artURL: solidPNG(t, 960, 1880, blue), logoURL: solidPNG(t, 880, 720, red)}
+	var fetched []string
+	c := &Catalogue{now: func() time.Time { return libraryTestNow }, artFailed: map[string]time.Time{}}
+	c.FetchArt = func(_ context.Context, u string) ([]byte, error) {
+		fetched = append(fetched, u)
+		if d, ok := files[u]; ok {
+			return d, nil
+		}
+		return nil, errors.New("404")
+	}
+	game := &catalogueGame{Title: "Forever", ArtURL: []string{artURL}, Logo: logoURL}
+
+	// Fetched before the logo was added: drawn again.
+	art, from := c.art(t.Context(), game, artURL)
+	if from != artURL+" "+logoURL || art == nil {
+		t.Fatalf("art from %q (%d bytes), want %q", from, len(art), artURL+" "+logoURL)
+	}
+	img, err := jpeg.Decode(bytes.NewReader(art))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := img.Bounds(); b.Dx() > 600 || b.Dy() > 800 || b.Dx() < 400 {
+		t.Errorf("cover is %v, want 960x1880 fitted in 600x800", b)
+	}
+	near := func(c color.Color, want color.RGBA) bool {
+		r, g, b, _ := c.RGBA()
+		d := func(x uint32, y uint8) bool { return int(x>>8)-int(y) < 40 && int(y)-int(x>>8) < 40 }
+		return d(r, want.R) && d(g, want.G) && d(b, want.B)
+	}
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
+	// 85% of the width: 7.5% to 92.5%.
+	for _, p := range []struct {
+		x, y int
+		want color.RGBA
+	}{{w / 2, h / 10, red}, {w * 10 / 100, h / 10, red}, {w * 90 / 100, h / 10, red}, {w * 4 / 100, h / 10, blue}, {w * 96 / 100, h / 10, blue}, {w / 2, h * 9 / 10, blue}} {
+		if !near(img.At(p.x, p.y), p.want) {
+			t.Errorf("cover at %d,%d is %v, want %v: logo not drawn across 85%% of the top", p.x, p.y, img.At(p.x, p.y), p.want)
+		}
+	}
+
+	// Already drawn: nothing fetched.
+	fetched = nil
+	if got, _ := c.art(t.Context(), game, from); got != nil || len(fetched) != 0 {
+		t.Errorf("drawn cover fetched again: %v", fetched)
+	}
+
+	// A logo that fails leaves the App's cover alone rather than storing
+	// textless art as if the logo were on it.
+	// and blames the logo, not the art (fetched once, retried with it).
+	delete(files, logoURL)
+	c.artFailed = map[string]time.Time{}
+	game.ArtURL = []string{artURL, "https://upload.wikimedia.org/art2.png"}
+	files["https://upload.wikimedia.org/art2.png"] = files[artURL]
+	fetched = nil
+	if got, gotFrom := c.art(t.Context(), game, ""); got != nil {
+		t.Errorf("cover stored from %q without its logo", gotFrom)
+	}
+	if _, ok := c.artFailed[logoURL]; !ok || len(c.artFailed) != 1 || !slices.Equal(fetched, []string{artURL, logoURL}) {
+		t.Errorf("logo down: failed %v, fetched %v; want only the logo failed, fetched once", c.artFailed, fetched)
+	}
+	fetched = nil
+	if got, _ := c.art(t.Context(), game, ""); got != nil || len(fetched) != 0 {
+		t.Errorf("fetched %v while the logo is down", fetched)
+	}
+
+	// A logo far taller than wide stays within the cover.
+	files[logoURL] = solidPNG(t, 1, 4096, red)
+	c.artFailed = map[string]time.Time{}
+	art, _ = c.art(t.Context(), game, "")
+	if img, err = jpeg.Decode(bytes.NewReader(art)); err != nil {
+		t.Fatalf("no cover with a tall logo: %v", err)
+	}
+	if w, h := img.Bounds().Dx(), img.Bounds().Dy(); !near(img.At(w/2, h*3/4), blue) {
+		t.Errorf("a tall logo covers %v at 3/4 down; want it within the top half", img.At(w/2, h*3/4))
+	}
+
+	// An image too large to decode safely is refused, not drawn.
+	files[logoURL] = solidPNG(t, 2049, 2048, red)
+	c.artFailed = map[string]time.Time{}
+	if art, _ := c.art(t.Context(), game, ""); art != nil {
+		t.Error("cover drawn with a logo over logoCoverMaxPixels")
+	}
+	if _, ok := c.artFailed[logoURL]; !ok {
+		t.Errorf("oversized logo not recorded as failed: %v", c.artFailed)
+	}
+
+	// One at the cap is drawn; an oversized art image fails only itself,
+	// and the next candidate is drawn with the logo.
+	files[logoURL] = solidPNG(t, 2048, 2048, red)
+	files[artURL] = solidPNG(t, 2049, 2048, blue)
+	c.artFailed = map[string]time.Time{}
+	got, from := c.art(t.Context(), game, "")
+	if got == nil || from != game.ArtURL[1]+" "+logoURL {
+		t.Errorf("cover from %q, want the second candidate with the logo", from)
+	}
+	if _, ok := c.artFailed[artURL]; !ok || len(c.artFailed) != 1 {
+		t.Errorf("failed %v, want only the oversized art", c.artFailed)
 	}
 }

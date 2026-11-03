@@ -30,6 +30,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/webp"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -83,6 +84,13 @@ const (
 	// Biggest cover accepted, per side: moonlight-proxy decodes it in full
 	// on every /appasset request.
 	catalogueMaxArtSide = 4096
+	// logoCoverWidth and logoCoverHeight bound a cover withLogo draws: the
+	// box art size moonlight-proxy serves.
+	logoCoverWidth  = 600
+	logoCoverHeight = 800
+	// logoCoverMaxPixels caps each image withLogo decodes: 32 MiB decoded at
+	// 16 bits per channel. Forever's art is 960x1880, its logo 882x718.
+	logoCoverMaxPixels = 2048 * 2048
 
 	// Size caps on what the Library (user-writable) may hand the operator,
 	// whose memory limit is 256Mi: an appmanifest is ~1KiB, Heroic's library
@@ -133,6 +141,9 @@ const battlenetProductDB = libraryHome + "/.local/share/battlenet/pfx/drive_c/Pr
 type battlenetProduct struct {
 	title string
 	art   []string // fixed URLs on artHosts, best first: never from the Library's files
+	// logo, if set, is a fixed URL on artHosts of the game's logo, drawn over
+	// the top of its art: for a game whose only portrait art is textless.
+	logo string
 }
 
 // battlenetProducts are the games catalogued, by their uid in product.db.
@@ -146,15 +157,16 @@ var battlenetProducts = map[string]battlenetProduct{
 	"wow": {"World of Warcraft", []string{
 		"https://upload.wikimedia.org/wikipedia/en/e/e1/World_of_Warcraft_Midnight_cover_art.jpg",
 		"https://blz-contentstack-images.akamaized.net/v3/assets/blta8f9a8e092360c6c/blt32d88afeaf869b25/68a34c30a317901872445d82/WoW_12.0_600x800.png",
-	}},
+	}, ""},
 	// WoW Forever installs as its own product (_forever_). Its tile must not
-	// reuse retail's cover, or Moonlight shows two identical WoW tiles. Its
-	// portrait key art (960x1880, textless) from Blizzard's Forever page, then
-	// that page's near-square cut of the same painting.
+	// reuse retail's cover, or Moonlight shows two identical WoW tiles.
+	// Blizzard publishes no portrait Forever cover with its title, so its
+	// Forever page's portrait key art (960x1880, textless) gets the page's
+	// logo drawn on; then that page's near-square cut of the same painting.
 	"wowf": {"World of Warcraft: Forever", []string{
 		"https://blz-contentstack-images.akamaized.net/v3/assets/blt9c12f249ac15c7ec/blt09d4f876d494a584/6aa1ead14b66aa844291d284/masthead-bg-sm.jpg",
 		"https://blz-contentstack-images.akamaized.net/v3/assets/blt9c12f249ac15c7ec/blt27ce9eca34bd523d/6aa1eb902c0580208d273e42/masthead-art-md.jpg",
-	}},
+	}, "https://blz-contentstack-images.akamaized.net/v3/assets/blt9c12f249ac15c7ec/blt527dd61848a757c7/6aa3316cad92093ee45628fd/camelot-logo-gamepage.png"},
 }
 
 // battlenetUID is what a product.db uid may look like to be logged by name.
@@ -228,6 +240,8 @@ type catalogueGame struct {
 	ID     string // Steam appid, Heroic appName, Nexus game ID or Battle.net uid
 	Title  string
 	ArtURL []string // tried in order
+	// Logo is a Battle.net game's logo URL, drawn over the top of its art.
+	Logo string
 	// StoreID is a Nexus game's Store product ID: its Store catalog art is
 	// tried ahead of ArtURL.
 	StoreID string
@@ -898,7 +912,7 @@ func parseBattlenet(files map[string][]byte) ([]catalogueGame, error) {
 		case !known:
 			unusable++
 		default:
-			games = append(games, catalogueGame{Store: v1alpha1types.CatalogueStoreBattlenet, ID: uid, Title: product.title, ArtURL: product.art})
+			games = append(games, catalogueGame{Store: v1alpha1types.CatalogueStoreBattlenet, ID: uid, Title: product.title, ArtURL: product.art, Logo: product.logo})
 		}
 	}
 	if len(skipped) > 0 || unusable > 0 {
@@ -1527,11 +1541,14 @@ func (c *Catalogue) art(ctx context.Context, game *catalogueGame, fetchedFrom st
 		candidates = append(c.storeArtURLs(ctx, game.StoreID), game.ArtURL...)
 	}
 	for _, u := range candidates {
-		if u == fetchedFrom {
+		if artSource(u, game.Logo) == fetchedFrom {
 			return nil, ""
 		}
 		if ctx.Err() != nil {
 			return nil, ""
+		}
+		if failed, ok := c.artFailed[game.Logo]; game.Logo != "" && ok && c.now().Sub(failed) < catalogueArtRetry {
+			return nil, "" // no cover without its logo; retried with the logo
 		}
 		if parsed, err := url.Parse(u); err != nil || checkArtURL(parsed) != nil {
 			continue
@@ -1540,6 +1557,17 @@ func (c *Catalogue) art(ctx context.Context, game *catalogueGame, fetchedFrom st
 			continue
 		}
 		data, err := c.FetchArt(ctx, u)
+		if err == nil && game.Logo != "" {
+			data, err = c.withLogo(ctx, data, game.Logo)
+			if errors.Is(err, errLogo) {
+				// The logo's fault, not the art's: every candidate needs it.
+				klog.V(2).Infof("Catalogue: no box art for %s: %v", game.Title, err)
+				if ctx.Err() == nil {
+					c.artFailed[game.Logo] = c.now()
+				}
+				return nil, ""
+			}
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, "" // out of budget, not the URL's fault
@@ -1549,9 +1577,86 @@ func (c *Catalogue) art(ctx context.Context, game *catalogueGame, fetchedFrom st
 			continue
 		}
 		delete(c.artFailed, u)
-		return data, u
+		return data, artSource(u, game.Logo)
 	}
 	return nil, ""
+}
+
+// artSource is what catalogueArtAnnotation records for art fetched from u
+// with logo drawn on: u alone without a logo, so a logo added or changed
+// makes art() fetch the cover again.
+func artSource(u, logo string) string {
+	if logo == "" {
+		return u
+	}
+	return u + " " + logo // a space never appears in a URL art() fetches
+}
+
+// withLogo returns art with the logo at logoURL drawn across its top, as a
+// JPEG scaled to fit the box art moonlight-proxy serves. Both images are
+// fixed URLs of battlenetProducts, fetched (and so size-checked) by FetchArt.
+func (c *Catalogue) withLogo(ctx context.Context, art []byte, logoURL string) ([]byte, error) {
+	logoData, err := c.FetchArt(ctx, logoURL)
+	if err != nil {
+		return nil, fmt.Errorf("%w %s: %w", errLogo, logoURL, err)
+	}
+	bg, err := decodeCover(art)
+	if err != nil {
+		return nil, err
+	}
+	logo, err := decodeCover(logoData)
+	if err != nil {
+		return nil, fmt.Errorf("%w %s: %w", errLogo, logoURL, err)
+	}
+	// ApproxBiLinear, as moonlight-proxy's fitWithin: the kernel scalers
+	// allocate a float buffer of dst width x src height, hundreds of MB for a
+	// 4096px source, against the operator's 256Mi limit.
+	// Draw at the size served (moonlight-proxy fits covers in 600x800), so
+	// the App stores no more than is shown.
+	b := bg.Bounds()
+	scale := min(1, float64(logoCoverWidth)/float64(b.Dx()), float64(logoCoverHeight)/float64(b.Dy()))
+	cover := image.NewRGBA(image.Rect(0, 0, max(1, int(float64(b.Dx())*scale)), max(1, int(float64(b.Dy())*scale))))
+	xdraw.ApproxBiLinear.Scale(cover, cover.Bounds(), bg, b, xdraw.Src, nil)
+	// The logo spans 85% of the width, a small margin below the top edge.
+	cw, ch := cover.Bounds().Dx(), cover.Bounds().Dy()
+	lb := logo.Bounds()
+	lw := cw * 85 / 100
+	lh := max(1, lw*lb.Dy()/lb.Dx())
+	if lh > ch/2 { // a tall logo: at most half the cover, same aspect
+		lh = max(1, ch/2)
+		lw = max(1, lh*lb.Dx()/lb.Dy())
+	}
+	at := image.Rect((cw-lw)/2, ch*4/100, (cw-lw)/2+lw, ch*4/100+lh)
+	xdraw.ApproxBiLinear.Scale(cover, at, logo, lb, xdraw.Over, nil)
+	var out bytes.Buffer
+	if err := jpeg.Encode(&out, cover, &jpeg.Options{Quality: 90}); err != nil {
+		return nil, fmt.Errorf("encoding cover: %w", err)
+	}
+	return out.Bytes(), nil
+}
+
+// errLogo marks a withLogo failure caused by the logo, not the art.
+var errLogo = errors.New("logo")
+
+// decodeCover decodes an image fetchArt accepted (PNG, JPEG or WebP) of at
+// most logoCoverMaxPixels: withLogo holds two decoded at once, and a 4096²
+// 16-bit PNG alone is 128 MiB, against the operator's 256Mi limit.
+func decodeCover(data []byte) (image.Image, error) {
+	formats := []struct {
+		config func(io.Reader) (image.Config, error)
+		decode func(io.Reader) (image.Image, error)
+	}{{png.DecodeConfig, png.Decode}, {jpeg.DecodeConfig, jpeg.Decode}, {webp.DecodeConfig, webp.Decode}}
+	for _, f := range formats {
+		cfg, err := f.config(bytes.NewReader(data))
+		if err != nil {
+			continue
+		}
+		if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width*cfg.Height > logoCoverMaxPixels {
+			return nil, fmt.Errorf("decoding cover: %dx%d is over %d pixels", cfg.Width, cfg.Height, logoCoverMaxPixels)
+		}
+		return f.decode(bytes.NewReader(data))
+	}
+	return nil, errors.New("decoding cover: not a PNG, JPEG or WebP")
 }
 
 // storeArtURLs returns a Store product's portrait art URLs from the cache, or
