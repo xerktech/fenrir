@@ -338,8 +338,8 @@ func TestCatalogueArtDrawsBattlenetLogo(t *testing.T) {
 	game.ArtURL = []string{artURL, "https://upload.wikimedia.org/art2.png"}
 	files["https://upload.wikimedia.org/art2.png"] = files[artURL]
 	fetched = nil
-	if got, from := c.art(t.Context(), game, ""); got != nil {
-		t.Errorf("cover stored from %q without its logo", from)
+	if got, gotFrom := c.art(t.Context(), game, ""); got != nil {
+		t.Errorf("cover stored from %q without its logo", gotFrom)
 	}
 	if _, ok := c.artFailed[logoURL]; !ok || len(c.artFailed) != 1 || !slices.Equal(fetched, []string{artURL, logoURL}) {
 		t.Errorf("logo down: failed %v, fetched %v; want only the logo failed, fetched once", c.artFailed, fetched)
@@ -368,5 +368,18 @@ func TestCatalogueArtDrawsBattlenetLogo(t *testing.T) {
 	}
 	if _, ok := c.artFailed[logoURL]; !ok {
 		t.Errorf("oversized logo not recorded as failed: %v", c.artFailed)
+	}
+
+	// One at the cap is drawn; an oversized art image fails only itself,
+	// and the next candidate is drawn with the logo.
+	files[logoURL] = solidPNG(t, 2048, 2048, red)
+	files[artURL] = solidPNG(t, 2049, 2048, blue)
+	c.artFailed = map[string]time.Time{}
+	got, from := c.art(t.Context(), game, "")
+	if got == nil || from != game.ArtURL[1]+" "+logoURL {
+		t.Errorf("cover from %q, want the second candidate with the logo", from)
+	}
+	if _, ok := c.artFailed[artURL]; !ok || len(c.artFailed) != 1 {
+		t.Errorf("failed %v, want only the oversized art", c.artFailed)
 	}
 }
