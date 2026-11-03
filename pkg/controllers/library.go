@@ -353,15 +353,23 @@ func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) e
 		return nil
 	}
 	ctx := context.Background()
+	orphaned, ownerErr := c.ownerGone(ctx, owner)
+	if orphaned {
+		klog.Infof("Library %s's User is gone or plays from another library, stopping it", name)
+		return c.stopWithoutScan(ctx, pod)
+	}
 	closing, closeErr := c.closeRequested(ctx, pod, owner)
 	if closing {
 		klog.Infof("Library %s closed from Moonlight, stopping it", name)
 		return c.stop(ctx, pod)
 	}
-	if c.Catalogue != nil && podReady(pod) && c.Catalogue.ScanDue(owner) {
+	// An owner we couldn't check gets no scan, periodic or final: it would
+	// re-create a removed library's Apps. The idle check still runs, so an
+	// API fault can't keep an idle Library up.
+	if c.Catalogue != nil && ownerErr == nil && podReady(pod) && c.Catalogue.ScanDue(owner) {
 		c.scanCatalogue(ctx, pod, catalogueArtBudget)
 	}
-	requeueAfter, err := c.reconcileIdle(ctx, pod)
+	requeueAfter, err := c.reconcileIdle(ctx, pod, ownerErr == nil)
 	if c.Catalogue != nil && requeueAfter > catalogueScanInterval {
 		requeueAfter = catalogueScanInterval
 	}
@@ -370,7 +378,27 @@ func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) e
 	}
 	// A close we couldn't check is retried (rate-limited): the user was told
 	// the Library is closing. The idle check and scan still ran meanwhile.
-	return stderrors.Join(closeErr, err)
+	return stderrors.Join(ownerErr, closeErr, err)
+}
+
+// ownerGone reports whether owner's own Library has lost its library: its
+// User is deleted or no longer has spec.library (XERK-2641). Nobody can reach
+// that pod any more (the page picks the library from the User as it is now),
+// and its scans would re-create Apps Catalogue.Refresh deletes. The User is
+// read live, as in closeRequested: a lagging watch would stop a new User's
+// Library. The shared library (owner "") is never gone.
+func (c *LibraryController) ownerGone(ctx context.Context, owner string) (bool, error) {
+	if owner == "" {
+		return false, nil
+	}
+	user, err := c.UserClient.Get(ctx, owner, metav1.GetOptions{})
+	switch {
+	case errors.IsNotFound(err):
+		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("reading Library %s's User: %w", owner, err)
+	}
+	return user.LibraryOwner() != owner, nil
 }
 
 // WatchCloseRequests acts on moonlight-proxy's "Close Library" requests,
@@ -467,13 +495,18 @@ func (c *LibraryController) clearCloseRequest(ctx context.Context, pairing, uid 
 }
 
 // reconcileIdle stops the Library once it is idle, and otherwise says when to
-// look again.
-func (c *LibraryController) reconcileIdle(ctx context.Context, pod *corev1.Pod) (time.Duration, error) {
+// look again. finalScan false skips stop()'s last catalogue scan (an owner
+// that couldn't be checked).
+func (c *LibraryController) reconcileIdle(ctx context.Context, pod *corev1.Pod, finalScan bool) (time.Duration, error) {
+	stop := c.stop
+	if !finalScan {
+		stop = c.stopWithoutScan
+	}
 	// A failed or evicted Library serves nobody but would hold the Steam lock
 	// (and block launches) until it idled out.
 	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 		klog.Infof("Library pod is %s, removing it", pod.Status.Phase)
-		return 0, c.stop(ctx, pod)
+		return 0, stop(ctx, pod)
 	}
 
 	if wait, _ := c.untilIdle(pod); wait > 0 {
@@ -513,7 +546,7 @@ func (c *LibraryController) reconcileIdle(ctx context.Context, pod *corev1.Pod) 
 	}
 
 	klog.Infof("Library %s with no downloads, stopping it", why)
-	return 0, c.stop(ctx, fresh)
+	return 0, stop(ctx, fresh)
 }
 
 // untilIdle returns how long until the Library counts as idle: no browser
@@ -536,6 +569,16 @@ func (c *LibraryController) untilIdle(pod *corev1.Pod) (wait time.Duration, why 
 // for it to exit, then deletes the pod. A failed shutdown still deletes the
 // pod: SIGTERM is the fallback, and leaving it up would hold the Steam lock.
 func (c *LibraryController) stop(ctx context.Context, pod *corev1.Pod) error {
+	return c.shutDown(ctx, pod, c.Catalogue != nil)
+}
+
+// stopWithoutScan is stop for a Library whose owner lost their library: its
+// Apps are no longer anyone's, so it skips the last scan.
+func (c *LibraryController) stopWithoutScan(ctx context.Context, pod *corev1.Pod) error {
+	return c.shutDown(ctx, pod, false)
+}
+
+func (c *LibraryController) shutDown(ctx context.Context, pod *corev1.Pod, scan bool) error {
 	if podReady(pod) {
 		shutdownCtx, cancel := context.WithTimeout(ctx, libraryShutdownTimeout)
 		_, err := c.Exec(shutdownCtx, pod.Namespace, pod.Name, libraryContainer, steamShutdownCommand)
@@ -551,7 +594,7 @@ func (c *LibraryController) stop(ctx context.Context, pod *corev1.Pod) error {
 		}
 		// Last look, now Steam has written its manifests out. No art: the
 		// Steam lock is held until the pod is gone; the next run fetches it.
-		if c.Catalogue != nil {
+		if scan {
 			c.scanCatalogue(ctx, pod, 0)
 		}
 	}

@@ -251,7 +251,7 @@ func TestLibraryIdleRule(t *testing.T) {
 			f := newLibraryFixture(t, []runtime.Object{pod})
 			f.exec.steam, f.exec.heroic, f.exec.err = tc.steam, tc.heroic, tc.execErr
 
-			requeue, err := f.library.reconcileIdle(context.Background(), pod)
+			requeue, err := f.library.reconcileIdle(context.Background(), pod, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -416,7 +416,7 @@ func TestLibraryStopDeletesEvenIfShutdownFails(t *testing.T) {
 		return "", nil
 	}
 
-	if _, err := f.library.reconcileIdle(context.Background(), pod); err != nil {
+	if _, err := f.library.reconcileIdle(context.Background(), pod, true); err != nil {
 		t.Fatal(err)
 	}
 	if f.podExists(t) {
@@ -511,7 +511,7 @@ func TestLibraryStopRelinksSteamForSessions(t *testing.T) {
 	pod := libraryPod(time.Hour, true)
 	f := newLibraryFixture(t, []runtime.Object{pod})
 
-	if _, err := f.library.reconcileIdle(context.Background(), pod); err != nil {
+	if _, err := f.library.reconcileIdle(context.Background(), pod, true); err != nil {
 		t.Fatal(err)
 	}
 	if f.exec.shutdowns != 1 || f.exec.relinks != 1 {
@@ -913,7 +913,7 @@ func TestLibraryStopRechecksFreshActivity(t *testing.T) {
 	fresh := libraryPod(time.Minute, true)
 	f := newLibraryFixture(t, []runtime.Object{fresh})
 
-	requeue, err := f.library.reconcileIdle(context.Background(), stale)
+	requeue, err := f.library.reconcileIdle(context.Background(), stale, true)
 	if err != nil {
 		t.Fatal(err)
 	}
