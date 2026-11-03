@@ -326,7 +326,7 @@ func TestCatalogueArtDrawsBattlenetLogo(t *testing.T) {
 
 	// Already drawn: nothing fetched.
 	fetched = nil
-	if art, _ := c.art(t.Context(), game, from); art != nil || len(fetched) != 0 {
+	if got, _ := c.art(t.Context(), game, from); got != nil || len(fetched) != 0 {
 		t.Errorf("drawn cover fetched again: %v", fetched)
 	}
 
@@ -338,21 +338,35 @@ func TestCatalogueArtDrawsBattlenetLogo(t *testing.T) {
 	game.ArtURL = []string{artURL, "https://upload.wikimedia.org/art2.png"}
 	files["https://upload.wikimedia.org/art2.png"] = files[artURL]
 	fetched = nil
-	if art, from := c.art(t.Context(), game, ""); art != nil {
+	if got, from := c.art(t.Context(), game, ""); got != nil {
 		t.Errorf("cover stored from %q without its logo", from)
 	}
 	if _, ok := c.artFailed[logoURL]; !ok || len(c.artFailed) != 1 || !slices.Equal(fetched, []string{artURL, logoURL}) {
 		t.Errorf("logo down: failed %v, fetched %v; want only the logo failed, fetched once", c.artFailed, fetched)
 	}
 	fetched = nil
-	if art, _ := c.art(t.Context(), game, ""); art != nil || len(fetched) != 0 {
+	if got, _ := c.art(t.Context(), game, ""); got != nil || len(fetched) != 0 {
 		t.Errorf("fetched %v while the logo is down", fetched)
 	}
 
 	// A logo far taller than wide stays within the cover.
 	files[logoURL] = solidPNG(t, 1, 4096, red)
 	c.artFailed = map[string]time.Time{}
-	if art, _ := c.art(t.Context(), game, ""); art == nil {
-		t.Error("no cover with a tall logo")
+	art, _ = c.art(t.Context(), game, "")
+	if img, err = jpeg.Decode(bytes.NewReader(art)); err != nil {
+		t.Fatalf("no cover with a tall logo: %v", err)
+	}
+	if w, h := img.Bounds().Dx(), img.Bounds().Dy(); !near(img.At(w/2, h*3/4), blue) {
+		t.Errorf("a tall logo covers %v at 3/4 down; want it within the top half", img.At(w/2, h*3/4))
+	}
+
+	// An image too large to decode safely is refused, not drawn.
+	files[logoURL] = solidPNG(t, 2049, 2048, red)
+	c.artFailed = map[string]time.Time{}
+	if art, _ := c.art(t.Context(), game, ""); art != nil {
+		t.Error("cover drawn with a logo over logoCoverMaxPixels")
+	}
+	if _, ok := c.artFailed[logoURL]; !ok {
+		t.Errorf("oversized logo not recorded as failed: %v", c.artFailed)
 	}
 }

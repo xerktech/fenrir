@@ -88,6 +88,9 @@ const (
 	// box art size moonlight-proxy serves.
 	logoCoverWidth  = 600
 	logoCoverHeight = 800
+	// logoCoverMaxPixels caps each image withLogo decodes: 32 MiB decoded at
+	// 16 bits per channel. Forever's art is 960x1880, its logo 882x718.
+	logoCoverMaxPixels = 2048 * 2048
 
 	// Size caps on what the Library (user-writable) may hand the operator,
 	// whose memory limit is 256Mi: an appmanifest is ~1KiB, Heroic's library
@@ -1635,12 +1638,23 @@ func (c *Catalogue) withLogo(ctx context.Context, art []byte, logoURL string) ([
 // errLogo marks a withLogo failure caused by the logo, not the art.
 var errLogo = errors.New("logo")
 
-// decodeCover decodes an image fetchArt accepted (PNG, JPEG or WebP).
+// decodeCover decodes an image fetchArt accepted (PNG, JPEG or WebP) of at
+// most logoCoverMaxPixels: withLogo holds two decoded at once, and a 4096²
+// 16-bit PNG alone is 128 MiB, against the operator's 256Mi limit.
 func decodeCover(data []byte) (image.Image, error) {
-	for _, decode := range []func(io.Reader) (image.Image, error){png.Decode, jpeg.Decode, webp.Decode} {
-		if img, err := decode(bytes.NewReader(data)); err == nil {
-			return img, nil
+	formats := []struct {
+		config func(io.Reader) (image.Config, error)
+		decode func(io.Reader) (image.Image, error)
+	}{{png.DecodeConfig, png.Decode}, {jpeg.DecodeConfig, jpeg.Decode}, {webp.DecodeConfig, webp.Decode}}
+	for _, f := range formats {
+		cfg, err := f.config(bytes.NewReader(data))
+		if err != nil {
+			continue
 		}
+		if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width*cfg.Height > logoCoverMaxPixels {
+			return nil, fmt.Errorf("decoding cover: %dx%d is over %d pixels", cfg.Width, cfg.Height, logoCoverMaxPixels)
+		}
+		return f.decode(bytes.NewReader(data))
 	}
 	return nil, errors.New("decoding cover: not a PNG, JPEG or WebP")
 }
