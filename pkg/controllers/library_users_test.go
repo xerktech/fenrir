@@ -815,6 +815,7 @@ func TestLibraryStopsOrphanedOwnLibrary(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		user    *v1alpha1types.User // nil: deleted
+		idle    bool
 		readErr bool
 		stopped bool
 		scanned bool
@@ -823,10 +824,15 @@ func TestLibraryStopsOrphanedOwnLibrary(t *testing.T) {
 		{name: "user deleted", stopped: true},
 		{name: "spec.library cleared", user: libraryUser("sam", false), stopped: true},
 		{name: "user read fails", user: libraryUser("sam", true), readErr: true, wantErr: true},
+		{name: "user read fails, idle", user: libraryUser("sam", true), idle: true, readErr: true, stopped: true, wantErr: true},
 		{name: "still sam's library", user: libraryUser("sam", true), scanned: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pod := libraryPod(0, true)
+			var lastActivity time.Duration
+			if tc.idle {
+				lastActivity = 2 * DefaultLibraryIdleTimeout
+			}
+			pod := libraryPod(lastActivity, true)
 			pod.Name = v1alpha1types.LibraryPodNameFor("sam")
 			pod.Labels[v1alpha1types.LibraryOwnerLabel] = "sam"
 			var dwObjs []runtime.Object
@@ -841,8 +847,11 @@ func TestLibraryStopsOrphanedOwnLibrary(t *testing.T) {
 			}
 			shutdowns := 0
 			f.library.Exec = func(_ context.Context, _, _, _ string, command []string) (string, error) {
-				if strings.Contains(strings.Join(command, " "), "-shutdown") {
+				switch {
+				case strings.Contains(strings.Join(command, " "), "-shutdown"):
 					shutdowns++
+				case slices.Contains(command, heroicDownloadQueue):
+					return `{"queue":[]}`, nil
 				}
 				return "", nil
 			}

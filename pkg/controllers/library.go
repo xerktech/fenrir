@@ -363,13 +363,13 @@ func (c *LibraryController) Reconcile(namespace, name string, pod *corev1.Pod) e
 		klog.Infof("Library %s closed from Moonlight, stopping it", name)
 		return c.stop(ctx, pod)
 	}
-	// An owner we couldn't check gets no scan: it would re-create a removed
-	// library's Apps. The idle check still runs, so an API fault can't keep
-	// an idle Library up.
+	// An owner we couldn't check gets no scan, periodic or final: it would
+	// re-create a removed library's Apps. The idle check still runs, so an
+	// API fault can't keep an idle Library up.
 	if c.Catalogue != nil && ownerErr == nil && podReady(pod) && c.Catalogue.ScanDue(owner) {
 		c.scanCatalogue(ctx, pod, catalogueArtBudget)
 	}
-	requeueAfter, err := c.reconcileIdle(ctx, pod)
+	requeueAfter, err := c.reconcileIdle(ctx, pod, ownerErr == nil)
 	if c.Catalogue != nil && requeueAfter > catalogueScanInterval {
 		requeueAfter = catalogueScanInterval
 	}
@@ -495,13 +495,18 @@ func (c *LibraryController) clearCloseRequest(ctx context.Context, pairing, uid 
 }
 
 // reconcileIdle stops the Library once it is idle, and otherwise says when to
-// look again.
-func (c *LibraryController) reconcileIdle(ctx context.Context, pod *corev1.Pod) (time.Duration, error) {
+// look again. finalScan false skips stop()'s last catalogue scan (an owner
+// that couldn't be checked).
+func (c *LibraryController) reconcileIdle(ctx context.Context, pod *corev1.Pod, finalScan bool) (time.Duration, error) {
+	stop := c.stop
+	if !finalScan {
+		stop = c.stopWithoutScan
+	}
 	// A failed or evicted Library serves nobody but would hold the Steam lock
 	// (and block launches) until it idled out.
 	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 		klog.Infof("Library pod is %s, removing it", pod.Status.Phase)
-		return 0, c.stop(ctx, pod)
+		return 0, stop(ctx, pod)
 	}
 
 	if wait, _ := c.untilIdle(pod); wait > 0 {
@@ -541,7 +546,7 @@ func (c *LibraryController) reconcileIdle(ctx context.Context, pod *corev1.Pod) 
 	}
 
 	klog.Infof("Library %s with no downloads, stopping it", why)
-	return 0, c.stop(ctx, fresh)
+	return 0, stop(ctx, fresh)
 }
 
 // untilIdle returns how long until the Library counts as idle: no browser
