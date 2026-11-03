@@ -907,14 +907,20 @@ func TestLibraryStopsSharedLibraryOnMovedClaims(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		home, games string
+		noVolumes   bool
 		wantStopped bool
 	}{
 		{name: "current flags", home: "steam-home", games: "games"},
 		{name: "home flag changed", home: "steam-home-2", games: "games", wantStopped: true},
 		{name: "games flag changed", home: "steam-home", games: "games-2", wantStopped: true},
+		// Only buildPod makes these pods; one without the claims serves no library.
+		{name: "no claim volumes", home: "steam-home", games: "games", noVolumes: true, wantStopped: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := libraryPod(0, true)
+			if tc.noVolumes {
+				pod.Spec.Volumes = nil
+			}
 			f := newLibraryFixture(t, []runtime.Object{pod.DeepCopy()})
 			f.library.HomePVC, f.library.GamesPVC = tc.home, tc.games
 			cf := newCatalogueFixture(t, baseApp("steam-base", nil), baseApp("heroic-base", nil))
