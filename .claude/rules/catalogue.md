@@ -109,6 +109,8 @@ paths:
   - Covers are fixed URLs in `battlenetProducts`, best first (exact hosts in `artHosts`).
     WoW's is Wikipedia's copy of the Midnight box art: Blizzard's sites publish no portrait
     cover with the logo. Blizzard's textless key art is the fallback.
+  - No two products share an art URL (`TestBattlenetProductsLaunchable`): WoW Forever reusing
+    retail's cover showed as two identical tiles. Forever's is its Blizzard page's key art.
   - Art fetches send `artUserAgent`: Wikimedia answers Go's default User-Agent with 403.
   - Tests: `catalogue_battlenet_test.go` (fixture product.db in `testdata/catalogue`).
 - The CRD rejects an empty `appAssetWebP` (the fake clientset doesn't): a catalogue App shows
