@@ -1,7 +1,8 @@
 #!/bin/bash
 # shellcheck shell=bash
 
-# Installs Xodus Nexus's Wine runtime (Xodus Proton) when Nexus has none.
+# Installs Xodus Nexus's Wine runtime (Xodus Proton) when Nexus has none, and
+# moves it to upstream's newest release when one is published.
 # Nexus installs its backend by itself on first run, but not the runtime:
 # until someone clicks "Install Xodus Runtime" in its Settings, every game
 # launch, including from Moonlight, fails with "Select a Wine/Xodus Proton
@@ -17,17 +18,26 @@
 # Nexus reads at start. Paths are absolute under /config; sessions mount the
 # home there too.
 #
-# Install-if-missing only: runtime releases are near-daily and ~1.4 GB
-# unpacked, so updates stay with Nexus's Settings.
+# Updates (XERK-2499): when the newest release differs from the active one, it
+# is installed and current.json moves to it. The release it replaces stays (a
+# session still running may use it); older runtime releases are deleted, as
+# each is ~1.4 GB unpacked and releases are near-daily. A failed check or
+# download keeps the active runtime.
 #
-# Never exits non-zero: any failure leaves Nexus asking for its runtime.
+# Never exits non-zero: any failure leaves Nexus on its current runtime, or
+# asking for one when it has none.
 
 # Nexus's checkNexus order: the runtime repository, then the launcher's own as
 # its fallback, each with its archive prefix.
 sources=("domsvoboda/nexus-runtime nexus-runtime" "domsvoboda/xodus-nexus xodus-nexus-runtime")
 
+active=
 give_up() {
-  echo "xodus-nexus-runtime: $*; Nexus will ask for its runtime in Settings" >&2
+  if [[ -n "${active}" ]]; then
+    echo "xodus-nexus-runtime: $*; Nexus keeps ${active}" >&2
+  else
+    echo "xodus-nexus-runtime: $*; Nexus will ask for its runtime in Settings" >&2
+  fi
   exit 0
 }
 
@@ -43,10 +53,24 @@ valid_wine() {
   [[ -x "$1" ]] && out="$(timeout 60 "$1" --version 2>&1)" && grep -qi wine <<<"${out}"
 }
 
-wine="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["winePath"])' "${root}/current.json" 2>/dev/null)"
+read -r wine active_name < <(python3 -I -c '
+import json, sys
+p = json.load(open(sys.argv[1]))
+print(p["winePath"], p.get("name") or "")' "${root}/current.json" 2>/dev/null)
+# A working runtime is kept unless a newer release installs cleanly. Its
+# release directory comes from its wine path, which is what a running session
+# uses; pruning is skipped when that is not one of releases/<dir>.
+# Its directory is kept from pruning even when its wine fails: a session may
+# still be running it. The path is normalized first, so "releases/../x" is not
+# taken for releases/x's sibling.
+active_dir="$(python3 -I -c '
+import os, re, sys
+wine, releases = os.path.normpath(sys.argv[1]), os.path.normpath(sys.argv[2])
+parts = os.path.relpath(wine, releases).split(os.sep)
+if len(parts) == 4 and parts[1:] == ["files", "bin", "wine"] and re.fullmatch(r"[A-Za-z0-9._-]+", parts[0]) and parts[0] not in (".", ".."):
+    print(parts[0])' "${wine}" "${root}/releases" 2>/dev/null)"
 if valid_wine "${wine}"; then
-  echo "xodus-nexus-runtime: Nexus's runtime is installed"
-  exit 0
+  active="${active_name:-${wine}}"
 fi
 
 releases="$(mktemp)" || give_up "cannot make a temporary file"
@@ -121,6 +145,10 @@ done
 [[ -n "${fields}" ]] || give_up "cannot find a verifiable runtime release"
 IFS=$'\t' read -r name tag url size sha sum_url <<<"${fields}"
 release="${name%-x86_64.tar.xz}"
+if [[ -n "${active}" && "${release}" == "${active_dir}" ]]; then
+  echo "xodus-nexus-runtime: Nexus's runtime ${release} is up to date"
+  exit 0
+fi
 
 mkdir -p "${root}/releases" || give_up "cannot create ${root}"
 staging="$(mktemp -d "${root}/.staging-direwolf-XXXXXX")" || give_up "cannot make a staging directory"
@@ -168,4 +196,16 @@ with os.fdopen(fd, "w") as f:
                "installedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}, f, indent=2)
 os.replace(path + ".tmp", path)
 ' "${release}" "${wine}" "${tag}" "${root}/current.json" || give_up "cannot write current.json"
-echo "xodus-nexus-runtime: installed ${release}"
+echo "xodus-nexus-runtime: installed ${release}${active:+, replacing ${active}}"
+# A working runtime outside releases/: which directory a session uses is unknown.
+[[ -z "${active}" || -n "${active_dir}" ]] || exit 0
+
+# Older runtime releases go: everything but the new one and the one it
+# replaced. Only runtime-named directories; nothing outside releases/.
+for dir in "${root}"/releases/*; do
+  base="${dir##*/}"
+  [[ -d "${dir}" && ! -L "${dir}" ]] || continue
+  [[ "${base}" =~ ^(proton-xodus-|xodus-nexus-runtime-|nexus-runtime-)[A-Za-z0-9._-]+$ ]] || continue
+  [[ "${base}" == "${release}" || "${base}" == "${active_dir}" ]] && continue
+  rm -rf -- "${dir}" && echo "xodus-nexus-runtime: removed ${base}"
+done

@@ -80,7 +80,8 @@ COPY --from=battlenet /opt/battlenet /opt/battlenet
 
 RUN \
   # The COPY above makes everything 755; these are data, 644 as in the session image.
-  chmod 0644 /opt/xodus-nexus.hold /usr/share/applications/*.desktop && \
+  chmod 0644 /opt/xodus-nexus.hold /usr/share/applications/*.desktop \
+    /usr/share/xodus-nexus/xgameruntime/games /usr/share/xodus-nexus/xgameruntime/patches/*.patch && \
   echo "**** install heroic ****" && \
   curl -fsSL -o /tmp/heroic.deb \
     "https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/releases/download/${HEROIC_VERSION}/Heroic-${HEROIC_VERSION#v}-linux-amd64.deb" && \
