@@ -17,11 +17,14 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       libx11-xcb-dev libx264-dev libxcb-randr0-dev libxrandr-dev libxxf86vm-dev \
       nlohmann-json3-dev libglib2.0-dev libfreetype-dev libusb-1.0-0-dev \
       librsvg2-dev libarchive-dev libpng-dev bsdextrautils
+# No PipeWire backend: the GoW image has no PipeWire config or modules (it runs
+# PulseAudio), and WiVRn 26.9's backend then segfaults on every headset connect.
+# Its only audio backend is PipeWire, so this build streams no audio.
 RUN git clone --depth 1 -b "${WIVRN_VERSION}" https://github.com/WiVRn/WiVRn /src/wivrn \
  && cmake -S /src/wivrn -B /src/wivrn/build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
       -DCMAKE_INSTALL_PREFIX=/usr/local -DWIVRN_BUILD_CLIENT=OFF -DWIVRN_BUILD_DASHBOARD=OFF \
       -DWIVRN_USE_SYSTEM_BOOST=OFF -DWIVRN_USE_SYSTEM_OPENXR=OFF \
-      -DWIVRN_USE_NVENC=ON -DWIVRN_USE_VAAPI=OFF -DWIVRN_USE_X264=ON -DWIVRN_USE_PIPEWIRE=ON \
+      -DWIVRN_USE_NVENC=ON -DWIVRN_USE_VAAPI=OFF -DWIVRN_USE_X264=ON -DWIVRN_USE_PIPEWIRE=OFF \
       -DWIVRN_FEATURE_STEAMVR_LIGHTHOUSE=OFF -DWIVRN_FEATURE_SOLARXR=OFF \
       -DWIVRN_OPENXR_MANIFEST_TYPE=absolute \
  && cmake --build /src/wivrn/build \
