@@ -1,0 +1,99 @@
+# XERK-2659 VR spike: hand-written WiVRn test pod on talos04 (not via the operator).
+# kubectl apply -f pod.yaml; then drive it with kubectl exec (see README.md).
+# Port 20034 is the last port of the operator's --session-port-range (20000-20034),
+# which the port allocator (lowest free block first) hands out only to a 5th
+# concurrent Session; check `kubectl get sessions -A -o yaml | grep -A8 ports:` first.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vr-spike
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: vr-spike-gpu
+  namespace: vr-spike
+spec:
+  # As gpu_claim.go builds it for the steam App (gpu.memory 8Gi).
+  devices:
+    requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          capacity:
+            requests:
+              memory: 8Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wivrn-config
+  namespace: vr-spike
+data:
+  config.json: |
+    {
+      "port": 20034,
+      "publish-service": "none",
+      "encoder": "nvenc"
+    }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wivrn
+  namespace: vr-spike
+spec:
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: talos04.xerktech.com
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: present
+      effect: NoSchedule
+  resourceClaims:
+    - name: gpu
+      resourceClaimName: vr-spike-gpu
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  containers:
+    - name: wivrn
+      image: ghcr.io/xerktech/fenrir/vr-spike:xerk-2659
+      # The GoW entrypoint (sway, cont-init as root) is not needed: WiVRn's
+      # compositor and hello_xr render offscreen through Vulkan.
+      command: ["sleep", "infinity"]
+      env:
+        - name: HOME
+          value: /home/vr
+        - name: XDG_RUNTIME_DIR
+          value: /run/vr
+        - name: XDG_CONFIG_HOME
+          value: /home/vr/.config
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: all
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        claims:
+          - name: gpu
+      volumeMounts:
+        - name: home
+          mountPath: /home/vr
+        - name: run
+          mountPath: /run/vr
+        - name: config
+          mountPath: /home/vr/.config/wivrn
+  volumes:
+    - name: home
+      emptyDir: {}
+    - name: run
+      emptyDir: {}
+    - name: config
+      configMap:
+        name: wivrn-config
