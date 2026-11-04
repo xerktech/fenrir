@@ -40,8 +40,12 @@ shopt -s nullglob
 patches=("${share}"/patches/*.patch)
 mapfile -t exes < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' "${share}/games" 2>/dev/null | grep -iE '^[A-Za-z0-9._-]+\.exe$')
 patch_id=
-# Same computation as hack/nexus-xgameruntime/patch-id.sh.
-((${#patches[@]})) && patch_id="$(cat "${patches[@]}" | sha256sum | cut -c1-12)"
+if ((${#patches[@]})); then
+  # An unreadable patch would hash to a series no release is built for.
+  cat "${patches[@]}" >/dev/null 2>&1 || give_up "cannot read the patch series"
+  # Same computation as hack/nexus-xgameruntime/patch-id.sh.
+  patch_id="$(cat "${patches[@]}" | sha256sum | cut -c1-12)"
+fi
 
 state="${HOME}/.config/xodus-nexus/launcher-state.json"
 root="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["settings"]["runtimeRoot"])' "${state}" 2>/dev/null)"
@@ -51,6 +55,13 @@ compat="$(dirname "${root}")/compatdata"
 cache="${HOME}/.cache/xodus-nexus/xgameruntime"
 # Game ids whose prefix holds a DLL this script installed.
 installed="${cache}/installed"
+
+# One run at a time over the shared home: the Library and every Nexus session
+# run this (XERK-2654), and concurrent runs would race on the prefixes' temp
+# files, user.reg and the record. The lock lives on the shared home itself.
+mkdir -p "${cache}" 2>/dev/null
+exec 9>>"${cache}/.lock" || give_up "cannot open the lock"
+flock -w 120 9 || give_up "another run kept the lock for 2 minutes"
 
 # The active runtime: current.json's wine is <release>/files/bin/wine, and its
 # commit is the release tag (as Nexus and xodus-nexus-runtime write it).
@@ -182,7 +193,6 @@ os.replace(tmp, path)
 ' "$1" "$2"
 }
 
-mkdir -p "${cache}" 2>/dev/null
 mapfile -t before < <(grep -E '^[A-Za-z0-9_-]+$' "${installed}" 2>/dev/null)
 after=()
 declare -A listed=()

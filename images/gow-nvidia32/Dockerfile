@@ -213,7 +213,9 @@ COPY --chmod=644 root/usr/share/xodus-nexus/xgameruntime/ /usr/share/xodus-nexus
 COPY --chmod=755 root/etc/cont-init.d/31-xodus-nexus-game-patches.sh /etc/cont-init.d/
 RUN test -x /opt/xodus-nexus/AppRun && command -v gnome-keyring-daemon dbus-run-session dbus-send >/dev/null \
   && command -v python3 curl sha256sum gosu timeout >/dev/null \
-  && chmod 0755 /usr/share/xodus-nexus/xgameruntime /usr/share/xodus-nexus/xgameruntime/patches \
+  && chmod 0755 /usr/share/xodus-nexus /usr/share/xodus-nexus/xgameruntime /usr/share/xodus-nexus/xgameruntime/patches \
+  && command -v flock >/dev/null \
+  && gosu nobody cat /usr/share/xodus-nexus/xgameruntime/games /usr/share/xodus-nexus/xgameruntime/patches/*.patch >/dev/null \
   && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/xodus-nexus /usr/share/xodus-nexus' \
   && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
 

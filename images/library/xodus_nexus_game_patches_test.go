@@ -519,3 +519,53 @@ func TestXodusNexusGamePatchesMatchSessionImage(t *testing.T) {
 		}
 	}
 }
+
+// The Library and every Nexus session run this over one shared home
+// (XERK-2654): concurrent runs serialise on a lock there, so all of them end
+// with the patched DLL and none fails to install it.
+func TestXodusNexusGamePatchesConcurrentRunsAgree(t *testing.T) {
+	h := newPatchHost(t)
+	h.games(map[string]string{"g007": "007FirstLight.exe"})
+	patched := fakeDLL(false, "patched")
+	h.publish(patched, "")
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	cmds := make([]*exec.Cmd, 4)
+	outs := make([]*bytes.Buffer, len(cmds))
+	for i := range cmds {
+		cmd := exec.CommandContext(ctx, "bash", xodusNexusGamePatches)
+		cmd.Env = append(os.Environ(), "LOG=/dev/null",
+			"PATH="+filepath.Join(h.dir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"HOME="+h.home, "FAKE_GH="+h.gh, "XODUS_NEXUS_PATCH_SHARE="+h.share)
+		outs[i] = &bytes.Buffer{}
+		cmd.Stdout, cmd.Stderr = outs[i], outs[i]
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		cmds[i] = cmd
+	}
+	for i, cmd := range cmds {
+		if err := cmd.Wait(); err != nil || strings.Contains(outs[i].String(), "cannot") {
+			t.Errorf("run %d: %v\n%s", i, err, outs[i])
+		}
+	}
+	if !bytes.Equal(h.system32("g007"), patched) || strings.Count(h.userReg("g007"), overrideKey) != 1 {
+		t.Errorf("after concurrent runs: patched=%v\n%s", bytes.Equal(h.system32("g007"), patched), h.userReg("g007"))
+	}
+}
+
+// A patch that can't be read stops the run: its series would hash to an id
+// no release is built for, and every listed game would get the builtin.
+func TestXodusNexusGamePatchesStopsOnAnUnreadablePatch(t *testing.T) {
+	h := newPatchHost(t)
+	h.games(map[string]string{"g007": "007FirstLight.exe"})
+	patched := fakeDLL(false, "patched")
+	h.publish(patched, "")
+	h.run()
+	if err := os.Mkdir(filepath.Join(h.share, "patches", "0003-unreadable.patch"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if calls := h.run(); !bytes.Equal(h.system32("g007"), patched) || !strings.Contains(calls, "cannot read the patch series") {
+		t.Errorf("want the run stopped and 007 kept patched:\n%s", calls)
+	}
+}
