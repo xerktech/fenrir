@@ -397,16 +397,17 @@ func TestXodusNexusUpdateHeld(t *testing.T) {
 	}
 }
 
-// The hold ships in both images: the Library copies root/ whole, the session
-// image file by file.
+// A hold, when one ships, ships in both images: the Library copies root/
+// whole, the session image file by file. None ships while the image's
+// NEXUS_VERSION is a release that works (XERK-2499 lifted v0.4.0's).
 func TestXodusNexusHoldShipsInBothImages(t *testing.T) {
-	library, err := os.ReadFile("root/opt/xodus-nexus.hold")
-	if err != nil {
-		t.Fatal(err)
+	library, lerr := os.ReadFile("root/opt/xodus-nexus.hold")
+	session, serr := os.ReadFile("../gow-nvidia32/root/opt/xodus-nexus.hold")
+	if os.IsNotExist(lerr) && os.IsNotExist(serr) {
+		return
 	}
-	session, err := os.ReadFile("../gow-nvidia32/root/opt/xodus-nexus.hold")
-	if err != nil {
-		t.Fatal(err)
+	if lerr != nil || serr != nil {
+		t.Fatalf("a hold in only one image: library %v, session %v", lerr, serr)
 	}
 	if !bytes.Equal(library, session) {
 		t.Error("images/library and images/gow-nvidia32 ship different Xodus Nexus holds")

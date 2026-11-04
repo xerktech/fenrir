@@ -109,9 +109,10 @@ paths:
   - The AppImage is unpacked as the desktop user, then chowned to root and made world-readable.
   - Sessions run it `--cached-only` (cont-init `30-xodus-nexus-update.sh`): the Library's verified
     copy, never a download at launch, so a session runs the Library's version.
-  - `/opt/xodus-nexus.hold` (in both images) stops `xodus-nexus-update` entirely: the image's
-    `NEXUS_VERSION` runs, and neither a newer release nor a newer cached copy is installed. Use it
-    to hold back a broken release; its text says why. Remove it with the pin bump to a fixed one.
+  - `/opt/xodus-nexus.hold`, when shipped (in both images, `root/opt/`), stops `xodus-nexus-update`
+    entirely: the image's `NEXUS_VERSION` runs and no newer release is installed. Ship one to hold
+    back a broken release, its text saying why; remove it with the pin bump to a fixed one.
+    - None ships: v0.4.2 replaced the v0.4.0 hold (0.4.1 quit Moonlight launches, #457; XERK-2499).
   - Tests: `images/library/xodus_nexus_update_test.go`.
   - `xodus-nexus` (identical in `images/gow-nvidia32`, `TestXodusNexusWrapperMatchesSessionImage`)
     starts gnome-keyring's secrets component: Nexus keeps the Microsoft account in a Secret
