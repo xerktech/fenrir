@@ -6,6 +6,7 @@
 # Library start. It never updates the runtime; the Library does. Bounded, so a
 # slow GitHub delays a launch by at most 90 s. Only the nexus target ships it.
 if [ -x /usr/local/bin/xodus-nexus-game-patches ]; then
-    timeout 90 gosu "${UNAME}" /usr/local/bin/xodus-nexus-game-patches ||
+    # A run the Library (or another session) is in waits at most 60 s for it.
+    XODUS_NEXUS_PATCH_LOCK_WAIT=60 timeout 90 gosu "${UNAME}" /usr/local/bin/xodus-nexus-game-patches ||
         gow_log "Could not refresh patched xgameruntime.dll; games keep the one they have"
 fi
