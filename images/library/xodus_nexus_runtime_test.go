@@ -200,8 +200,8 @@ func TestXodusNexusRuntimeInstallsWhenMissing(t *testing.T) {
 	}
 
 	calls = h.run()
-	if strings.Contains(calls, "releases") || !strings.Contains(calls, "runtime is installed") {
-		t.Errorf("want an installed runtime left alone, without asking GitHub:\n%s", calls)
+	if strings.Contains(calls, "download ") || !strings.Contains(calls, runtimeName+" is up to date") {
+		t.Errorf("want the newest runtime left alone, without downloading it again:\n%s", calls)
 	}
 }
 
@@ -485,5 +485,94 @@ func TestXodusNexusRuntimePicksAsNexus(t *testing.T) {
 				t.Errorf("current.json %v, want %s:\n%s", p, tc.want, calls)
 			}
 		})
+	}
+}
+
+// A newer release replaces the active runtime (XERK-2499): current.json moves
+// to it, the replaced release stays for a session still using it, and older
+// runtime releases go. Nothing but runtime-named directories is touched.
+func TestXodusNexusRuntimeUpdatesAndPrunes(t *testing.T) {
+	h := newRuntimeHost(t)
+	rel := filepath.Join(h.root, "releases")
+	for _, d := range []string{"xodus-nexus-runtime-11.0-20261022-gf4adc821", "nexus-runtime-11.0-experimental-gold", "keep-me"} {
+		bin := filepath.Join(rel, d, "files", "bin")
+		if err := os.MkdirAll(bin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeStub(t, filepath.Join(bin, "wine"), `echo wine-10.0`)
+	}
+	active := filepath.Join(rel, "xodus-nexus-runtime-11.0-20261022-gf4adc821", "files", "bin", "wine")
+	if err := os.WriteFile(filepath.Join(h.root, "current.json"),
+		[]byte(`{"name":"xodus-nexus-runtime-11.0-20261022-gf4adc821","winePath":"`+active+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.publish(runtimeArchive(t, runtimeName, "wine-11.0"), "", "")
+	calls := h.run()
+	if p := h.current(); p["name"] != runtimeName {
+		t.Fatalf("current.json %v, want %s:\n%s", p, runtimeName, calls)
+	}
+	for d, want := range map[string]bool{
+		runtimeName: true, "xodus-nexus-runtime-11.0-20261022-gf4adc821": true,
+		"nexus-runtime-11.0-experimental-gold": false, "keep-me": true,
+	} {
+		if _, err := os.Stat(filepath.Join(rel, d)); (err == nil) != want {
+			t.Errorf("%s present=%v, want %v:\n%s", d, err == nil, want, calls)
+		}
+	}
+}
+
+// A failed check keeps the active runtime and deletes nothing.
+func TestXodusNexusRuntimeKeepsActiveOnFailure(t *testing.T) {
+	h := newRuntimeHost(t)
+	bin := filepath.Join(h.root, "releases", "nexus-runtime-11.0-experimental-gold", "files", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStub(t, filepath.Join(bin, "wine"), `echo wine-10.0`)
+	cur := `{"name":"nexus-runtime-11.0-experimental-gold","winePath":"` + filepath.Join(bin, "wine") + `"}`
+	if err := os.WriteFile(filepath.Join(h.root, "current.json"), []byte(cur), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(h.dir, "gh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.dir, "gh", runtimeRepo+".status"), []byte("503"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := h.run()
+	if !strings.Contains(calls, "Nexus keeps nexus-runtime-11.0-experimental-gold") {
+		t.Errorf("want the active runtime kept:\n%s", calls)
+	}
+	if b, _ := os.ReadFile(filepath.Join(h.root, "current.json")); string(b) != cur {
+		t.Errorf("current.json changed: %s", b)
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Errorf("active release removed: %v", err)
+	}
+}
+
+// A working runtime outside releases/ (set by hand) is replaced but nothing is
+// pruned: which directory a session uses is unknown.
+func TestXodusNexusRuntimeSkipsPruneForForeignActive(t *testing.T) {
+	h := newRuntimeHost(t)
+	other := filepath.Join(h.dir, "elsewhere", "files", "bin")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStub(t, filepath.Join(other, "wine"), `echo wine-10.0`)
+	old := filepath.Join(h.root, "releases", "nexus-runtime-11.0-experimental-gold")
+	if err := os.MkdirAll(old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.root, "current.json"), []byte(`{"winePath":"`+filepath.Join(other, "wine")+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.publish(runtimeArchive(t, runtimeName, "wine-11.0"), "", "")
+	calls := h.run()
+	if p := h.current(); p["name"] != runtimeName {
+		t.Fatalf("current.json %v:\n%s", p, calls)
+	}
+	if _, err := os.Stat(old); err != nil {
+		t.Errorf("pruned with a foreign active runtime: %v", err)
 	}
 }
