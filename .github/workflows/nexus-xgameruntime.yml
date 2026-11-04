@@ -79,11 +79,12 @@ jobs:
         tag: ${{ fromJSON(needs.plan.outputs.tags) }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - name: Install MinGW and CMake
+      - name: Install MinGW, CMake and widl
         run: |
           sudo apt-get -o Acquire::Retries=3 update -q
+          # wine64-tools: widl, which the CMake build needs (as upstream's CI).
           sudo apt-get -o Acquire::Retries=3 install -y -q --no-install-recommends cmake make \
-            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine64-tools
           # As nexus-runtime and upstream's CI: the posix thread model.
           sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
           sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
