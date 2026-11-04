@@ -23,7 +23,7 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
 
 ### Use
 
-- Moonlight: add host `10.10.10.34`, start pairing, then open `pair.library.xerktech.com`
+- Moonlight: add host `10.10.10.34`, start pairing, then open `pair.xerktech.com`
   (Authentik), pick the waiting client and enter the PIN Moonlight shows.
   - The Authentik username needs a `User` CR of the same name, or the PIN is refused. A
     `k8x-games` member without one is sent to `library.xerktech.com` first, which creates it
@@ -65,7 +65,7 @@ nobody playing:
 
 These need a real Moonlight client and a gamepad, and are checked by hand:
 
-- Pair through `pair.library.xerktech.com`; launch Steam at the client's native resolution; the
+- Pair through `pair.xerktech.com`; launch Steam at the client's native resolution; the
   gamepad works in game; the stream uses NVENC (wolf log `Using h264 encoder: nvcodec`, not
   `x264`).
 - Disconnect without quitting, reconnect within 10 minutes: same game, same state.
