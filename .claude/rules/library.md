@@ -104,6 +104,9 @@ paths:
   - `xodus-nexus-update` (identical in `images/gow-nvidia32`, XERK-2288) installs the newest
     launcher release at Library start (`init-xodus-nexus-update`), like `init-heroic-update`:
     cached in the home, trusted only by GitHub's published SHA256, home touched only as abc.
+  - Upstream is renaming domsvoboda/xodus-nexus to domsvoboda/nexus-launcher (Nexus 0.4.3 prepares
+    for it). GitHub redirects the old name, but asset URLs then name the new one: any exact-URL check
+    must accept both, canonical first, as `xodus-nexus-backend`'s `download_repos` does.
   - The repo also publishes `backend-v*` and `runtime-*` releases (about three per launcher
     release): never use `releases/latest`; a cached version is fetched by its tag, not paged for.
   - The AppImage is unpacked as the desktop user, then chowned to root and made world-readable.

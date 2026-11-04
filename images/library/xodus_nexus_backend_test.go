@@ -81,6 +81,8 @@ type backendRelease struct {
 	manifest          func(map[string]any)
 	sum               string // the .sha512sum's content; "" for the archive's own
 	missing           string // an asset suffix left out of the release
+	repo              string // the repository its asset URLs name; "" for domsvoboda/xodus-nexus
+	otherRepo         string // an asset suffix whose URL names the other repository
 }
 
 // backendHost is a desktop home, an installed launcher and a fake GitHub.
@@ -242,8 +244,15 @@ func (h *backendHost) publish(releases ...backendRelease) {
 			if err = os.WriteFile(filepath.Join(h.gh, pkg+suffix), content, 0o600); err != nil {
 				t.Fatal(err)
 			}
+			repo := r.repo
+			if repo == "" {
+				repo = "domsvoboda/xodus-nexus"
+			}
+			if suffix == r.otherRepo {
+				repo = map[string]string{"domsvoboda/xodus-nexus": "domsvoboda/nexus-launcher", "domsvoboda/nexus-launcher": "domsvoboda/xodus-nexus"}[repo]
+			}
 			listed = append(listed, map[string]any{"name": pkg + suffix,
-				"browser_download_url": "https://github.com/domsvoboda/xodus-nexus/releases/download/" + tag + "/" + pkg + suffix})
+				"browser_download_url": "https://github.com/" + repo + "/releases/download/" + tag + "/" + pkg + suffix})
 		}
 		list = append(list, map[string]any{"tag_name": tag, "assets": listed})
 	}
@@ -692,5 +701,21 @@ func TestXodusNexusBackendRepairsMetadata(t *testing.T) {
 				t.Errorf("written through to %q", b)
 			}
 		})
+	}
+}
+
+// Upstream is renaming domsvoboda/xodus-nexus to domsvoboda/nexus-launcher;
+// GitHub then lists asset URLs under the new name. A release whose assets all
+// name either repository installs, as Nexus 0.4.3+ accepts; one mixing the two
+// names is refused like any other unexpected URL.
+func TestXodusNexusBackendAcceptsTheRenamedRepository(t *testing.T) {
+	h := newBackendHost(t)
+	h.pointer(oldBackend)
+	h.publish(backendRelease{version: "0.2.12", contract: "linux-run-v25"},
+		backendRelease{version: "0.2.13", contract: "linux-run-v25", repo: "domsvoboda/nexus-launcher"},
+		backendRelease{version: "0.2.14", contract: "linux-run-v25", repo: "domsvoboda/nexus-launcher", otherRepo: ".sha512sum"})
+	calls := h.run()
+	if p := h.current(); p["version"] != "0.2.13" || !strings.Contains(calls, "updated the backend 0.2.11 -> 0.2.13") {
+		t.Errorf("want 0.2.13 from the renamed repository, not the mixed 0.2.14 (%v):\n%s", p, calls)
 	}
 }
