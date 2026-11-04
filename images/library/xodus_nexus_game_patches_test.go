@@ -62,6 +62,8 @@ func newPatchHost(t *testing.T, exes ...string) *patchHost {
 	if len(exes) > 0 {
 		h.write(filepath.Join(h.share, "games"), []byte("# listed\n"+strings.Join(exes, "\n")+"\n"))
 	}
+	// cp fails while FAIL_CP is set, else is the real one.
+	writeStub(t, filepath.Join(dir, "bin", "cp"), `[ -n "$FAIL_CP" ] && exit 1; exec /bin/cp "$@"`)
 	writeStub(t, filepath.Join(dir, "bin", "curl"), `for a; do [ "$prev" = -o ] && out=$a; prev=$a; url=$a; done
 case "$url" in https://api.github.com/repos/xerktech/fenrir/releases/tags/*)
   echo "release ${url##*/}" >>"$LOG"; f="$FAKE_GH/release-${url##*/}.json"; [ -f "$f" ] || exit 22; exec cat "$f";;
@@ -135,12 +137,13 @@ func (h *patchHost) cmd(name string, args ...string) string {
 	return string(out)
 }
 
-// run runs the real script and returns the stubs' calls and its output.
-func (h *patchHost) run() string {
+// run runs the real script, with env added, and returns the stubs' calls and
+// its output.
+func (h *patchHost) run(env ...string) string {
 	h.t.Helper()
-	return runOneshot(h.t, xodusNexusGamePatches, h.log,
-		"PATH="+filepath.Join(h.dir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"HOME="+h.home, "FAKE_GH="+h.gh, "XODUS_NEXUS_PATCH_SHARE="+h.share)
+	return runOneshot(h.t, xodusNexusGamePatches, h.log, append([]string{
+		"PATH=" + filepath.Join(h.dir, "bin") + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + h.home, "FAKE_GH=" + h.gh, "XODUS_NEXUS_PATCH_SHARE=" + h.share}, env...)...)
 }
 
 // runOneshot runs an s6 oneshot script with env (and LOG=log for its stubs),
@@ -305,7 +308,7 @@ func TestXodusNexusGamePatchesNeedsAnActiveRuntime(t *testing.T) {
 // xgameruntime value: the value is added or corrected, nothing else changes.
 func TestXodusNexusGamePatchesFixesAnExistingOverrideKey(t *testing.T) {
 	for test, tc := range map[string]struct{ section, keep string }{
-		"key with other DLLs":     {overrideKey + " 1786134207\n#time=1dd\n\"d3d11\"=\"native\"\n", `"d3d11"="native"`},
+		"key with other DLLs":     {overrideKey + " 1786134207\n#time=1dd\n\"d3d11\"=\"native\"\n", overrideKey + " 1786134207\n#time=1dd\n"},
 		"key with builtin value":  {overrideKey + " 1786134207\n\"XGameRuntime\"=\"builtin\"\n", overrideKey + " 1786134207"},
 		"key in another case":     {strings.ToLower(overrideKey) + " 1786134207\n", strings.ToLower(overrideKey)},
 		"key followed by another": {overrideKey + " 1\n\n[Software\\\\Wine\\\\Other] 2\n\"x\"=\"y\"\n", `"x"="y"`},
@@ -428,5 +431,55 @@ func TestXodusNexusGamePatchesReplacesASymlinkedDLL(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(outside); !bytes.Equal(b, patched) {
 		t.Errorf("wrote through the symlink")
+	}
+}
+
+// A patched prefix stays recorded across starts where it can't be updated
+// (its user.reg is missing, or installing fails), so delisting the game later
+// still puts the builtin back; a failed restore keeps it recorded too.
+func TestXodusNexusGamePatchesKeepsTheRecordUntilRestored(t *testing.T) {
+	record := func(h *patchHost) string {
+		b, _ := os.ReadFile(filepath.Join(h.home, ".cache", "xodus-nexus", "xgameruntime", "installed"))
+		return strings.TrimSpace(string(b))
+	}
+	for _, test := range []string{"user.reg missing", "install fails"} {
+		t.Run(test, func(t *testing.T) {
+			h := newPatchHost(t)
+			h.games(map[string]string{"g007": "007FirstLight.exe"})
+			h.publish(fakeDLL(false, "patched"), "")
+			h.run()
+			if record(h) != "g007" {
+				t.Fatalf("record %q after patching", record(h))
+			}
+			reg := filepath.Join(h.compat, "g007", "pfx", "user.reg")
+			var env []string
+			if test == "user.reg missing" {
+				if err := os.Rename(reg, reg+".away"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// A new DLL to install, which then fails.
+				h.publish(fakeDLL(false, "patched-2"), "")
+				if err := os.RemoveAll(filepath.Join(h.home, ".cache", "xodus-nexus", "xgameruntime", "nexus-xgameruntime-"+patchRuntimeTag+"-"+strings.TrimSpace(h.cmd("bash", "../../hack/nexus-xgameruntime/patch-id.sh", filepath.Join(h.share, "patches"))))); err != nil {
+					t.Fatal(err)
+				}
+				env = []string{"FAIL_CP=1"}
+			}
+			if calls := h.run(env...); record(h) != "g007" {
+				t.Fatalf("record %q after a start that couldn't update the prefix:\n%s", record(h), calls)
+			}
+			if test == "user.reg missing" {
+				if err := os.Rename(reg+".away", reg); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.write(filepath.Join(h.share, "games"), []byte("# none\n"))
+			if calls := h.run("FAIL_CP=1"); record(h) != "g007" {
+				t.Fatalf("record %q after a failed restore:\n%s", record(h), calls)
+			}
+			if calls := h.run(); !bytes.Equal(h.system32("g007"), h.builtin) || record(h) != "" {
+				t.Errorf("want the builtin back and an empty record (%q):\n%s", record(h), calls)
+			}
+		})
 	}
 }

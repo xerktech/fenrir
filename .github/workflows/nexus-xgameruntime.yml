@@ -103,7 +103,7 @@ jobs:
     # built publishes even when another's build failed (patches that no longer
     # apply to one runtime must not hold back the others); the failed build
     # still fails the run.
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.plan.outputs.tags != '[]' }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.plan.outputs.tags != '[]' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

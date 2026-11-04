@@ -192,6 +192,8 @@ for target in "${targets[@]}"; do
   pfx="${compat}/${gid}/pfx"
   if [[ ! -d "${pfx}/drive_c/windows/system32" || ! -f "${pfx}/user.reg" ]]; then
     note "${exe}: no prefix yet (it is made at first launch)"
+    # Still recorded if patched before: its System32 may hold our DLL.
+    [[ " ${before[*]} " == *" ${gid} "* ]] && after+=("${gid}")
     continue
   fi
   if ! put "${pfx}" "${patched:-${builtin}}"; then
