@@ -206,9 +206,15 @@ COPY --chmod=755 root/opt/direwolf/launch-nexus /opt/direwolf/launch-nexus
 COPY --chmod=755 root/opt/gow/nexus-startup-app.sh /opt/gow/startup-app.sh
 COPY --chmod=755 root/usr/local/bin/xodus-nexus-update /usr/local/bin/xodus-nexus-update
 COPY --chmod=755 root/etc/cont-init.d/30-xodus-nexus-update.sh /etc/cont-init.d/
+# The Library's patched-xgameruntime step, re-run at session start (XERK-2654);
+# identical to images/library's (TestXodusNexusGamePatchesMatchSessionImage).
+COPY --chmod=755 root/usr/local/bin/xodus-nexus-game-patches /usr/local/bin/xodus-nexus-game-patches
+COPY --chmod=644 root/usr/share/xodus-nexus/xgameruntime/ /usr/share/xodus-nexus/xgameruntime/
+COPY --chmod=755 root/etc/cont-init.d/31-xodus-nexus-game-patches.sh /etc/cont-init.d/
 RUN test -x /opt/xodus-nexus/AppRun && command -v gnome-keyring-daemon dbus-run-session dbus-send >/dev/null \
   && command -v python3 curl sha256sum gosu timeout >/dev/null \
-  && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/xodus-nexus' \
+  && chmod 0755 /usr/share/xodus-nexus/xgameruntime /usr/share/xodus-nexus/xgameruntime/patches \
+  && d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin /opt/direwolf /opt/xodus-nexus /usr/share/xodus-nexus' \
   && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
 
 # Sessions of one Battle.net game (XERK-2363): launch-battlenet starts the

@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Malcolm Habeeb <malcolm.habeeb@gmail.com>
+Date: Tue, 3 Nov 2026 19:29:32 -0500
+Subject: [PATCH] fix(xuser): match a catch-all "*" endpoint and report no
+ token required for it
+
+A title's catch-all "*" endpoint (HostType wildcard, no RelyingParty or
+TokenType) never matched: match_wildcard stopped once the pattern was used
+up, so a trailing '*' could not absorb the rest of the host. Such titles'
+own services then got an XSTS token for https://<host>, which XSTS
+rejects with 400, so sign-in failed (007 First Light: no online play).
+Trailing '*' now matches the rest, and hosts compare case-insensitively.
+
+A matched entry without a token type now completes with
+E_GAMEUSER_NO_TOKEN_REQUIRED, which XSAPI treats as "send no auth
+headers", instead of success with no token, which crashes 007 First
+Light at its title screen.
+
+Test: NexusAuthentication.CatchAllWildcardEndpointMatchesEveryHostWithoutAToken
+builds its endpoints directly, so it runs on stock Wine without
+Windows.Data.Json.
+---
+ src/System/XUser.cpp      | 32 +++++++++++----
+ tests/Nexus/test_user.cpp | 85 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 109 insertions(+), 8 deletions(-)
+
+diff --git a/src/System/XUser.cpp b/src/System/XUser.cpp
+index 7ea2561..768b8dc 100644
+--- a/src/System/XUser.cpp
++++ b/src/System/XUser.cpp
+@@ -1289,23 +1289,29 @@ static HRESULT user_wait_init( XUserHandle user )
+     return hr;
+ }
+ 
++/* Glob match of an endpoint host pattern ('*' any run, '?' any one character),
++ * backtracking to the most recent '*'. A trailing '*' still matches once the
++ * input is exhausted, so a title's catch-all "*" entry matches every host, as
++ * on Windows; without that, such titles fall back to an XSTS token for
++ * https://<host>, which XSTS rejects with 400. Hosts compare
++ * case-insensitively, like the exact entries in GetEndpointInfo. */
+ static BOOLEAN match_wildcard( const WCHAR *pat, UINT32 patLen, const WCHAR *inp, UINT32 inpLen )
+ {
+-    UINT32 lastMatch = -1, lastWildcard = -1, patOff = 0, inpOff = 0;
++    UINT32 lastMatch = 0, lastWildcard = ~0u, patOff = 0, inpOff = 0;
+ 
+-    while ( inpOff < inpLen && patOff < patLen )
++    while ( inpOff < inpLen )
+     {
+-        if ( pat[patOff] == '*' )
++        if ( patOff < patLen && pat[patOff] == '*' )
+         {
+             lastWildcard = patOff++;
+             lastMatch = inpOff;
+         }
+-        else if ( pat[patOff] == '?' || pat[patOff] == inp[inpOff] )
++        else if ( patOff < patLen && ( pat[patOff] == '?' || !wcsnicmp( pat + patOff, inp + inpOff, 1 ) ) )
+         {
+             patOff++;
+             inpOff++;
+         }
+-        else if ( lastWildcard != -1 )
++        else if ( lastWildcard != ~0u )
+         {
+             patOff = lastWildcard + 1;
+             inpOff = ++lastMatch;
+@@ -1313,8 +1319,9 @@ static BOOLEAN match_wildcard( const WCHAR *pat, UINT32 patLen, const WCHAR *inp
+         else
+             return FALSE;
+     }
++    while ( patOff < patLen && pat[patOff] == '*' ) patOff++;
+ 
+-    return inpOff == inpLen && patOff == patLen;
++    return patOff == patLen;
+ }
+ 
+ HRESULT WINAPI XUser::GetEndpointInfo( const char *url, struct endpoint *info )
+@@ -2218,8 +2225,17 @@ static HRESULT WINAPI token_signature_phase( XAsyncOp op, const XAsyncProviderDa
+             info.relyingParty = ownedParty;
+             info.tokenType = ownedType;
+         }
+-        if ( info.tokenType &&
+-             FAILED( hr = ( context->user )
++        /* A matched entry without a token type (a title's catch-all "*" host,
++         * with empty RelyingParty and TokenType) needs no token. Report it as
++         * E_GAMEUSER_NO_TOKEN_REQUIRED, which XSAPI treats as "send no auth
++         * headers", as on Windows; success with no token crashes 007 First
++         * Light at its title screen. */
++        if ( !WindowsGetStringLen( info.tokenType ) )
++        {
++            hr = E_GAMEUSER_NO_TOKEN_REQUIRED;
++            goto complete;
++        }
++        if ( FAILED( hr = ( context->user )
+                               ->GetAuthorization( WindowsGetStringRawBuffer( info.relyingParty, NULL ), &auth ) ) )
+             goto complete;
+ 
+diff --git a/tests/Nexus/test_user.cpp b/tests/Nexus/test_user.cpp
+index 2c2f6e9..5eb6a57 100644
+--- a/tests/Nexus/test_user.cpp
++++ b/tests/Nexus/test_user.cpp
+@@ -1315,3 +1315,88 @@ TEST( NexusOfflineIdentity, AStaleIdentityIsNotUsed )
+     EXPECT_EQ( user->SignInOffline( Unreachable ), Unreachable );
+     EXPECT_EQ( user->xuid, 0u );
+ }
++// Endpoints as a title's metadata would load them, built directly so the test
++// needs no Windows.Data.Json: an exact untyped host, typed wildcards and a
++// catch-all "*" with no relying party or token type.
++static void SetCatchAllEndpoints( XUser *user )
++{
++    struct Entry { const wchar_t *host; bool wildcard; const wchar_t *relyingParty, *tokenType; };
++    const Entry list[] = {
++        { L"untyped.example.invalid", false, nullptr, nullptr },
++        { L"*.Example.invalid", true, L"https://wild.example.invalid/", L"JWT" },
++        { L"api.trailing.invalid*", true, L"https://trailing.invalid/", L"JWT" },
++        { L"*", true, nullptr, nullptr },
++    };
++    const UINT32 count = sizeof( list ) / sizeof( list[0] );
++    user->endpoints = static_cast<endpoint *>( calloc( count, sizeof( endpoint ) ) );
++    ASSERT_NE( user->endpoints, nullptr );
++    user->endpointsLen = count;
++    for ( UINT32 i = 0; i < count; ++i )
++    {
++        auto &e = user->endpoints[i];
++        ASSERT_EQ( WindowsCreateString( L"https", 5, &e.protocol ), S_OK );
++        ASSERT_EQ( WindowsCreateString( list[i].host, wcslen( list[i].host ), &e.host ), S_OK );
++        if ( list[i].relyingParty )
++            ASSERT_EQ( WindowsCreateString( list[i].relyingParty, wcslen( list[i].relyingParty ), &e.relyingParty ), S_OK );
++        if ( list[i].tokenType )
++            ASSERT_EQ( WindowsCreateString( list[i].tokenType, wcslen( list[i].tokenType ), &e.tokenType ), S_OK );
++        e.wildcard = list[i].wildcard;
++    }
++}
++TEST( NexusAuthentication, CatchAllWildcardEndpointMatchesEveryHostWithoutAToken )
++{
++    // 007 First Light declares a catch-all "*" host with no relying party or
++    // token type after its own entries. It must match any host, in any case,
++    // and a request for it must report E_GAMEUSER_NO_TOKEN_REQUIRED (XSAPI then
++    // sends no auth headers) without asking XSTS, which rejects an invented
++    // relying party with 400. Success with no token crashes that title.
++    Apartment apartment;
++    SyntheticTransport transport;
++    XUserImpl api( transport );
++    auto user = CreateUser( transport );
++    user->initDone = 1;
++    user->initResult = S_OK;
++    SetCatchAllEndpoints( user.get() );
++
++    endpoint info{};
++    ASSERT_EQ( user->GetEndpointInfo( "https://API.example.INVALID/v1", &info ), S_OK );
++    EXPECT_STREQ( WindowsGetStringRawBuffer( info.relyingParty, nullptr ), L"https://wild.example.invalid/" );
++    // A trailing '*' still matches once the host is used up.
++    info = {};
++    ASSERT_EQ( user->GetEndpointInfo( "https://api.trailing.invalid/v1", &info ), S_OK );
++    EXPECT_STREQ( WindowsGetStringRawBuffer( info.relyingParty, nullptr ), L"https://trailing.invalid/" );
++    info = {};
++    ASSERT_EQ( user->GetEndpointInfo( "https://storage.title.example.com/saves", &info ), S_OK );
++    EXPECT_EQ( WindowsGetStringLen( info.tokenType ), 0u );
++    info = {};
++    EXPECT_EQ( user->GetEndpointInfo( "http://storage.title.example.com/saves", &info ), E_FAIL );
++
++    IXThreadingImpl *threads = nullptr;
++    ASSERT_EQ( QueryApiImpl( CLSID_XThreadingImpl, __uuidof( IXThreadingImpl ), reinterpret_cast<void **>( &threads ) ), S_OK );
++    for ( bool utf16 : { false, true } )
++        for ( const char *url : { "https://storage.title.example.com/saves", "https://untyped.example.invalid/x" } )
++        {
++            SCOPED_TRACE( std::string( url ) + ( utf16 ? " (UTF-16)" : "" ) );
++            XTaskQueueHandle queue = nullptr;
++            ASSERT_EQ( threads->XTaskQueueCreate( XTaskQueueDispatchMode::Manual, XTaskQueueDispatchMode::Manual, &queue ), S_OK );
++            XAsyncBlock block{};
++            block.queue = queue;
++            const std::wstring wide( url, url + strlen( url ) );
++            ASSERT_EQ( utf16 ? api.XUserGetTokenAndSignatureUtf16Async( user.get(), XUserGetTokenAndSignatureOptions::None, L"GET",
++                                                                       wide.c_str(), 0, nullptr, 4, "body", &block )
++                             : api.XUserGetTokenAndSignatureAsync( user.get(), XUserGetTokenAndSignatureOptions::None, "GET", url, 0,
++                                                                   nullptr, 4, "body", &block ),
++                       S_OK );
++            threads->XTaskQueueDispatch( queue, XTaskQueuePort::Work, 2000 );
++            EXPECT_EQ( threads->XAsyncGetStatus( &block, TRUE ), E_GAMEUSER_NO_TOKEN_REQUIRED );
++            while ( threads->XTaskQueueDispatch( queue, XTaskQueuePort::Completion, 0 ) ) {}
++            SIZE_T size = 77;
++            EXPECT_EQ( utf16 ? api.XUserGetTokenAndSignatureUtf16ResultSize( &block, &size )
++                             : api.XUserGetTokenAndSignatureResultSize( &block, &size ),
++                       E_GAMEUSER_NO_TOKEN_REQUIRED );
++            threads->XTaskQueueCloseHandle( queue );
++        }
++    threads->Release();
++    EXPECT_EQ( transport.rawCalls, 0u );
++    EXPECT_EQ( transport.httpCalls, 0u );
++}

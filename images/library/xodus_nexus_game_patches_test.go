@@ -483,3 +483,39 @@ func TestXodusNexusGamePatchesKeepsTheRecordUntilRestored(t *testing.T) {
 		})
 	}
 }
+
+// Sessions re-run the Library's step before the game starts (XERK-2654), so
+// the session image ships the same script, game list and patch series.
+func TestXodusNexusGamePatchesMatchSessionImage(t *testing.T) {
+	for _, f := range []string{"root/usr/local/bin/xodus-nexus-game-patches", patchesShare + "/games",
+		patchesShare + "/patches/0001-xasync-late-completion-reused-block.patch",
+		patchesShare + "/patches/0002-xuser-catch-all-endpoint.patch"} {
+		library, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		session, err := os.ReadFile("../gow-nvidia32/" + f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(library, session) {
+			t.Errorf("images/library and images/gow-nvidia32 ship different %s", f)
+		}
+	}
+	lib, _ := filepath.Glob(filepath.Join(patchesShare, "patches", "*"))
+	ses, _ := filepath.Glob(filepath.Join("..", "gow-nvidia32", patchesShare, "patches", "*"))
+	if len(lib) != len(ses) {
+		t.Errorf("patch series differ: library %d files, session %d", len(lib), len(ses))
+	}
+	dockerfile, err := os.ReadFile("../gow-nvidia32/Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"COPY --chmod=755 root/usr/local/bin/xodus-nexus-game-patches /usr/local/bin/xodus-nexus-game-patches",
+		"COPY --chmod=644 root/usr/share/xodus-nexus/xgameruntime/ /usr/share/xodus-nexus/xgameruntime/",
+		"COPY --chmod=755 root/etc/cont-init.d/31-xodus-nexus-game-patches.sh /etc/cont-init.d/"} {
+		if !strings.Contains(string(dockerfile), line) {
+			t.Errorf("the session image lacks %q", line)
+		}
+	}
+}
