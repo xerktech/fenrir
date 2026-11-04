@@ -42,6 +42,18 @@ data:
       "encoder": "nvenc"
     }
 ---
+# As games/nvidia-icd, which session Apps mount: the GPU claim's CDI spec injects
+# the NVIDIA libraries but no ICD manifests, so without these Vulkan (WiVRn's
+# compositor) runs on lavapipe and NVENC's CUDA import of its frames fails 999.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-icd
+  namespace: vr-spike
+data:
+  10_nvidia.json: '{"file_format_version": "1.0.0", "ICD": {"library_path": "libEGL_nvidia.so.0"}}'
+  nvidia_icd.json: '{"file_format_version": "1.0.1", "ICD": {"library_path": "libGLX_nvidia.so.0", "api_version": "1.4.329"}}'
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -70,7 +82,9 @@ spec:
       image: ghcr.io/xerktech/fenrir/vr-spike:xerk-2659@sha256:1ed2dd4f7fbbe83b12b6d82f5e805832d3684bac2f20a5fc9dd2c8c89b4a635f
       # The GoW entrypoint (sway, cont-init as root) is not needed: WiVRn's
       # compositor and hello_xr render offscreen through Vulkan.
-      command: ["sleep", "infinity"]
+      # WiVRn writes paired headsets' keys next to its config, so copy the
+      # read-only ConfigMap into the writable home first.
+      command: ["sh", "-c", "mkdir -p $HOME/.config/wivrn && cp /etc/wivrn/config.json $HOME/.config/wivrn/ && exec sleep infinity"]
       env:
         - name: HOME
           value: /home/vr
@@ -93,7 +107,16 @@ spec:
         - name: run
           mountPath: /run/vr
         - name: config
-          mountPath: /home/vr/.config/wivrn
+          mountPath: /etc/wivrn
+          readOnly: true
+        - name: nvidia-icd
+          mountPath: /etc/vulkan/icd.d/nvidia_icd.json
+          subPath: nvidia_icd.json
+          readOnly: true
+        - name: nvidia-icd
+          mountPath: /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+          subPath: 10_nvidia.json
+          readOnly: true
   volumes:
     - name: home
       emptyDir: {}
@@ -102,3 +125,6 @@ spec:
     - name: config
       configMap:
         name: wivrn-config
+    - name: nvidia-icd
+      configMap:
+        name: nvidia-icd
