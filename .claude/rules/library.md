@@ -106,7 +106,8 @@ paths:
     cached in the home, trusted only by GitHub's published SHA256, home touched only as abc.
   - Upstream is renaming domsvoboda/xodus-nexus to domsvoboda/nexus-launcher (Nexus 0.4.3 prepares
     for it). GitHub redirects the old name, but asset URLs then name the new one: any exact-URL check
-    must accept both, canonical first, as `xodus-nexus-backend`'s `download_repos` does.
+    must accept both, as `xodus-nexus-backend`'s `download_repos` does (all of a release's assets
+    under one name, downloaded from it; Nexus itself checks each asset alone).
   - The repo also publishes `backend-v*` and `runtime-*` releases (about three per launcher
     release): never use `releases/latest`; a cached version is fetched by its tag, not paged for.
   - The AppImage is unpacked as the desktop user, then chowned to root and made world-readable.

@@ -26,7 +26,8 @@
 # Upstream is renaming domsvoboda/xodus-nexus to domsvoboda/nexus-launcher;
 # GitHub redirects the old name's API and downloads, but asset URLs then name
 # the new repository. As Nexus 0.4.3+ (release-repositories.ts) does, exact
-# URLs under either name are accepted, the canonical one first.
+# URLs under either name are accepted; stricter than Nexus, all of a release's
+# assets must name the same one, which is also where they are downloaded from.
 releases_url="https://api.github.com/repos/domsvoboda/xodus-nexus/releases?per_page=100"
 download_repos=("domsvoboda/nexus-launcher" "domsvoboda/xodus-nexus")
 asar="${NEXUS_ASAR:-/opt/xodus-nexus/resources/app.asar}"
