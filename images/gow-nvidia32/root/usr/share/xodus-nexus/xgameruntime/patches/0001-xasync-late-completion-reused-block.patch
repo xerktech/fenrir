@@ -1,0 +1,222 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xerhab <malcolm.habeeb@gmail.com>
+Date: Fri, 30 Oct 2026 01:35:55 -0400
+Subject: [PATCH] fix(async): never let a late completion write a reused
+ XAsyncBlock
+
+A title may zero its XAsyncBlock, or start a new call on it, while the
+call on it is still pending. When that call later completed, the runtime
+mirrored its status and terminal signature into the caller's block
+anyway: a newer call on the same block was silently completed and
+orphaned, and when the newer call finished, TrySetTerminalStatus hit
+assert(m_userInternal->status == E_PENDING) (XAsync.cpp:386).
+
+Only mirror state into the caller's block while it still points at this
+call, checked again once its lock is held; the provider copy stays
+authoritative. Queue termination now cancels and completes the call
+through its provider block, so terminating the old queue cancels the old
+call instead of the newer one on the same block.
+
+A block the title has freed is still read, as before.
+
+Tests: NexusAsyncResults.LateCompletionLeavesAReusedBlockToItsNewCall,
+NexusAsyncResults.TerminatingTheOldQueueCancelsOnlyTheOldCallOnAReusedBlock.
+---
+ scripts/test-component.mjs         |  2 +-
+ scripts/test-policy.test.mjs       |  2 +-
+ src/System/Threading/XAsync.cpp    | 32 +++++++---
+ tests/Nexus/test_async_results.cpp | 94 ++++++++++++++++++++++++++++++
+ 4 files changed, 120 insertions(+), 10 deletions(-)
+
+diff --git a/scripts/test-component.mjs b/scripts/test-component.mjs
+index 580a30f..ce9d214 100644
+--- a/scripts/test-component.mjs
++++ b/scripts/test-component.mjs
+@@ -63,7 +63,7 @@ try {
+ 
+     const units = execute('unit', 'wine', [path.join(bin, 'test_xgameruntime.exe')], 120000);
+     const match = units.match(/\[\s*PASSED\s*\]\s+(\d+) tests/);
+-    if (!match || Number(match[1]) < 76 || /\[\s*(SKIPPED|FAILED)\s*\]/.test(units))
++    if (!match || Number(match[1]) < 78 || /\[\s*(SKIPPED|FAILED)\s*\]/.test(units))
+         throw Error('Missing, skipped or failed C++ unit coverage');
+     proof.results.push({name: 'cpp-unit', checks: Number(match[1]), failures: 0});
+     const identities=execute('async-identity-unit','wine',[path.join(bin,'test_nexus_async_identity.exe')]);
+diff --git a/scripts/test-policy.test.mjs b/scripts/test-policy.test.mjs
+index a5b6bd1..0974892 100644
+--- a/scripts/test-policy.test.mjs
++++ b/scripts/test-policy.test.mjs
+@@ -397,7 +397,7 @@ test('desktop streaming lifecycle never advertises remote streaming support or w
+     const features=read('src/System/XGameRuntimeFeature.cpp');
+     assert.doesNotMatch(features,/case XGameRuntimeFeature::XGameStreaming:/);
+     assert.match(read('tests/Nexus/test_optional_providers.cpp'),/ConcurrentInitializationAndTeardownNeverInventClients/);
+-    assert.match(read('scripts/test-component.mjs'),/Number\(match\[1\]\) < 76/);
++    assert.match(read('scripts/test-component.mjs'),/Number\(match\[1\]\) < 78/);
+ });
+ 
+ test('WinRT-dependent privilege validation has a separate matching-engine gate',()=>{
+diff --git a/src/System/Threading/XAsync.cpp b/src/System/Threading/XAsync.cpp
+index 6145e8d..0cc4f24 100644
+--- a/src/System/Threading/XAsync.cpp
++++ b/src/System/Threading/XAsync.cpp
+@@ -292,18 +292,32 @@ public:
+             m_internal = reinterpret_cast<AsyncBlockInternal*>(asyncBlock->internal);
+         }
+ 
++        m_userInternal = m_internal;
+         if (m_internal->signature == ASYNC_BLOCK_SIG && m_internal->state != nullptr)
+         {
+-            m_userInternal = reinterpret_cast<AsyncBlockInternal*>(m_internal->state->userAsyncBlock->internal);
+-        }
+-        else
+-        {
+-            m_userInternal = m_internal;
++            // A title may zero its block, or start a new call on it, while
++            // this call is still pending. Native XAsync then writes this
++            // call's state into a block it no longer owns, completing or
++            // orphaning the newer call. Only mirror status into the caller's
++            // block while it still points at this call. A block the title has
++            // freed is still read here, as before: that stays unsupported.
++            auto* user = reinterpret_cast<AsyncBlockInternal*>(m_internal->state->userAsyncBlock->internal);
++            if (user->signature == ASYNC_BLOCK_SIG && user->state == m_internal->state)
++            {
++                m_userInternal = user;
++            }
+         }
+ 
+         if (m_userInternal != m_internal)
+         {
+             SpinLock::Lock(m_userInternal->lock);
++            // The title, or a newer call, may have reused the block between
++            // the check above and the lock; check again under the lock.
++            if (m_userInternal->signature != ASYNC_BLOCK_SIG || m_userInternal->state != m_internal->state)
++            {
++                m_userInternal->lock.clear();
++                m_userInternal = m_internal;
++            }
+         }
+     }
+ 
+@@ -653,16 +667,18 @@ static void CALLBACK WorkerCallback(
+ 
+     if (canceled)
+     {
+-        XAsyncCancel(state->userAsyncBlock);
++        // Address the call through its own provider block: the caller's
++        // block may already belong to a newer call.
++        XAsyncCancel(&state->providerAsyncBlock);
+         HRESULT callStatus;
+         {
+-            AsyncBlockInternalGuard internal{ state->userAsyncBlock };
++            AsyncBlockInternalGuard internal{ &state->providerAsyncBlock };
+             callStatus = internal.GetStatus();
+         }
+ 
+         if (callStatus != E_ABORT)
+         {
+-            XAsyncComplete(state->userAsyncBlock, E_ABORT, 0);
++            XAsyncComplete(&state->providerAsyncBlock, E_ABORT, 0);
+         }
+     }
+     else
+diff --git a/tests/Nexus/test_async_results.cpp b/tests/Nexus/test_async_results.cpp
+index 3609ee7..598b8ad 100644
+--- a/tests/Nexus/test_async_results.cpp
++++ b/tests/Nexus/test_async_results.cpp
+@@ -117,3 +117,97 @@ TEST( NexusAsyncResults, ConcurrentResultReadersCannotConsumeTheSamePayloadTwice
+     EXPECT_EQ( payload.cleanups, 1u );
+     EXPECT_EQ( values[0] + values[1], 0x1234u );
+ }
++namespace
++{
++struct Deferred
++{
++    IXThreadingImpl *api;
++    XAsyncBlock *async = nullptr;
++    std::atomic<unsigned> cancels{ 0 }, cleanups{ 0 };
++};
++HRESULT WINAPI DeferredProvider( XAsyncOp op, const XAsyncProviderData *data )
++{
++    auto deferred = static_cast<Deferred *>( data->context );
++    switch ( op )
++    {
++    case XAsyncOp::Begin:
++        deferred->async = data->async;
++        return S_OK;
++    case XAsyncOp::Cancel:
++        // Counted only: the termination path completes the call itself.
++        ++deferred->cancels;
++        return S_OK;
++    case XAsyncOp::GetResult:
++        memset( data->buffer, 0x5A, data->bufferSize );
++        return S_OK;
++    case XAsyncOp::Cleanup:
++        ++deferred->cleanups;
++        return S_OK;
++    default:
++        return S_OK;
++    }
++}
++}
++TEST( NexusAsyncResults, LateCompletionLeavesAReusedBlockToItsNewCall )
++{
++    // A title zeroes its block and starts a new call on it while the first
++    // call is still pending. The first call must not complete the second.
++    Fixture fixture;
++    ASSERT_EQ( fixture.Initialize(), S_OK );
++    Deferred first{ fixture.api }, second{ fixture.api };
++    XAsyncBlock async{};
++    async.queue = fixture.queue;
++    ASSERT_EQ( fixture.api->XAsyncBegin( &async, &first, &payloadIdentity, "First", DeferredProvider ), S_OK );
++    ASSERT_NE( first.async, nullptr );
++    async = XAsyncBlock{};
++    async.queue = fixture.queue;
++    ASSERT_EQ( fixture.api->XAsyncBegin( &async, &second, &payloadIdentity, "Second", DeferredProvider ), S_OK );
++    ASSERT_NE( second.async, nullptr );
++
++    fixture.api->XAsyncComplete( first.async, S_OK, 0 );
++    EXPECT_EQ( first.cleanups, 1u );
++    EXPECT_EQ( fixture.api->XAsyncGetStatus( &async, FALSE ), E_PENDING );
++
++    fixture.api->XAsyncComplete( second.async, S_OK, sizeof( DWORD ) );
++    ASSERT_EQ( fixture.api->XAsyncGetStatus( &async, TRUE ), S_OK );
++    DWORD value = 0;
++    ASSERT_EQ( fixture.api->XAsyncGetResult( &async, &payloadIdentity, sizeof( value ), &value, nullptr ), S_OK );
++    EXPECT_EQ( value, 0x5A5A5A5Au );
++    EXPECT_EQ( second.cleanups, 1u );
++}
++TEST( NexusAsyncResults, TerminatingTheOldQueueCancelsOnlyTheOldCallOnAReusedBlock )
++{
++    // The first call is scheduled on its own queue; the title then reuses
++    // the block for a second call on another queue and terminates the first
++    // queue. Termination must cancel and clean up the first call only.
++    Fixture fixture;
++    ASSERT_EQ( fixture.Initialize(), S_OK );
++    XTaskQueueHandle queue = nullptr;
++    ASSERT_EQ( fixture.api->XTaskQueueCreate( XTaskQueueDispatchMode::Manual, XTaskQueueDispatchMode::Manual, &queue ), S_OK );
++    Deferred first{ fixture.api }, second{ fixture.api };
++    XAsyncBlock async{};
++    async.queue = queue;
++    ASSERT_EQ( fixture.api->XAsyncBegin( &async, &first, &payloadIdentity, "First", DeferredProvider ), S_OK );
++    ASSERT_EQ( fixture.api->XAsyncSchedule( first.async, 0 ), S_OK );
++    async = XAsyncBlock{};
++    async.queue = fixture.queue;
++    ASSERT_EQ( fixture.api->XAsyncBegin( &async, &second, &payloadIdentity, "Second", DeferredProvider ), S_OK );
++
++    ASSERT_EQ( fixture.api->XTaskQueueTerminate( queue, FALSE, nullptr, nullptr ), S_OK );
++    for ( int i = 0; i < 50; ++i )
++    {
++        fixture.api->XTaskQueueDispatch( queue, XTaskQueuePort::Work, 10 );
++        fixture.api->XTaskQueueDispatch( queue, XTaskQueuePort::Completion, 10 );
++    }
++    EXPECT_EQ( first.cancels, 1u );
++    EXPECT_EQ( first.cleanups, 1u );
++    EXPECT_EQ( second.cancels, 0u );
++    EXPECT_EQ( fixture.api->XAsyncGetStatus( &async, FALSE ), E_PENDING );
++
++    fixture.api->XAsyncComplete( second.async, S_OK, sizeof( DWORD ) );
++    ASSERT_EQ( fixture.api->XAsyncGetStatus( &async, TRUE ), S_OK );
++    DWORD value = 0;
++    ASSERT_EQ( fixture.api->XAsyncGetResult( &async, &payloadIdentity, sizeof( value ), &value, nullptr ), S_OK );
++    EXPECT_EQ( second.cleanups, 1u );
++    fixture.api->XTaskQueueCloseHandle( queue );
++}

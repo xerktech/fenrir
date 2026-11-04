@@ -1,0 +1,8 @@
+# Game executables (MicrosoftGame.config <Executable Name>) that get the
+# patched xgameruntime.dll in their own Proton prefix; see
+# xodus-nexus-game-patches. One per line. Remove a game once upstream's runtime
+# runs it, and drop the patches when this list is empty.
+#
+# 007 First Light: the XAsync fix (0001) stops its crash after sign-in; the
+# catch-all endpoint fix (0002) lets it go online (XERK-2461, XERK-2499).
+007FirstLight.exe

@@ -40,8 +40,12 @@ shopt -s nullglob
 patches=("${share}"/patches/*.patch)
 mapfile -t exes < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' "${share}/games" 2>/dev/null | grep -iE '^[A-Za-z0-9._-]+\.exe$')
 patch_id=
-# Same computation as hack/nexus-xgameruntime/patch-id.sh.
-((${#patches[@]})) && patch_id="$(cat "${patches[@]}" | sha256sum | cut -c1-12)"
+if ((${#patches[@]})); then
+  # An unreadable patch would hash to a series no release is built for.
+  cat "${patches[@]}" >/dev/null 2>&1 || give_up "cannot read the patch series"
+  # Same computation as hack/nexus-xgameruntime/patch-id.sh.
+  patch_id="$(cat "${patches[@]}" | sha256sum | cut -c1-12)"
+fi
 
 state="${HOME}/.config/xodus-nexus/launcher-state.json"
 root="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["settings"]["runtimeRoot"])' "${state}" 2>/dev/null)"
@@ -51,6 +55,17 @@ compat="$(dirname "${root}")/compatdata"
 cache="${HOME}/.cache/xodus-nexus/xgameruntime"
 # Game ids whose prefix holds a DLL this script installed.
 installed="${cache}/installed"
+
+# One run at a time over the shared home: the Library and every Nexus session
+# run this (XERK-2654), and concurrent runs would race on the prefixes' temp
+# files, user.reg and the record. The lock lives on the shared home itself.
+mkdir -p "${cache}" 2>/dev/null
+# The wait is bounded below its caller's timeout (sessions set 60 s, under
+# their 90 s cap). Children never get fd 9: a stray download must not hold it.
+wait_s="${XODUS_NEXUS_PATCH_LOCK_WAIT:-120}"
+[[ "${wait_s}" =~ ^[0-9]+$ ]] || wait_s=120
+exec 9>>"${cache}/.lock" || give_up "cannot open the lock"
+flock -w "${wait_s}" 9 || give_up "another run kept the lock for ${wait_s} s"
 
 # The active runtime: current.json's wine is <release>/files/bin/wine, and its
 # commit is the release tag (as Nexus and xodus-nexus-runtime write it).
@@ -102,7 +117,7 @@ if ((${#targets[@]})); then
     echo "$(cat "${dir}/sha256")  ${dir}/xgameruntime.dll" | sha256sum -c --status - 2>/dev/null; then
     patched="${dir}/xgameruntime.dll"
   else
-    fields="$(curl -fsSL --max-time 30 "https://api.github.com/repos/${repo}/releases/tags/${release}" 2>/dev/null |
+    fields="$(curl -fsSL --max-time 30 "https://api.github.com/repos/${repo}/releases/tags/${release}" 2>/dev/null 9>&- |
       python3 -I -c '
 import json, re, sys
 for a in json.load(sys.stdin).get("assets") or []:
@@ -116,7 +131,7 @@ for a in json.load(sys.stdin).get("assets") or []:
       read -r url size sha <<<"${fields}"
       tmp="$(mktemp -d)" || give_up "cannot make a temporary directory"
       trap 'rm -rf "${tmp}"' EXIT
-      if curl -fsSL --max-time 300 --max-filesize "${size}" -o "${tmp}/xgameruntime.dll" "${url}" &&
+      if curl -fsSL --max-time 300 --max-filesize "${size}" -o "${tmp}/xgameruntime.dll" "${url}" 9>&- &&
         echo "${sha}  ${tmp}/xgameruntime.dll" | sha256sum -c --status - &&
         ! head -c 96 "${tmp}/xgameruntime.dll" | grep -aq 'Wine builtin DLL'; then
         mkdir -p "${dir}" && mv "${tmp}/xgameruntime.dll" "${dir}/xgameruntime.dll" &&
@@ -182,7 +197,6 @@ os.replace(tmp, path)
 ' "$1" "$2"
 }
 
-mkdir -p "${cache}" 2>/dev/null
 mapfile -t before < <(grep -E '^[A-Za-z0-9_-]+$' "${installed}" 2>/dev/null)
 after=()
 declare -A listed=()

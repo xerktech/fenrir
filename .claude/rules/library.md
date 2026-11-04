@@ -149,6 +149,9 @@ paths:
     - `init-xodus-nexus-game-patches` (before the desktop) installs that exact DLL, else the runtime's
       builtin, in each listed game's prefix (`<runtimeRoot>/../compatdata/<id>/pfx`) System32, and
       sets `"xgameruntime"="native,builtin"` in that exe's DllOverrides key (adding or fixing it).
+    - The session image (`gow-nvidia32` nexus target, cont-init `31-xodus-nexus-game-patches.sh`)
+      re-runs the same script, kept identical (`TestXodusNexusGamePatchesMatchSessionImage`), before each
+      game starts, so a DLL CI publishes after a runtime update reaches the next session (XERK-2654).
     - It records the prefixes it patched (`~/.cache/xodus-nexus/xgameruntime/installed`) and puts the
       builtin back once a game is unlisted or the patches are gone; Proton never replaces a non-builtin.
     - System32, not the game folder: the GDK loads xgameruntime.dll with a System32-only search.
