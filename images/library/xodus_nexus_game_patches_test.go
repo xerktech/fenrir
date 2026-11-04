@@ -300,3 +300,133 @@ func TestXodusNexusGamePatchesNeedsAnActiveRuntime(t *testing.T) {
 		t.Errorf("changed a game's DLL without an active runtime:\n%s", calls)
 	}
 }
+
+// The per-exe key may already exist, holding other DLLs or another
+// xgameruntime value: the value is added or corrected, nothing else changes.
+func TestXodusNexusGamePatchesFixesAnExistingOverrideKey(t *testing.T) {
+	for test, tc := range map[string]struct{ section, keep string }{
+		"key with other DLLs":     {overrideKey + " 1786134207\n#time=1dd\n\"d3d11\"=\"native\"\n", `"d3d11"="native"`},
+		"key with builtin value":  {overrideKey + " 1786134207\n\"XGameRuntime\"=\"builtin\"\n", overrideKey + " 1786134207"},
+		"key in another case":     {strings.ToLower(overrideKey) + " 1786134207\n", strings.ToLower(overrideKey)},
+		"key followed by another": {overrideKey + " 1\n\n[Software\\\\Wine\\\\Other] 2\n\"x\"=\"y\"\n", `"x"="y"`},
+	} {
+		t.Run(test, func(t *testing.T) {
+			h := newPatchHost(t)
+			h.games(map[string]string{"g007": "007FirstLight.exe"})
+			reg := filepath.Join(h.compat, "g007", "pfx", "user.reg")
+			h.write(reg, []byte("WINE REGISTRY Version 2\n\n"+tc.section))
+			h.publish(fakeDLL(false, "patched"), "")
+			calls := h.run()
+			got := h.userReg("g007")
+			lower := strings.ToLower(got)
+			if strings.Count(lower, strings.ToLower(overrideKey)) != 1 || strings.Count(lower, `"xgameruntime"=`) != 1 ||
+				!strings.Contains(got, `"xgameruntime"="native,builtin"`) || !strings.Contains(got, tc.keep) {
+				t.Errorf("user.reg:\n%s\ncalls:\n%s", got, calls)
+			}
+			// The value lands inside the 007 key, before any following key.
+			at := strings.Index(lower, strings.ToLower(overrideKey))
+			next := strings.Index(got[at+1:], "\n[")
+			if v := strings.Index(got[at:], `"xgameruntime"="native,builtin"`); v < 0 || (next >= 0 && v > next+1) {
+				t.Errorf("value outside the 007 key:\n%s", got)
+			}
+		})
+	}
+}
+
+// A game patched before gets upstream's builtin back once it is no longer
+// listed, or when no patches are left; the record of patched prefixes empties.
+func TestXodusNexusGamePatchesRestoresDelistedGames(t *testing.T) {
+	for _, test := range []string{"game delisted", "patches deleted"} {
+		t.Run(test, func(t *testing.T) {
+			h := newPatchHost(t)
+			h.games(map[string]string{"g007": "007FirstLight.exe"})
+			h.publish(fakeDLL(false, "patched"), "")
+			h.run()
+			if bytes.Equal(h.system32("g007"), h.builtin) {
+				t.Fatal("not patched to start with")
+			}
+			if test == "game delisted" {
+				h.write(filepath.Join(h.share, "games"), []byte("# none\n"))
+			} else {
+				for _, p := range []string{"0001-xasync-late-completion-reused-block.patch", "0002-xuser-catch-all-endpoint.patch"} {
+					if err := os.Remove(filepath.Join(h.share, "patches", p)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			calls := h.run()
+			if !bytes.Equal(h.system32("g007"), h.builtin) || !strings.Contains(calls, "g007: no longer listed") {
+				t.Errorf("want upstream's builtin back:\n%s", calls)
+			}
+			if b, _ := os.ReadFile(filepath.Join(h.home, ".cache", "xodus-nexus", "xgameruntime", "installed")); len(b) != 0 {
+				t.Errorf("record still lists %q", b)
+			}
+		})
+	}
+}
+
+// Prefixes live beside a custom runtimeRoot, as Nexus places them.
+func TestXodusNexusGamePatchesFollowsRuntimeRoot(t *testing.T) {
+	h := newPatchHost(t)
+	old := filepath.Join(h.home, ".local", "share", "xodus-nexus")
+	moved := filepath.Join(h.dir, "nexus-data")
+	if err := os.Rename(old, moved); err != nil {
+		t.Fatal(err)
+	}
+	h.compat = filepath.Join(moved, "compatdata")
+	cur := filepath.Join(moved, "runtimes", "current.json")
+	b, err := os.ReadFile(cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.write(cur, []byte(strings.ReplaceAll(string(b), old, moved)))
+	h.games(map[string]string{"g007": "007FirstLight.exe"})
+	h.write(filepath.Join(h.home, ".config", "xodus-nexus", "launcher-state.json"),
+		[]byte(`{"settings":{"runtimeRoot":"`+filepath.Join(moved, "runtimes")+`"},"games":[{"id":"g007","path":"`+filepath.Join(h.dir, "games", "g007")+`"}]}`))
+	patched := fakeDLL(false, "patched")
+	h.publish(patched, "")
+	if calls := h.run(); !bytes.Equal(h.system32("g007"), patched) {
+		t.Errorf("custom runtimeRoot's prefix not patched:\n%s", calls)
+	}
+}
+
+// Odd entries don't stop the rest: a malformed game entry is skipped, and a
+// config naming the exe with single quotes or a subdirectory still matches.
+func TestXodusNexusGamePatchesToleratesOddEntries(t *testing.T) {
+	h := newPatchHost(t)
+	h.games(map[string]string{"g007": "007FirstLight.exe"})
+	h.write(filepath.Join(h.dir, "games", "g007", "MicrosoftGame.Config"),
+		[]byte(`<Game><ExecutableList><Executable Id='Game' Name='Retail\007FirstLight.exe'/></ExecutableList></Game>`))
+	h.write(filepath.Join(h.home, ".config", "xodus-nexus", "launcher-state.json"),
+		[]byte(`{"settings":{},"games":["bad",null,{"id":"../x","path":"/"},{"id":"g007","path":"`+filepath.Join(h.dir, "games", "g007")+`"}]}`))
+	patched := fakeDLL(false, "patched")
+	h.publish(patched, "")
+	if calls := h.run(); !bytes.Equal(h.system32("g007"), patched) || !strings.Contains(h.userReg("g007"), overrideKey) {
+		t.Errorf("odd entries stopped patching:\n%s", calls)
+	}
+}
+
+// A symlink where the DLL goes is replaced by a file, never written through.
+func TestXodusNexusGamePatchesReplacesASymlinkedDLL(t *testing.T) {
+	h := newPatchHost(t)
+	h.games(map[string]string{"g007": "007FirstLight.exe"})
+	outside := filepath.Join(h.dir, "outside.dll")
+	h.write(outside, []byte("outside"))
+	dll := filepath.Join(h.compat, "g007", "pfx", "drive_c", "windows", "system32", "xgameruntime.dll")
+	if err := os.Remove(dll); err != nil {
+		t.Fatal(err)
+	}
+	patched := fakeDLL(false, "patched")
+	h.write(outside, patched) // same content: a hash check alone would skip it
+	if err := os.Symlink(outside, dll); err != nil {
+		t.Fatal(err)
+	}
+	h.publish(patched, "")
+	calls := h.run()
+	if fi, err := os.Lstat(dll); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("DLL is still a symlink (%v):\n%s", err, calls)
+	}
+	if b, _ := os.ReadFile(outside); !bytes.Equal(b, patched) {
+		t.Errorf("wrote through the symlink")
+	}
+}

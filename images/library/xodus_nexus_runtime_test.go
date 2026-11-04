@@ -576,3 +576,51 @@ func TestXodusNexusRuntimeSkipsPruneForForeignActive(t *testing.T) {
 		t.Errorf("pruned with a foreign active runtime: %v", err)
 	}
 }
+
+// The active runtime's directory is never pruned, even when its wine fails
+// (a session may still run it) or current.json names it through "..";
+// a symlink or plain file in releases/ is not a runtime and stays too.
+func TestXodusNexusRuntimePruneKeepsActiveAndNonRuntimes(t *testing.T) {
+	for test, tc := range map[string]struct{ wine, winePath string }{
+		"active wine fails":  {`exit 1`, "releases/nexus-runtime-11.0-experimental-gold/files/bin/wine"},
+		"path through ..":    {`echo wine-10.0`, "releases/../releases/nexus-runtime-11.0-experimental-gold/files/bin/wine"},
+		"active wine normal": {`echo wine-10.0`, "releases/nexus-runtime-11.0-experimental-gold/files/bin/wine"},
+	} {
+		t.Run(test, func(t *testing.T) {
+			h := newRuntimeHost(t)
+			rel := filepath.Join(h.root, "releases")
+			bin := filepath.Join(rel, "nexus-runtime-11.0-experimental-gold", "files", "bin")
+			if err := os.MkdirAll(bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeStub(t, filepath.Join(bin, "wine"), tc.wine)
+			target := filepath.Join(h.dir, "linked-runtime")
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(rel, "nexus-runtime-11.0-experimental-glink")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rel, "nexus-runtime-11.0-experimental-gfile"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(h.root, "current.json"),
+				[]byte(`{"name":"nexus-runtime-11.0-experimental-gold","winePath":"`+filepath.Join(h.root, tc.winePath)+`"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			h.publish(runtimeArchive(t, runtimeName, "wine-11.0"), "", "")
+			calls := h.run()
+			if p := h.current(); p["name"] != runtimeName {
+				t.Fatalf("current.json %v:\n%s", p, calls)
+			}
+			for _, d := range []string{"nexus-runtime-11.0-experimental-gold", "nexus-runtime-11.0-experimental-glink", "nexus-runtime-11.0-experimental-gfile"} {
+				if _, err := os.Lstat(filepath.Join(rel, d)); err != nil {
+					t.Errorf("%s removed:\n%s", d, calls)
+				}
+			}
+			if _, err := os.Stat(target); err != nil {
+				t.Errorf("symlink target removed")
+			}
+		})
+	}
+}

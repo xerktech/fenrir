@@ -49,12 +49,12 @@ jobs:
         run: |
           set -euo pipefail
           pid="$(hack/nexus-xgameruntime/patch-id.sh images/library/root/usr/share/xodus-nexus/xgameruntime/patches)"
-          # The newest three published x86_64 runtimes: the Library installs the
-          # newest, and a pod may still run one of the previous ones.
+          # The newest two published x86_64 runtimes: the Library installs the
+          # newest, and a pod may still run the one it replaced.
           mapfile -t runtimes < <(gh api 'repos/domsvoboda/nexus-runtime/releases?per_page=30' --jq '
             [.[] | select((.draft or .prerelease) | not)
                  | select(any(.assets[]; .name | test("^nexus-runtime-[A-Za-z0-9._-]+-x86_64\\.tar\\.xz$")))]
-            | sort_by(.published_at) | reverse | .[0:3] | .[].tag_name')
+            | sort_by(.published_at) | reverse | .[0:2] | .[].tag_name')
           tags=()
           for t in "${runtimes[@]}"; do
             [[ "$t" =~ ^[A-Za-z0-9._-]+$ ]] || continue
@@ -99,8 +99,11 @@ jobs:
 
   publish:
     needs: [plan, build]
-    # Only main publishes: the Library trusts these releases.
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.plan.outputs.tags != '[]'
+    # Only main publishes: the Library trusts these releases. Each runtime that
+    # built publishes even when another's build failed (patches that no longer
+    # apply to one runtime must not hold back the others); the failed build
+    # still fails the run.
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.plan.outputs.tags != '[]' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -110,10 +113,14 @@ jobs:
         tag: ${{ fromJSON(needs.plan.outputs.tags) }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: artifact
+        # No artifact: this runtime's build failed; nothing to publish for it.
+        continue-on-error: true
         with:
           name: xgameruntime-${{ matrix.tag }}
           path: out
       - name: Publish
+        if: steps.artifact.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ matrix.tag }}

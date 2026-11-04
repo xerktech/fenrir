@@ -126,8 +126,8 @@ paths:
     launch fails "Select a Wine/Xodus Proton binary". `init-xodus-nexus-runtime` (as abc) installs
     the newest runtime release the way Nexus's `installNexus` does (XERK-2289), at every Library
     start: also over a working runtime when a newer one is published (XERK-2499).
-    - It keeps the release it replaced (a session may still run it) and deletes older
-      runtime-named dirs in `releases/`; it prunes nothing when the active wine is outside it.
+    - It keeps the release it replaced (a session may still run it, even one whose wine now fails)
+      and deletes older runtime-named dirs in `releases/`; nothing when the active wine is outside.
     - Its source order is Nexus's `checkNexus`: domsvoboda/nexus-runtime (`nexus-runtime-*`) first,
       domsvoboda/xodus-nexus (`xodus-nexus-runtime-*`) only when that repo 404s or has no release.
       Any other release-list error installs nothing (XERK-2499): the fallback runtimes are older.
@@ -136,11 +136,16 @@ paths:
     patch series in `root/usr/share/xodus-nexus/xgameruntime/` for games upstream can't run yet.
     - `games` lists executables; `patches/*.patch` apply to domsvoboda/nexus-xgameruntime.
       Remove a game once upstream runs it; delete the patches with the last game.
-    - CI (`nexus-xgameruntime.yml`, `hack/nexus-xgameruntime/build.sh`) builds the DLL per upstream
-      runtime release at the xgameruntime/wine commits its `candidate.json` pins, and publishes
+    - CI (`nexus-xgameruntime.yml`, `hack/nexus-xgameruntime/build.sh`) builds the DLL for the newest
+      two upstream runtimes at the xgameruntime/wine commits each `candidate.json` pins, and publishes
       release `nexus-xgameruntime-<runtime tag>-<patch id>` here. Exit 3: patches no longer apply.
-    - `init-xodus-nexus-game-patches` installs that exact DLL (else the runtime's builtin) in each
-      listed game's prefix `drive_c/windows/system32`, plus a per-exe `native,builtin` override.
+    - Publish runs per runtime even when another runtime's build failed (`!cancelled()`): one
+      runtime the patches don't fit must not leave the newest unpublished.
+    - `init-xodus-nexus-game-patches` (before the desktop) installs that exact DLL, else the runtime's
+      builtin, in each listed game's prefix (`<runtimeRoot>/../compatdata/<id>/pfx`) System32, and
+      sets `"xgameruntime"="native,builtin"` in that exe's DllOverrides key (adding or fixing it).
+    - It records the prefixes it patched (`~/.cache/xodus-nexus/xgameruntime/installed`) and puts the
+      builtin back once a game is unlisted or the patches are gone; Proton never replaces a non-builtin.
     - System32, not the game folder: the GDK loads xgameruntime.dll with a System32-only search.
       Proton's prefix upgrade keeps a replaced builtin, so runtime updates don't undo it.
     - Never edit a prefix's `user.reg` while a session runs in it: Wine writes its in-memory

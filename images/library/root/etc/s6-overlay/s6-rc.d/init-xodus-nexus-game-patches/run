@@ -2,8 +2,9 @@
 # shellcheck shell=bash
 
 # Installs the patched xgameruntime.dll for the listed games after the runtime
-# is in place; see xodus-nexus-game-patches. Works only in the desktop user's
-# home, so it runs as that user.
+# is in place and before the desktop (and so Nexus) starts; see
+# xodus-nexus-game-patches. Works only in the desktop user's home, so it runs as
+# that user.
 #
 # Never exits non-zero: a failed oneshot stops s6 starting the desktop and
 # leaves the pod Running but never Ready, which would hold the Steam lock.

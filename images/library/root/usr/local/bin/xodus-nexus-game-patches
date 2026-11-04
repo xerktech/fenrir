@@ -7,45 +7,50 @@
 # launcher and backend) stays upstream's.
 #
 # Run as the desktop user by init-xodus-nexus-game-patches, after the runtime
-# is installed or updated. Per listed game with a prefix:
+# is installed or updated and before Nexus starts. Per listed game with a prefix:
 #   - the DLL CI built for exactly this runtime and this image's patch series
 #     (release nexus-xgameruntime-<runtime tag>-<patch id> in this repo, checked
 #     against GitHub's published SHA-256), else upstream's builtin from the
 #     active runtime, so a DLL built for another runtime never stays installed;
 #   - goes to <prefix>/drive_c/windows/system32: the GDK loads xgameruntime.dll
 #     with a System32-only search, so a copy in the game folder is never seen;
-#   - and a per-exe DllOverrides entry (native,builtin) in the prefix's user.reg
+#   - and "xgameruntime"="native,builtin" in the prefix's per-exe DllOverrides
 #     makes Wine load it. With upstream's builtin there, Wine loads its builtin.
-# Proton's prefix upgrade keeps a replaced builtin ("builtin library was
-# replaced"), so a runtime update does not undo this; the next start does.
+# A prefix it patched before whose game is no longer listed (or with no
+# patches left) gets the builtin back. Proton's prefix upgrade keeps a replaced
+# builtin ("builtin library was replaced"), so only this script changes it.
 #
 # A Wine session running in that prefix while this edits user.reg can write its
 # in-memory registry back and drop the entry; the next start adds it again.
 #
-# Never exits non-zero: any failure leaves the game on upstream's DLL.
+# Never exits non-zero: any failure leaves the game on the DLL it has.
 
 repo="xerktech/fenrir"
 # The image's patch series and game list (overridable for its tests).
 share="${XODUS_NEXUS_PATCH_SHARE:-/usr/share/xodus-nexus/xgameruntime}"
 
 note() { echo "xodus-nexus-game-patches: $*"; }
+warn() { echo "xodus-nexus-game-patches: $*" >&2; }
 give_up() {
-  echo "xodus-nexus-game-patches: $*; games keep their current xgameruntime.dll" >&2
+  warn "$*; games keep their current xgameruntime.dll"
   exit 0
 }
 
 shopt -s nullglob
 patches=("${share}"/patches/*.patch)
-((${#patches[@]})) || give_up "no patches"
 mapfile -t exes < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' "${share}/games" 2>/dev/null | grep -iE '^[A-Za-z0-9._-]+\.exe$')
-((${#exes[@]})) || give_up "no games listed"
+patch_id=
 # Same computation as hack/nexus-xgameruntime/patch-id.sh.
-patch_id="$(cat "${patches[@]}" | sha256sum | cut -c1-12)"
+((${#patches[@]})) && patch_id="$(cat "${patches[@]}" | sha256sum | cut -c1-12)"
 
 state="${HOME}/.config/xodus-nexus/launcher-state.json"
 root="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["settings"]["runtimeRoot"])' "${state}" 2>/dev/null)"
 [[ "${root}" == /* ]] || root="${HOME}/.local/share/xodus-nexus/runtimes"
-compat="${HOME}/.local/share/xodus-nexus/compatdata"
+# As Nexus places prefixes: <runtimeRoot>/../compatdata/<game id>.
+compat="$(dirname "${root}")/compatdata"
+cache="${HOME}/.cache/xodus-nexus/xgameruntime"
+# Game ids whose prefix holds a DLL this script installed.
+installed="${cache}/installed"
 
 # The active runtime: current.json's wine is <release>/files/bin/wine, and its
 # commit is the release tag (as Nexus and xodus-nexus-runtime write it).
@@ -57,38 +62,48 @@ print(p["winePath"], p["commit"])' "${root}/current.json" 2>/dev/null) || give_u
 builtin="${wine%/bin/wine}/lib/wine/x86_64-windows/xgameruntime.dll"
 head -c 96 "${builtin}" 2>/dev/null | grep -aq 'Wine builtin DLL' || give_up "the runtime has no builtin xgameruntime.dll"
 
-# The listed games Nexus installed: id and install path from its state, the
-# executable names from each game's MicrosoftGame.config.
-mapfile -t targets < <(python3 -I -c '
+# The listed games Nexus installed (id and path from its state), matched on the
+# executable names in each game's MicrosoftGame.config, spelled as the config
+# spells them: the override key is the process name.
+targets=()
+if [[ -n "${patch_id}" ]] && ((${#exes[@]})); then
+  mapfile -t targets < <(python3 -I -c '
 import glob, json, os, re, sys
 state, wanted = sys.argv[1], {e.lower() for e in sys.argv[2:]}
-for g in json.load(open(state)).get("games") or []:
+games = json.load(open(state)).get("games")
+for g in games if isinstance(games, list) else []:
+    if not isinstance(g, dict):
+        continue
     gid, path = g.get("id"), g.get("path")
     if not isinstance(gid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", gid) or not isinstance(path, str):
         continue
+    names = set()
     for cfg in glob.glob(os.path.join(glob.escape(path), "[Mm]icrosoft[Gg]ame.[Cc]onfig")):
         try:
             text = open(cfg, encoding="utf-8", errors="replace").read()
         except OSError:
             continue
-        # Kept as the config spells it: the override key is the process name.
-        names = {n for n in re.findall(r"<Executable\s[^>]*?\bName=\"([^\"]+)\"", text)
-                 if re.fullmatch(r"[A-Za-z0-9._-]+\.exe", n, re.I)}
-        for exe in sorted(n for n in names if n.lower() in wanted):
-            print(gid, exe)
+        for _, name in re.findall(r"<Executable\s[^>]*?\bName\s*=\s*([\"\x27])(.*?)\1", text):
+            name = re.split(r"[\\/]", name)[-1]
+            if re.fullmatch(r"[A-Za-z0-9._-]+\.exe", name, re.I) and name.lower() in wanted:
+                names.add(name)
+    for exe in sorted(names):
+        print(gid, exe)
 ' "${state}" "${exes[@]}" 2>/dev/null)
-((${#targets[@]})) || { note "no listed game is installed"; exit 0; }
+fi
 
 # The patched DLL for this runtime and patch series, cached per release.
-release="nexus-xgameruntime-${tag}-${patch_id}"
-cache="${HOME}/.cache/xodus-nexus/xgameruntime/${release}"
 patched=
-if [[ -f "${cache}/xgameruntime.dll" && -f "${cache}/sha256" ]] &&
-  echo "$(cat "${cache}/sha256")  ${cache}/xgameruntime.dll" | sha256sum -c --status - 2>/dev/null; then
-  patched="${cache}/xgameruntime.dll"
-else
-  fields="$(curl -fsSL --max-time 30 "https://api.github.com/repos/${repo}/releases/tags/${release}" 2>/dev/null |
-    python3 -I -c '
+release=
+if ((${#targets[@]})); then
+  release="nexus-xgameruntime-${tag}-${patch_id}"
+  dir="${cache}/${release}"
+  if [[ -f "${dir}/xgameruntime.dll" && -f "${dir}/sha256" ]] &&
+    echo "$(cat "${dir}/sha256")  ${dir}/xgameruntime.dll" | sha256sum -c --status - 2>/dev/null; then
+    patched="${dir}/xgameruntime.dll"
+  else
+    fields="$(curl -fsSL --max-time 30 "https://api.github.com/repos/${repo}/releases/tags/${release}" 2>/dev/null |
+      python3 -I -c '
 import json, re, sys
 for a in json.load(sys.stdin).get("assets") or []:
     url, digest, size = a.get("browser_download_url") or "", a.get("digest") or "", a.get("size")
@@ -97,47 +112,110 @@ for a in json.load(sys.stdin).get("assets") or []:
         print(url, size, digest.removeprefix("sha256:"))
         break
 ' 2>/dev/null)"
-  if [[ -n "${fields}" ]]; then
-    read -r url size sha <<<"${fields}"
-    tmp="$(mktemp -d)" || give_up "cannot make a temporary directory"
-    trap 'rm -rf "${tmp}"' EXIT
-    if curl -fsSL --max-time 300 --max-filesize "${size}" -o "${tmp}/xgameruntime.dll" "${url}" &&
-      echo "${sha}  ${tmp}/xgameruntime.dll" | sha256sum -c --status - &&
-      ! head -c 96 "${tmp}/xgameruntime.dll" | grep -aq 'Wine builtin DLL'; then
-      mkdir -p "${cache}" && mv "${tmp}/xgameruntime.dll" "${cache}/xgameruntime.dll" &&
-        echo "${sha}" >"${cache}/sha256" && patched="${cache}/xgameruntime.dll"
+    if [[ -n "${fields}" ]]; then
+      read -r url size sha <<<"${fields}"
+      tmp="$(mktemp -d)" || give_up "cannot make a temporary directory"
+      trap 'rm -rf "${tmp}"' EXIT
+      if curl -fsSL --max-time 300 --max-filesize "${size}" -o "${tmp}/xgameruntime.dll" "${url}" &&
+        echo "${sha}  ${tmp}/xgameruntime.dll" | sha256sum -c --status - &&
+        ! head -c 96 "${tmp}/xgameruntime.dll" | grep -aq 'Wine builtin DLL'; then
+        mkdir -p "${dir}" && mv "${tmp}/xgameruntime.dll" "${dir}/xgameruntime.dll" &&
+          echo "${sha}" >"${dir}/sha256" && patched="${dir}/xgameruntime.dll"
+      else
+        warn "${release} did not download or verify"
+      fi
     else
-      echo "xodus-nexus-game-patches: ${release} did not download or verify" >&2
+      note "no ${release} release yet; listed games get upstream's builtin"
     fi
-  else
-    note "no ${release} release yet; listed games get upstream's builtin"
   fi
 fi
-source_dll="${patched:-${builtin}}"
-want="$(sha256sum "${source_dll}" | cut -d' ' -f1)"
 
+# put PREFIX SOURCE: installs SOURCE as the prefix's System32 xgameruntime.dll
+# unless it is already there. Replaced by rename: a running game keeps the file
+# it loaded. A symlink there is replaced, never followed.
+put() {
+  local sys32="$1/drive_c/windows/system32" want
+  want="$(sha256sum "$2" | cut -d' ' -f1)"
+  [[ ! -L "${sys32}/xgameruntime.dll" &&
+    "$(sha256sum "${sys32}/xgameruntime.dll" 2>/dev/null | cut -d' ' -f1)" == "${want}" ]] && return 0
+  if cp "$2" "${sys32}/.xgameruntime.dll.direwolf" && chmod 0644 "${sys32}/.xgameruntime.dll.direwolf" &&
+    mv -f "${sys32}/.xgameruntime.dll.direwolf" "${sys32}/xgameruntime.dll"; then
+    return 0
+  fi
+  rm -f "${sys32}/.xgameruntime.dll.direwolf"
+  return 1
+}
+
+# override USER_REG EXE: "xgameruntime"="native,builtin" in that exe's
+# DllOverrides key, adding the key, adding the value to an existing key, or
+# correcting another value. Wine's format: a "[key] timestamp" line, an
+# optional "#time=" line, then "name"="value" lines up to the next key; keys
+# and value names compare case-insensitively.
+override() {
+  python3 -I -c '
+import os, re, sys, time
+path, exe = sys.argv[1:]
+key = r"Software\\Wine\\AppDefaults\\" + exe + r"\\DllOverrides"
+want = "\"xgameruntime\"=\"native,builtin\""
+lines = open(path, encoding="utf-8", errors="surrogateescape").read().split("\n")
+head = re.compile(r"\[" + re.escape(key) + r"\](\s.*)?$", re.I)
+value = re.compile(r"\"xgameruntime\"=", re.I)
+at = next((i for i, l in enumerate(lines) if head.match(l)), None)
+if at is None:
+    if lines and lines[-1] == "":
+        lines.pop()
+    lines += ["", "[" + key + "] " + str(int(time.time())), want, ""]
+else:
+    end = next((i for i in range(at + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+    found = next((i for i in range(at + 1, end) if value.match(lines[i])), None)
+    if found is not None and lines[found] == want:
+        sys.exit(0)
+    if found is not None:
+        lines[found] = want
+    else:
+        lines.insert(at + 2 if at + 1 < end and lines[at + 1].startswith("#time=") else at + 1, want)
+tmp = path + ".direwolf"
+with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as f:
+    f.write("\n".join(lines))
+os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+os.replace(tmp, path)
+' "$1" "$2"
+}
+
+mkdir -p "${cache}" 2>/dev/null
+mapfile -t before < <(grep -E '^[A-Za-z0-9_-]+$' "${installed}" 2>/dev/null)
+after=()
+declare -A listed=()
 for target in "${targets[@]}"; do
   read -r gid exe <<<"${target}"
+  listed["${gid}"]=1
   pfx="${compat}/${gid}/pfx"
-  sys32="${pfx}/drive_c/windows/system32"
-  [[ -d "${sys32}" && -f "${pfx}/user.reg" ]] || { note "${exe}: no prefix yet (it is made at first launch)"; continue; }
-  if [[ -L "${sys32}/xgameruntime.dll" || "$(sha256sum "${sys32}/xgameruntime.dll" 2>/dev/null | cut -d' ' -f1)" != "${want}" ]]; then
-    # Replaced by rename: a running game keeps the file it loaded.
-    if ! { cp "${source_dll}" "${sys32}/.xgameruntime.dll.direwolf" &&
-      chmod 0644 "${sys32}/.xgameruntime.dll.direwolf" &&
-      mv -f "${sys32}/.xgameruntime.dll.direwolf" "${sys32}/xgameruntime.dll"; }; then
-      rm -f "${sys32}/.xgameruntime.dll.direwolf"
-      echo "xodus-nexus-game-patches: ${exe}: cannot install the DLL" >&2
-      continue
-    fi
+  if [[ ! -d "${pfx}/drive_c/windows/system32" || ! -f "${pfx}/user.reg" ]]; then
+    note "${exe}: no prefix yet (it is made at first launch)"
+    continue
   fi
-  # Wine's registry format: a key line with a timestamp, then values. Keys are
-  # matched case-insensitively; append only when the key is missing.
-  key="[Software\\\\Wine\\\\AppDefaults\\\\${exe}\\\\DllOverrides]"
-  if ! grep -qiF "${key}" "${pfx}/user.reg"; then
-    printf '\n%s %s\n"xgameruntime"="native,builtin"\n' "${key}" "$(date +%s)" >>"${pfx}/user.reg" ||
-      echo "xodus-nexus-game-patches: ${exe}: cannot add the DLL override" >&2
+  if ! put "${pfx}" "${patched:-${builtin}}"; then
+    warn "${exe}: cannot install the DLL"
+    [[ " ${before[*]} " == *" ${gid} "* ]] && after+=("${gid}")
+    continue
   fi
+  override "${pfx}/user.reg" "${exe}" || warn "${exe}: cannot set the DLL override"
+  [[ -n "${patched}" ]] && after+=("${gid}")
   note "${exe}: $([[ -n "${patched}" ]] && echo "patched ${release}" || echo "upstream builtin ${tag}")"
 done
+# Prefixes patched before that are no longer listed get upstream's builtin back.
+for gid in "${before[@]}"; do
+  [[ -n "${listed[${gid}]:-}" ]] && continue
+  pfx="${compat}/${gid}/pfx"
+  [[ -d "${pfx}/drive_c/windows/system32" ]] || continue
+  if put "${pfx}" "${builtin}"; then
+    note "${gid}: no longer listed; upstream builtin ${tag}"
+  else
+    warn "${gid}: cannot restore upstream's builtin"
+    after+=("${gid}")
+  fi
+done
+for gid in "${after[@]}"; do echo "${gid}"; done >"${installed}.tmp" 2>/dev/null &&
+  mv -f "${installed}.tmp" "${installed}" 2>/dev/null
+((${#targets[@]})) || note "no listed game is installed"
 exit 0

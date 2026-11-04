@@ -60,11 +60,17 @@ print(p["winePath"], p.get("name") or "")' "${root}/current.json" 2>/dev/null)
 # A working runtime is kept unless a newer release installs cleanly. Its
 # release directory comes from its wine path, which is what a running session
 # uses; pruning is skipped when that is not one of releases/<dir>.
-active_dir=
+# Its directory is kept from pruning even when its wine fails: a session may
+# still be running it. The path is normalized first, so "releases/../x" is not
+# taken for releases/x's sibling.
+active_dir="$(python3 -I -c '
+import os, re, sys
+wine, releases = os.path.normpath(sys.argv[1]), os.path.normpath(sys.argv[2])
+parts = os.path.relpath(wine, releases).split(os.sep)
+if len(parts) == 4 and parts[1:] == ["files", "bin", "wine"] and re.fullmatch(r"[A-Za-z0-9._-]+", parts[0]) and parts[0] not in (".", ".."):
+    print(parts[0])' "${wine}" "${root}/releases" 2>/dev/null)"
 if valid_wine "${wine}"; then
   active="${active_name:-${wine}}"
-  [[ "${wine}" == "${root}"/releases/*/files/bin/wine ]] && active_dir="${wine#"${root}"/releases/}" &&
-    active_dir="${active_dir%%/*}"
 fi
 
 releases="$(mktemp)" || give_up "cannot make a temporary file"
@@ -191,6 +197,7 @@ with os.fdopen(fd, "w") as f:
 os.replace(path + ".tmp", path)
 ' "${release}" "${wine}" "${tag}" "${root}/current.json" || give_up "cannot write current.json"
 echo "xodus-nexus-runtime: installed ${release}${active:+, replacing ${active}}"
+# A working runtime outside releases/: which directory a session uses is unknown.
 [[ -z "${active}" || -n "${active_dir}" ]] || exit 0
 
 # Older runtime releases go: everything but the new one and the one it
