@@ -23,8 +23,13 @@
 #
 # Never exits non-zero: any failure keeps the installed backend.
 
+# Upstream is renaming domsvoboda/xodus-nexus to domsvoboda/nexus-launcher;
+# GitHub redirects the old name's API and downloads, but asset URLs then name
+# the new repository. As Nexus 0.4.3+ (release-repositories.ts) does, exact
+# URLs under either name are accepted; stricter than Nexus, all of a release's
+# assets must name the same one, which is also where they are downloaded from.
 releases_url="https://api.github.com/repos/domsvoboda/xodus-nexus/releases?per_page=100"
-download_url="https://github.com/domsvoboda/xodus-nexus/releases/download"
+download_repos=("domsvoboda/nexus-launcher" "domsvoboda/xodus-nexus")
 asar="${NEXUS_ASAR:-/opt/xodus-nexus/resources/app.asar}"
 managed="${HOME}/.config/xodus-nexus/xodus-backends"
 
@@ -82,10 +87,11 @@ fi
 
 releases="$(curl -fsSL --max-time 30 "${releases_url}")" || give_up "cannot read the releases"
 # The backend releases at or above the minimum that carry every asset Nexus
-# requires, at the URLs Nexus expects, newest first: one "tag version" a line.
+# requires, at the URLs Nexus expects (all under one of download_repos), newest
+# first: one "tag version download-base" a line.
 candidates="$(python3 -I -c '
 import json, re, sys
-minimum, base = sys.argv[1:]
+minimum, *repos = sys.argv[1:]
 def key(v):
     return tuple(int(n) for n in v.split("."))
 found = []
@@ -98,15 +104,17 @@ for r in json.load(sys.stdin):
         continue
     package = f"xodus-nexus-backend-{m[1]}-linux-x86_64"
     urls = {a.get("name"): a.get("browser_download_url") for a in r.get("assets") or []}
-    if not all(urls.get(package + s) == f"{base}/{tag}/{package}{s}"
-               for s in (".tar.xz", ".manifest.json", ".sha512sum", "-source.tar.xz", "-source.sha512sum")):
+    base = next((b for b in (f"https://github.com/{repo}/releases/download" for repo in repos)
+                 if all(urls.get(package + s) == f"{b}/{tag}/{package}{s}"
+                        for s in (".tar.xz", ".manifest.json", ".sha512sum", "-source.tar.xz", "-source.sha512sum"))), None)
+    if base is None:
         continue
-    found.append((key(m[1]), tag, m[1]))
+    found.append((key(m[1]), tag, m[1], base))
 if not found:
     sys.exit(1)
-for _, tag, version in sorted(found, reverse=True):
-    print(tag, version)
-' "${minimum}" "${download_url}" <<<"${releases}" 2>/dev/null)" ||
+for _, tag, version, base in sorted(found, reverse=True):
+    print(tag, version, base)
+' "${minimum}" "${download_repos[@]}" <<<"${releases}" 2>/dev/null)" ||
   give_up "cannot find a backend release for launcher backend ${minimum}"
 
 older() {
@@ -120,7 +128,7 @@ trap 'rm -rf "${staging}"' EXIT
 # The newest release on the launcher's launch contract, its manifest valid as
 # Nexus validates it. Stops at the installed version: nothing older replaces it.
 tag=
-while read -r candidate version; do
+while read -r candidate version download_url; do
   if [[ "${installed}" != - ]] && older "${version}" "${installed}"; then
     break
   fi

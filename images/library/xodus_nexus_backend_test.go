@@ -81,6 +81,9 @@ type backendRelease struct {
 	manifest          func(map[string]any)
 	sum               string // the .sha512sum's content; "" for the archive's own
 	missing           string // an asset suffix left out of the release
+	repo              string // the repository its asset URLs name; "" for domsvoboda/xodus-nexus
+	otherRepo         string // an asset suffix whose URL names the other repository
+	urlSuffix         string // appended to every asset URL (a near miss of the exact form)
 }
 
 // backendHost is a desktop home, an installed launcher and a fake GitHub.
@@ -104,7 +107,7 @@ func newBackendHost(t *testing.T) *backendHost {
 	// last component, as GitHub serves release assets.
 	writeStub(t, filepath.Join(bin, "curl"), `for a; do [ "$prev" = -o ] && out=$a; prev=$a; url=$a; done
 case "$url" in https://api.github.com/*) echo "releases" >>"$LOG"; exec cat "$FAKE_GH/releases.json";; esac
-echo "download ${url##*/}" >>"$LOG"
+echo "download ${url##*/}" >>"$LOG"; echo "url $url" >>"$LOG"
 f="$FAKE_GH/${url##*/}"; [ -f "$f" ] || exit 22
 if [ -n "$out" ]; then cp "$f" "$out"; else cat "$f"; fi`)
 	h := &backendHost{t: t, dir: dir, home: filepath.Join(dir, "home"), log: filepath.Join(dir, "log"),
@@ -242,8 +245,15 @@ func (h *backendHost) publish(releases ...backendRelease) {
 			if err = os.WriteFile(filepath.Join(h.gh, pkg+suffix), content, 0o600); err != nil {
 				t.Fatal(err)
 			}
+			repo := r.repo
+			if repo == "" {
+				repo = "domsvoboda/xodus-nexus"
+			}
+			if suffix == r.otherRepo {
+				repo = map[string]string{"domsvoboda/xodus-nexus": "domsvoboda/nexus-launcher", "domsvoboda/nexus-launcher": "domsvoboda/xodus-nexus"}[repo]
+			}
 			listed = append(listed, map[string]any{"name": pkg + suffix,
-				"browser_download_url": "https://github.com/domsvoboda/xodus-nexus/releases/download/" + tag + "/" + pkg + suffix})
+				"browser_download_url": "https://github.com/" + repo + "/releases/download/" + tag + "/" + pkg + suffix + r.urlSuffix})
 		}
 		list = append(list, map[string]any{"tag_name": tag, "assets": listed})
 	}
@@ -310,7 +320,8 @@ func TestXodusNexusBackendUpdatesOldBackend(t *testing.T) {
 		backendRelease{version: "0.2.13", contract: "linux-run-v25"},
 		backendRelease{version: "0.2.14", contract: "linux-run-v25", missing: "-source.tar.xz"})
 	calls := h.run()
-	if !strings.Contains(calls, "updated the backend 0.2.11 -> 0.2.13") {
+	if !strings.Contains(calls, "updated the backend 0.2.11 -> 0.2.13") ||
+		!strings.Contains(calls, "url https://github.com/domsvoboda/xodus-nexus/releases/download/backend-v0.2.13/xodus-nexus-backend-0.2.13-linux-x86_64.tar.xz\n") {
 		t.Fatalf("calls:\n%s", calls)
 	}
 	p := h.current()
@@ -692,5 +703,32 @@ func TestXodusNexusBackendRepairsMetadata(t *testing.T) {
 				t.Errorf("written through to %q", b)
 			}
 		})
+	}
+}
+
+// Upstream is renaming domsvoboda/xodus-nexus to domsvoboda/nexus-launcher;
+// GitHub then lists asset URLs under the new name. A release whose assets all
+// name either repository installs, downloaded from that repository, as Nexus
+// 0.4.3+ accepts. Stricter than Nexus, one mixing the two names is refused, as
+// is any URL that only nearly matches the exact form.
+func TestXodusNexusBackendAcceptsTheRenamedRepository(t *testing.T) {
+	h := newBackendHost(t)
+	h.pointer(oldBackend)
+	h.publish(backendRelease{version: "0.2.12", contract: "linux-run-v25"},
+		backendRelease{version: "0.2.13", contract: "linux-run-v25", repo: "domsvoboda/nexus-launcher"},
+		backendRelease{version: "0.2.14", contract: "linux-run-v25", repo: "domsvoboda/nexus-launcher", otherRepo: ".sha512sum"},
+		backendRelease{version: "0.2.15", contract: "linux-run-v25", repo: "domsvoboda/nexus-launcher", urlSuffix: "?x"})
+	calls := h.run()
+	if p := h.current(); p["version"] != "0.2.13" || !strings.Contains(calls, "updated the backend 0.2.11 -> 0.2.13") {
+		t.Errorf("want 0.2.13 from the renamed repository, not the mixed 0.2.14 or the near-miss 0.2.15 (%v):\n%s", p, calls)
+	}
+	want := "url https://github.com/domsvoboda/nexus-launcher/releases/download/backend-v0.2.13/xodus-nexus-backend-0.2.13-linux-x86_64"
+	for _, s := range []string{".manifest.json", ".sha512sum", ".tar.xz"} {
+		if !strings.Contains(calls, want+s+"\n") {
+			t.Errorf("want %s downloaded from the renamed repository:\n%s", s, calls)
+		}
+	}
+	if strings.Contains(calls, "url https://github.com/domsvoboda/xodus-nexus/") {
+		t.Errorf("downloaded from the old repository:\n%s", calls)
 	}
 }
