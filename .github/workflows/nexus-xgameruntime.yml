@@ -88,6 +88,9 @@ jobs:
           # As nexus-runtime and upstream's CI: the posix thread model.
           sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
           sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+          # Ubuntu's wine64-tools puts widl in /usr/lib/wine, off PATH.
+          echo /usr/lib/wine >>"$GITHUB_PATH"
+          test -x /usr/lib/wine/widl || command -v widl
       - name: Build
         env:
           TAG: ${{ matrix.tag }}
