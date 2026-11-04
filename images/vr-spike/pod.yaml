@@ -79,7 +79,7 @@ spec:
     fsGroup: 1000
   containers:
     - name: wivrn
-      image: ghcr.io/xerktech/fenrir/vr-spike:xerk-2659@sha256:1ed2dd4f7fbbe83b12b6d82f5e805832d3684bac2f20a5fc9dd2c8c89b4a635f
+      image: ghcr.io/xerktech/fenrir/vr-spike:xerk-2659@sha256:a669e5eb568c9608c1a13451d45c035b8d05cf51214b3b5bb9a822edf88844eb
       # The GoW entrypoint (sway, cont-init as root) is not needed: WiVRn's
       # compositor and hello_xr render offscreen through Vulkan.
       # WiVRn writes paired headsets' keys next to its config, so copy the
