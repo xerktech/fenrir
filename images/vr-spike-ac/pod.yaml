@@ -1,0 +1,111 @@
+# XERK-2660 VR spike (scratch): one hand-written pod in games (the PVCs are there) on talos04
+# running WiVRn + a headless sway desktop + Steam + Assetto Corsa as uid 1000.
+# Unlike XERK-2659 it is user-namespaced and NOT host-networked, like the split App pod
+# (XERK-1920): Steam's bwrap needs hostUsers:false + procMount Unmasked + seccomp Unconfined,
+# which the apiserver refuses with hostNetwork. WiVRn's one port reaches the LAN by hostPort.
+# Mounts the shared Steam home/games claims: never run it while the shared Library or a
+# shared-library Session runs (one Steam per home, .claude/rules/library.md).
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: xerk2660-gpu
+  namespace: games
+spec:
+  devices:
+    requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          capacity:
+            requests:
+              memory: 12Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: xerk2660-vr
+  namespace: games
+data:
+  sway.conf: |
+    output HEADLESS-1 resolution 1920x1080
+    xwayland enable
+    default_border none
+  wivrn.json: |
+    {
+      "port": 20034,
+      "publish-service": "none",
+      "encoder": "nvenc",
+      "openvr-compat-path": "/opt/xrizer"
+    }
+  start-desktop.sh: |
+    # Run as uid 1000 via kubectl exec; logs go to $HOME/xerk2660/logs.
+    set -u
+    L=$HOME/xerk2660/logs; mkdir -p "$L" "$HOME/.config/wivrn"
+    [ -f "$HOME/.config/wivrn/config.json" ] || cp /etc/xerk2660/wivrn.json "$HOME/.config/wivrn/config.json"
+    dbus-daemon --session --address="unix:path=$XDG_RUNTIME_DIR/bus" --fork --print-pid > "$L/dbus.pid"
+    WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 nohup sway -c /etc/xerk2660/sway.conf > "$L/sway.log" 2>&1 &
+    for i in $(seq 30); do [ -S "$XDG_RUNTIME_DIR/wayland-1" ] && break; sleep 1; done
+    ls -la "$XDG_RUNTIME_DIR"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: xerk2660-vr
+  namespace: games
+  labels: {app: xerk2660-vr}
+spec:
+  hostUsers: false
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: talos04.xerktech.com
+  tolerations:
+    - {key: nvidia.com/gpu, operator: Equal, value: present, effect: NoSchedule}
+  resourceClaims:
+    - name: gpu
+      resourceClaimName: xerk2660-gpu
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile: {type: Unconfined}
+    appArmorProfile: {type: Unconfined}
+  containers:
+    - name: vr
+      image: ghcr.io/xerktech/fenrir/vr-spike:xerk-2660
+      imagePullPolicy: Always
+      command: ["sleep", "infinity"]
+      env:
+        - {name: HOME, value: /home/retro}
+        - {name: USER, value: retro}
+        - {name: XDG_RUNTIME_DIR, value: /run/vr}
+        - {name: WAYLAND_DISPLAY, value: wayland-1}
+        - {name: DISPLAY, value: ":0"}
+        - {name: DBUS_SESSION_BUS_ADDRESS, value: "unix:path=/run/vr/bus"}
+        - {name: NVIDIA_DRIVER_CAPABILITIES, value: all}
+        - {name: GBM_BACKENDS_PATH, value: "/usr/lib/gbm:/usr/lib/x86_64-linux-gnu/gbm"}
+      ports:
+        - {name: wivrn-tcp, containerPort: 20034, hostPort: 20034, protocol: TCP}
+        - {name: wivrn-udp, containerPort: 20034, hostPort: 20034, protocol: UDP}
+      securityContext:
+        allowPrivilegeEscalation: false
+        procMount: Unmasked
+        capabilities: {drop: ["ALL"]}
+      resources:
+        requests: {cpu: "8", memory: 16Gi}
+        limits: {cpu: "8", memory: 16Gi}
+        claims: [{name: gpu}]
+      volumeMounts:
+        - {name: steam-home, mountPath: /home/retro}
+        - {name: games, mountPath: /games}
+        - {name: run, mountPath: /run/vr}
+        - {name: dshm, mountPath: /dev/shm}
+        - {name: cfg, mountPath: /etc/xerk2660, readOnly: true}
+        - {name: nvidia-icd, mountPath: /etc/vulkan/icd.d/nvidia_icd.json, subPath: nvidia_icd.json, readOnly: true}
+        - {name: nvidia-icd, mountPath: /usr/share/glvnd/egl_vendor.d/10_nvidia.json, subPath: 10_nvidia.json, readOnly: true}
+  volumes:
+    - {name: steam-home, persistentVolumeClaim: {claimName: steam-home-local}}
+    - {name: games, persistentVolumeClaim: {claimName: games-library}}
+    - {name: run, emptyDir: {medium: Memory, sizeLimit: 256Mi}}
+    - {name: dshm, emptyDir: {medium: Memory, sizeLimit: 4Gi}}
+    - {name: cfg, configMap: {name: xerk2660-vr}}
+    - {name: nvidia-icd, configMap: {name: nvidia-icd}}
