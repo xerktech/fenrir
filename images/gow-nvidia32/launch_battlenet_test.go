@@ -230,9 +230,9 @@ func TestLaunchBattlenetPlaysTheGameThenStopsBattlenet(t *testing.T) {
 	}
 }
 
-// WoW Forever is a version on retail's product page, which no --exec code
-// selects, so its _forever_/Wow.exe is started directly beside the client,
-// from its own folder; it also gets the gamepad CVar.
+// WoW Forever is launched by the client with its own code, as retail is:
+// started directly, it ran but never signed in (XERK-2688). It also gets the
+// gamepad CVar.
 func TestLaunchBattlenetPlaysWoWForever(t *testing.T) {
 	var wtf, game string
 	r := runLaunchBattlenetWith(t, true, func(games string) {
@@ -249,8 +249,7 @@ func TestLaunchBattlenetPlaysWoWForever(t *testing.T) {
 		"proton [run] [" + client + "]",
 		"client VKD3D_SHADER_CACHE_PATH=" + filepath.Join(r.home, ".cache", "vkd3d-proton", "battlenet-wowf") +
 			" DXVK_STATE_CACHE_PATH=" + filepath.Join(r.home, ".cache", "dxvk", "battlenet-wowf"),
-		"proton [run] [" + filepath.Join(game, "Wow.exe") + "] [-launcherlogin] [-uid] [wowf]",
-		"game cwd " + game,
+		"proton [run] [" + client + "] [--exec=launch WoWF]",
 		"wineserver -k WINEPREFIX=" + filepath.Join(r.prefix, "pfx"),
 	}
 	if calls := r.calls(t); !slices.Equal(calls, want) {
@@ -292,17 +291,6 @@ func installForever(t *testing.T, games string) {
 	}
 	if err := os.WriteFile(filepath.Join(game, "Wow.exe"), nil, 0o644); err != nil { //nolint:gosec // test fixture
 		t.Fatal(err)
-	}
-}
-
-// Forever is started directly, so without it there is nothing to wait for.
-func TestLaunchBattlenetNeedsWoWForeverInstalled(t *testing.T) {
-	r := runLaunchBattlenet(t, true, []string{"wowf"}, "GAME_SECONDS=3")
-	if r.code != 1 || !strings.Contains(r.out, "wowf is not installed") {
-		t.Fatalf("exit %d, want 1 for a missing game\n%s", r.code, r.out)
-	}
-	if calls := r.calls(t); !slices.Equal(calls, []string{"killall sway"}) {
-		t.Errorf("calls %q, want only the session ended", calls)
 	}
 }
 

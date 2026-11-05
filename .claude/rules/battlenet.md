@@ -214,12 +214,9 @@ paths:
 
 - WoW Forever (uid `wowf`, `World of Warcraft/_forever_/Wow.exe`) was installed after this;
   the catalogue skipped it until it got a case (`launch-battlenet does not play (["wowf"])`).
-  - It is a version on retail's product page; `launch_uid wowf` only selects it
-    (bizkut/ps5-forever `forever-maintenance.c`), and that `launch WoW` starts the selected
-    version is unverified. So `launch-battlenet` starts `_forever_/Wow.exe -launcherlogin -uid
-    wowf` itself, from its folder, once the client is up, as ps5-forever does.
-  - uid, folder and exe are from ps5-forever and the live log, not a live file. That the direct
-    start signs in through the running client here is unverified: check `wowf is running`.
+  - The client launches it with `--exec="launch WoWF"`, as retail with `launch WoW` (code from
+    Lutris's `world-of-warcraft-forever-battlenet` installer). Starting `_forever_/Wow.exe
+    -launcherlogin -uid wowf` directly ran the game but it never signed in (XERK-2688).
   - It shows retail's cover: no portrait Forever cover is published on `artHosts`.
 - Only WoW retail was run. The other titles (Classic, D4, OW2, SC2, HS, D2R, D3) are not
   installed and have no App: their uids, launch codes and exes are still unrecorded.
