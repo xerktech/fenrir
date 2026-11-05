@@ -31,7 +31,12 @@ RUN set -eu; \
   test -z "$(find /tmp/squashfs-root ! -type l \( ! -perm -o=r -o -perm /022 \))"; \
   mv /tmp/squashfs-root /opt/xodus-nexus; \
   # xodus-nexus-update compares releases against this.
-  echo "${NEXUS_VERSION#v}" >/opt/xodus-nexus/.direwolf-version
+  echo "${NEXUS_VERSION#v}" >/opt/xodus-nexus/.direwolf-version; \
+  # The menus' icon. labwc loads an absolute icon path only if it ends in
+  # .png/.svg/.xpm, so .DirIcon itself shows none; kept outside
+  # /opt/xodus-nexus, which xodus-nexus-update replaces wholesale.
+  cp -L /opt/xodus-nexus/.DirIcon /opt/xodus-nexus.png; \
+  test "$(od -An -tx1 -N8 /opt/xodus-nexus.png | tr -d ' \n')" = 89504e470d0a1a0a
 
 # Battle.net runs under this Proton (the spike's, XERK-2360) via `proton run`:
 # root-owned in the image, so nothing the desktop runs can change it. Its
@@ -84,6 +89,7 @@ ARG HEROIC_SHA256=f89eed7e0eb900fbe3051edfedbe7532db14328241cbf8c1fb766462dfc0b8
 # First, so the RUN below can point Heroic's own launchers at the wrapper.
 COPY --chmod=755 root/ /
 COPY --from=nexus /opt/xodus-nexus /opt/xodus-nexus
+COPY --from=nexus /opt/xodus-nexus.png /usr/share/pixmaps/xodus-nexus.png
 COPY --from=battlenet /opt/proton-cachyos /opt/proton-cachyos
 COPY --from=battlenet /opt/battlenet /opt/battlenet
 
@@ -130,7 +136,7 @@ RUN \
   for menu in /defaults/menu.xml /defaults/menu_wayland.xml; do \
     sed -i 's|</menu>|<item label="Heroic" icon="/usr/share/icons/hicolor/48x48/apps/heroic.png"><action name="Execute"><command>/usr/bin/wrapped-heroic</command></action></item>\n</menu>|' "$menu" && \
     grep -q wrapped-heroic "$menu" || exit 1; \
-    sed -i 's|</menu>|<item label="Xodus Nexus" icon="/opt/xodus-nexus/.DirIcon"><action name="Execute"><command>/usr/bin/xodus-nexus</command></action></item>\n</menu>|' "$menu" && \
+    sed -i 's|</menu>|<item label="Xodus Nexus" icon="/usr/share/pixmaps/xodus-nexus.png"><action name="Execute"><command>/usr/bin/xodus-nexus</command></action></item>\n</menu>|' "$menu" && \
     grep -q '/usr/bin/xodus-nexus' "$menu" || exit 1; \
     sed -i 's|</menu>|<item label="Battle.net" icon="/opt/battlenet/battlenet.png"><action name="Execute"><command>/usr/bin/battlenet</command></action></item>\n</menu>|' "$menu" && \
     grep -q '/usr/bin/battlenet' "$menu" || exit 1; \

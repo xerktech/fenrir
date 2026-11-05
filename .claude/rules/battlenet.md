@@ -21,6 +21,9 @@ paths:
   - The operator sets `BATTLENET_GAMES` to `<--library-games-path>/battlenet` in the Library pod.
   - `init-battlenet` (root) makes `$BATTLENET_GAMES` for abc, never following a link, then runs
     `battlenet --prepare` as abc: creates the prefix and sets `UseTakeFocus=N`.
+  - Only `--prepare` runs `wineserver -w` (to see user.reg written): it waits for every Wine
+    client in the prefix, so a desktop start beside a running client hung until it quit.
+    Tests: `TestBattlenetStartNeverWaitsForWineserver`.
   - Each start with no client running forces `Client.HardwareAcceleration` off and, if unset,
     `Client.Install.DefaultInstallPath` to `Z:$BATTLENET_GAMES/`. Battle.net keeps that key; that
     its install dialog uses it is unverified, so check the folder there.

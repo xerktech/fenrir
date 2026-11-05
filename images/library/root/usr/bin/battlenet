@@ -40,6 +40,10 @@ config="${pfx}/drive_c/users/steamuser/AppData/Roaming/Battle.net/Battle.net.con
 #
 # `proton run` creates the prefix first if there is none. Each value is the
 # only one of its name in user.reg.
+#
+# --no-wait (a desktop start) trusts the running wineserver's registry, which
+# saves it on exit: `wineserver -w` waits for every Wine client in the prefix,
+# so a start beside a running Battle.net hung until the client quit.
 prepared() {
   grep -qs '^"UseTakeFocus"="N"' "${pfx}/user.reg" &&
     grep -qs '^"ShowSystray"=dword:00000000' "${pfx}/user.reg"
@@ -49,6 +53,7 @@ prepare() {
   mkdir -p "${STEAM_COMPAT_DATA_PATH}" || return 1
   "${PROTON}" run reg add 'HKCU\Software\Wine\X11 Driver' /v UseTakeFocus /d N /f || return 1
   "${PROTON}" run reg add 'HKCU\Software\Wine\Explorer' /v ShowSystray /t REG_DWORD /d 0 /f || return 1
+  [ "$1" == "--no-wait" ] && return 0
   # Wine writes user.reg when its wineserver exits.
   WINEPREFIX="${pfx}" "${PROTON%/*}/files/bin/wineserver" -w
   prepared
@@ -63,7 +68,7 @@ if [ "$1" == "--prepare" ]; then
   exit 0
 fi
 
-prepare || echo "battlenet: could not prepare ${STEAM_COMPAT_DATA_PATH}; starting anyway" >&2
+prepare --no-wait || echo "battlenet: could not prepare ${STEAM_COMPAT_DATA_PATH}; starting anyway" >&2
 
 # A running client rewrites its config when it exits: only edit it while none
 # runs (a second start then hands its arguments to the running client).

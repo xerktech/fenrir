@@ -34,6 +34,7 @@ func newBattlenetHost(t *testing.T) *battlenetHost {
 	}
 	writeStub(t, filepath.Join(h.proton, "proton"), `echo "proton $* xalia=$PROTON_USE_XALIA fsr4=$PROTON_FSR4_UPGRADE client=$STEAM_COMPAT_CLIENT_INSTALL_PATH" >>"$LOG"
 [ -n "$PROTON_FAIL" ] && exit 1
+[ -n "$PROTON_REG_FAIL" ] && [ "$2" = reg ] && exit 1
 if [ "$2" = reg ]; then
   mkdir -p "$STEAM_COMPAT_DATA_PATH/pfx"
   case "$*" in
@@ -137,6 +138,36 @@ func TestBattlenetPrepareCreatesPrefixOnce(t *testing.T) {
 	}
 	if _, err := os.Stat(h.config()); !os.IsNotExist(err) {
 		t.Errorf("--prepare touched Battle.net's config: %v", err)
+	}
+}
+
+// A desktop start on an unprepared prefix still sets the value, but never
+// waits for the wineserver: with Battle.net already running in the prefix,
+// `wineserver -w` would hold the start until the client exits.
+func TestBattlenetStartNeverWaitsForWineserver(t *testing.T) {
+	h := newBattlenetHost(t)
+	calls := h.run([]string{"CLIENT_RUNNING=1"})
+	for _, want := range []string{
+		`proton run reg add HKCU\Software\Wine\X11 Driver /v UseTakeFocus /d N /f`,
+		`proton run reg add HKCU\Software\Wine\Explorer /v ShowSystray /t REG_DWORD /d 0 /f`,
+	} {
+		if !strings.Contains(calls, want) {
+			t.Errorf("the start lacks %q:\n%s", want, calls)
+		}
+	}
+	if strings.Contains(calls, "wineserver") || strings.Contains(calls, "could not prepare") {
+		t.Errorf("the start waited on the wineserver or reported a failed prepare:\n%s", calls)
+	}
+}
+
+// A failed prepare on a desktop start is reported, and Battle.net starts anyway.
+func TestBattlenetStartReportsFailedPrepare(t *testing.T) {
+	h := newBattlenetHost(t)
+	calls := h.run([]string{"PROTON_REG_FAIL=1"})
+	for _, want := range []string{"could not prepare", "starting anyway", "proton run /opt/battlenet/Battle.net-Setup.exe"} {
+		if !strings.Contains(calls, want) {
+			t.Errorf("calls lack %q:\n%s", want, calls)
+		}
 	}
 }
 

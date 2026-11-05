@@ -3,6 +3,6 @@ Type=Application
 Name=Xodus Nexus
 Comment=Microsoft Store and Xbox PC games
 Exec=/usr/bin/xodus-nexus
-Icon=/opt/xodus-nexus/.DirIcon
+Icon=/usr/share/pixmaps/xodus-nexus.png
 Categories=Game;
 Terminal=false
