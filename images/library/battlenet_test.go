@@ -132,6 +132,20 @@ func TestBattlenetPrepareCreatesPrefixOnce(t *testing.T) {
 	}
 }
 
+// A desktop start on an unprepared prefix still sets the value, but never
+// waits for the wineserver: with Battle.net already running in the prefix,
+// `wineserver -w` would hold the start until the client exits.
+func TestBattlenetStartNeverWaitsForWineserver(t *testing.T) {
+	h := newBattlenetHost(t)
+	calls := h.run([]string{"CLIENT_RUNNING=1"})
+	if !strings.Contains(calls, `proton run reg add HKCU\Software\Wine\X11 Driver /v UseTakeFocus /d N /f`) {
+		t.Errorf("the start did not set UseTakeFocus:\n%s", calls)
+	}
+	if strings.Contains(calls, "wineserver") || strings.Contains(calls, "could not prepare") {
+		t.Errorf("the start waited on the wineserver or reported a failed prepare:\n%s", calls)
+	}
+}
+
 // A failing Proton never fails --prepare: init-battlenet must not hold the desktop.
 func TestBattlenetPrepareFailureExitsZero(t *testing.T) {
 	h := newBattlenetHost(t)
