@@ -151,4 +151,9 @@ type SessionPorts struct {
 
 	// wolf-agent's HTTPS port (bearer-token protected).
 	WolfAgent int32 `json:"wolfAgent,omitempty"`
+
+	// The App pod's VR server port (TCP and UDP), for an App with
+	// spec.vrPort. Not part of the block: it comes from the operator's
+	// separate --vr-port-range, so adding it moved no block.
+	VR int32 `json:"vr,omitempty"`
 }

@@ -112,6 +112,10 @@ controllers:
           # talos04 is a GPU node; keep in sync with moonlight_proxy's tolerations.
           - --session-tolerations=nvidia.com/gpu=present:NoSchedule
           - --session-port-range=20000-20999
+          # One host port per Session of an App with spec.vrPort (a VR server in the
+          # App pod; needs --app-pod-host-dir), off unless set. Must not overlap
+          # --session-port-range. The headset dials it at the node's IP:
+          #   --vr-port-range=21000-21009
           # Each Session's App in a user-namespaced pod of its own (XERK-1920), off
           # unless set. The directory must be on a shared-propagation mount and
           # belong to this operator alone (it sweeps Sessions it doesn't know):

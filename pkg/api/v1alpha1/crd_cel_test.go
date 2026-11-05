@@ -79,6 +79,42 @@ func TestAppCRDValidatesEmbeddedMetadata(t *testing.T) {
 	}
 }
 
+// spec.vrPort's hostPort belongs on the App pod, off the host network.
+func TestAppCRDRequiresAppPodForVRPort(t *testing.T) {
+	validate := crdValidator(t, "apps")
+	for _, tc := range []struct {
+		name    string
+		extra   map[string]any
+		wantErr bool
+	}{
+		{name: "neither"},
+		{name: "vrPort false", extra: map[string]any{"vrPort": false}},
+		{name: "both", extra: map[string]any{"vrPort": true, "requireAppPod": true}},
+		{name: "vrPort alone", extra: map[string]any{"vrPort": true}, wantErr: true},
+		{name: "requireAppPod false", extra: map[string]any{"vrPort": true, "requireAppPod": false}, wantErr: true},
+	} {
+		spec := map[string]any{
+			"title": "a", "id": int64(1), "isHDRSupported": false, "appAssetWebP": "AA==",
+			"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "game"}}}},
+		}
+		for k, v := range tc.extra {
+			spec[k] = v
+		}
+		errs := validate(map[string]any{
+			"apiVersion": "direwolf.games-on-whales.github.io/v1alpha1",
+			"kind":       "App",
+			"metadata":   map[string]any{"name": "a", "namespace": "ns"},
+			"spec":       spec,
+		})
+		switch {
+		case !tc.wantErr && len(errs) > 0:
+			t.Errorf("%s: unexpected errors: %v", tc.name, errs.ToAggregate())
+		case tc.wantErr && (len(errs) != 1 || !strings.Contains(errs[0].Error(), "vrPort needs requireAppPod")):
+			t.Errorf("%s: errors %v, want vrPort needs requireAppPod", tc.name, errs.ToAggregate())
+		}
+	}
+}
+
 // crdValidator runs the API server's own CRD validation (rule compilation
 // and cost budget) over the generated CRD of the plural resource and returns
 // a func applying its schema and CEL validators to an object.

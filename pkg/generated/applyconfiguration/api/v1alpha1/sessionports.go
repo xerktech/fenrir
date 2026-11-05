@@ -37,6 +37,10 @@ type SessionPortsApplyConfiguration struct {
 	AudioRTP *int32 `json:"audioRTP,omitempty"`
 	// wolf-agent's HTTPS port (bearer-token protected).
 	WolfAgent *int32 `json:"wolfAgent,omitempty"`
+	// The App pod's VR server port (TCP and UDP), for an App with
+	// spec.vrPort. Not part of the block: it comes from the operator's
+	// separate --vr-port-range, so adding it moved no block.
+	VR *int32 `json:"vr,omitempty"`
 }
 
 // SessionPortsApplyConfiguration constructs a declarative configuration of the SessionPorts type for use with
@@ -98,5 +102,13 @@ func (b *SessionPortsApplyConfiguration) WithAudioRTP(value int32) *SessionPorts
 // If called multiple times, the WolfAgent field is set to the value of the last call.
 func (b *SessionPortsApplyConfiguration) WithWolfAgent(value int32) *SessionPortsApplyConfiguration {
 	b.WolfAgent = &value
+	return b
+}
+
+// WithVR sets the VR field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the VR field is set to the value of the last call.
+func (b *SessionPortsApplyConfiguration) WithVR(value int32) *SessionPortsApplyConfiguration {
+	b.VR = &value
 	return b
 }
