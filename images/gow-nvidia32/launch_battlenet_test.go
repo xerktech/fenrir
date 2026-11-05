@@ -271,6 +271,9 @@ func TestLaunchBattlenetTellsWoWVersionsApart(t *testing.T) {
 		{"wowf", `/games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`, true},
 		{"wowf", `Z:/games/battlenet/World of Warcraft/_FOREVER_/WOW.EXE`, true},
 		{"wowf", `Wow.exe -launcherlogin -uid WOWF`, true},
+		// The folder names the game: the client's -uid for it is unrecorded.
+		{"wowf", `Z:\games\battlenet\World of Warcraft\_forever_\Wow.exe -launcherlogin -uid wow`, true},
+		{"wow", `Z:\games\battlenet\World of Warcraft\_retail_\WoW.exe -launcherlogin -uid wowf`, true},
 	} {
 		r := runLaunchBattlenetWith(t, true, func(games string) { installForever(t, games) }, []string{tc.product}, "GAME_SECONDS=3", "BATTLENET_LAUNCH_TIMEOUT=4", "GAME_ARGV0="+tc.argv0)
 		if seen := strings.Contains(r.out, tc.product+" is running"); seen != tc.seen {

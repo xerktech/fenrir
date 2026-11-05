@@ -155,8 +155,9 @@ fi
 # program, the start of the line up to the first " -": other command lines
 # (a crash reporter, a shell) may name the game in their arguments.
 # Retail and Forever are both Wow.exe in any case, so a directory must end in
-# the game's own folder, and a -uid argument must name this product: else the
-# other version would count as this one.
+# the game's own folder. A bare Wow.exe counts only if its -uid, if any, names
+# this product: the uid the client gives Forever is unrecorded (XERK-2688), so
+# a folder that names the game is trusted whatever its -uid.
 game='^(([A-Za-z]:)?[\\/](([^ ]| [^-])*[\\/])?'"${game_dir##*/}"'[\\/])?'"${exe//./\\.}"'( |$)'
 # Proton's own wrappers carry a started program's path as an argument
 # (wine-preloader ... steam.exe /games/.../Wow.exe -launcherlogin ...), which
@@ -168,7 +169,8 @@ game_running() {
     if [[ " ${cmd%% -*}" =~ .\ ([A-Za-z]:)?[\\/] ]]; then
       continue
     fi
-    if [[ " ${cmd,,} " =~ \ -uid\ ([^ ]+)\  ]] && [ "${BASH_REMATCH[1]}" != "${product}" ]; then
+    if [[ "${cmd%% -*}" != *[\\/]* ]] && [[ " ${cmd,,} " =~ \ -uid\ ([^ ]+)\  ]] &&
+      [ "${BASH_REMATCH[1]}" != "${product}" ]; then
       continue
     fi
     return 0
