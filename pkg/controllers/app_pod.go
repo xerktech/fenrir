@@ -211,6 +211,8 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 
 	wolf.Labels[podRoleLabel] = podRoleWolf
 	wolf.Annotations[appPodAnnotation] = c.appPodName(session)
+	// The VR port is the App pod's (vrPortMoved checks it there).
+	delete(wolf.Annotations, vrPortAnnotation)
 
 	app.Name = c.appPodName(session)
 	app.Labels[podRoleLabel] = podRoleApp

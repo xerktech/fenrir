@@ -221,6 +221,11 @@
               "format": "int32",
               "type": "integer"
             },
+            "vr": {
+              "description": "The App pod's VR server port (TCP and UDP), for an App with\nspec.vrPort. Not part of the block: it comes from the operator's\nseparate --vr-port-range, so adding it moved no block.",
+              "format": "int32",
+              "type": "integer"
+            },
             "wolfAgent": {
               "description": "wolf-agent's HTTPS port (bearer-token protected).",
               "format": "int32",

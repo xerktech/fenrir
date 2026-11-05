@@ -24,6 +24,10 @@ import (
 
 // AppSpecApplyConfiguration represents a declarative configuration of the AppSpec type for use
 // with apply.
+//
+// AppSpec is an App's spec. vrPort needs requireAppPod: the VR port is a
+// hostPort on the App pod, off the host network; in the host-networked
+// session pod a VR server would listen on the node's own network.
 type AppSpecApplyConfiguration struct {
 	// Name of the app to be presented to the user
 	Title *string `json:"title,omitempty"`
@@ -64,6 +68,12 @@ type AppSpecApplyConfiguration struct {
 	// host-networked session pod that is the node's loopback, open to every
 	// process on the node, and two Sessions on one node collide on fixed ports.
 	RequireAppPod *bool `json:"requireAppPod,omitempty"`
+	// VRPort gives each Session one host port, from the operator's
+	// --vr-port-range, for a VR server (WiVRn) in the App pod: TCP and UDP
+	// on the same number, declared as hostPorts on the App's first container
+	// and handed to every App container as DIREWOLF_VR_PORT. A headset dials
+	// it at the node's IP. Needs requireAppPod.
+	VRPort *bool `json:"vrPort,omitempty"`
 }
 
 // AppSpecApplyConfiguration constructs a declarative configuration of the AppSpec type for use with
@@ -151,5 +161,13 @@ func (b *AppSpecApplyConfiguration) WithGPU(value *AppGPUApplyConfiguration) *Ap
 // If called multiple times, the RequireAppPod field is set to the value of the last call.
 func (b *AppSpecApplyConfiguration) WithRequireAppPod(value bool) *AppSpecApplyConfiguration {
 	b.RequireAppPod = &value
+	return b
+}
+
+// WithVRPort sets the VRPort field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the VRPort field is set to the value of the last call.
+func (b *AppSpecApplyConfiguration) WithVRPort(value bool) *AppSpecApplyConfiguration {
+	b.VRPort = &value
 	return b
 }

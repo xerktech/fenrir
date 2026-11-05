@@ -49,6 +49,22 @@ paths:
   ("Failed to save keys") and never the shared Steam home.
 - The stream is AES-128-CTR with no MAC (XERK-2691). Never set `--no-encrypt`.
 
+## Operator port (XERK-2664)
+
+- `App.spec.vrPort` (CEL: needs `requireAppPod`) gets one port per Session from `--vr-port-range`
+  (`vrPorts`, `vr_port.go`), recorded as `status.ports.vr` and replayed via `ClaimBase` on start.
+  - Never from the session block: growing `sessionPortBlockSize` moves every block base, and
+    running Sessions' recorded `status.ports` would no longer `Claim`.
+  - `Claim` ignores `ports.VR`; keep it so, or every VR Session's block fails to re-claim.
+- Every App container gets `DIREWOLF_VR_PORT` (first in env); the App's first container declares
+  it TCP and UDP with `hostPort` = `containerPort`. Never the Wolf pod.
+- The App pod's `vr-port` annotation records it; one differing from `status.ports.vr` ends the
+  Session (`vrPortMoved`). No annotation means it serves none, and is left alone.
+- No port is allocated once `PodCreated` is True: an App turning vrPort on would hold ports for
+  pods that never serve them. A pod then built without one is refused (InvalidSpec).
+- Without `--vr-port-range` a vrPort App's Sessions end InvalidSpec; the range must not overlap
+  `--session-port-range` (operator exits). Tests: `vr_port_test.go`.
+
 ## Runtime pitfalls
 
 - wivrn-server needs a D-Bus session bus (`dbus-run-session`); no system bus or systemd needed.
