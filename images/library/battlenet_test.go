@@ -34,7 +34,13 @@ func newBattlenetHost(t *testing.T) *battlenetHost {
 	}
 	writeStub(t, filepath.Join(h.proton, "proton"), `echo "proton $* xalia=$PROTON_USE_XALIA fsr4=$PROTON_FSR4_UPGRADE client=$STEAM_COMPAT_CLIENT_INSTALL_PATH" >>"$LOG"
 [ -n "$PROTON_FAIL" ] && exit 1
-if [ "$2" = reg ]; then mkdir -p "$STEAM_COMPAT_DATA_PATH/pfx" && echo '"UseTakeFocus"="N"' >>"$STEAM_COMPAT_DATA_PATH/pfx/user.reg"; fi
+if [ "$2" = reg ]; then
+  mkdir -p "$STEAM_COMPAT_DATA_PATH/pfx"
+  case "$*" in
+  *UseTakeFocus*) echo '"UseTakeFocus"="N"' ;;
+  *ShowSystray*) echo '"ShowSystray"=dword:00000000' ;;
+  esac >>"$STEAM_COMPAT_DATA_PATH/pfx/user.reg"
+fi
 exit 0`)
 	writeStub(t, filepath.Join(h.proton, "files", "bin", "wineserver"), `echo "wineserver $* $WINEPREFIX" >>"$LOG"`)
 	writeStub(t, filepath.Join(dir, "bin", "pgrep"), `case "$*" in *Setup*) [ -n "$SETUP_RUNNING" ] ;; *) [ -n "$CLIENT_RUNNING" ] ;; esac`)
@@ -110,13 +116,15 @@ func (h *battlenetHost) readConfig() battlenetConfig {
 	return c
 }
 
-// --prepare creates the prefix with keyboard focus left to labwc, waits for
-// Wine to write it out, and does nothing once that is done.
+// --prepare creates the prefix with keyboard focus left to labwc and Wine's
+// standalone tray window off, waits for Wine to write it out, and does
+// nothing once that is done.
 func TestBattlenetPrepareCreatesPrefixOnce(t *testing.T) {
 	h := newBattlenetHost(t)
 	calls := h.run(nil, "--prepare")
 	for _, want := range []string{
 		`proton run reg add HKCU\Software\Wine\X11 Driver /v UseTakeFocus /d N /f xalia=0 fsr4=0 client=` + filepath.Join(h.home, ".local", "share", "Steam"),
+		`proton run reg add HKCU\Software\Wine\Explorer /v ShowSystray /t REG_DWORD /d 0 /f`,
 		"wineserver -w " + filepath.Join(h.prefix(), "pfx"),
 		"prefix ready",
 	} {
@@ -129,6 +137,23 @@ func TestBattlenetPrepareCreatesPrefixOnce(t *testing.T) {
 	}
 	if _, err := os.Stat(h.config()); !os.IsNotExist(err) {
 		t.Errorf("--prepare touched Battle.net's config: %v", err)
+	}
+}
+
+// A prefix prepared before ShowSystray (keyboard focus only) gets it: its
+// tray window showed as a full-screen white window in the Library.
+func TestBattlenetPrepareTurnsOffTrayWindowInOldPrefix(t *testing.T) {
+	h := newBattlenetHost(t)
+	pfx := filepath.Join(h.prefix(), "pfx")
+	if err := os.MkdirAll(pfx, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pfx, "user.reg"), []byte("\"UseTakeFocus\"=\"N\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := h.run(nil, "--prepare")
+	if want := "ShowSystray /t REG_DWORD /d 0"; !strings.Contains(calls, want) || !strings.Contains(calls, "prefix ready") {
+		t.Errorf("calls lack %q or readiness:\n%s", want, calls)
 	}
 }
 
