@@ -42,13 +42,12 @@ product="${1:-${BATTLENET_PRODUCT:-}}"
 # Only games known to launch this way: the code goes into Battle.net's command
 # line, the product into a process pattern. Each: --exec command, executable,
 # and the game's own folder under the games volume.
-# WoW Forever is a version on retail's product page: "launch WoW" starts
-# whichever version that page has selected, and "launch_uid wowf" only selects
-# it (bizkut/ps5-forever). So it has no code: its executable is started
-# directly with the client's own arguments, beside the running client.
+# WoW Forever has its own code, WoWF (Lutris' world-of-warcraft-forever-battlenet
+# installer). Starting its Wow.exe directly, without the client, does not sign
+# in (XERK-2688).
 case "${product}" in
   wow) code="launch WoW" exe=WoW.exe game_dir="World of Warcraft/_retail_" ;;  # World of Warcraft (retail), XERK-2360
-  wowf) code="" exe=Wow.exe game_dir="World of Warcraft/_forever_" ;;  # World of Warcraft: Forever
+  wowf) code="launch WoWF" exe=Wow.exe game_dir="World of Warcraft/_forever_" ;;  # World of Warcraft: Forever
   *)
     log "unknown product '${product}'; expected one of: wow, wowf"
     exit 2
@@ -136,12 +135,6 @@ enable_wow_gamepad() {
     log "turned on WoW's gamepad mode in ${wtf}"
 }
 games="${BATTLENET_GAMES:-/games/battlenet}"
-# A game started directly (no code) must be installed: the client would only
-# be waited on until the timeout, which reads as patching or a sign-in.
-if [ -z "${code}" ] && [ ! -f "${games}/${game_dir}/${exe}" ]; then
-  log "${product} is not installed in ${games}/${game_dir}; install it from the Library"
-  exit 1
-fi
 if [ "${product}" = wow ] || [ "${product}" = wowf ]; then
   enable_wow_gamepad "${games}/${game_dir}" ||
     log "could not turn on WoW's gamepad mode; a pad needs /console GamePadEnable 1"
@@ -158,7 +151,7 @@ fi
 # the game's own folder, and a -uid argument must name this product: else the
 # other version would count as this one.
 game='^(([A-Za-z]:)?[\\/](([^ ]| [^-])*[\\/])?'"${game_dir##*/}"'[\\/])?'"${exe//./\\.}"'( |$)'
-# Proton's own wrappers carry a direct start's path as an argument
+# Proton's own wrappers carry a started program's path as an argument
 # (wine-preloader ... steam.exe /games/.../Wow.exe -launcherlogin ...), which
 # the space-crossing directory above would take in: a program part with a
 # second path in it (a space, then / \ or a drive) is not the game.
@@ -265,11 +258,7 @@ until game_running; do
   if [ -n "${next_send}" ] && ((SECONDS >= next_send)); then
     # In the background: if this wrapper stays up too, it must not hold the
     # loop. wineserver -k ends it with the rest.
-    if [ -n "${code}" ]; then
-      "${PROTON}" run "${client}" --exec="${code}" &
-    else
-      (cd "${games}/${game_dir}" && exec "${PROTON}" run "${games}/${game_dir}/${exe}" -launcherlogin -uid "${product}") &
-    fi
+    "${PROTON}" run "${client}" --exec="${code}" &
     sends=$((sends + 1))
     log "sent launch ${sends} for ${product}"
     next_send=$((SECONDS + resend))
