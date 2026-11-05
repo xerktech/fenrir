@@ -297,7 +297,8 @@ func TestBattlenetIconIsExtractedLogo(t *testing.T) {
 	for what, want := range map[string]string{
 		"extracts the icons": "wrestool -x -t 14 /opt/battlenet/Battle.net-Setup.exe",
 		"extracts the logo":  "icotool -x -w 256 -o " + icon,
-		"checks it is a PNG": `= PNG ] ||`,
+		"checks it is a PNG": `/opt/battlenet/battlenet.png 2>/dev/null | tail -c 3)" = PNG ] ||`,
+		"fails without one":  `has no 256px PNG icon" >&2; exit 1; }`,
 		// The desktop user must read it, or the menus show no icon.
 		"makes it readable":  "chmod 0644 " + icon,
 		"uses it in menus":   `<item label="Battle.net" icon="` + icon + `">`,

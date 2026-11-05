@@ -65,7 +65,8 @@ RUN set -eu; \
   # The menu's Battle.net icon: the installer's own 256px logo, so it moves
   # with the pin. The build fails if the installer stops carrying one.
   wrestool -x -t 14 /opt/battlenet/Battle.net-Setup.exe >/tmp/battlenet.ico; \
-  # icotool exits 0 even when it extracts nothing, so check the result.
+  # icotool can exit 0 having written nothing (no 256px entry), so check the
+  # result. Its x/y_pels_per_meter warnings on this icon are harmless.
   icotool -x -w 256 -o /opt/battlenet/battlenet.png /tmp/battlenet.ico; \
   [ "$(head -c 4 /opt/battlenet/battlenet.png 2>/dev/null | tail -c 3)" = PNG ] || \
     { echo "Battle.net-Setup.exe has no 256px PNG icon" >&2; exit 1; }; \
