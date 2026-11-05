@@ -351,7 +351,7 @@ RUN ldconfig \
       /opt/xrizer/bin/linux64/vrclient.so /opt/opencomposite/bin/linux64/vrclient.so; do \
     ldd "$f" >/tmp/ldd || exit 1; ! grep 'not found' /tmp/ldd || { echo "$f: missing libraries" >&2; exit 1; }; \
   done && rm /tmp/ldd \
- && python3 -I -c 'import os,sys; bad=[os.path.join(d,f) for r in ("/usr/local","/opt") for d,_,fs in os.walk(r) for f in fs if not os.path.islink(os.path.join(d,f)) and "security.capability" in os.listxattr(os.path.join(d,f))]; sys.exit(bad and "file capabilities on %s" % bad)' \
+ && python3 -I -c 'import os,sys; bad=[os.path.join(d,f) for r in ("/usr/local","/opt") for d,_,fs in os.walk(r) for f in fs if not os.path.islink(os.path.join(d,f)) and "security.capability" in os.listxattr(os.path.join(d,f))]; bad and sys.exit("file capabilities on %s" % bad)' \
  && for c in pipewire pipewire-pulse wireplumber dbus-run-session ss mountpoint setsid; do \
     command -v "$c" >/dev/null || { echo "no $c" >&2; exit 1; }; \
   done \

@@ -61,7 +61,8 @@ cat >"$config.tmp" <<JSON
   "encoder": "nvenc"
 }
 JSON
-mv -f "$config.tmp" "$config"
+# -T: a directory named config.json is an error, not a place to move it into.
+mv -fT "$config.tmp" "$config"
 
 # PipeWire's sockets (and its pulse server's) go in a directory of their own:
 # Wolf's pulseaudio already serves this runtime dir.
