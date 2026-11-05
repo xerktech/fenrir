@@ -45,7 +45,7 @@ ARG PROTON_CACHYOS_SHA512=457bee6051ee671509e1cd6b865246df00685e508908cd0cf98c62
 ARG BATTLENET_SETUP_VERSION=1.0.68
 ARG BATTLENET_SETUP_SHA256=f4643a2086c0cecb1ab68cc601bf38c1a0a6f7ef5914ad03375cc9449385bec6
 RUN set -eu; \
-  apt-get update; apt-get install -y --no-install-recommends ca-certificates curl xz-utils; \
+  apt-get update; apt-get install -y --no-install-recommends ca-certificates curl icoutils xz-utils; \
   name="proton-${PROTON_CACHYOS_VERSION}-x86_64"; \
   curl -fsSL -o /tmp/proton.tar.xz \
     "https://github.com/CachyOS/proton-cachyos/releases/download/${PROTON_CACHYOS_VERSION}/${name}.tar.xz"; \
@@ -61,7 +61,16 @@ RUN set -eu; \
   curl -fsSL -o /opt/battlenet/Battle.net-Setup.exe \
     "https://downloader.battle.net/download/installer/win/${BATTLENET_SETUP_VERSION}/Battle.net-Setup.exe"; \
   echo "${BATTLENET_SETUP_SHA256}  /opt/battlenet/Battle.net-Setup.exe" | sha256sum -c -; \
-  chmod 0644 /opt/battlenet/Battle.net-Setup.exe
+  chmod 0644 /opt/battlenet/Battle.net-Setup.exe; \
+  # The menu's Battle.net icon: the installer's own 256px logo, so it moves
+  # with the pin. The build fails if the installer stops carrying one.
+  wrestool -x -t 14 /opt/battlenet/Battle.net-Setup.exe >/tmp/battlenet.ico; \
+  # icotool can exit 0 having written nothing (no 256px entry), so check the
+  # result. Its x/y_pels_per_meter warnings on this icon are harmless.
+  icotool -x -w 256 -o /opt/battlenet/battlenet.png /tmp/battlenet.ico; \
+  [ "$(head -c 4 /opt/battlenet/battlenet.png 2>/dev/null | tail -c 3)" = PNG ] || \
+    { echo "Battle.net-Setup.exe has no 256px PNG icon" >&2; exit 1; }; \
+  chmod 0644 /opt/battlenet/battlenet.png
 
 FROM lscr.io/linuxserver/steam:latest@sha256:d1c9f2c6d522169f6dcede9b17076c0e31ddbc5f9c4a102562cecddfe2d4ecdb
 
@@ -123,11 +132,10 @@ RUN \
     grep -q wrapped-heroic "$menu" || exit 1; \
     sed -i 's|</menu>|<item label="Xodus Nexus" icon="/opt/xodus-nexus/.DirIcon"><action name="Execute"><command>/usr/bin/xodus-nexus</command></action></item>\n</menu>|' "$menu" && \
     grep -q '/usr/bin/xodus-nexus' "$menu" || exit 1; \
-    sed -i 's|</menu>|<item label="Battle.net" icon="/usr/share/icons/Adwaita/scalable/devices/input-gaming.svg"><action name="Execute"><command>/usr/bin/battlenet</command></action></item>\n</menu>|' "$menu" && \
+    sed -i 's|</menu>|<item label="Battle.net" icon="/opt/battlenet/battlenet.png"><action name="Execute"><command>/usr/bin/battlenet</command></action></item>\n</menu>|' "$menu" && \
     grep -q '/usr/bin/battlenet' "$menu" || exit 1; \
   done && \
-  # Battle.net's menu icon: the theme has no applications-games, so it showed none.
-  test -f /usr/share/icons/Adwaita/scalable/devices/input-gaming.svg && \
+  test -f /opt/battlenet/battlenet.png && \
   echo "**** resolve game sessions' Steam paths ****" && \
   # Sessions mount the shared Steam home at /home/retro, and Steam records
   # absolute paths (~/.steam/steam, library folders); see init-steam-home.
