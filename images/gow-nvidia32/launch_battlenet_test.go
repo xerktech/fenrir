@@ -291,6 +291,15 @@ func installForever(t *testing.T, games string) {
 	}
 }
 
+// A missing game is only warned about: the client still waits out the
+// timeout, and the log says why.
+func TestLaunchBattlenetWarnsWoWForeverNotInstalled(t *testing.T) {
+	r := runLaunchBattlenet(t, true, []string{"wowf"}, "GAME_SECONDS=3", "BATTLENET_LAUNCH_TIMEOUT=3")
+	if r.code != 1 || !strings.Contains(r.out, "wowf does not look installed") {
+		t.Fatalf("exit %d, want 1 with the missing game named\n%s", r.code, r.out)
+	}
+}
+
 // Proton's wrappers for a started Wow.exe name the game's path with its
 // arguments, as Proton's run and Wine show them; they are not the game.
 func TestLaunchBattlenetIgnoresDirectStartWrappers(t *testing.T) {

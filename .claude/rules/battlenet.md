@@ -219,7 +219,7 @@ paths:
   - Never start `_forever_/Wow.exe -launcherlogin -uid wowf` directly: live it ran ~1 min and
     never signed in, while retail signed in fine (XERK-2688).
   - uid, folder and exe are from bizkut/ps5-forever and the live log, not a live file.
-  - It shows retail's cover: no portrait Forever cover is published on `artHosts`.
+  - Its tile has its own composed cover (`catalogue.go`), not retail's: two identical WoW tiles.
 - Only WoW retail was run. The other titles (Classic, D4, OW2, SC2, HS, D2R, D3) are not
   installed and have no App: their uids, launch codes and exes are still unrecorded.
 - WoW retail (`battlenet-wow`, App pod), all from Moonlight:

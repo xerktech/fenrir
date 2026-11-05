@@ -43,8 +43,8 @@ product="${1:-${BATTLENET_PRODUCT:-}}"
 # line, the product into a process pattern. Each: --exec command, executable,
 # and the game's own folder under the games volume.
 # WoW Forever has its own code, WoWF (Lutris' world-of-warcraft-forever-battlenet
-# installer). Starting its Wow.exe directly, without the client, does not sign
-# in (XERK-2688).
+# installer). Starting its Wow.exe directly, beside the running client, did
+# not sign in (XERK-2688).
 case "${product}" in
   wow) code="launch WoW" exe=WoW.exe game_dir="World of Warcraft/_retail_" ;;  # World of Warcraft (retail), XERK-2360
   wowf) code="launch WoWF" exe=Wow.exe game_dir="World of Warcraft/_forever_" ;;  # World of Warcraft: Forever
@@ -135,6 +135,11 @@ enable_wow_gamepad() {
     log "turned on WoW's gamepad mode in ${wtf}"
 }
 games="${BATTLENET_GAMES:-/games/battlenet}"
+# Only a warning: the client still runs (to install it, say) until the
+# timeout, whose reason would otherwise read as patching or a sign-in.
+if [ ! -f "${games}/${game_dir}/${exe}" ]; then
+  log "${product} does not look installed in ${games}/${game_dir}; install it from the Library"
+fi
 if [ "${product}" = wow ] || [ "${product}" = wowf ]; then
   enable_wow_gamepad "${games}/${game_dir}" ||
     log "could not turn on WoW's gamepad mode; a pad needs /console GamePadEnable 1"
