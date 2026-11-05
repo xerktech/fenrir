@@ -50,7 +50,7 @@ func newVRStart(t *testing.T) *vrStart {
 	s := &vrStart{dir: t.TempDir(), bin: t.TempDir(), home: t.TempDir()}
 	s.runtime = shortTempDir(t)
 	s.steamLog = filepath.Join(s.dir, "steam.log")
-	for _, f := range []string{"startup-app.sh", "wivrn-config.py", "dbus-session.conf"} {
+	for _, f := range []string{"startup-app.sh", "dbus-session.conf"} {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
@@ -238,25 +238,21 @@ func readConfig(t *testing.T, path string) map[string]any {
 	return cfg
 }
 
-func runConfig(t *testing.T, path string) {
-	t.Helper()
-	out, err := exec.CommandContext(t.Context(), "python3", "-I", "wivrn-config.py", path, "20034", "/opt/opencomposite").CombinedOutput()
-	if err != nil {
-		t.Fatalf("wivrn-config.py: %v\n%s", err, out)
-	}
-}
-
-func TestWiVRnConfigForcesSessionSettingsKeepsTheUsers(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
+// WiVRn reads its keys in one try block, so a user key of the wrong type read
+// before "port" would leave it on 9757: the config is rewritten whole.
+func TestVRStartRewritesWiVRnConfigWhole(t *testing.T) {
+	s := newVRStart(t)
+	path := filepath.Join(s.home, ".config", "wivrn", "config.json")
 	if err := os.WriteFile(path, []byte(`{"port": 9757, "publish-service": "avahi", "hid-forwarding": true,
-		"openvr-compat-path": "/home/retro/xrizer", "application": ["steam"], "bitrate": 50000000,
-		"encoder": "x264"}`), 0o600); err != nil {
+		"application": ["steam"], "bit-depth": "ten", "tcp-only": 1e400}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runConfig(t, path)
+	if out, err := s.run(t, "DIREWOLF_VR_PORT=20034", "DIREWOLF_VR_OPENVR=opencomposite"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
 	want := map[string]any{
 		"port": float64(20034), "publish-service": "none", "hid-forwarding": false,
-		"openvr-compat-path": "/opt/opencomposite", "bitrate": float64(50000000), "encoder": "x264",
+		"openvr-compat-path": "/opt/opencomposite", "encoder": "nvenc",
 	}
 	got := readConfig(t, path)
 	if len(got) != len(want) {
@@ -269,22 +265,52 @@ func TestWiVRnConfigForcesSessionSettingsKeepsTheUsers(t *testing.T) {
 	}
 }
 
-func TestWiVRnConfigReplacesAnUnreadableConfig(t *testing.T) {
-	for _, body := range []string{"", "not json", "[1, 2]", "\xff\xfe"} {
-		path := filepath.Join(t.TempDir(), "config.json")
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+// mountpoint follows links, so a link into the shared home would pass it; and
+// a read-only volume loses the pairing keys ("Failed to save keys").
+func TestVRStartRefusesLinkedOrReadOnlyConfigDirs(t *testing.T) {
+	for _, tc := range []struct{ name, want string }{
+		{"link", "is a symlink"},
+		{"readonly", "is not writable"},
+	} {
+		if tc.name == "readonly" && os.Geteuid() == 0 {
+			t.Log("skipping readonly: root writes a 0555 directory anyway")
+			continue
+		}
+		s := newVRStart(t)
+		dir := filepath.Join(s.home, ".config", "openvr")
+		if tc.name == "link" {
+			if err := os.Remove(dir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(s.home, dir); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.Chmod(dir, 0o555); err != nil {
 			t.Fatal(err)
 		}
-		runConfig(t, path)
-		got := readConfig(t, path)
-		if got["port"] != float64(20034) || got["publish-service"] != "none" || got["encoder"] != "nvenc" {
-			t.Errorf("%q: config %v", body, got)
+		out, err := s.run(t, "DIREWOLF_VR_PORT=20034")
+		if err == nil || !strings.Contains(out, tc.want) {
+			t.Errorf("%s: err %v, output %q; want %q", tc.name, err, out, tc.want)
+		}
+		if _, err := os.Stat(s.steamLog); err == nil {
+			t.Errorf("%s: Steam started", tc.name)
 		}
 	}
-	path := filepath.Join(t.TempDir(), "config.json")
-	runConfig(t, path)
-	if got := readConfig(t, path); got["hid-forwarding"] != any(false) {
-		t.Errorf("new config %v", got)
+}
+
+// The session bus must be a file: unix:tmpdir may be an abstract socket, which
+// lives in the network namespace.
+func TestVRSessionBusListensOnAFile(t *testing.T) {
+	b, err := os.ReadFile("dbus-session.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listens := regexp.MustCompile(`<listen>([^<]*)</listen>`).FindAllStringSubmatch(string(b), -1)
+	if len(listens) != 1 || listens[0][1] != "unix:dir=/tmp" {
+		t.Fatalf("listens on %v, want only unix:dir=/tmp", listens)
+	}
+	if strings.Contains(string(b), "<include") {
+		t.Fatal("includes another config, which may add listeners")
 	}
 }
 

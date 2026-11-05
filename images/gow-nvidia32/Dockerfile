@@ -324,12 +324,14 @@ FROM steam AS vr
 # PipeWire, its pulse server and WirePlumber run per session (vr-services):
 # WiVRn 26.9 segfaults on every headset connect without PipeWire's config and
 # modules, and the game's audio reaches the headset through them. iproute2's ss
-# is the supervisor's port check.
+# is the supervisor's port check. libopengl0: OpenComposite's vrclient.so
+# links libOpenGL.so.0, which the GoW base lacks.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       pipewire pipewire-pulse wireplumber iproute2 \
       libavahi-client3 libavahi-glib1 libavfilter10 libswscale8 libbsd0 libcap2 libcjson1 \
       libnotify4 libpipewire-0.3-0t64 libsystemd0 libudev1 libva2 libvulkan1 libx264-164 \
       libxxf86vm1 libusb-1.0-0 librsvg2-2 libarchive13t64 libpng16-16t64 \
+      libopengl0 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=vr-wivrn /out/ /
 COPY --from=vr-opencomposite /out/ /
@@ -338,17 +340,21 @@ COPY --from=vr-xrizer /out/ /
 # moves beside the vr scripts (startup-app.sh finds its siblings by its own
 # path) and ours takes its place.
 COPY --chmod=644 vr/dbus-session.conf /opt/direwolf/vr/
-COPY --chmod=755 vr/startup-app.sh vr/vr-services vr/wivrn-config.py /opt/direwolf/vr/
+COPY --chmod=755 vr/startup-app.sh vr/vr-services /opt/direwolf/vr/
 RUN chmod 0755 /opt/direwolf /opt/direwolf/vr \
  && mv /opt/gow/startup-app.sh /opt/direwolf/vr/steam-startup-app.sh \
  && ln -s /opt/direwolf/vr/startup-app.sh /opt/gow/startup-app.sh
 # No setcap anywhere (with file caps gdbus ignores DBUS_SESSION_BUS_ADDRESS),
 # and nothing may link-fail at run time.
 RUN ldconfig \
- && ! ldd /usr/local/bin/wivrn-server /usr/local/lib/wivrn/libopenxr_wivrn.so \
-      /opt/xrizer/bin/linux64/vrclient.so /opt/opencomposite/bin/linux64/vrclient.so | grep 'not found' \
+ && for f in /usr/local/bin/wivrn-server /usr/local/lib/wivrn/libopenxr_wivrn.so \
+      /opt/xrizer/bin/linux64/vrclient.so /opt/opencomposite/bin/linux64/vrclient.so; do \
+    ldd "$f" >/tmp/ldd || exit 1; ! grep 'not found' /tmp/ldd || { echo "$f: missing libraries" >&2; exit 1; }; \
+  done && rm /tmp/ldd \
  && python3 -I -c 'import os,sys; bad=[os.path.join(d,f) for r in ("/usr/local","/opt") for d,_,fs in os.walk(r) for f in fs if not os.path.islink(os.path.join(d,f)) and "security.capability" in os.listxattr(os.path.join(d,f))]; sys.exit(bad and "file capabilities on %s" % bad)' \
- && command -v pipewire pipewire-pulse wireplumber dbus-run-session ss mountpoint python3 setsid >/dev/null \
+ && for c in pipewire pipewire-pulse wireplumber dbus-run-session ss mountpoint setsid; do \
+    command -v "$c" >/dev/null || { echo "no $c" >&2; exit 1; }; \
+  done \
  && test -d /usr/share/pipewire && test -f /usr/share/pipewire/client.conf \
  && gosu nobody sh -c 'test -r /usr/local/share/openxr/1/openxr_wivrn.json -a -r /opt/xrizer/bin/linux64/vrclient.so -a -r /opt/opencomposite/bin/linux64/vrclient.so' \
  && d='/etc/cont-init.d /opt/gow /usr/local /usr/bin /opt/direwolf /opt/xrizer /opt/opencomposite' \

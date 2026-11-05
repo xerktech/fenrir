@@ -46,8 +46,8 @@ paths:
 - It refuses to start (the session ends) without `DIREWOLF_VR_PORT` (XERK-2664 sets it on App
   containers when `spec.vrPort`), or unless `~/.config/{wivrn,openxr,openvr}` are each a mount:
   the App mounts a per-user volume there. It never falls back to the shared home or port 9757.
-- `wivrn-config.py` rewrites `port`, `publish-service`, `hid-forwarding`, `openvr-compat-path`
-  and drops `application` at every start; the user's other keys stay.
+- startup-app.sh rewrites WiVRn's `config.json` whole at every start, keeping no user key: WiVRn
+  parses keys in one try block, and one of the wrong type would leave the port on 9757.
 - PipeWire, WirePlumber and pipewire-pulse run with `XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR/vr-audio`:
   Wolf's pulseaudio shares the runtime dir. The game gets `PULSE_SERVER` there, so its audio
   goes to the headset, not the Moonlight stream. wivrn-server keeps the real runtime dir: games

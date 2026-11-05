@@ -37,11 +37,31 @@ esac
 # per-user volume the App mounts there, writable.
 for d in wivrn openxr openvr; do
   dir=$HOME/.config/$d
+  # mountpoint follows a link: one into the shared home would pass.
+  [[ ! -L $dir ]] || die "$dir is a symlink; it must be a per-user volume mounted by the App"
   mountpoint -q "$dir" || die "$dir must be a per-user volume mounted by the App, not the shared home"
   [[ -w $dir ]] || die "$dir is not writable"
 done
 
-python3 -I "$here/wivrn-config.py" "$HOME/.config/wivrn/config.json" "$port" "$layer"
+# WiVRn's config, rewritten whole at every start. No user keys are kept: WiVRn
+# reads its keys in one try block, so one of the wrong type (any process of the
+# session can write the file) would drop the port and leave it on 9757.
+# "publish-service": "none": no Avahi (it needs the node's system bus); the
+# headset dials the node's IP and port. "hid-forwarding": false: it needs the
+# uinput device, which App pods never get. No "application": WiVRn would start
+# it on every headset connect, beside the game Steam runs.
+config=$HOME/.config/wivrn/config.json
+rm -f "$config.tmp"
+cat >"$config.tmp" <<JSON
+{
+  "port": $port,
+  "publish-service": "none",
+  "hid-forwarding": false,
+  "openvr-compat-path": "$layer",
+  "encoder": "nvenc"
+}
+JSON
+mv -f "$config.tmp" "$config"
 
 # PipeWire's sockets (and its pulse server's) go in a directory of their own:
 # Wolf's pulseaudio already serves this runtime dir.
@@ -53,7 +73,8 @@ chmod 0700 "$audio"
 dbus-run-session --config-file="$here/dbus-session.conf" -- "$here/vr-services" "$port" "$audio" &
 services=$!
 app=
-# As PID 1 its exit ends the container anyway; this covers any other caller.
+# Stops the direct children when this exits. In the image it is PID 1, so its
+# exit ends the container, grandchildren included.
 trap 'kill $services $app 2>/dev/null || true' EXIT
 
 timeout=${DIREWOLF_VR_START_TIMEOUT:-60}
