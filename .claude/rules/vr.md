@@ -37,6 +37,24 @@ paths:
 - Memory: 16Gi was OOM-killed at Steam + AC start; 24Gi held (steady 2-7 GiB).
 - One VR session per GPU: two 1280x1344 eyes at 90 Hz used ~50% of the RTX 3090's NVENC.
 
+## Image (`images/gow-nvidia32` target `vr`, files in `vr/`; XERK-2663)
+
+- The steam image plus WiVRn (built from source at a verified commit), xrizer (zip, sha256) and
+  OpenComposite (commit); `DIREWOLF_VR_OPENVR` = `xrizer` (default) or `opencomposite`.
+- `/opt/gow/startup-app.sh` links to `vr/startup-app.sh`; GoW's Steam startup moves beside it as
+  `steam-startup-app.sh`. Siblings are found by the script's own path (tests copy them).
+- It refuses to start (the session ends) without `DIREWOLF_VR_PORT` (XERK-2664 sets it on App
+  containers when `spec.vrPort`), or unless `~/.config/{wivrn,openxr,openvr}` are each a mount:
+  the App mounts a per-user volume there. It never falls back to the shared home or port 9757.
+- startup-app.sh rewrites WiVRn's `config.json` whole at every start, keeping no user key: WiVRn
+  parses keys in one try block, and one of the wrong type would leave the port on 9757.
+- PipeWire, WirePlumber and pipewire-pulse run with `XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR/vr-audio`:
+  Wolf's pulseaudio shares the runtime dir. The game gets `PULSE_SERVER` there, so its audio
+  goes to the headset, not the Moonlight stream. wivrn-server keeps the real runtime dir: games
+  reach its IPC socket there.
+- The session bus listens on `unix:dir=/tmp` (`dbus-session.conf`), never an abstract socket.
+- Either Steam or the VR services exiting ends the session. Tests: `images/gow-nvidia32/vr/vr_test.go`.
+
 ## Ports and auth
 
 - Exactly one port, TCP (control) and UDP (stream) on the same number: config `"port"`.
