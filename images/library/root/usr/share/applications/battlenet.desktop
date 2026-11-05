@@ -3,6 +3,6 @@ Type=Application
 Name=Battle.net
 Comment=Blizzard games
 Exec=/usr/bin/battlenet
-Icon=/usr/share/icons/Adwaita/scalable/devices/input-gaming.svg
+Icon=/opt/battlenet/battlenet.png
 Categories=Game;
 Terminal=false

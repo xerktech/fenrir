@@ -281,3 +281,33 @@ func TestBattlenetStartsOneInstaller(t *testing.T) {
 		t.Errorf("calls:\n%s", calls)
 	}
 }
+
+// Battle.net's launcher and menu entries show the logo the build extracts from
+// its installer, not a generic gamepad.
+func TestBattlenetIconIsExtractedLogo(t *testing.T) {
+	const icon = "/opt/battlenet/battlenet.png"
+	dockerfile, err := os.ReadFile("Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	desktop, err := os.ReadFile("root/usr/share/applications/battlenet.desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for what, want := range map[string]string{
+		"extracts the icons": "wrestool -x -t 14 /opt/battlenet/Battle.net-Setup.exe",
+		"extracts the logo":  "icotool -x -w 256 -o " + icon,
+		"checks it is a PNG": `= PNG ] ||`,
+		// The desktop user must read it, or the menus show no icon.
+		"makes it readable":  "chmod 0644 " + icon,
+		"uses it in menus":   `<item label="Battle.net" icon="` + icon + `">`,
+		"checks it is there": "test -f " + icon,
+	} {
+		if !strings.Contains(string(dockerfile), want) {
+			t.Errorf("Dockerfile no longer %s (%q)", what, want)
+		}
+	}
+	if !strings.Contains(string(desktop), "\nIcon="+icon+"\n") {
+		t.Errorf("battlenet.desktop does not use %s", icon)
+	}
+}
