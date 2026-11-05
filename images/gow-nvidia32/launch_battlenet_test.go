@@ -19,8 +19,7 @@ const launchBattlenet = "root/opt/direwolf/launch-battlenet"
 
 // stubProton stands in for Proton. `run <client>` is the client: it listens
 // on $BATTLENET_WEB_PORT after $CLIENT_UP_AFTER seconds (never with
-// $CLIENT_NEVER_UP) and stays up until wineserver -k. `run <client> --exec=...`,
-// or `run <game> -launcherlogin ...` (logged with its working directory),
+// $CLIENT_NEVER_UP) and stays up until wineserver -k. `run <client> --exec=...`
 // starts a fake game process, whose command line is Wine's for WoW, for
 // $GAME_SECONDS (none if unset), $GAME_DELAY seconds after the launch. Like
 // the real client, it ignores a launch sent before it is up; with
@@ -33,8 +32,7 @@ printf 'proton' >>"$STUB_LOG"
 printf ' [%s]' "$@" >>"$STUB_LOG"
 echo >>"$STUB_LOG"
 case "$*" in
-*--exec=*|*" -launcherlogin "*)
-  case "$*" in *" -launcherlogin "*) echo "game cwd $PWD" >>"$STUB_LOG" ;; esac
+*--exec=*)
   if [ -n "${IGNORE_FIRST:-}" ] && [ ! -f "$STUB_DIR/ignored" ]; then
     touch "$STUB_DIR/ignored"
   elif { [ -f "$STUB_DIR/up" ] || [ -n "${CLIENT_NEVER_UP:-}" ]; } && [ -n "${GAME_SECONDS:-}" ]; then
@@ -274,6 +272,9 @@ func TestLaunchBattlenetTellsWoWVersionsApart(t *testing.T) {
 		{"wowf", `/games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`, true},
 		{"wowf", `Z:/games/battlenet/World of Warcraft/_FOREVER_/WOW.EXE`, true},
 		{"wowf", `Wow.exe -launcherlogin -uid WOWF`, true},
+		// The folder names the game: the client's -uid for it is unrecorded.
+		{"wowf", `Z:\games\battlenet\World of Warcraft\_forever_\Wow.exe -launcherlogin -uid wow`, true},
+		{"wow", `Z:\games\battlenet\World of Warcraft\_retail_\WoW.exe -launcherlogin -uid wowf`, true},
 	} {
 		r := runLaunchBattlenetWith(t, true, func(games string) { installForever(t, games) }, []string{tc.product}, "GAME_SECONDS=3", "BATTLENET_LAUNCH_TIMEOUT=4", "GAME_ARGV0="+tc.argv0)
 		if seen := strings.Contains(r.out, tc.product+" is running"); seen != tc.seen {
@@ -294,8 +295,8 @@ func installForever(t *testing.T, games string) {
 	}
 }
 
-// Proton's wrappers for a direct start name the game's path with its
-// arguments, as Proton's run and Wine show them; they are not the game.
+// Proton's wrappers for a game started by path name it with its arguments,
+// as Proton's run and Wine show them; they are not the game.
 func TestLaunchBattlenetIgnoresDirectStartWrappers(t *testing.T) {
 	for _, argv0 := range []string{
 		`/opt/proton-cachyos/files/lib/wine/x86_64-unix/wine-preloader /opt/proton-cachyos/files/lib/wine c:\windows\system32\steam.exe /games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`,

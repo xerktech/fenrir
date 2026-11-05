@@ -54,10 +54,11 @@ paths:
     capital O, so a case-sensitive `Wow.exe` never matched and each resend started another WoW.
     Other command lines (a shell, a crash reporter) name the path in their arguments.
   - Retail and Forever are both `Wow.exe` (any case), so a directory must end in the product's
-    folder and a `-uid` must name the product; a bare `Wow.exe` still counts.
+    folder. Only a bare `Wow.exe` is checked by `-uid`: the client's uid for Forever is
+    unrecorded (XERK-2688), and a skipped game gets resent, each copy logging the last out.
     Tests: `TestLaunchBattlenetTellsWoWVersionsApart`.
   - Proton's `run` wrappers (`wine-preloader ... steam.exe <game path> -launcherlogin ...`) stay
-    up beside a direct start: a program part holding a second path is not the game.
+    up beside a game started by path: a program part holding a second path is not the game.
     The stub's wrappers are short-lived, so only `TestLaunchBattlenetIgnoresDirectStartWrappers`
     (decoy processes) sees this.
   - It refuses the host user namespace (identity `uid_map`): only the App pod
