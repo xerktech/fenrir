@@ -199,6 +199,18 @@ paths:
   - A file with any line that is not `SET <name> "<value>"` is left alone: WoW rewrites the
     whole file, and a mis-edit could drop the user's CVars. CRLF and a missing final newline
     are kept consistent. Tests: `TestLaunchBattlenetTurnsOnWoWGamepadUnlessSet`.
+- Forever rewrites Config.wtf without `GamePadEnable` on exit; the line is re-added each launch.
+- Retail reads the pad through WGI/DirectInput; Forever only through XInput, and only once at
+  startup. So a pad can work in retail and not in Forever (XERK-2697).
+  - Forever's symptom: `/dump C_GamePad.GetAllDeviceIDs()` prints `{}` with `IsEnabled()` true.
+  - XInput uses Wine's `HID\VID_045E&PID_02EA&XI_00\<id>` device. If that Enum key in the
+    prefix's `system.reg` has only its `Device Parameters` subkey (no `Driver`), Wine never starts
+    it: its `{6C53D5FD-…}` interface stays unlinked and every XInput slot reads 1167.
+  - Fix seen live: delete the pad's `Enum\{HID,WINEXINPUT,WINEBUS}\VID_045E&PID_02EA*` and its
+    `DeviceClasses` keys (`wine reg delete`); Wine re-installs them on the next plug.
+  - The cause of the broken key is unknown; a fresh prefix installs it correctly.
+  - Not the cause (each tested): SDL hints (`SDL_JOYSTICK_WGI`/`RAWINPUT`), gameinput.dll,
+    Battle.net's own XInput use, pad hotplug timing.
 
 ## Loopback listeners (feeds XERK-2362)
 
