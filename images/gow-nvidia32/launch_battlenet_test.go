@@ -301,24 +301,35 @@ func TestLaunchBattlenetWarnsWoWForeverNotInstalled(t *testing.T) {
 }
 
 // The installed check ignores the exe's case: retail's live argv says WoW.exe,
-// while its file may be Wow.exe.
+// while its file may be Wow.exe. A symlinked exe counts too.
 func TestLaunchBattlenetInstalledCheckIgnoresCase(t *testing.T) {
-	for _, tc := range []struct{ product, dir, file string }{
-		{"wow", "_retail_", "Wow.exe"},
-		{"wow", "_retail_", "WoW.exe"},
-		{"wowf", "_forever_", "WOW.EXE"},
+	for _, tc := range []struct {
+		product, dir, file string
+		link               bool
+	}{
+		{"wow", "_retail_", "Wow.exe", false},
+		{"wow", "_retail_", "WoW.exe", false},
+		{"wowf", "_forever_", "WOW.EXE", false},
+		{"wowf", "_forever_", "Wow.exe", true},
 	} {
 		r := runLaunchBattlenetWith(t, true, func(games string) {
 			dir := filepath.Join(games, "World of Warcraft", tc.dir)
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(dir, tc.file), nil, 0o644); err != nil { //nolint:gosec // test fixture
+			target := filepath.Join(dir, tc.file)
+			if tc.link {
+				target = filepath.Join(games, "real.exe")
+				if err := os.Symlink(target, filepath.Join(dir, tc.file)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(target, nil, 0o644); err != nil { //nolint:gosec // test fixture
 				t.Fatal(err)
 			}
 		}, []string{tc.product}, "BATTLENET_LAUNCH_TIMEOUT=2")
 		if strings.Contains(r.out, "does not look installed") {
-			t.Errorf("%s with %s/%s: warned it is not installed\n%s", tc.product, tc.dir, tc.file, r.out)
+			t.Errorf("%s with %s/%s (link %v): warned it is not installed\n%s", tc.product, tc.dir, tc.file, tc.link, r.out)
 		}
 	}
 }

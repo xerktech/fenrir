@@ -137,8 +137,9 @@ enable_wow_gamepad() {
 games="${BATTLENET_GAMES:-/games/battlenet}"
 # Only a warning: the client still runs (to install it, say) until the
 # timeout, whose reason would otherwise read as patching or a sign-in.
-# Any case: Wine finds it so, and the on-disk spelling is unrecorded.
-if [ -z "$(find "${games}/${game_dir}" -maxdepth 1 -type f -iname "${exe}" -print -quit 2>/dev/null)" ]; then
+# Any case: Wine finds it so, and the on-disk spelling is unrecorded. -L, as
+# [ -f ] would: a symlinked exe or folder counts.
+if [ -z "$(find -L "${games}/${game_dir}" -maxdepth 1 -type f -iname "${exe}" -print -quit 2>/dev/null)" ]; then
   log "${product} does not look installed in ${games}/${game_dir}; install it from the Library"
 fi
 if [ "${product}" = wow ] || [ "${product}" = wowf ]; then
