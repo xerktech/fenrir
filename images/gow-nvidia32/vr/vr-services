@@ -1,0 +1,81 @@
+#!/bin/bash
+# The vr session's services, under their own D-Bus session bus
+# (startup-app.sh): PipeWire, WirePlumber and PipeWire's pulse server, then
+# wivrn-server under a supervisor. Exits, ending the session, if an audio
+# daemon does. Usage: vr-services <port> <audio runtime dir>
+set -euo pipefail
+
+port=$1
+audio=$2
+config=$HOME/.config/wivrn/config.json
+# Seconds between checks, and failed checks in a row before a restart: the
+# first restart comes no sooner than interval*misses, which covers start-up.
+interval=${DIREWOLF_VR_CHECK_INTERVAL:-5}
+misses_allowed=${DIREWOLF_VR_CHECK_MISSES:-6}
+
+log() { echo "direwolf-vr: $*" >&2; }
+
+# PipeWire's daemons run in the audio dir, with their state there too, out of
+# the shared home. None of them listens on the network.
+audio_env=(env XDG_RUNTIME_DIR="$audio" XDG_STATE_HOME="$audio/state" PIPEWIRE_RUNTIME_DIR="$audio")
+"${audio_env[@]}" pipewire &
+pids=($!)
+for ((i = 0; i < 100; i++)); do
+  [[ -S $audio/pipewire-0 ]] && break
+  sleep 0.1
+done
+[[ -S $audio/pipewire-0 ]] || {
+  log "PipeWire did not start"
+  exit 1
+}
+"${audio_env[@]}" wireplumber &
+pids+=($!)
+"${audio_env[@]}" pipewire-pulse &
+pids+=($!)
+
+# Serving: listening, or holding the one headset's connection (the listener
+# closes while a headset is connected).
+serving() {
+  [[ -n $(ss -Htln "sport = :$port") ]] || [[ -n $(ss -Htn state established "sport = :$port") ]]
+}
+
+# After a failed headset session wivrn-server stayed up but never listened
+# again (XERK-2659), so it is restarted when it stops serving its port, not
+# only when it exits. setsid makes it a process group leader, so its forked
+# connection handlers go with it.
+supervise() {
+  local pid misses started i
+  while :; do
+    started=$SECONDS
+    PIPEWIRE_RUNTIME_DIR=$audio setsid wivrn-server -f "$config" \
+      --early-active-runtime --no-publish-service --no-instructions &
+    pid=$!
+    misses=0
+    while kill -0 "$pid" 2>/dev/null; do
+      sleep "$interval"
+      if serving; then
+        misses=0
+      elif ((++misses >= misses_allowed)); then
+        log "wivrn-server is not serving port $port; restarting it"
+        kill -TERM -- "-$pid" 2>/dev/null || true
+        for ((i = 0; i < 10; i++)); do
+          kill -0 "$pid" 2>/dev/null || break
+          sleep 1
+        done
+        kill -KILL -- "-$pid" 2>/dev/null || true
+        break
+      fi
+    done
+    wait "$pid" || log "wivrn-server exited with status $?"
+    # One that dies at once (a bad config) is not restarted in a tight loop.
+    if ((SECONDS - started < 10)); then sleep 5; else sleep 1; fi
+  done
+}
+supervise &
+pids+=($!)
+
+status=0
+wait -n "${pids[@]}" || status=$?
+log "a VR service exited (status $status)"
+kill -- "${pids[@]}" 2>/dev/null || true
+exit 1

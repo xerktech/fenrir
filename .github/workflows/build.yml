@@ -51,6 +51,10 @@ jobs:
           - app: battlenet
             context: images/gow-nvidia32
             target: battlenet
+          # The steam image plus WiVRn, xrizer and OpenComposite (VR, XERK-2663).
+          - app: vr
+            context: images/gow-nvidia32
+            target: vr
           # Go binary plus a C shim: repo-root context, own Dockerfile.
           - app: nri-nvenc-fix
             file: cmd/nri-nvenc-fix/Dockerfile

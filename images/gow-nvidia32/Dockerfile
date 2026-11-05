@@ -250,3 +250,106 @@ RUN ldconfig -p | grep -q 'libwebkit2gtk-4.1.so.0 (libc6,x86-64)' \
   done \
   && d='/usr/bin /opt/ferestre' \
   && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
+
+# PC VR sessions (epic XERK-2656; spike report XERK-2662, .claude/rules/vr.md):
+# the steam image plus the WiVRn server (OpenXR runtime, streams to a Quest
+# running the WiVRn client) and two OpenVR-on-OpenXR layers, xrizer and
+# OpenComposite; DIREWOLF_VR_OPENVR picks one per App. Files: vr/.
+#
+# WiVRn is built here, not taken from a distro or flatpak: only this way is
+# the server's version pinned to the Quest client's (a protocol mismatch is
+# refused, so bump WIVRN_VERSION and the Horizon store client together). Built
+# on the steam image itself so it links the libraries the session has.
+FROM steam AS vr-wivrn
+ARG WIVRN_VERSION=v26.9
+# The tag's commit: a moved tag fails the build. Its CMakeLists pins every
+# FetchContent dependency by URL_HASH, and monado by commit (monado-rev).
+ARG WIVRN_COMMIT=bbc6e4cc36c355fa6180980abd231673dc15115d
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build git pkg-config ca-certificates python3 \
+      glslang-tools spirv-tools gettext libssl-dev \
+      libavahi-client-dev libavahi-glib-dev libavcodec-dev libavfilter-dev libavutil-dev \
+      libswscale-dev libdrm-dev libbsd-dev libcap-dev libcjson-dev libcli11-dev libeigen3-dev \
+      libgl-dev libglx-dev libgl1-mesa-dev libglu1-mesa-dev mesa-common-dev libnotify-dev \
+      libpipewire-0.3-dev libsystemd-dev libudev-dev libva-dev libvulkan-dev libwayland-dev \
+      libx11-xcb-dev libx264-dev libxcb-randr0-dev libxrandr-dev libxxf86vm-dev \
+      nlohmann-json3-dev libglib2.0-dev libfreetype-dev libusb-1.0-0-dev \
+      librsvg2-dev libarchive-dev libpng-dev bsdextrautils
+# PipeWire on: it is WiVRn's only audio backend, and the image ships the daemon
+# (vr-services starts it). No dashboard, no client, no Lighthouse/SolarXR
+# drivers, no VA-API (NVIDIA only).
+RUN git clone --depth 1 -b "${WIVRN_VERSION}" https://github.com/WiVRn/WiVRn /src/wivrn \
+ && test "$(git -C /src/wivrn rev-parse HEAD)" = "${WIVRN_COMMIT}" \
+ && cmake -S /src/wivrn -B /src/wivrn/build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DCMAKE_INSTALL_PREFIX=/usr/local -DWIVRN_BUILD_CLIENT=OFF -DWIVRN_BUILD_DASHBOARD=OFF \
+      -DWIVRN_USE_SYSTEM_BOOST=OFF -DWIVRN_USE_SYSTEM_OPENXR=OFF \
+      -DWIVRN_USE_NVENC=ON -DWIVRN_USE_VAAPI=OFF -DWIVRN_USE_X264=ON -DWIVRN_USE_PIPEWIRE=ON \
+      -DWIVRN_FEATURE_STEAMVR_LIGHTHOUSE=OFF -DWIVRN_FEATURE_SOLARXR=OFF \
+      -DWIVRN_OPENXR_MANIFEST_TYPE=absolute \
+ && cmake --build /src/wivrn/build \
+ && DESTDIR=/out cmake --install /src/wivrn/build \
+ && test -x /out/usr/local/bin/wivrn-server \
+ && test -f /out/usr/local/share/openxr/1/openxr_wivrn.json
+
+# OpenComposite (gitlab.com/znixian/OpenOVR), at a commit: its submodules are
+# pinned by that commit's gitlinks.
+FROM steam AS vr-opencomposite
+ARG OPENCOMPOSITE_COMMIT=cff07db75c4823afe93ed7027b03d5f7bc86f164
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build git pkg-config ca-certificates python3 \
+      libvulkan-dev libgl-dev libglx-dev libx11-dev libxrandr-dev libxxf86vm-dev libwayland-dev
+RUN git clone https://gitlab.com/znixian/OpenOVR.git /src/oc \
+ && git -C /src/oc checkout --detach "${OPENCOMPOSITE_COMMIT}" \
+ && test "$(git -C /src/oc rev-parse HEAD)" = "${OPENCOMPOSITE_COMMIT}" \
+ && git -C /src/oc submodule update --init --recursive \
+ && cmake -S /src/oc -B /src/oc/build -GNinja -DCMAKE_BUILD_TYPE=Release \
+ && cmake --build /src/oc/build \
+ && install -D -m 0755 "$(find /src/oc/build -name vrclient.so | head -1)" \
+      /out/opt/opencomposite/bin/linux64/vrclient.so
+
+# xrizer's release zip, checked against its SHA256 (update both together).
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS vr-xrizer
+ARG XRIZER_VERSION=v0.6
+ARG XRIZER_SHA256=9b2105433e48a20f789e20a14113dbd98650afd116bd232419725a4438dd2149
+ADD --checksum=sha256:${XRIZER_SHA256} \
+  https://github.com/Supreeeme/xrizer/releases/download/${XRIZER_VERSION}/xrizer-${XRIZER_VERSION}.zip /tmp/xrizer.zip
+RUN set -eu; \
+  apt-get update; apt-get install -y --no-install-recommends unzip; \
+  unzip -q /tmp/xrizer.zip -d /tmp/xrizer; \
+  test -f "/tmp/xrizer/xrizer-${XRIZER_VERSION}/bin/linux64/vrclient.so"; \
+  chmod -R u=rwX,go=rX "/tmp/xrizer/xrizer-${XRIZER_VERSION}"; \
+  mkdir -p /out/opt; mv "/tmp/xrizer/xrizer-${XRIZER_VERSION}" /out/opt/xrizer
+
+FROM steam AS vr
+# PipeWire, its pulse server and WirePlumber run per session (vr-services):
+# WiVRn 26.9 segfaults on every headset connect without PipeWire's config and
+# modules, and the game's audio reaches the headset through them. iproute2's ss
+# is the supervisor's port check.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      pipewire pipewire-pulse wireplumber iproute2 \
+      libavahi-client3 libavahi-glib1 libavfilter10 libswscale8 libbsd0 libcap2 libcjson1 \
+      libnotify4 libpipewire-0.3-0t64 libsystemd0 libudev1 libva2 libvulkan1 libx264-164 \
+      libxxf86vm1 libusb-1.0-0 librsvg2-2 libarchive13t64 libpng16-16t64 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=vr-wivrn /out/ /
+COPY --from=vr-opencomposite /out/ /
+COPY --from=vr-xrizer /out/ /
+# The session starts the VR services, then Steam as before: GoW's startup-app
+# moves beside the vr scripts (startup-app.sh finds its siblings by its own
+# path) and ours takes its place.
+COPY --chmod=644 vr/dbus-session.conf /opt/direwolf/vr/
+COPY --chmod=755 vr/startup-app.sh vr/vr-services vr/wivrn-config.py /opt/direwolf/vr/
+RUN chmod 0755 /opt/direwolf /opt/direwolf/vr \
+ && mv /opt/gow/startup-app.sh /opt/direwolf/vr/steam-startup-app.sh \
+ && ln -s /opt/direwolf/vr/startup-app.sh /opt/gow/startup-app.sh
+# No setcap anywhere (with file caps gdbus ignores DBUS_SESSION_BUS_ADDRESS),
+# and nothing may link-fail at run time.
+RUN ldconfig \
+ && ! ldd /usr/local/bin/wivrn-server /usr/local/lib/wivrn/libopenxr_wivrn.so \
+      /opt/xrizer/bin/linux64/vrclient.so /opt/opencomposite/bin/linux64/vrclient.so | grep 'not found' \
+ && python3 -I -c 'import os,sys; bad=[os.path.join(d,f) for r in ("/usr/local","/opt") for d,_,fs in os.walk(r) for f in fs if not os.path.islink(os.path.join(d,f)) and "security.capability" in os.listxattr(os.path.join(d,f))]; sys.exit(bad and "file capabilities on %s" % bad)' \
+ && command -v pipewire pipewire-pulse wireplumber dbus-run-session ss mountpoint python3 setsid >/dev/null \
+ && test -d /usr/share/pipewire && test -f /usr/share/pipewire/client.conf \
+ && gosu nobody sh -c 'test -r /usr/local/share/openxr/1/openxr_wivrn.json -a -r /opt/xrizer/bin/linux64/vrclient.so -a -r /opt/opencomposite/bin/linux64/vrclient.so' \
+ && d='/etc/cont-init.d /opt/gow /usr/local /usr/bin /opt/direwolf /opt/xrizer /opt/opencomposite' \
+ && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
