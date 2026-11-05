@@ -182,7 +182,7 @@ paths:
     already runs. Tests: `TestWrappedSteamKeepsRunningNexus`.
   - The Library's selkies-desktop menu lists only `.desktop` files; labwc's right-click menu is
     the openbox `menu.xml`, so ship both.
-  - labwc 0.8 loads an absolute icon path only if it ends in `.png`/`.svg`/`.xpm`, so the menus
+  - labwc loads an absolute icon path only if it ends in `.png`/`.svg`/`.xpm`, so the menus
     point at a copy of `.DirIcon` in `/usr/share/pixmaps`, outside the dir the updater replaces.
 - Battle.net (`/usr/bin/battlenet`, `init-battlenet`) is in `.claude/rules/battlenet.md`.
 - linuxserver's `init-selkies-config` copies the default `menu.xml` into the home only when it

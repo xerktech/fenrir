@@ -34,6 +34,7 @@ func newBattlenetHost(t *testing.T) *battlenetHost {
 	}
 	writeStub(t, filepath.Join(h.proton, "proton"), `echo "proton $* xalia=$PROTON_USE_XALIA fsr4=$PROTON_FSR4_UPGRADE client=$STEAM_COMPAT_CLIENT_INSTALL_PATH" >>"$LOG"
 [ -n "$PROTON_FAIL" ] && exit 1
+[ -n "$PROTON_REG_FAIL" ] && [ "$2" = reg ] && exit 1
 if [ "$2" = reg ]; then mkdir -p "$STEAM_COMPAT_DATA_PATH/pfx" && echo '"UseTakeFocus"="N"' >>"$STEAM_COMPAT_DATA_PATH/pfx/user.reg"; fi
 exit 0`)
 	writeStub(t, filepath.Join(h.proton, "files", "bin", "wineserver"), `echo "wineserver $* $WINEPREFIX" >>"$LOG"`)
@@ -143,6 +144,17 @@ func TestBattlenetStartNeverWaitsForWineserver(t *testing.T) {
 	}
 	if strings.Contains(calls, "wineserver") || strings.Contains(calls, "could not prepare") {
 		t.Errorf("the start waited on the wineserver or reported a failed prepare:\n%s", calls)
+	}
+}
+
+// A failed prepare on a desktop start is reported, and Battle.net starts anyway.
+func TestBattlenetStartReportsFailedPrepare(t *testing.T) {
+	h := newBattlenetHost(t)
+	calls := h.run([]string{"PROTON_REG_FAIL=1"})
+	for _, want := range []string{"could not prepare", "starting anyway", "proton run /opt/battlenet/Battle.net-Setup.exe"} {
+		if !strings.Contains(calls, want) {
+			t.Errorf("calls lack %q:\n%s", want, calls)
+		}
 	}
 }
 
