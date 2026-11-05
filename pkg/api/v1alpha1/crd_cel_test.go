@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"context"
+	"maps"
 	"os"
 	"strings"
 	"testing"
@@ -97,9 +98,7 @@ func TestAppCRDRequiresAppPodForVRPort(t *testing.T) {
 			"title": "a", "id": int64(1), "isHDRSupported": false, "appAssetWebP": "AA==",
 			"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "game"}}}},
 		}
-		for k, v := range tc.extra {
-			spec[k] = v
-		}
+		maps.Copy(spec, tc.extra)
 		errs := validate(map[string]any{
 			"apiVersion": "direwolf.games-on-whales.github.io/v1alpha1",
 			"kind":       "App",

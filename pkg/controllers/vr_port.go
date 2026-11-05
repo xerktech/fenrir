@@ -90,9 +90,11 @@ func withVRPort(spec *corev1.PodSpec, port int32) {
 	if len(spec.Containers) == 0 {
 		return
 	}
+	// Unnamed: a name could collide with one of the App's own ports, and
+	// the apiserver would refuse the pod.
 	spec.Containers[0].Ports = append(slices.Clone(spec.Containers[0].Ports),
-		corev1.ContainerPort{Name: "vr-tcp", ContainerPort: port, HostPort: port, Protocol: corev1.ProtocolTCP},
-		corev1.ContainerPort{Name: "vr-udp", ContainerPort: port, HostPort: port, Protocol: corev1.ProtocolUDP},
+		corev1.ContainerPort{ContainerPort: port, HostPort: port, Protocol: corev1.ProtocolTCP},
+		corev1.ContainerPort{ContainerPort: port, HostPort: port, Protocol: corev1.ProtocolUDP},
 	)
 }
 
