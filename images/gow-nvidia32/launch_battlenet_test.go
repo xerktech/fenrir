@@ -300,6 +300,29 @@ func TestLaunchBattlenetWarnsWoWForeverNotInstalled(t *testing.T) {
 	}
 }
 
+// The installed check ignores the exe's case: retail's live argv says WoW.exe,
+// while its file may be Wow.exe.
+func TestLaunchBattlenetInstalledCheckIgnoresCase(t *testing.T) {
+	for _, tc := range []struct{ product, dir, file string }{
+		{"wow", "_retail_", "Wow.exe"},
+		{"wow", "_retail_", "WoW.exe"},
+		{"wowf", "_forever_", "WOW.EXE"},
+	} {
+		r := runLaunchBattlenetWith(t, true, func(games string) {
+			dir := filepath.Join(games, "World of Warcraft", tc.dir)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, tc.file), nil, 0o644); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+		}, []string{tc.product}, "BATTLENET_LAUNCH_TIMEOUT=2")
+		if strings.Contains(r.out, "does not look installed") {
+			t.Errorf("%s with %s/%s: warned it is not installed\n%s", tc.product, tc.dir, tc.file, r.out)
+		}
+	}
+}
+
 // Proton's wrappers for a started Wow.exe name the game's path with its
 // arguments, as Proton's run and Wine show them; they are not the game.
 func TestLaunchBattlenetIgnoresDirectStartWrappers(t *testing.T) {
