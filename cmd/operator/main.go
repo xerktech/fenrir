@@ -48,6 +48,9 @@ func main() {
 	// the NodePort range (30000-32767).
 	sessionPortRange := flag.String("session-port-range", "20000-20999",
 		"Host port range (MIN-MAX) session pods get their port blocks from")
+	vrPortRange := flag.String("vr-port-range", "",
+		"Host port range (MIN-MAX) VR ports are allocated from, one per Session of an App with spec.vrPort; "+
+			"must not overlap --session-port-range. Empty: such Apps are refused")
 	sessionNodeSelector := flag.String("session-node-selector", "",
 		"Node labels session pods are pinned to, e.g. kubernetes.io/hostname=talos04.xerktech.com")
 	sessionTolerations := flag.String("session-tolerations", "",
@@ -116,6 +119,15 @@ func main() {
 	portRange, err := controllers.ParsePortRange(*sessionPortRange)
 	if err != nil {
 		klog.Fatalf("--session-port-range: %v", err)
+	}
+	var vrRange controllers.PortRange
+	if *vrPortRange != "" {
+		if vrRange, err = controllers.ParseVRPortRange(*vrPortRange); err != nil {
+			klog.Fatalf("--vr-port-range: %v", err)
+		}
+		if vrRange.Overlaps(portRange) {
+			klog.Fatalf("--vr-port-range %s overlaps --session-port-range %s", *vrPortRange, *sessionPortRange)
+		}
 	}
 	nodeSelector, err := labels.ConvertSelectorToLabelsMap(*sessionNodeSelector)
 	if err != nil {
@@ -284,6 +296,7 @@ func main() {
 		controllers.SessionControllerOptions{
 			WolfAgentImage:      *wolfAgentImage,
 			SessionPortRange:    portRange,
+			VRPortRange:         vrRange,
 			SessionNodeSelector: nodeSelector,
 			AppPodHostDir:       *appPodHostDir,
 			SessionTolerations:  tolerations,

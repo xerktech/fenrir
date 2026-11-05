@@ -18,6 +18,10 @@ type App struct {
 	Spec AppSpec `json:"spec"`
 }
 
+// AppSpec is an App's spec. vrPort needs requireAppPod: the VR port is a
+// hostPort on the App pod, off the host network; in the host-networked
+// session pod a VR server would listen on the node's own network.
+// +kubebuilder:validation:XValidation:rule="!has(self.vrPort) || !self.vrPort || (has(self.requireAppPod) && self.requireAppPod)",message="vrPort needs requireAppPod"
 type AppSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
@@ -84,6 +88,14 @@ type AppSpec struct {
 	// process on the node, and two Sessions on one node collide on fixed ports.
 	// +kubebuilder:validation:Optional
 	RequireAppPod bool `json:"requireAppPod,omitempty" xml:"-"`
+
+	// VRPort gives each Session one host port, from the operator's
+	// --vr-port-range, for a VR server (WiVRn) in the App pod: TCP and UDP
+	// on the same number, declared as hostPorts on the App's first container
+	// and handed to every App container as DIREWOLF_VR_PORT. A headset dials
+	// it at the node's IP. Needs requireAppPod.
+	// +kubebuilder:validation:Optional
+	VRPort bool `json:"vrPort,omitempty" xml:"-"`
 }
 
 // Positive means a nonzero digit before any suffix or exponent (the schema

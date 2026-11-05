@@ -31,6 +31,10 @@ paths:
     start). The fixed-size "Battle.net Login" window then fights the resize and its page never
     renders, so the image adds an UnMaximize rule for that title. Its class `steam_proton` is
     every Proton window's: never unmaximize by class alone.
+  - `--prepare` also sets `HKCU\Software\Wine\Explorer` `ShowSystray=0`: with no XEmbed tray,
+    `explorer.exe /desktop` puts Battle.net's tray icon in an untitled `steam_proton` window of its
+    own, which labwc maximized into a full-screen white window (seen live; `_NET_WM_PID` explorer).
+    Explorer reads it at prefix start; the Battle.net tray icon is gone with it.
   - `PROTON_FSR4_UPGRADE=0`: this Proton otherwise downloads a 65 MB DLL, outside the image's
     pin, into the prefix on every run.
   - No autostart beside Heroic: nothing needs the client running, and its CEF costs CPU.

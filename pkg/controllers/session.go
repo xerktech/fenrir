@@ -130,6 +130,10 @@ type SessionControllerOptions struct {
 	WolfAgentImage string
 	// Host ports session port blocks are allocated from.
 	SessionPortRange PortRange
+	// Host ports VR ports (App spec.vrPort) are allocated from, one per
+	// Session; must not overlap SessionPortRange. Zero: Apps with vrPort
+	// are refused.
+	VRPortRange PortRange
 	// Node labels session pods are pinned to. Session pods use hostNetwork, so
 	// this selects the node whose IP Moonlight clients stream from.
 	SessionNodeSelector map[string]string
@@ -185,6 +189,8 @@ type SessionController struct {
 	Recorder record.EventRecorder
 
 	ports *portAllocator
+	// vrPorts hands out VR ports (spec.vrPort); nil without VRPortRange.
+	vrPorts *portAllocator
 
 	// videoProgress spots attached streams that stopped sending video.
 	videoProgress videoProgress
@@ -232,6 +238,9 @@ func NewSessionController(
 		Recorder:                 recorder,
 		ports:                    newPortAllocator(options.SessionPortRange),
 		SessionControllerOptions: options,
+	}
+	if options.VRPortRange != (PortRange{}) {
+		res.vrPorts = newVRPortAllocator(options.VRPortRange)
 	}
 
 	res.controller = generic.NewController(
@@ -1094,6 +1103,9 @@ func (c *SessionController) checkSessionPod(ctx context.Context, session *v1alph
 		// Its block was re-allocated (e.g. lost across an operator restart),
 		// so the pod no longer serves the ports the session advertises.
 		return nil, c.endSessionErr(ctx, session, fmt.Sprintf("its pod is on port block %s, not %d", pod.Annotations[portBlockAnnotation], session.Status.Ports.HTTP))
+	case vrPortMoved(pod, session):
+		// Likewise for the App pod's VR port.
+		return nil, c.endSessionErr(ctx, session, fmt.Sprintf("its pod %s is on VR port %s, not %d", pod.Name, pod.Annotations[vrPortAnnotation], session.Status.Ports.VR))
 	}
 	if reason := podExitReason(pod); reason != "" {
 		return nil, c.endSessionErr(ctx, session, reason)
@@ -1193,6 +1205,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	}
 	if app.Spec.RequireAppPod && c.AppPodHostDir == "" {
 		return nil, invalidSpec(fmt.Errorf("app %s sets requireAppPod, but the operator runs without --app-pod-host-dir", app.Name))
+	}
+	if vrErr := c.checkVRPort(app, session); vrErr != nil {
+		return nil, invalidSpec(vrErr)
 	}
 	wolfConfigSeed, err := wolfConfigSeed()
 	if err != nil {
@@ -1297,6 +1312,12 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	if err := validateNoUserHostPathMounts(&podToCreate.Spec, user.Spec.Volumes); err != nil {
 		return nil, invalidSpec(err)
 	}
+	// Before the operator's own containers are added: only the App's get it.
+	var vrPort int32
+	if app.Spec.VRPort {
+		vrPort = session.Status.Ports.VR
+	}
+	withVRPort(&podToCreate.Spec, vrPort)
 
 	if podToCreate.Labels == nil {
 		podToCreate.Labels = map[string]string{}
@@ -1857,6 +1878,9 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		annotations = map[string]string{}
 	}
 	annotations[portBlockAnnotation] = strconv.Itoa(int(session.Status.Ports.HTTP))
+	if vrPort != 0 {
+		annotations[vrPortAnnotation] = strconv.Itoa(int(vrPort))
+	}
 	if err := validateBuiltPod(&podToCreate.Spec, podToCreate.Labels); err != nil {
 		return nil, invalidSpec(err)
 	}
@@ -2659,20 +2683,24 @@ func (c *SessionController) allocatePorts(
 	session *v1alpha1types.Session,
 ) error {
 	owner := c.portOwner(session)
-	if session.Status.Ports != (v1alpha1types.SessionPorts{}) {
+	claimed := false
+	if session.Status.Ports.HTTP != 0 {
 		err := c.ports.Claim(owner, session.Status.Ports)
 		if err == nil {
-			return nil
+			claimed = true
+		} else {
+			klog.Warningf("Session %s/%s: re-allocating ports: %v", session.Namespace, session.Name, err)
 		}
-		klog.Warningf("Session %s/%s: re-allocating ports: %v", session.Namespace, session.Name, err)
 	}
-
-	ports, err := c.ports.Allocate(owner)
-	if err != nil {
-		return err
+	if !claimed {
+		ports, err := c.ports.Allocate(owner)
+		if err != nil {
+			return err
+		}
+		ports.VR = session.Status.Ports.VR
+		session.Status.Ports = ports
 	}
-	session.Status.Ports = ports
-	return nil
+	return c.allocateVRPort(session)
 }
 
 // claimRecordedPorts re-registers the port blocks recorded in sessions'
@@ -2684,6 +2712,11 @@ func (c *SessionController) claimRecordedPorts(sessions []*v1alpha1types.Session
 		}
 		if err := c.ports.Claim(c.portOwner(session), session.Status.Ports); err != nil {
 			klog.Warningf("Session %s/%s: not restoring port allocation: %v", session.Namespace, session.Name, err)
+		}
+		if vr := session.Status.Ports.VR; vr != 0 && c.vrPorts != nil {
+			if err := c.vrPorts.ClaimBase(c.portOwner(session), vr); err != nil {
+				klog.Warningf("Session %s/%s: not restoring VR port allocation: %v", session.Namespace, session.Name, err)
+			}
 		}
 	}
 }
@@ -2708,6 +2741,9 @@ func (c *SessionController) releaseUnusedPorts() error {
 		live.Insert(c.portOwner(s))
 	}
 	c.ports.Retain(live)
+	if c.vrPorts != nil {
+		c.vrPorts.Retain(live)
+	}
 	return nil
 }
 

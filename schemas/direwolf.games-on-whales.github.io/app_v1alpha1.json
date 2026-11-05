@@ -12,6 +12,7 @@
       "type": "object"
     },
     "spec": {
+      "description": "AppSpec is an App's spec. vrPort needs requireAppPod: the VR port is a\nhostPort on the App pod, off the host network; in the host-networked\nsession pod a VR server would listen on the node's own network.",
       "properties": {
         "appAssetWebP": {
           "description": "PNG image of the app",
@@ -7790,6 +7791,10 @@
           ],
           "additionalProperties": false
         },
+        "vrPort": {
+          "description": "VRPort gives each Session one host port, from the operator's\n--vr-port-range, for a VR server (WiVRn) in the App pod: TCP and UDP\non the same number, declared as hostPorts on the App's first container\nand handed to every App container as DIREWOLF_VR_PORT. A headset dials\nit at the node's IP. Needs requireAppPod.",
+          "type": "boolean"
+        },
         "wolfConfig": {
           "description": "Unstructured wolf configuration for app to be merged with the default\nconfiguration",
           "properties": {
@@ -7883,6 +7888,12 @@
         "title"
       ],
       "type": "object",
+      "x-kubernetes-validations": [
+        {
+          "message": "vrPort needs requireAppPod",
+          "rule": "!has(self.vrPort) || !self.vrPort || (has(self.requireAppPod) && self.requireAppPod)"
+        }
+      ],
       "additionalProperties": false
     }
   },

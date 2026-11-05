@@ -30,19 +30,33 @@ client="${pfx}/drive_c/Program Files (x86)/Battle.net/Battle.net.exe"
 config="${pfx}/drive_c/users/steamuser/AppData/Roaming/Battle.net/Battle.net.config"
 
 # Keyboard input from Selkies never reaches Battle.net's windows under labwc
-# unless Wine leaves focus to the window manager. `proton run` creates the
-# prefix first if there is none. The value is the only UseTakeFocus in user.reg.
+# unless Wine leaves focus to the window manager.
+#
+# With no XEmbed tray on the desktop, Wine's explorer.exe shows tray icons
+# (Battle.net's) in a window of its own: untitled, class steam_proton, so
+# labwc's catch-all maximizes it into a full-screen white window. ShowSystray
+# 0 stops explorer creating it; the prefix is shared with game sessions, where
+# it floated as a white box over the game.
+#
+# `proton run` creates the prefix first if there is none. Each value is the
+# only one of its name in user.reg.
+#
 # --no-wait (a desktop start) trusts the running wineserver's registry, which
 # saves it on exit: `wineserver -w` waits for every Wine client in the prefix,
 # so a start beside a running Battle.net hung until the client quit.
+prepared() {
+  grep -qs '^"UseTakeFocus"="N"' "${pfx}/user.reg" &&
+    grep -qs '^"ShowSystray"=dword:00000000' "${pfx}/user.reg"
+}
 prepare() {
-  grep -qs '^"UseTakeFocus"="N"' "${pfx}/user.reg" && return 0
+  prepared && return 0
   mkdir -p "${STEAM_COMPAT_DATA_PATH}" || return 1
   "${PROTON}" run reg add 'HKCU\Software\Wine\X11 Driver' /v UseTakeFocus /d N /f || return 1
+  "${PROTON}" run reg add 'HKCU\Software\Wine\Explorer' /v ShowSystray /t REG_DWORD /d 0 /f || return 1
   [ "$1" == "--no-wait" ] && return 0
   # Wine writes user.reg when its wineserver exits.
   WINEPREFIX="${pfx}" "${PROTON%/*}/files/bin/wineserver" -w
-  grep -qs '^"UseTakeFocus"="N"' "${pfx}/user.reg"
+  prepared
 }
 
 if [ "$1" == "--prepare" ]; then

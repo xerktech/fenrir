@@ -168,6 +168,8 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     (`pkg/controllers/ports.go`, `--session-port-range`), or pods on the node collide.
     - Blocks are keyed by pod and freed when its Session is deleted; `status.ports` is the
       record, replayed via `Claim` on operator start. Tests: `ports_test.go`.
+    - An App's VR port (`spec.vrPort`) comes from `--vr-port-range`, never the block: resizing
+      the block breaks `Claim` for running Sessions. See `.claude/rules/vr.md`.
     - Ports stay declared as containerPorts: under hostNetwork they become hostPorts, so the
       scheduler holds a pod whose block a terminating predecessor still binds.
     - A pod records its block in the `port-block` annotation; one whose block differs from
