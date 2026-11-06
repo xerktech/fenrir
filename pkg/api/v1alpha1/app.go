@@ -100,29 +100,28 @@ type AppSpec struct {
 
 	// StateMounts are directories kept per User and App: each is the
 	// subdirectory mounts/<name> of the volumeClaimTemplate's PVC, mounted at
-	// mountPath in every App container. For an App whose home is shared (the
-	// Steam home) but which needs some state of its own, such as a VR
-	// server's pairing keys. The App can't mount that PVC itself: it holds
-	// Wolf's data too. Needs volumeClaimTemplate.
+	// /srv/direwolf/state/<name> in every App container. For an App whose
+	// home is shared (the Steam home) but which needs some state of its own,
+	// such as a VR server's pairing keys. The App can't mount that PVC itself:
+	// it holds Wolf's data too. Needs volumeClaimTemplate.
+	//
+	// The path is fixed, never in a volume (XERK-2713): the runtime follows
+	// links at a mount point, so one in a volume a game writes could put the
+	// User's directory over /etc. The image links its own paths there.
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxItems=16
 	// +listType=map
 	// +listMapKey=name
-	// +kubebuilder:validation:XValidation:rule="self.all(a, self.exists_one(b, b.mountPath == a.mountPath))",message="stateMounts mountPaths must be unique"
 	StateMounts []StateMount `json:"stateMounts,omitempty" xml:"-"`
 }
 
 // StateMount is one of an App's per-User directories (AppSpec.StateMounts).
 type StateMount struct {
-	// Name picks the directory, mounts/<name>, on the PVC: renaming one
-	// starts it empty.
+	// Name picks the directory, mounts/<name>, on the PVC, and where it is
+	// mounted, /srv/direwolf/state/<name>: renaming one starts it empty.
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
-	// MountPath is an absolute path in the App's containers, not "/".
-	// +kubebuilder:validation:MaxLength=4096
-	// +kubebuilder:validation:Pattern=`^/.*[^/]$`
-	MountPath string `json:"mountPath"`
 }
 
 // Positive means a nonzero digit before any suffix or exponent (the schema

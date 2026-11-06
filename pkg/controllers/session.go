@@ -1369,12 +1369,13 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		)
 		// spec.stateMounts: per-User directories on the same PVC, outside
 		// state/ so a game whose home is state/<app> can't plant a link in
-		// their place. A clash with another mount is left to validateBuiltPod.
+		// their place, mounted under stateMountsRoot. A mount at, above or
+		// under that root is refused by validateBuiltPod.
 		for _, m := range app.Spec.StateMounts {
 			podToCreate.Spec.Containers[i].VolumeMounts = append(podToCreate.Spec.Containers[i].VolumeMounts,
 				corev1.VolumeMount{
 					Name:      "wolf-data",
-					MountPath: m.MountPath,
+					MountPath: path.Join(stateMountsRoot, m.Name),
 					SubPath:   path.Join(stateMountsDir, m.Name),
 				},
 			)
@@ -2291,6 +2292,9 @@ func validateBuiltPod(spec *corev1.PodSpec, podLabels map[string]string) error {
 				}
 				paths.Insert(p)
 			}
+			if err := validateStateMountsRoot(&ctr); err != nil {
+				return err
+			}
 			for _, c := range ctr.Resources.Claims {
 				if !claims.Has(c.Name) {
 					return fmt.Errorf("validation failed: container %q claims resource %q, which the pod does not declare (an App without spec.gpu gets no %q claim)", ctr.Name, c.Name, appGPUClaim)
@@ -2564,6 +2568,42 @@ const AppHomePath = "/home/retro"
 // stateMountsDir holds an App's spec.stateMounts on its wolf-data PVC, one
 // subdirectory each: beside state/, never inside it.
 const stateMountsDir = "mounts"
+
+// stateMountsRoot is where an App container gets its spec.stateMounts, one
+// directory each. The runtime resolves a mount point through links in the
+// container's filesystem, so a link a game plants in a volume it writes (the
+// shared Steam home, /games) would put the User's directory wherever it
+// points, over /etc for one (XERK-2713). Under this root a path resolves only
+// through the image: validateBuiltPod refuses any other mount at, above or
+// under it. Pressure-vessel shares /srv with Proton games like the home.
+const stateMountsRoot = "/srv/direwolf/state"
+
+// isStateMount reports whether m is one of the operator's spec.stateMounts.
+func isStateMount(m *corev1.VolumeMount) bool {
+	return m.Name == "wolf-data" && path.Dir(mountTarget(m)) == stateMountsRoot &&
+		path.Dir(m.SubPath) == stateMountsDir && m.SubPathExpr == ""
+}
+
+// validateStateMountsRoot refuses, in a container with spec.stateMounts, any
+// other mount at, above or under stateMountsRoot: one above would let its
+// volume's links redirect the stateMounts, one under would be redirected by
+// links in the User's own directories.
+func validateStateMountsRoot(ctr *corev1.Container) error {
+	if !slices.ContainsFunc(ctr.VolumeMounts, func(m corev1.VolumeMount) bool { return isStateMount(&m) }) {
+		return nil
+	}
+	for i := range ctr.VolumeMounts {
+		m := &ctr.VolumeMounts[i]
+		if isStateMount(m) {
+			continue
+		}
+		p := mountTarget(m)
+		if p == "/" || p == stateMountsRoot || strings.HasPrefix(stateMountsRoot, p+"/") || strings.HasPrefix(p, stateMountsRoot+"/") {
+			return fmt.Errorf("validation failed: container %q mounts volume %q at %s, at, above or under %s where the operator mounts spec.stateMounts", ctr.Name, m.Name, p, stateMountsRoot)
+		}
+	}
+	return nil
+}
 
 // withMountUnlessTaken appends each of add to mounts unless mounts already
 // has something at its path.

@@ -38,7 +38,7 @@ func writeExec(t *testing.T, path, body string) {
 }
 
 type vrStart struct {
-	dir, bin, home, runtime, steamLog string
+	dir, bin, home, state, runtime, steamLog string
 }
 
 // newVRStart lays the scripts out as the image does (siblings in one dir,
@@ -48,7 +48,7 @@ type vrStart struct {
 // real services would, then stays up.
 func newVRStart(t *testing.T) *vrStart {
 	t.Helper()
-	s := &vrStart{dir: t.TempDir(), bin: t.TempDir(), home: t.TempDir()}
+	s := &vrStart{dir: t.TempDir(), bin: t.TempDir(), home: t.TempDir(), state: t.TempDir()}
 	s.runtime = shortTempDir(t)
 	s.steamLog = filepath.Join(s.dir, "steam.log")
 	for _, f := range []string{"startup-app.sh", "dbus-session.conf"} {
@@ -61,7 +61,7 @@ func newVRStart(t *testing.T) *vrStart {
 		}
 	}
 	for _, d := range []string{"wivrn", "openxr", "openvr"} {
-		if err := os.MkdirAll(filepath.Join(s.home, ".config", d), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(s.state, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -101,6 +101,7 @@ func (s *vrStart) run(t *testing.T, env ...string) (string, error) {
 	cmd.Env = append([]string{
 		"PATH=" + s.bin + ":" + os.Getenv("PATH"),
 		"HOME=" + s.home,
+		"DIREWOLF_STATE_ROOT=" + s.state,
 		"XDG_RUNTIME_DIR=" + s.runtime,
 		"DBUS_LOG=" + filepath.Join(s.dir, "dbus.log"),
 		"SERVICES_LOG=" + filepath.Join(s.dir, "services.log"),
@@ -132,14 +133,14 @@ func TestVRStartRefusesWithoutTheSessionsPort(t *testing.T) {
 }
 
 // The pairing keys and the runtime files WiVRn rewrites must never land in
-// the shared Steam home.
-func TestVRStartRefusesConfigDirsInTheSharedHome(t *testing.T) {
+// the shared Steam home: each state dir must be the operator's mount.
+func TestVRStartRefusesUnmountedStateDirs(t *testing.T) {
 	for _, unmounted := range []string{"wivrn", "openxr", "openvr"} {
 		s := newVRStart(t)
 		writeExec(t, filepath.Join(s.bin, "mountpoint"),
-			"case \"$2\" in */.config/"+unmounted+") exit 1;; esac\nexit 0\n")
+			"case \"$2\" in */"+unmounted+") exit 1;; esac\nexit 0\n")
 		out, err := s.run(t, "DIREWOLF_VR_PORT=20034")
-		if err == nil || !strings.Contains(out, ".config/"+unmounted+" must be a per-user volume") {
+		if err == nil || !strings.Contains(out, unmounted+" must be the per-user volume the operator mounts") {
 			t.Errorf("%s unmounted: err %v, output %q; want a refusal", unmounted, err, out)
 		}
 		if _, err := os.Stat(s.steamLog); err == nil {
@@ -243,7 +244,7 @@ func readConfig(t *testing.T, path string) map[string]any {
 // before "port" would leave it on 9757: the config is rewritten whole.
 func TestVRStartRewritesWiVRnConfigWhole(t *testing.T) {
 	s := newVRStart(t)
-	path := filepath.Join(s.home, ".config", "wivrn", "config.json")
+	path := filepath.Join(s.state, "wivrn", "config.json")
 	if err := os.WriteFile(path, []byte(`{"port": 9757, "publish-service": "avahi", "hid-forwarding": true,
 		"application": ["steam"], "bit-depth": "ten", "tcp-only": 1e400}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -278,7 +279,7 @@ func TestVRStartRefusesLinkedOrReadOnlyConfigDirs(t *testing.T) {
 			continue
 		}
 		s := newVRStart(t)
-		dir := filepath.Join(s.home, ".config", "openvr")
+		dir := filepath.Join(s.state, "openvr")
 		if tc.name == "link" {
 			if err := os.Remove(dir); err != nil {
 				t.Fatal(err)
@@ -392,7 +393,7 @@ func TestVRServicesStartWiVRnWithPipeWire(t *testing.T) {
 	if m[2] != m[1]+"/state" || m[3] != m[1] {
 		t.Errorf("PipeWire in %s (state %s), wivrn-server's PIPEWIRE_RUNTIME_DIR %s", m[1], m[2], m[3])
 	}
-	if want := "-f /home/retro/.config/wivrn/config.json --early-active-runtime --no-publish-service --no-instructions"; m[4] != want {
+	if want := "-f /srv/direwolf/state/wivrn/config.json --early-active-runtime --no-publish-service --no-instructions"; m[4] != want {
 		t.Errorf("wivrn-server %s, want %s", m[4], want)
 	}
 }
@@ -653,5 +654,48 @@ func TestVRImageAppendsAppDLLOverrides(t *testing.T) {
 		if err != nil || string(got) != want {
 			t.Errorf("DIREWOLF_WINEDLLOVERRIDES=%q: %q %v, want %q", env, got, err, want)
 		}
+	}
+}
+
+// ~/.config/<name> in the shared home becomes a link to the state dir, which
+// resolves to each container's own mount (XERK-2713). An empty directory there
+// (an old mount point) or another link is replaced; anything else is refused.
+func TestVRStartLinksConfigDirsToState(t *testing.T) {
+	s := newVRStart(t)
+	cfg := filepath.Join(s.home, ".config")
+	if err := os.MkdirAll(filepath.Join(cfg, "wivrn"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc", filepath.Join(cfg, "openxr")); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // and again, with the links in place
+		if out, err := s.run(t, "DIREWOLF_VR_PORT=20034"); err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		for _, d := range []string{"wivrn", "openxr", "openvr"} {
+			if got, err := os.Readlink(filepath.Join(cfg, d)); err != nil || got != filepath.Join(s.state, d) {
+				t.Errorf("~/.config/%s -> %q (%v), want %s", d, got, err, filepath.Join(s.state, d))
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(s.state, "wivrn", "config.json")); err != nil {
+		t.Errorf("WiVRn config not in the state dir: %v", err)
+	}
+
+	s = newVRStart(t)
+	kept := filepath.Join(s.home, ".config", "openvr", "keep")
+	if err := os.MkdirAll(kept, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.run(t, "DIREWOLF_VR_PORT=20034")
+	if err == nil || !strings.Contains(out, "in the way of a link") {
+		t.Errorf("non-empty ~/.config/openvr: err %v, output %q; want a refusal", err, out)
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Errorf("non-empty ~/.config/openvr removed: %v", err)
+	}
+	if _, err := os.Stat(s.steamLog); err == nil {
+		t.Error("Steam started")
 	}
 }
