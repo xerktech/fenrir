@@ -184,6 +184,12 @@ type SessionController struct {
 	PairingClient   v1alpha1client.PairingInterface
 	PairingInformer generic.Informer[*v1alpha1types.Pairing]
 
+	// A VR App's WiVRn is seeded with its User's Headsets; a Session whose
+	// pod was seeded with a deleted one is ended (headset.go). Nil (no
+	// WatchHeadsets): seeded with none.
+	HeadsetClient   v1alpha1client.HeadsetInterface
+	HeadsetInformer generic.Informer[*v1alpha1types.Headset]
+
 	TCPRouteClient gatewayv1alpha2.TCPRouteInterface
 	UDPRouteClient gatewayv1alpha2.UDPRouteInterface
 
@@ -207,6 +213,7 @@ type SessionController struct {
 	controller        generic.Controller[*v1alpha1types.Session]
 	podController     generic.Controller[*corev1.Pod]
 	pairingController generic.Controller[*v1alpha1types.Pairing]
+	headsetController generic.Controller[*v1alpha1types.Headset]
 	SessionControllerOptions
 }
 
@@ -320,6 +327,15 @@ func (c *SessionController) Run(ctx context.Context) error {
 			klog.Errorf("Failed to run pairing controller: %v", err)
 		}
 	}()
+
+	if c.headsetController != nil {
+		go func() {
+			defer cancel()
+			if err := c.headsetController.Run(sessionCtx); err != nil {
+				klog.Errorf("Failed to run headset controller: %v", err)
+			}
+		}()
+	}
 
 	return c.controller.Run(sessionCtx)
 }
@@ -1116,6 +1132,11 @@ func (c *SessionController) checkSessionPod(ctx context.Context, session *v1alph
 		// Likewise for the App pod's VR port.
 		return nil, c.endSessionErr(ctx, session, fmt.Sprintf("its pod %s is on VR port %s, not %d", pod.Name, pod.Annotations[vrPortAnnotation], session.Status.Ports.VR))
 	}
+	if reason, err := c.headsetRevokedReason(ctx, pod); err != nil {
+		return nil, err
+	} else if reason != "" {
+		return nil, c.endSessionErr(ctx, session, reason)
+	}
 	if reason := podExitReason(pod); reason != "" {
 		return nil, c.endSessionErr(ctx, session, reason)
 	}
@@ -1327,6 +1348,16 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		vrPort = session.Status.Ports.VR
 	}
 	withVRPort(&podToCreate.Spec, vrPort)
+	var headsetNames string
+	if vrPort != 0 {
+		headsets, err := c.userHeadsets(session.Namespace, user.Name)
+		if err != nil {
+			return nil, err
+		}
+		if headsetNames, err = withVRHeadsets(&podToCreate.Spec, headsets); err != nil {
+			return nil, err
+		}
+	}
 
 	if podToCreate.Labels == nil {
 		podToCreate.Labels = map[string]string{}
@@ -1902,6 +1933,7 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	annotations[portBlockAnnotation] = strconv.Itoa(int(session.Status.Ports.HTTP))
 	if vrPort != 0 {
 		annotations[vrPortAnnotation] = strconv.Itoa(int(vrPort))
+		annotations[vrHeadsetsAnnotation] = headsetNames
 	}
 	if err := validateBuiltPod(&podToCreate.Spec, podToCreate.Labels); err != nil {
 		return nil, invalidSpec(err)

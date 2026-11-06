@@ -227,15 +227,17 @@ RUN for lib in libfreetype.so.6 libfontconfig.so.1 libldap.so.2; do \
 # running the WiVRn client) and two OpenVR-on-OpenXR layers, xrizer and
 # OpenComposite; DIREWOLF_VR_OPENVR picks one per App. Files: vr/.
 #
-# WiVRn is built here, not taken from a distro or flatpak: only this way is
-# the server's version pinned to the Quest client's (a protocol mismatch is
-# refused, so bump WIVRN_VERSION and the Horizon store client together). Built
-# on the steam image itself so it links the libraries the session has.
+# WiVRn is built here from the xerktech/WiVRn fork, not upstream, a distro or
+# flatpak: the fork authenticates the stream (AES-GCM, XERK-2691) and has a
+# long-term server key the headset pins (XERK-2699). Its socket code differs
+# from upstream's, so the Quest runs the fork's APK, built from this same
+# commit (a protocol mismatch is refused): bump both together. Built on the
+# steam image itself so it links the libraries the session has.
 FROM steam AS vr-wivrn
-ARG WIVRN_VERSION=v26.9
-# The tag's commit: a moved tag fails the build. Its CMakeLists pins every
+ARG WIVRN_REPO=https://github.com/xerktech/WiVRn
+# The fork's master at the commit built. Its CMakeLists pins every
 # FetchContent dependency by URL_HASH, and monado by commit (monado-rev).
-ARG WIVRN_COMMIT=bbc6e4cc36c355fa6180980abd231673dc15115d
+ARG WIVRN_COMMIT=96e91569b23cd261a7bcd2caa705986a7283c546
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build git pkg-config ca-certificates python3 \
       glslang-tools spirv-tools gettext libssl-dev \
@@ -249,7 +251,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # PipeWire on: it is WiVRn's only audio backend, and the image ships the daemon
 # (vr-services starts it). No dashboard, no client, no Lighthouse/SolarXR
 # drivers, no VA-API (NVIDIA only).
-RUN git clone --depth 1 -b "${WIVRN_VERSION}" https://github.com/WiVRn/WiVRn /src/wivrn \
+RUN git init -q /src/wivrn \
+ && git -C /src/wivrn fetch -q --depth 1 "${WIVRN_REPO}" "${WIVRN_COMMIT}" \
+ && git -C /src/wivrn checkout -q FETCH_HEAD \
  && test "$(git -C /src/wivrn rev-parse HEAD)" = "${WIVRN_COMMIT}" \
  && cmake -S /src/wivrn -B /src/wivrn/build -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
       -DCMAKE_INSTALL_PREFIX=/usr/local -DWIVRN_BUILD_CLIENT=OFF -DWIVRN_BUILD_DASHBOARD=OFF \
@@ -257,6 +261,7 @@ RUN git clone --depth 1 -b "${WIVRN_VERSION}" https://github.com/WiVRn/WiVRn /sr
       -DWIVRN_USE_NVENC=ON -DWIVRN_USE_VAAPI=OFF -DWIVRN_USE_X264=ON -DWIVRN_USE_PIPEWIRE=ON \
       -DWIVRN_FEATURE_STEAMVR_LIGHTHOUSE=OFF -DWIVRN_FEATURE_SOLARXR=OFF \
       -DWIVRN_OPENXR_MANIFEST_TYPE=absolute \
+      -DGIT_DESC="xerktech-${WIVRN_COMMIT}" -DGIT_COMMIT="${WIVRN_COMMIT}" \
  && cmake --build /src/wivrn/build \
  && DESTDIR=/out cmake --install /src/wivrn/build \
  && test -x /out/usr/local/bin/wivrn-server \

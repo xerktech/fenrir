@@ -359,3 +359,38 @@ func TestSessionCRDAcceptsEncodedSessions(t *testing.T) {
 		}
 	}
 }
+
+// A Headset (XERK-2669) holds one PEM public key and never changes: a new key
+// under an old name would let another headset in without ending the old
+// one's Sessions.
+func TestHeadsetCRDValidatesKeyAndImmutability(t *testing.T) {
+	validate := crdValidator(t, "headsets")
+	const key = "-----BEGIN PUBLIC KEY-----\nMEIwBQYDK2VvAzkAqk1Wq0pX\n-----END PUBLIC KEY-----\n"
+	headset := func(user, publicKey string) map[string]any {
+		return map[string]any{
+			"apiVersion": "direwolf.games-on-whales.github.io/v1alpha1",
+			"kind":       "Headset",
+			"metadata":   map[string]any{"name": "h", "namespace": "ns"},
+			"spec": map[string]any{
+				"userReference": map[string]any{"name": user},
+				"publicKey":     publicKey,
+			},
+		}
+	}
+	if errs := validate(headset("alex", key)); len(errs) > 0 {
+		t.Errorf("valid headset: %v", errs.ToAggregate())
+	}
+	for _, bad := range []string{"", "AAAA", strings.Replace(key, "PUBLIC", "PRIVATE", 2), key + "x", "-----BEGIN PUBLIC KEY-----\n" + strings.Repeat("A", 1100) + "\n-----END PUBLIC KEY-----\n"} {
+		if errs := validate(headset("alex", bad)); len(errs) == 0 {
+			t.Errorf("publicKey %.40q: accepted", bad)
+		}
+	}
+	if errs := validate(headset("alex", key), headset("alex", key)); len(errs) > 0 {
+		t.Errorf("unchanged update: %v", errs.ToAggregate())
+	}
+	for _, changed := range []map[string]any{headset("sam", key), headset("alex", strings.Replace(key, "MEIw", "MEIx", 1))} {
+		if errs := validate(changed, headset("alex", key)); len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "immutable") {
+			t.Errorf("spec change: errors %v, want immutable", errs.ToAggregate())
+		}
+	}
+}

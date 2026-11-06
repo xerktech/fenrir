@@ -79,6 +79,32 @@ JSON
 # -T: a directory named config.json is an error, not a place to move it into.
 mv -fT "$config.tmp" "$config"
 
+# The headsets that may connect, rewritten whole at every start from the
+# User's Headset objects (XERK-2669): a key an earlier session paired, or the
+# game wrote, is dropped, so deleting a Headset revokes it. WiVRn reads an
+# unparseable file as no keys, which opens PIN pairing, so only a list the
+# parser below accepts is written. With none, WiVRn pairs by PIN, shown only on
+# the authenticated mirror (vr-notice). Unset: an operator that can't revoke.
+[[ -v DIREWOLF_VR_HEADSETS ]] ||
+  die "DIREWOLF_VR_HEADSETS is unset; the operator must seed this User's headsets"
+keys=$state/wivrn/known_keys.json
+rm -f "$keys.tmp"
+python3 -I -c '
+import json, re, sys
+pem = re.compile(r"-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+-----END PUBLIC KEY-----\n?")
+keys = json.loads(sys.argv[1])
+if not isinstance(keys, list):
+    sys.exit("not a list")
+for k in keys:
+    if not (isinstance(k, dict) and set(k) == {"key", "name"} and isinstance(k["name"], str)
+            and isinstance(k["key"], str) and pem.fullmatch(k["key"])):
+        sys.exit("bad entry")
+with open(sys.argv[2], "x") as f:
+    json.dump(keys, f)
+' "$DIREWOLF_VR_HEADSETS" "$keys.tmp" ||
+  die "DIREWOLF_VR_HEADSETS is not a list of WiVRn known keys"
+mv -fT "$keys.tmp" "$keys"
+
 # PipeWire's sockets (and its pulse server's) go in a directory of their own:
 # Wolf's pulseaudio already serves this runtime dir.
 audio=$XDG_RUNTIME_DIR/vr-audio

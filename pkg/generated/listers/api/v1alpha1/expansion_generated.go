@@ -26,6 +26,14 @@ type AppListerExpansion interface{}
 // AppNamespaceLister.
 type AppNamespaceListerExpansion interface{}
 
+// HeadsetListerExpansion allows custom methods to be added to
+// HeadsetLister.
+type HeadsetListerExpansion interface{}
+
+// HeadsetNamespaceListerExpansion allows custom methods to be added to
+// HeadsetNamespaceLister.
+type HeadsetNamespaceListerExpansion interface{}
+
 // PairingListerExpansion allows custom methods to be added to
 // PairingLister.
 type PairingListerExpansion interface{}

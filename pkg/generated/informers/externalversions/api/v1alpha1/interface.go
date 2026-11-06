@@ -26,6 +26,8 @@ import (
 type Interface interface {
 	// Apps returns a AppInformer.
 	Apps() TypedAppInformer
+	// Headsets returns a HeadsetInformer.
+	Headsets() TypedHeadsetInformer
 	// Pairings returns a PairingInformer.
 	Pairings() TypedPairingInformer
 	// Sessions returns a SessionInformer.
@@ -48,6 +50,11 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 // Apps returns a TypedAppInformer.
 func (v *version) Apps() TypedAppInformer {
 	return &appInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// Headsets returns a TypedHeadsetInformer.
+func (v *version) Headsets() TypedHeadsetInformer {
+	return &headsetInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // Pairings returns a TypedPairingInformer.

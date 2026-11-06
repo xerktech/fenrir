@@ -1,0 +1,59 @@
+{
+  "description": "Headset is a VR headset paired with a User (XERK-2669): the public key the\nVR server (WiVRn) lets connect to that User's VR Sessions. The operator\nwrites a User's Headsets into WiVRn's known keys at every VR session start,\nso these objects, not the keys file on the User's volume, decide which\nheadsets connect. Deleting one revokes the headset and ends the User's VR\nSessions, as deleting a Pairing does for a Moonlight client.\n\nThe spec is immutable: a changed key would let a different headset in\nwithout ending the Sessions the old one may hold.",
+  "properties": {
+    "apiVersion": {
+      "description": "APIVersion defines the versioned schema of this representation of an object.\nServers should convert recognized schemas to the latest internal value, and\nmay reject unrecognized values.\nMore info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Kind is a string value representing the REST resource this object represents.\nServers may infer this from the endpoint the client submits requests to.\nCannot be updated.\nIn CamelCase.\nMore info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+      "type": "string"
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "spec": {
+      "properties": {
+        "displayName": {
+          "description": "DisplayName is the name WiVRn shows for the key (the headset's model\nat pairing).",
+          "maxLength": 128,
+          "type": "string"
+        },
+        "publicKey": {
+          "description": "PublicKey is the headset's long-term public key as WiVRn stores it in\nknown_keys.json: a PEM \"PUBLIC KEY\" block.",
+          "maxLength": 1024,
+          "pattern": "^-----BEGIN PUBLIC KEY-----\\n[A-Za-z0-9+/=\\n]+-----END PUBLIC KEY-----\\n?$",
+          "type": "string"
+        },
+        "userReference": {
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "publicKey",
+        "userReference"
+      ],
+      "type": "object",
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "spec"
+  ],
+  "type": "object",
+  "x-kubernetes-validations": [
+    {
+      "message": "spec is immutable; delete the Headset to revoke it",
+      "rule": "self.spec == oldSelf.spec"
+    }
+  ]
+}
