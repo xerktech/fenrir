@@ -292,6 +292,9 @@ func vrExampleLinkScript(t *testing.T) string {
 	if !ok || !ok2 {
 		t.Fatal("no LINK heredoc in examples/vr.yaml's command")
 	}
+	if !strings.Contains(cmd, `"$docs" `+linkTarget+` <<'LINK'`) {
+		t.Fatalf("examples/vr.yaml no longer links AC's Documents to %s", linkTarget)
+	}
 	return script
 }
 
