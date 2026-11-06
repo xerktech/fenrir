@@ -230,6 +230,17 @@ stop_battlenet() {
   wait
 }
 
+# A prefix whose Wolf pad key Wine left half-installed (no Driver) never
+# starts the pad's XInput device, so XInput-only games see no pad (XERK-2697).
+# Drop the pad's keys for Wine to reinstall; it edits system.reg, which Wine
+# rewrites from memory, so only while no wineserver of ours runs. Never fatal.
+if pgrep -u "$(id -u)" -x wineserver >/dev/null; then
+  log "a wineserver is running; pad registry check skipped"
+else
+  python3 -I "${BASH_SOURCE[0]%/*}/battlenet-pad-repair.py" "${pfx}/system.reg" ||
+    log "pad registry check failed; a pad may not reach XInput games"
+fi
+
 log "starting Battle.net for ${product}"
 "${PROTON}" run "${client}" &
 client_pid=$!

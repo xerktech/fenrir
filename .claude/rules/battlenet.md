@@ -76,6 +76,14 @@ paths:
     runs, every `steam_proton` window whose `pid` is not the game's goes to the scratchpad,
     every 2s. Moving both by hand live left WoW alone on the full output.
   - Tests: `images/gow-nvidia32/launch_battlenet_test.go` (stub Proton and wineserver).
+  - Before the client starts it drops a half-installed Wolf pad from `pfx/system.reg`
+    (`battlenet-pad-repair.py`, XERK-2709): an `Enum\HID\VID_045E&PID_02EA&XI_*\<id>` key
+    with no `Driver` (XERK-2697). It removes every key of that pad, Enum and DeviceClasses, and
+    keeps the original as `system.reg.direwolf-pad-repair.bak`.
+    - It edits the file, not `wine reg`: no wineserver boot per launch. Wine rewrites system.reg
+      from memory, so it is skipped while any wineserver of the user runs.
+    - Unverified live: that Wine reinstalls the pad from such an edit as it did after
+      `wine reg delete`. Tests: `battlenet_pad_repair_test.go`.
 
 ## Managed WoW addons (XERK-2366)
 
