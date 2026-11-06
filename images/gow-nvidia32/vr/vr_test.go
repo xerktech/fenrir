@@ -598,7 +598,7 @@ func TestVRNoticeKeepsOtherTextOutOfSwaysExec(t *testing.T) {
 	if execs == "" {
 		t.Fatal("no bar shown")
 	}
-	for _, l := range strings.Split(strings.TrimSpace(execs), "\n") {
+	for l := range strings.SplitSeq(strings.TrimSpace(execs), "\n") {
 		if strings.Count(l, "'") != 2 || strings.ContainsAny(strings.Trim(l[strings.Index(l, "'")+1:], "'"), ";,'") {
 			t.Errorf("exec %q carries quotes or separators", l)
 		}

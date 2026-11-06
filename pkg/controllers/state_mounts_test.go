@@ -165,7 +165,7 @@ func TestVRExampleSeedsACConfigInVRMode(t *testing.T) {
 	}
 	flat := "[VIDEO]\r\nWIDTH=1920\r\nFULLSCREEN=1\r\n\r\n[CAMERA]\r\nMODE=DEFAULT\r\n[ASSETTO]\r\nX=1\r\n"
 	for name, body := range map[string]string{"video.ini": flat, "controls.ini": "[A]\r\nB=1\r\n", "extension/csp.ini": "c"} {
-		if err := os.WriteFile(filepath.Join(shared, name), []byte(body), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(shared, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -188,7 +188,7 @@ func TestVRExampleSeedsACConfigInVRMode(t *testing.T) {
 		t.Errorf("shared video.ini changed to %q", got)
 	}
 	// Once seeded, the User's own copy is kept: the shared one is not re-copied.
-	if err := os.WriteFile(filepath.Join(cfg, "controls.ini"), []byte("mine"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cfg, "controls.ini"), []byte("mine"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runSeed(t, script, shared, cfg)
