@@ -142,7 +142,8 @@ paths:
     once, skipping links, then forces `[VIDEO] FULLSCREEN=0`, `[CAMERA] MODE=OPENVR`.
   - Assumes AC in Steam's default library in the shared home
     (`~/.steam/debian-installation/steamapps`), launched flat once, or the command ends the
-    session. The steam image's flat link and the example name that path: change them together.
+    session. The steam image's flat link and the example name that path: change them together
+    (`TestVRExampleACPathsAgreeWithSteamImage`).
   - The shared install keeps AssettoCorsa.exe = acs.exe (CM and the Kunos launcher can't run),
     and the Proton 9 pin; `steam -applaunch 244210` then starts acs.exe in either mode.
   - Recenter: Ctrl+Space from the Moonlight keyboard, on track. A pad/wheel binding is untested.

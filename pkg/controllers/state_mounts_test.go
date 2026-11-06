@@ -372,3 +372,49 @@ func TestVRExampleLinksACDocumentsToState(t *testing.T) {
 		t.Errorf("no flat folder made: %v %v", fi, err)
 	}
 }
+
+// AC's paths agree across the example and the steam image (XERK-2666): the
+// command reads the shared prefix's flat Documents through a read-only mount
+// of the home it is in, and the steam image's flat link names the same
+// folder. A path changed in one place alone leaves the VR copy seeded from
+// nothing, or flat sessions with a dangling Documents link, and no other test
+// fails.
+func TestVRExampleACPathsAgreeWithSteamImage(t *testing.T) {
+	_, app := vrExampleFixture(t)
+	c := app.Spec.Template.Spec.Containers[0]
+	cmd := strings.Join(c.Command, "\n")
+	var apps, docs string
+	for _, line := range strings.Split(cmd, "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "apps="); ok {
+			apps = v
+		}
+		if v, ok := strings.CutPrefix(line, "docs="); ok {
+			docs = strings.ReplaceAll(strings.Replace(v, "$apps", apps, 1), `\ `, " ")
+		}
+	}
+	const home, seed = "/home/retro", "/run/direwolf-vr/home"
+	if apps == "" || !strings.HasPrefix(docs, home+"/") {
+		t.Fatalf("apps=%q docs=%q; want AC's Documents in the home at %s", apps, docs, home)
+	}
+	if !strings.Contains(cmd, `"`+seed+`/${docs#`+home+`/}.flat/cfg"`) {
+		t.Errorf("the seed no longer reads %s/<docs below the home>.flat/cfg", seed)
+	}
+	mounts := map[string]corev1.VolumeMount{}
+	for _, m := range c.VolumeMounts {
+		mounts[m.MountPath] = m
+	}
+	if m, ok := mounts[home]; !ok || m.ReadOnly {
+		t.Errorf("the home is not mounted read-write at %s: %+v", home, m)
+	}
+	if m, ok := mounts[seed]; !ok || !m.ReadOnly || m.Name != mounts[home].Name || m.SubPath != "" {
+		t.Errorf("%s is not a read-only whole mount of the home's volume: %+v", seed, m)
+	}
+	b, err := os.ReadFile("../../images/gow-nvidia32/Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "ln -s '"+docs+".flat' \\\n      /srv/direwolf/ac-documents") {
+		t.Errorf("the steam image's /srv/direwolf/ac-documents link does not lead to %s.flat", docs)
+	}
+}
