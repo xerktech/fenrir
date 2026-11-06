@@ -89,9 +89,10 @@ RUN d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin' \
 # /srv/direwolf/ac-documents (examples/vr.yaml, XERK-2713). Here it leads to
 # the shared flat copy; the vr image points it at its User's mount instead.
 # Never under /srv/direwolf/state, the stateMounts root: the runtime would
-# follow an image link there into /games. /srv: pressure-vessel shares it.
+# follow an image link there into the home. /srv: pressure-vessel shares it.
+# AC is in Steam's own library in the shared home, like every Steam game.
 RUN mkdir -p /srv/direwolf \
- && ln -s '/games/steamapps/compatdata/244210/pfx/drive_c/users/steamuser/Documents/Assetto Corsa.flat' \
+ && ln -s '/home/retro/.steam/debian-installation/steamapps/compatdata/244210/pfx/drive_c/users/steamuser/Documents/Assetto Corsa.flat' \
       /srv/direwolf/ac-documents \
  && test ! -e /srv/direwolf/state
 
