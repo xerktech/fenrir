@@ -73,6 +73,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - App template metadata keys are checked by CEL markers in `app.go`; label values by a pattern
     `update-codegen.sh` patches into every CRD `labels` map (XERK-1375). CEL over a map's values
     exceeds the CRD cost budget. `TestAppCRDValidatesEmbeddedMetadata` runs the API server's checks.
+  - Removing a CRD field an ArgoCD-applied object sets freezes the whole `direwolf` Argo app
+    (XERK-2713): its ServerSideDiff fails on the live object's managedFields ("field not declared
+    in schema") and syncs nothing. Plan the deploy: strip that field from `argocd-controller`'s
+    managedFields entry right after the chart lands, or deprecate the field instead.
   - CEL rules must compile on 1.28, the chart floor: no `quantity()` (1.29+, XERK-1521). The
     vendored libraries back-date it to 1.28, so only an envtest 1.28 kube-apiserver catches it.
     `hack/check-crds-on-floor.sh` (CI `crd-floor.yml`) creates every CRD on one; bump its
