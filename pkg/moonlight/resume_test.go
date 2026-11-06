@@ -97,6 +97,28 @@ func TestResumeWithoutSessionLaunches(t *testing.T) {
 	}
 }
 
+// A VR-mode Session (XERK-2667) has no Moonlight stream: /resume leaves it
+// alone and launches, rather than write a Moonlight client's keys into it.
+func TestResumeSkipsVRSession(t *testing.T) {
+	vr := alexSession("alex-vr", time.Now())
+	vr.Spec = v1alpha1types.SessionSpec{Mode: v1alpha1types.SessionModeVR}
+	dw := generatedclient.NewSimpleClientset(vr)
+	sessions := dw.DirewolfV1alpha1().Sessions("ns")
+	srv := &RESTServer{SessionClient: sessions, RESTServerOptions: RESTServerOptions{LaunchTimeout: time.Second}}
+	w := httptest.NewRecorder()
+	srv.resumeHandler(w, resumeRequest("rikey=k&rikeyid=1"))
+	if !strings.Contains(w.Body.String(), "appid required") {
+		t.Errorf("response = %d %s, want the launch path's appid error", w.Code, w.Body.String())
+	}
+	s, err := sessions.Get(t.Context(), "alex-vr", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Spec.Config != (v1alpha1types.SessionInfo{}) {
+		t.Errorf("VR Session config = %+v, want it untouched", s.Spec.Config)
+	}
+}
+
 func TestResumeRequiresKeys(t *testing.T) {
 	srv := &RESTServer{}
 	w := httptest.NewRecorder()
