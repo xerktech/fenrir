@@ -32,11 +32,14 @@ type HeadsetSpec struct {
 	//+kubebuilder:validation:Required
 	UserReference UserReference `json:"userReference"`
 
-	// PublicKey is the headset's long-term public key as WiVRn stores it in
-	// known_keys.json: a PEM "PUBLIC KEY" block.
+	// PublicKey is the headset's long-term public key as WiVRn stores and
+	// compares it in known_keys.json (and lists it in KnownKeys): the base64
+	// body of its PEM, with the BEGIN/END lines and all whitespace removed.
+	// A PEM block never matches (wivrn_connection.cpp clean_key).
 	//+kubebuilder:validation:Required
+	//+kubebuilder:validation:MinLength=4
 	//+kubebuilder:validation:MaxLength=1024
-	//+kubebuilder:validation:Pattern=`^-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+-----END PUBLIC KEY-----\n?$`
+	//+kubebuilder:validation:Pattern=`^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`
 	PublicKey string `json:"publicKey"`
 
 	// DisplayName is the name WiVRn shows for the key (the headset's model

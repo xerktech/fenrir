@@ -91,14 +91,17 @@ keys=$state/wivrn/known_keys.json
 rm -f "$keys.tmp"
 python3 -I -c '
 import json, re, sys
-pem = re.compile(r"-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+-----END PUBLIC KEY-----\n?")
+# WiVRn compares the bare base64 body of a key, never a PEM block.
+b64 = re.compile(r"([A-Za-z0-9+/]{4})+([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?|([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)")
 keys = json.loads(sys.argv[1])
 if not isinstance(keys, list):
     sys.exit("not a list")
 for k in keys:
     if not (isinstance(k, dict) and set(k) == {"key", "name"} and isinstance(k["name"], str)
-            and isinstance(k["key"], str) and pem.fullmatch(k["key"])):
+            and isinstance(k["key"], str) and b64.fullmatch(k["key"])):
         sys.exit("bad entry")
+    # A lone surrogate is valid to Python, but WiVRn (nlohmann) refuses the file.
+    k["name"].encode("utf-8")
 with open(sys.argv[2], "x") as f:
     json.dump(keys, f)
 ' "$DIREWOLF_VR_HEADSETS" "$keys.tmp" ||

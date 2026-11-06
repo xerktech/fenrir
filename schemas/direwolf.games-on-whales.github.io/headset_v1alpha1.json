@@ -20,9 +20,10 @@
           "type": "string"
         },
         "publicKey": {
-          "description": "PublicKey is the headset's long-term public key as WiVRn stores it in\nknown_keys.json: a PEM \"PUBLIC KEY\" block.",
+          "description": "PublicKey is the headset's long-term public key as WiVRn stores and\ncompares it in known_keys.json (and lists it in KnownKeys): the base64\nbody of its PEM, with the BEGIN/END lines and all whitespace removed.\nA PEM block never matches (wivrn_connection.cpp clean_key).",
           "maxLength": 1024,
-          "pattern": "^-----BEGIN PUBLIC KEY-----\\n[A-Za-z0-9+/=\\n]+-----END PUBLIC KEY-----\\n?$",
+          "minLength": 4,
+          "pattern": "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
           "type": "string"
         },
         "userReference": {

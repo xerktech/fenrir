@@ -29,9 +29,10 @@ const (
 	// vrHeadsetsEnv holds the User's headset keys in WiVRn's known_keys.json
 	// format, on every container of a vrPort App.
 	vrHeadsetsEnv = "DIREWOLF_VR_HEADSETS"
-	// vrHeadsetsAnnotation on a VR App pod lists the Headsets (by name,
-	// comma-separated) its WiVRn was seeded with; revoking any ends the
-	// Session. Present but empty: seeded with none.
+	// vrHeadsetsAnnotation on a VR App pod lists the Headsets its WiVRn was
+	// seeded with, as comma-separated <name>/<uid>; revoking any ends the
+	// Session. The UID tells a Headset re-created under the same name (maybe
+	// another key or User) from the one seeded. Present but empty: none.
 	vrHeadsetsAnnotation = "direwolf.games-on-whales.github.io/vr-headsets"
 )
 
@@ -90,7 +91,7 @@ func withVRHeadsets(spec *corev1.PodSpec, headsets []*v1alpha1types.Headset) (st
 			name = h.Name
 		}
 		keys = append(keys, wivrnKnownKey{Key: h.Spec.PublicKey, Name: name})
-		names = append(names, h.Name)
+		names = append(names, h.Name+"/"+string(h.UID))
 	}
 	value, err := json.Marshal(keys)
 	if err != nil {
@@ -108,13 +109,32 @@ func withVRHeadsets(spec *corev1.PodSpec, headsets []*v1alpha1types.Headset) (st
 	return strings.Join(names, ","), nil
 }
 
+// seededHeadset is one entry of vrHeadsetsAnnotation.
+type seededHeadset struct{ name, uid string }
+
 // podHeadsets returns the Headsets pod was seeded with.
-func podHeadsets(pod *corev1.Pod) []string {
+func podHeadsets(pod *corev1.Pod) []seededHeadset {
 	v := pod.Annotations[vrHeadsetsAnnotation]
 	if v == "" {
 		return nil
 	}
-	return strings.Split(v, ",")
+	var res []seededHeadset
+	for e := range strings.SplitSeq(v, ",") {
+		name, uid, _ := strings.Cut(e, "/")
+		res = append(res, seededHeadset{name, uid})
+	}
+	return res
+}
+
+// isSeeded is whether pod was seeded with a Headset named name.
+func isSeeded(pod *corev1.Pod, name string) bool {
+	return slices.ContainsFunc(podHeadsets(pod), func(h seededHeadset) bool { return h.name == name })
+}
+
+// stillSeeded is whether h is the live Headset seeded as want: not
+// re-created under its name, and not being deleted (held by a finalizer).
+func stillSeeded(h *v1alpha1types.Headset, want seededHeadset) bool {
+	return string(h.UID) == want.uid && h.DeletionTimestamp == nil
 }
 
 // headsetRevokedReason says why pod's Session must end because a Headset its
@@ -124,35 +144,33 @@ func (c *SessionController) headsetRevokedReason(ctx context.Context, pod *corev
 	if c.HeadsetInformer == nil {
 		return "", nil
 	}
-	for _, name := range podHeadsets(pod) {
-		_, err := c.HeadsetInformer.Namespaced(pod.Namespace).Get(name)
-		if err == nil {
+	for _, want := range podHeadsets(pod) {
+		cached, err := c.HeadsetInformer.Namespaced(pod.Namespace).Get(want.name)
+		if err == nil && stillSeeded(cached, want) {
 			continue
-		} else if !errors.IsNotFound(err) {
-			return "", fmt.Errorf("failed to get headset %s/%s: %w", pod.Namespace, name, err)
+		} else if err != nil && !errors.IsNotFound(err) {
+			return "", fmt.Errorf("failed to get headset %s/%s: %w", pod.Namespace, want.name, err)
 		}
 		// The Headset watch can lag the Session's and the pod's: ask the
 		// API server before ending anything.
-		_, err = c.HeadsetClient.Get(ctx, name, metav1.GetOptions{})
+		live, err := c.HeadsetClient.Get(ctx, want.name, metav1.GetOptions{})
 		switch {
-		case err == nil:
+		case err == nil && stillSeeded(live, want):
 			continue
-		case errors.IsNotFound(err):
-			return fmt.Sprintf("its headset %s was revoked", name), nil
+		case err == nil || errors.IsNotFound(err):
+			return fmt.Sprintf("its headset %s was revoked", want.name), nil
 		default:
-			return "", fmt.Errorf("failed to get headset %s/%s: %w", pod.Namespace, name, err)
+			return "", fmt.Errorf("failed to get headset %s/%s: %w", pod.Namespace, want.name, err)
 		}
 	}
 	return "", nil
 }
 
-// reconcileHeadset ends the Sessions of a deleted Headset at once, as
-// reconcilePairing does for a Pairing. It finds them by their pods'
-// annotation, as a deleted object no longer says whose it was.
-func (c *SessionController) reconcileHeadset(namespace, name string, headset *v1alpha1types.Headset) error {
-	if headset != nil {
-		return nil
-	}
+// reconcileHeadset ends the Sessions of a revoked Headset at once, as
+// reconcilePairing does for a Pairing: deleted, being deleted, or re-created
+// under its name. It finds them by their pods' annotation, as a deleted
+// object no longer says whose it was.
+func (c *SessionController) reconcileHeadset(namespace, name string, _ *v1alpha1types.Headset) error {
 	ctx := c.runCtx
 	if ctx == nil { // called without Run (tests)
 		ctx = context.Background()
@@ -166,7 +184,7 @@ func (c *SessionController) reconcileHeadset(namespace, name string, headset *v1
 	var errs []error
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if !slices.Contains(podHeadsets(pod), name) {
+		if !isSeeded(pod, name) {
 			continue
 		}
 		owner := metav1.GetControllerOf(pod)

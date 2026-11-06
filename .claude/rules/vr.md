@@ -86,15 +86,19 @@ paths:
 
 ## Headsets (XERK-2669)
 
-- A `Headset` CR (user, PEM public key) is the only record of who may connect, not the volume.
+- A `Headset` CR (user, public key) is the only record of who may connect, not the volume.
+  - Its key is WiVRn's stored form, the PEM's bare base64 body: WiVRn strips the headset's PEM
+    (`clean_key`) and compares with `==`, so a seeded PEM block never matches and, the list being
+    non-empty, pairing is off too: the headset is locked out.
   - Every vrPort App container gets `DIREWOLF_VR_HEADSETS` (WiVRn's known_keys format, the
     User's Headsets sorted by name; an App's own value is replaced). `startup-app.sh` rewrites
     `known_keys.json` from it at every start, so a key left on the volume is dropped.
   - Unset, the image refuses to start: an operator that cannot revoke would leave old keys in
     force. `[]` (no Headsets) opens PIN pairing, shown on the authenticated mirror only.
-  - The App pod's `vr-headsets` annotation lists the Headsets it was seeded with. One gone
-    (cache miss confirmed live) ends the Session on reconcile; a Headset delete ends them at once
-    (`reconcileHeadset`, found by annotation: a deleted object no longer names its User).
+  - The App pod's `vr-headsets` annotation lists the Headsets it was seeded with as `name/uid`.
+    One gone, being deleted, or re-created under its name (UID differs; cache miss confirmed live)
+    ends the Session on reconcile, and at once on any Headset event (`reconcileHeadset`, found by
+    annotation: a deleted object no longer names its User).
   - The spec is immutable (CEL): a changed key would admit a headset without ending Sessions.
   - Nothing yet turns a PIN pairing into a Headset: each session pairs anew until the vr-agent
     (XERK-2668) reports WiVRn's `KnownKeys` and the operator records them (rest of XERK-2669).

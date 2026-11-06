@@ -22,8 +22,10 @@ package v1alpha1
 // with apply.
 type HeadsetSpecApplyConfiguration struct {
 	UserReference *UserReferenceApplyConfiguration `json:"userReference,omitempty"`
-	// PublicKey is the headset's long-term public key as WiVRn stores it in
-	// known_keys.json: a PEM "PUBLIC KEY" block.
+	// PublicKey is the headset's long-term public key as WiVRn stores and
+	// compares it in known_keys.json (and lists it in KnownKeys): the base64
+	// body of its PEM, with the BEGIN/END lines and all whitespace removed.
+	// A PEM block never matches (wivrn_connection.cpp clean_key).
 	PublicKey *string `json:"publicKey,omitempty"`
 	// DisplayName is the name WiVRn shows for the key (the headset's model
 	// at pairing).

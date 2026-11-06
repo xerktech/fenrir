@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	generatedclient "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
@@ -19,8 +20,9 @@ import (
 )
 
 const (
-	testHeadsetKeyA = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n"
-	testHeadsetKeyB = "-----BEGIN PUBLIC KEY-----\nBBBB\n-----END PUBLIC KEY-----\n"
+	// WiVRn's stored form: a PEM's bare base64 body.
+	testHeadsetKeyA = "MEIwBQYDK2VvAzkAqk1Wq0pXbcbn0mt3CzI1nlOJlKBQ+jDH0A2FErfGpkAx6tB3PdT5AmIoU7oz+t8SN0Z+cH0b5ZM="
+	testHeadsetKeyB = "MEIwBQYDK2VvAzkAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="
 )
 
 // watchHeadsets turns on f's Headset handling over f's own clientset.
@@ -35,16 +37,24 @@ func watchHeadsets(t *testing.T, f *portsFixture) {
 	f.sc.WatchHeadsets(f.dw.DirewolfV1alpha1().Headsets(portsTestNS), generic.NewInformer[*v1alpha1types.Headset](inf))
 }
 
+// createHeadset creates a Headset with UID <name>-uid (the fake API server
+// sets none).
 func (f *portsFixture) createHeadset(t *testing.T, name, user, key, display string) {
 	t.Helper()
+	f.createHeadsetObj(t, name, user, key, display, func(*v1alpha1types.Headset) {})
+}
+
+func (f *portsFixture) createHeadsetObj(t *testing.T, name, user, key, display string, mutate func(*v1alpha1types.Headset)) {
+	t.Helper()
 	h := &v1alpha1types.Headset{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: portsTestNS},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: portsTestNS, UID: types.UID(name + "-uid")},
 		Spec: v1alpha1types.HeadsetSpec{
 			UserReference: v1alpha1types.UserReference{Name: user},
 			PublicKey:     key,
 			DisplayName:   display,
 		},
 	}
+	mutate(h)
 	if _, err := f.dw.DirewolfV1alpha1().Headsets(portsTestNS).Create(context.Background(), h, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +92,10 @@ func TestVRPodSeededWithUsersHeadsets(t *testing.T) {
 	f.createHeadset(t, "quest-b", f.user, testHeadsetKeyB, "")
 	f.createHeadset(t, "quest-a", f.user, testHeadsetKeyA, "Quest 3")
 	f.createHeadset(t, "theirs", "someone-else", testHeadsetKeyB, "")
-	f.waitHeadsets(t, 3)
+	f.createHeadsetObj(t, "leaving", f.user, testHeadsetKeyB, "", func(h *v1alpha1types.Headset) {
+		h.DeletionTimestamp, h.Finalizers = &metav1.Time{Time: time.Now()}, []string{"test/hold"}
+	})
+	f.waitHeadsets(t, 4)
 
 	sess := f.session("alex-1", f.user)
 	if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
@@ -92,8 +105,8 @@ func TestVRPodSeededWithUsersHeadsets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := app.Annotations[vrHeadsetsAnnotation]; got != "quest-a,quest-b" {
-		t.Errorf("App pod %s = %q, want quest-a,quest-b", vrHeadsetsAnnotation, got)
+	if got := app.Annotations[vrHeadsetsAnnotation]; got != "quest-a/quest-a-uid,quest-b/quest-b-uid" {
+		t.Errorf("App pod %s = %q, want quest-a and quest-b with their UIDs (not the one being deleted)", vrHeadsetsAnnotation, got)
 	}
 	if _, ok := wolf.Annotations[vrHeadsetsAnnotation]; ok {
 		t.Error("Wolf pod carries the headsets annotation")
@@ -214,9 +227,11 @@ func TestRevokedHeadsetEndsSessionOnReconcile(t *testing.T) {
 		name, seeded string
 		ends         bool
 	}{
-		{"all present", "quest", false},
+		{"all present", "quest/quest-uid", false},
 		{"seeded with none", "", false},
-		{"one revoked", "quest,gone", true},
+		{"one revoked", "quest/quest-uid,gone/gone-uid", true},
+		{"re-created under its name", "quest/old-uid", true},
+		{"being deleted", "held/held-uid", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sess, objs := vrSessionPods(tc.seeded)
@@ -224,7 +239,10 @@ func TestRevokedHeadsetEndsSessionOnReconcile(t *testing.T) {
 			f.sc.AppPodHostDir = testAppPodHostDir
 			watchHeadsets(t, f)
 			f.createHeadset(t, "quest", f.user, testHeadsetKeyA, "")
-			f.waitHeadsets(t, 1)
+			f.createHeadsetObj(t, "held", f.user, testHeadsetKeyB, "", func(h *v1alpha1types.Headset) {
+				h.DeletionTimestamp, h.Finalizers = &metav1.Time{Time: time.Now()}, []string{"test/hold"}
+			})
+			f.waitHeadsets(t, 2)
 			waitPod(t, f, s.Name)
 			waitPod(t, f, s.Name+"-app")
 
@@ -252,11 +270,15 @@ func TestHeadsetRevokedReasonConfirmsWithAPIServer(t *testing.T) {
 	f.sc.WatchHeadsets(f.dw.DirewolfV1alpha1().Headsets(portsTestNS), generic.NewInformer[*v1alpha1types.Headset](inf))
 	f.createHeadset(t, "fresh", f.user, testHeadsetKeyA, "")
 
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: portsTestNS, Annotations: map[string]string{vrHeadsetsAnnotation: "fresh"}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: portsTestNS, Annotations: map[string]string{vrHeadsetsAnnotation: "fresh/fresh-uid"}}}
 	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || reason != "" {
 		t.Errorf("headsetRevokedReason = %q, %v; want kept", reason, err)
 	}
-	pod.Annotations[vrHeadsetsAnnotation] = "never-made"
+	pod.Annotations[vrHeadsetsAnnotation] = "fresh/other-uid"
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || reason == "" {
+		t.Errorf("headsetRevokedReason(re-created) = %q, %v; want revoked", reason, err)
+	}
+	pod.Annotations[vrHeadsetsAnnotation] = "never-made/x"
 	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || reason == "" {
 		t.Errorf("headsetRevokedReason = %q, %v; want revoked", reason, err)
 	}
@@ -266,7 +288,7 @@ func TestHeadsetRevokedReasonConfirmsWithAPIServer(t *testing.T) {
 // whose pods were seeded with it, and only those.
 func TestHeadsetDeletionEndsItsSessions(t *testing.T) {
 	ctx := t.Context()
-	sess, objs := vrSessionPods("quest")
+	sess, objs := vrSessionPods("quest/quest-uid")
 	f, s := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
 		s := sess(f)
 		s.Status.WolfSessionID = "1" // streaming, so the unstarted reaper leaves it
@@ -277,7 +299,7 @@ func TestHeadsetDeletionEndsItsSessions(t *testing.T) {
 		other.Name, other.UID = "other-app", "other-pod"
 		other.OwnerReferences[0].Name, other.OwnerReferences[0].UID = "other", "other-uid"
 		other.Labels = map[string]string{v1alpha1types.SessionPodLabel: v1alpha1types.SessionPodLabelValue}
-		other.Annotations[vrHeadsetsAnnotation] = "another"
+		other.Annotations[vrHeadsetsAnnotation] = "another/another-uid"
 		return append(res, other)
 	})
 	other := f.session("other", f.user)
@@ -306,7 +328,30 @@ func TestHeadsetDeletionEndsItsSessions(t *testing.T) {
 		t.Error("ended a session seeded with another headset")
 	}
 	// An existing Headset is no revocation.
-	if err := f.sc.reconcileHeadset(portsTestNS, "another", &v1alpha1types.Headset{}); err != nil || !f.sessionExists(t, other.Name) {
+	another, err := f.sc.HeadsetInformer.Namespaced(portsTestNS).Get("another")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sc.reconcileHeadset(portsTestNS, "another", another); err != nil || !f.sessionExists(t, other.Name) {
 		t.Errorf("reconcileHeadset(present) = %v, session exists %v", err, f.sessionExists(t, other.Name))
+	}
+	// Re-created under its name (another key, maybe another User): its add
+	// event ends the Session seeded with the old one.
+	if err := f.dw.DirewolfV1alpha1().Headsets(portsTestNS).Delete(ctx, "another", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	f.createHeadsetObj(t, "another", "someone-else", testHeadsetKeyA, "", func(h *v1alpha1types.Headset) { h.UID = "new-uid" })
+	for range 500 {
+		if h, err := f.sc.HeadsetInformer.Namespaced(portsTestNS).Get("another"); err == nil && h.UID == "new-uid" {
+			another = h
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := f.sc.reconcileHeadset(portsTestNS, "another", another); err != nil {
+		t.Fatal(err)
+	}
+	if f.sessionExists(t, other.Name) {
+		t.Error("session outlived its headset being re-created under the same name")
 	}
 }

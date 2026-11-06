@@ -701,7 +701,8 @@ func TestVRStartLinksConfigDirsToState(t *testing.T) {
 	}
 }
 
-const testHeadsetKey = "-----BEGIN PUBLIC KEY-----\nMEIwBQYDK2VvAzkAqk1Wq0pXbcbn0mt3CzI1nlOJlKBQ+jDH0A2FErfGpkAx6tB3\nPdT5AmIoU7oz+t8SN0Z+cH0b5ZM=\n-----END PUBLIC KEY-----\n"
+// WiVRn's stored form of a key: its PEM's bare base64 body (clean_key).
+const testHeadsetKey = "MEIwBQYDK2VvAzkAqk1Wq0pXbcbn0mt3CzI1nlOJlKBQ+jDH0A2FErfGpkAx6tB3PdT5AmIoU7oz+t8SN0Z+cH0b5ZM="
 
 // The User's Headsets replace WiVRn's known keys whole at every start: a key
 // left by an earlier session (a revoked headset) is gone (XERK-2669).
@@ -744,8 +745,12 @@ func TestVRStartRefusesBadHeadsetSeed(t *testing.T) {
 		"DIREWOLF_VR_HEADSETS={}",
 		"DIREWOLF_VR_HEADSETS=[1]",
 		`DIREWOLF_VR_HEADSETS=[{"key":"x","name":"y"}]`,
-		`DIREWOLF_VR_HEADSETS=[{"key":"` + strings.ReplaceAll(testHeadsetKey, "\n", `\n`) + `"}]`,
-		`DIREWOLF_VR_HEADSETS=[{"key":"` + strings.ReplaceAll(testHeadsetKey, "\n", `\n`) + `","name":"q","last_connection":1}]`,
+		`DIREWOLF_VR_HEADSETS=[{"key":"` + testHeadsetKey + `"}]`,
+		`DIREWOLF_VR_HEADSETS=[{"key":"` + testHeadsetKey + `","name":"q","last_connection":1}]`,
+		// A PEM block never matches in WiVRn, which would lock the headset out.
+		`DIREWOLF_VR_HEADSETS=[{"key":"-----BEGIN PUBLIC KEY-----\n` + testHeadsetKey + `\n-----END PUBLIC KEY-----\n","name":"q"}]`,
+		// nlohmann refuses a lone surrogate, and WiVRn would read no keys.
+		`DIREWOLF_VR_HEADSETS=[{"key":"` + testHeadsetKey + `","name":"\ud800"}]`,
 	} {
 		s := newVRStart(t)
 		path := filepath.Join(s.state, "wivrn", "known_keys.json")
