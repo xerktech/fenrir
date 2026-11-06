@@ -31,8 +31,8 @@ func withNativeVR(t *testing.T, f *portsFixture) *v1alpha1types.App {
 }
 
 // vrSession is a VR-mode Session as the library page would create it.
-func vrSession(f *portsFixture, name string) *v1alpha1types.Session {
-	s := f.session(name, f.user)
+func vrSession(f *portsFixture) *v1alpha1types.Session {
+	s := f.session("alex-vr", f.user)
 	s.CreationTimestamp = metav1.Now()
 	s.Spec.Mode = v1alpha1types.SessionModeVR
 	s.Spec.Config = v1alpha1types.SessionInfo{}
@@ -45,7 +45,7 @@ func vrSession(f *portsFixture, name string) *v1alpha1types.Session {
 func TestVRSessionBuildsWolflessPod(t *testing.T) {
 	f := newPortsFixture(t)
 	withNativeVR(t, f)
-	s := vrSession(f, "alex-vr")
+	s := vrSession(f)
 	if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Create(t.Context(), s, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestVRSessionBuildsWolflessPod(t *testing.T) {
 func TestVRSessionNeedsVRPortApp(t *testing.T) {
 	f := newPortsFixture(t)
 	withNativeVR(t, f).Spec.VRPort = false
-	s := vrSession(f, "alex-vr")
+	s := vrSession(f)
 	if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Create(t.Context(), s, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestVRPodKeepsAppChecks(t *testing.T) {
 			f := newPortsFixture(t)
 			app := withNativeVR(t, f)
 			mutate(&app.Spec.Template.Spec)
-			s := vrSession(f, "alex-vr")
+			s := vrSession(f)
 			s.Status.Ports.VR = 21000
 			if _, _, err := f.sc.buildPods(s, ""); err == nil || !strings.Contains(err.Error(), errInvalidSpec.Error()) {
 				t.Errorf("buildPods = %v, want an InvalidSpec", err)
@@ -206,7 +206,7 @@ type fakeVRAgent struct {
 	tokens []string
 }
 
-func newFakeVRAgent(t *testing.T, cert tls.Certificate) *fakeVRAgent {
+func newFakeVRAgent(t *testing.T, cert *tls.Certificate) *fakeVRAgent {
 	t.Helper()
 	a := &fakeVRAgent{}
 	a.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -219,7 +219,7 @@ func newFakeVRAgent(t *testing.T, cert tls.Certificate) *fakeVRAgent {
 		}
 		_ = json.NewEncoder(w).Encode(a.status)
 	}))
-	a.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	a.TLS = &tls.Config{Certificates: []tls.Certificate{*cert}}
 	a.StartTLS()
 	t.Cleanup(a.Close)
 	return a
@@ -244,9 +244,9 @@ func (a *fakeVRAgent) port(t *testing.T) int32 {
 // pointed at a fake vr-agent.
 func vrLifecycle(t *testing.T, mutate func(*corev1.Pod) *corev1.Pod) (*portsFixture, *v1alpha1types.Session, *fakeVRAgent) {
 	t.Helper()
-	agent := newFakeVRAgent(t, testAgentKeyPair(t))
+	agent := newFakeVRAgent(t, new(testAgentKeyPair(t)))
 	f, s := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
-		s := vrSession(f, "alex-vr")
+		s := vrSession(f)
 		s.Status.Ports = v1alpha1types.SessionPorts{VR: 21000}
 		s.Status.Conditions = []metav1.Condition{
 			{Type: "PortsAllocated", Status: metav1.ConditionTrue, Reason: "Test"},
@@ -349,7 +349,7 @@ func TestVRAgentCertIsPinned(t *testing.T) {
 		t.Fatal(err)
 	}
 	f, s, _ := vrLifecycle(t, identity)
-	impostor := newFakeVRAgent(t, other)
+	impostor := newFakeVRAgent(t, &other)
 	impostor.set(VRStatus{HeadsetConnected: true}, false)
 	f.sc.vrAgentPort = impostor.port(t)
 	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
@@ -405,7 +405,7 @@ func TestFinishedVRPodEndsSession(t *testing.T) {
 func TestVRSessionUnstartedReaper(t *testing.T) {
 	f := newPortsFixture(t)
 	now := time.Now()
-	s := vrSession(f, "alex-vr")
+	s := vrSession(f)
 	s.CreationTimestamp = metav1.NewTime(now.Add(-unstartedSessionTTL - time.Minute))
 	if r := f.sc.expiredReason(s, now); r != "" {
 		t.Errorf("reaped after the Moonlight TTL: %s", r)
@@ -424,7 +424,7 @@ func TestVRSessionUnstartedReaper(t *testing.T) {
 func TestClaimRecordedPortsVROnly(t *testing.T) {
 	f := newPortsFixture(t)
 	withNativeVR(t, f)
-	s := vrSession(f, "alex-vr")
+	s := vrSession(f)
 	s.Status.Ports = v1alpha1types.SessionPorts{VR: 21000}
 	f.sc.claimRecordedPorts([]*v1alpha1types.Session{s})
 	if err := f.sc.vrPorts.ClaimBase("ns/other", 21000); err == nil {

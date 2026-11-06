@@ -64,6 +64,9 @@ const (
 	vrWaitingForHeadset = "WaitingForHeadset"
 	vrHeadsetConnected  = "Connected"
 	vrHeadsetGone       = "Disconnected"
+	vrConditionSuccess  = "Success"
+	// vrAgentTokenVolume is the Session's token Secret, as buildPod mounts it.
+	vrAgentTokenVolume = "wolf-agent-token"
 )
 
 // VRStatus is vr-agent's reply on VRStatusPath: WiVRn's properties.
@@ -171,7 +174,7 @@ func (c *SessionController) vrAgentContainer() corev1.Container {
 			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: "wolf-agent-token", MountPath: wolfAgentTokenMountPath, ReadOnly: true},
+			{Name: vrAgentTokenVolume, MountPath: wolfAgentTokenMountPath, ReadOnly: true},
 			{Name: vrBusVolume, MountPath: VRBusDir},
 		},
 	}
@@ -192,7 +195,7 @@ func (c *SessionController) finishVRReconcile(ctx context.Context, session *v1al
 		})
 	default:
 		meta.SetStatusCondition(&session.Status.Conditions, metav1.Condition{
-			Type: podCreatedCondition, Status: metav1.ConditionTrue, Reason: "Success",
+			Type: podCreatedCondition, Status: metav1.ConditionTrue, Reason: vrConditionSuccess,
 		})
 	}
 
@@ -200,11 +203,12 @@ func (c *SessionController) finishVRReconcile(ctx context.Context, session *v1al
 	var pollErr error
 	if ready {
 		pollErr = c.reconcileVRHeadset(ctx, session, pod)
-		if stderrors.Is(pollErr, errSessionEnded) {
+		switch {
+		case stderrors.Is(pollErr, errSessionEnded):
 			return nil
-		} else if stderrors.Is(pollErr, errEndSessionFailed) {
+		case stderrors.Is(pollErr, errEndSessionFailed):
 			return pollErr
-		} else if pollErr != nil {
+		case pollErr != nil:
 			// An agent we can't reach changes nothing: container exits still
 			// end the Session, and the grace period still runs out.
 			klog.Warningf("Session %s/%s: %v", session.Namespace, session.Name, pollErr)
@@ -296,9 +300,9 @@ func (c *SessionController) pollVRAgent(ctx context.Context, session *v1alpha1ty
 		Transport: &wolfapi.BearerTokenTransport{Token: wolfapi.StaticToken(token), Base: transport},
 	}
 	url := "https://" + net.JoinHostPort(podIP, strconv.Itoa(int(c.vrAgentPort))) + VRStatusPath
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
-		return VRStatus{}, err
+		return VRStatus{}, fmt.Errorf("polling vr-agent: %w", err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

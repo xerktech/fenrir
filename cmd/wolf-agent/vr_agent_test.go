@@ -30,7 +30,7 @@ func TestVRAgentHandler(t *testing.T) {
 		return controllers.VRStatus{HeadsetConnected: true}, nil
 	})
 	get := func(path, token string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, http.NoBody)
 		if token != "" {
 			r.Header.Set("Authorization", "Bearer "+token)
 		}
@@ -66,32 +66,33 @@ func TestVRAgentHandler(t *testing.T) {
 // wivrnStatus reads the real properties over a real session bus, from an
 // object shaped like WiVRn's.
 func TestWiVRnStatusOverDBus(t *testing.T) {
-	daemon, err := exec.LookPath("dbus-daemon")
-	if err != nil {
+	daemon, lookErr := exec.LookPath("dbus-daemon")
+	if lookErr != nil {
 		t.Skip("no dbus-daemon")
 	}
-	dir, err := os.MkdirTemp("", "vrbus")
-	if err != nil {
-		t.Fatal(err)
+	// Short: a unix socket path has ~108 bytes.
+	dir, mkErr := os.MkdirTemp("", "vrbus") //nolint:usetesting // t.TempDir's path is too long for a socket
+	if mkErr != nil {
+		t.Fatal(mkErr)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	// The image's native bus config, at a test path.
-	conf, err := os.ReadFile("../../images/gow-nvidia32/vr/dbus-session-agent.conf")
-	if err != nil {
-		t.Fatal(err)
+	// The image's agent bus config, at a test path.
+	conf, readErr := os.ReadFile("../../images/gow-nvidia32/vr/dbus-session-agent.conf")
+	if readErr != nil {
+		t.Fatal(readErr)
 	}
 	addr := "unix:path=" + filepath.Join(dir, "bus")
 	if !strings.Contains(string(conf), "<listen>"+controllers.VRBusAddress+"</listen>") {
 		t.Fatalf("the image's native bus config does not listen on %s", controllers.VRBusAddress)
 	}
 	confPath := filepath.Join(dir, "bus.conf")
-	if err := os.WriteFile(confPath, []byte(strings.Replace(string(conf), controllers.VRBusAddress, addr, 1)), 0o600); err != nil {
+	if err := os.WriteFile(confPath, []byte(strings.Replace(string(conf), controllers.VRBusAddress, addr, 1)), 0o600); err != nil { //nolint:gosec // the test's own temp dir
 		t.Fatal(err)
 	}
 	cmd := exec.CommandContext(t.Context(), daemon, "--config-file="+confPath, "--nofork", "--print-address")
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
+	out, pipeErr := cmd.StdoutPipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
 	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -120,8 +121,8 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply, err := server.RequestName(wivrnService, dbus.NameFlagDoNotQueue); err != nil || reply != dbus.RequestNameReplyPrimaryOwner {
-		t.Fatalf("RequestName: %v %v", reply, err)
+	if reply, nameErr := server.RequestName(wivrnService, dbus.NameFlagDoNotQueue); nameErr != nil || reply != dbus.RequestNameReplyPrimaryOwner {
+		t.Fatalf("RequestName: %v %v", reply, nameErr)
 	}
 	st, err := wivrnStatus(ctx, addr)
 	if err != nil || st != (controllers.VRStatus{HeadsetConnected: true}) {

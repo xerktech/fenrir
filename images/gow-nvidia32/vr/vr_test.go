@@ -305,7 +305,7 @@ func TestVRStartRefusesLinkedOrReadOnlyConfigDirs(t *testing.T) {
 // directory (pkg/controllers VRBusAddress), which vr-agent reads.
 func TestVRSessionBusListensOnAFile(t *testing.T) {
 	for conf, want := range map[string]string{
-		"dbus-session.conf":        "unix:dir=/tmp",
+		"dbus-session.conf":       "unix:dir=/tmp",
 		"dbus-session-agent.conf": "unix:path=/run/direwolf-vr-bus/bus",
 	} {
 		b, err := os.ReadFile(conf)

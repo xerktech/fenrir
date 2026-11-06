@@ -1196,9 +1196,9 @@ func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1type
 			if moonlightOnly {
 				selector = moonlightPodsOf(user)
 			}
-			pods, err := s.PodLister.List(selector)
-			if err != nil {
-				return false, err
+			pods, listErr := s.PodLister.List(selector)
+			if listErr != nil {
+				return false, fmt.Errorf("listing pods: %w", listErr)
 			}
 			return len(pods) == 0, nil
 		})

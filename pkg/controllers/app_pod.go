@@ -391,8 +391,8 @@ func podUsesClaim(spec *corev1.PodSpec, name string) bool {
 func (c *SessionController) buildPods(session *v1alpha1types.Session, wolfUID types.UID) (wolf, app *corev1.Pod, err error) {
 	if session.Spec.IsVR() {
 		// One pod, App only (vr_session.go); never split.
-		pod, err := c.buildVRPod(session)
-		return pod, nil, err
+		pod, vrErr := c.buildVRPod(session)
+		return pod, nil, vrErr
 	}
 	pod, err := c.buildPod(session)
 	if err != nil || c.AppPodHostDir == "" {
