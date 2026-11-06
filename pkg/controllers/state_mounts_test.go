@@ -295,9 +295,12 @@ func vrExampleLinkScript(t *testing.T) string {
 	return script
 }
 
-func runLink(t *testing.T, script, docs, target string) (string, error) {
+// linkTarget is where the example links AC's Documents: the image links it on.
+const linkTarget = "/srv/direwolf/ac-documents"
+
+func runLink(t *testing.T, script, docs string) (string, error) {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), "python3", "-I", "-", docs, target)
+	cmd := exec.CommandContext(t.Context(), "python3", "-I", "-", docs, linkTarget)
 	cmd.Stdin = strings.NewReader(script)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -309,7 +312,7 @@ func runLink(t *testing.T, script, docs, target string) (string, error) {
 func TestVRExampleLinksACDocumentsToState(t *testing.T) {
 	script := vrExampleLinkScript(t)
 	dir := t.TempDir()
-	docs, target := filepath.Join(dir, "Documents", "Assetto Corsa"), "/srv/direwolf/state/ac-documents"
+	docs, target := filepath.Join(dir, "Documents", "Assetto Corsa"), linkTarget
 	if err := os.MkdirAll(filepath.Join(docs, "cfg"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +320,7 @@ func TestVRExampleLinksACDocumentsToState(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 { // and again, with the link in place
-		if out, err := runLink(t, script, docs, target); err != nil {
+		if out, err := runLink(t, script, docs); err != nil {
 			t.Fatalf("%v: %s", err, out)
 		}
 		if got, err := os.Readlink(docs); err != nil || got != target {
@@ -334,14 +337,14 @@ func TestVRExampleLinksACDocumentsToState(t *testing.T) {
 	if err := os.Symlink("/etc", docs); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runLink(t, script, docs, target); err != nil {
+	if out, err := runLink(t, script, docs); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	if got, _ := os.Readlink(docs); got != target {
 		t.Errorf("planted link not replaced: -> %q", got)
 	}
 	// Never launched flat: no Documents folder, no link.
-	if out, err := runLink(t, script, filepath.Join(dir, "missing", "Assetto Corsa"), target); err == nil || !strings.Contains(out, "launch Assetto Corsa flat once") {
+	if out, err := runLink(t, script, filepath.Join(dir, "missing", "Assetto Corsa")); err == nil || !strings.Contains(out, "launch Assetto Corsa flat once") {
 		t.Errorf("missing prefix: err %v, output %q; want a refusal", err, out)
 	}
 	// A folder and a flat copy both: neither is the script's to drop.
@@ -351,7 +354,7 @@ func TestVRExampleLinksACDocumentsToState(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if out, err := runLink(t, script, both, target); err == nil || !strings.Contains(out, "move one aside") {
+	if out, err := runLink(t, script, both); err == nil || !strings.Contains(out, "move one aside") {
 		t.Errorf("both folders: err %v, output %q; want a refusal", err, out)
 	}
 	// No flat copy yet (AC never wrote one): an empty one is made for flat sessions.
@@ -359,7 +362,7 @@ func TestVRExampleLinksACDocumentsToState(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(fresh), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runLink(t, script, fresh, target); err != nil {
+	if out, err := runLink(t, script, fresh); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	if fi, err := os.Lstat(fresh + ".flat"); err != nil || !fi.IsDir() {

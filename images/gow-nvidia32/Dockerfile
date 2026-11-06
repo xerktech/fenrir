@@ -86,12 +86,14 @@ RUN f=/etc/cont-init.d/system-services.sh \
 RUN d='/etc/cont-init.d /opt/gow /usr/local/bin /usr/bin' \
   && find $d ! -type l -perm /022 -exec chmod go-w {} + && test -z "$(find $d ! -type l -perm /022)"
 # Assetto Corsa's Documents folder in the shared Proton prefix is a link to
-# /srv/direwolf/state/ac-documents, where the VR App mounts its User's copy
-# (examples/vr.yaml, XERK-2713). A flat session follows this link instead, to
-# the shared flat copy beside it. /srv: pressure-vessel shares it with games.
-RUN mkdir -p /srv/direwolf/state \
+# /srv/direwolf/ac-documents (examples/vr.yaml, XERK-2713). Here it leads to
+# the shared flat copy; the vr image points it at its User's mount instead.
+# Never under /srv/direwolf/state, the stateMounts root: the runtime would
+# follow an image link there into /games. /srv: pressure-vessel shares it.
+RUN mkdir -p /srv/direwolf \
  && ln -s '/games/steamapps/compatdata/244210/pfx/drive_c/users/steamuser/Documents/Assetto Corsa.flat' \
-      /srv/direwolf/state/ac-documents
+      /srv/direwolf/ac-documents \
+ && test ! -e /srv/direwolf/state
 
 FROM ghcr.io/games-on-whales/heroic-games-launcher:edge@sha256:a207a39367801a8a8bf24b68dac2c9945052d3117cb03b061b27bd6672aab62f AS heroic
 # As in steam: it writes the same home and /games. nexus inherits it.
@@ -343,10 +345,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=vr-wivrn /out/ /
 COPY --from=vr-opencomposite /out/ /
 COPY --from=vr-xrizer /out/ /
-# The operator mounts spec.stateMounts here: the runtime follows a link at a
-# mount point, so steam's flat AC link would put this User's dir into /games.
-# Nothing of the image's may sit under it.
-RUN rm /srv/direwolf/state/ac-documents && test -z "$(ls -A /srv/direwolf/state)"
+# AC's shared Documents link leads to this User's stateMount. Nothing of the
+# image's sits under the stateMounts root: the runtime follows links at a
+# mount point (XERK-2713).
+RUN ln -sfnT /srv/direwolf/state/ac-documents /srv/direwolf/ac-documents \
+ && test ! -e /srv/direwolf/state
 # The session starts the VR services, then Steam as before: GoW's startup-app
 # moves beside the vr scripts (startup-app.sh finds its siblings by its own
 # path) and ours takes its place.

@@ -130,10 +130,12 @@ paths:
   - `startup-app.sh` links `~/.config/{wivrn,openxr,openvr}` there; in a flat session they
     dangle, so no Proton game finds a VR runtime. Pressure-vessel shares `/srv` like the home
     (steam-runtime-tools `wrap-home.c`), so games resolve the links.
-  - The command makes the prefix's `Documents/Assetto Corsa` a link to `ac-documents` and moves
-    the flat copy to `Assetto Corsa.flat`; the steam image links that path to `.flat`, so flat
-    sessions keep the flat config. The vr image removes that image link: under the root runc
-    would follow it into /games. Flat AC outside the steam image (the Library) finds nothing.
+  - The command makes the prefix's `Documents/Assetto Corsa` a link to `/srv/direwolf/ac-documents`
+    and moves the flat copy to `Assetto Corsa.flat`. The vr image links that path to the
+    `ac-documents` stateMount, the steam image to `.flat`, so flat sessions keep the flat config.
+    Flat AC outside the steam image (the Library) finds nothing.
+  - No image may ship anything under `/srv/direwolf/state`: runc follows an image link at a mount
+    point too, then a game's link in /games (QA reproduced it with runc; both stages test it).
   - The command still checks, before the entrypoint, that each is a mount exactly where named
     (`realpath -e`, `mountpoint`), and chowns with `-h`.
   - Its command seeds that cfg from `Assetto Corsa.flat` (a second, read-only `games` mount)

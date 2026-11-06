@@ -83,9 +83,9 @@ spec:
   #     unless each is a mount.
   #   - ac-documents: AC's Documents/Assetto Corsa (cfg/video.ini in VR mode,
   #     CSP's config in cfg/extension, setups). The command below turns that
-  #     folder in the shared prefix into a link here, keeping the flat copy as
-  #     "Assetto Corsa.flat", which the steam image links flat sessions to. It
-  #     is seeded from the flat copy on first use.
+  #     folder in the shared prefix into a link to /srv/direwolf/ac-documents,
+  #     keeping the flat copy as "Assetto Corsa.flat": the vr image links that
+  #     path here, the steam image to the flat copy. Seeded from it once.
   stateMounts:
   - name: wivrn
   - name: openxr
@@ -211,10 +211,10 @@ spec:
             chown -h "$PUID:$PGID" -- "$d"
           done
           # As PUID: AC's Documents folder in the shared prefix becomes a link
-          # to this User's mount; the flat copy moves beside it, where the
-          # steam image's own link sends flat sessions. Only in the shared
+          # to /srv/direwolf/ac-documents, which the vr image links to this
+          # User's mount and the steam image to the flat copy, moved beside it. Only in the shared
           # prefix, never through it: a link is replaced, not followed.
-          gosu "$PUID:$PGID" python3 -I - "$docs" "$state/ac-documents" <<'LINK'
+          gosu "$PUID:$PGID" python3 -I - "$docs" /srv/direwolf/ac-documents <<'LINK'
           import os, sys
           docs, target = sys.argv[1], sys.argv[2]
           flat = docs + ".flat"
