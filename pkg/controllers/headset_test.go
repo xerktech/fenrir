@@ -22,7 +22,7 @@ import (
 const (
 	// WiVRn's stored form: a PEM's bare base64 body.
 	testHeadsetKeyA = "MEIwBQYDK2VvAzkAqk1Wq0pXbcbn0mt3CzI1nlOJlKBQ+jDH0A2FErfGpkAx6tB3PdT5AmIoU7oz+t8SN0Z+cH0b5ZM="
-	testHeadsetKeyB = "MEIwBQYDK2VvAzkAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb="
+	testHeadsetKeyB = "MEIwBQYDK2VvAzkAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
 // watchHeadsets turns on f's Headset handling over f's own clientset.
