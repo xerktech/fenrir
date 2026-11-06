@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
 	"os"
 	"strings"
@@ -325,5 +326,36 @@ func TestSessionCRDValidatesMode(t *testing.T) {
 	}
 	if errs := validate(session("VR", nil), session("VR", nil)); len(errs) > 0 {
 		t.Errorf("unchanged VR Session update: unexpected errors: %v", errs.ToAggregate())
+	}
+}
+
+// A Session the Go type encodes passes the CRD in either mode: VR's unset
+// Moonlight fields must be left out (omitzero), not sent as {}.
+func TestSessionCRDAcceptsEncodedSessions(t *testing.T) {
+	validate := crdValidator(t, "sessions")
+	ref := "x"
+	for _, spec := range []SessionSpec{
+		{Mode: SessionModeVR, UserReference: UserReference{Name: ref}, GameReference: GameReference{Name: ref}},
+		{
+			UserReference: UserReference{Name: ref}, GameReference: GameReference{Name: ref},
+			PairingReference: PairingReference{Name: ref}, GatewayReference: GatewayReference{Name: ref},
+			Config: SessionInfo{AESKey: "k", AESIV: "i", SurroundAudioFlags: 196610, VideoWidth: 1920, VideoHeight: 1080, VideoRefreshRate: 60},
+		},
+	} {
+		data, err := json.Marshal(Session{Spec: spec})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var obj map[string]any
+		if err = json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
+		}
+		obj["apiVersion"] = "direwolf.games-on-whales.github.io/v1alpha1"
+		obj["kind"] = "Session"
+		obj["metadata"] = map[string]any{"name": "s", "namespace": "ns"}
+		delete(obj, "status") // its required ports are the operator's to write
+		if errs := validate(obj); len(errs) > 0 {
+			t.Errorf("mode %q: encoded Session %s refused: %v", spec.Mode, data, errs.ToAggregate())
+		}
 	}
 }

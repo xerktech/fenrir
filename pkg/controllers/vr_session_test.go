@@ -18,7 +18,8 @@ func TestVRModeSessionEndsUntilSupported(t *testing.T) {
 	s.Spec.Mode = v1alpha1types.SessionModeVR
 	s.Spec.PairingReference = v1alpha1types.PairingReference{}
 	s.Spec.GatewayReference = v1alpha1types.GatewayReference{}
-	s.Spec.Config = v1alpha1types.SessionInfo{}
+	// The fixture's config stays (the fake client runs no CEL): with a
+	// valid client IP only the VR guard can end it, not unstreamableReason.
 	if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Create(t.Context(), s, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
