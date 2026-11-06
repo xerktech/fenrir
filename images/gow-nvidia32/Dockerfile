@@ -235,6 +235,7 @@ RUN test -x /opt/xodus-nexus/AppRun && command -v gnome-keyring-daemon dbus-run-
 FROM game-session AS battlenet
 COPY --from=proton-cachyos /opt/proton-cachyos /opt/proton-cachyos
 COPY --chmod=755 root/opt/direwolf/launch-battlenet /opt/direwolf/launch-battlenet
+COPY --chmod=644 root/opt/direwolf/battlenet-pad-repair.py /opt/direwolf/battlenet-pad-repair.py
 COPY --chmod=755 root/opt/gow/battlenet-startup-app.sh /opt/gow/startup-app.sh
 RUN for lib in libfreetype.so.6 libfontconfig.so.1 libldap.so.2; do \
     ldconfig -p | grep -q "${lib} (libc6)" || { echo "no i386 ${lib}" >&2; exit 1; }; \
