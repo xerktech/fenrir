@@ -106,6 +106,7 @@ func (s *vrStart) run(t *testing.T, env ...string) (string, error) {
 		"DBUS_LOG=" + filepath.Join(s.dir, "dbus.log"),
 		"SERVICES_LOG=" + filepath.Join(s.dir, "services.log"),
 		"DIREWOLF_VR_START_TIMEOUT=5",
+		"DIREWOLF_VR_HEADSETS=[]",
 	}, env...)
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
@@ -561,7 +562,7 @@ func TestVRImageIsPinnedAndBuilt(t *testing.T) {
 	dockerfile := string(b)
 	for _, re := range []string{
 		`\nFROM steam AS vr\n`,
-		`\nARG WIVRN_VERSION=v26\.9\n`,
+		`\nARG WIVRN_REPO=https://github\.com/xerktech/WiVRn\n`,
 		`\nARG WIVRN_COMMIT=[0-9a-f]{40}\n`,
 		`test "\$\(git -C /src/wivrn rev-parse HEAD\)" = "\$\{WIVRN_COMMIT\}"`,
 		`-DWIVRN_USE_PIPEWIRE=ON`,
@@ -768,5 +769,79 @@ func TestVRStartLinksConfigDirsToState(t *testing.T) {
 	}
 	if _, err := os.Stat(s.steamLog); err == nil {
 		t.Error("Steam started")
+	}
+}
+
+// WiVRn's stored form of a key: its PEM's bare base64 body (clean_key).
+const testHeadsetKey = "MEIwBQYDK2VvAzkAqk1Wq0pXbcbn0mt3CzI1nlOJlKBQ+jDH0A2FErfGpkAx6tB3PdT5AmIoU7oz+t8SN0Z+cH0b5ZM="
+
+// The User's Headsets replace WiVRn's known keys whole at every start: a key
+// left by an earlier session (a revoked headset) is gone (XERK-2669).
+func TestVRStartSeedsKnownKeysFromHeadsets(t *testing.T) {
+	s := newVRStart(t)
+	path := filepath.Join(s.state, "wivrn", "known_keys.json")
+	if err := os.WriteFile(path, []byte(`[{"key":"revoked","name":"old"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seed, err := json.Marshal([]map[string]string{{"key": testHeadsetKey, "name": "Quest 3"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, runErr := s.run(t, "DIREWOLF_VR_PORT=20034", "DIREWOLF_VR_HEADSETS="+string(seed)); runErr != nil {
+		t.Fatalf("%v\n%s", runErr, out)
+	}
+	var got []map[string]string
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &got); err != nil || len(got) != 1 || got[0]["key"] != testHeadsetKey || got[0]["name"] != "Quest 3" {
+		t.Errorf("known_keys.json = %s (%v); want only the seeded key", b, err)
+	}
+
+	// None: an empty list (WiVRn pairs by PIN), never the old file.
+	if out, err := s.run(t, "DIREWOLF_VR_PORT=20034"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "[]" {
+		t.Errorf("known_keys.json = %s; want []", b)
+	}
+}
+
+// An unparseable known_keys.json reads as no keys in WiVRn, which opens PIN
+// pairing: a bad or missing seed refuses to start and writes nothing.
+func TestVRStartRefusesBadHeadsetSeed(t *testing.T) {
+	for _, env := range []string{
+		"DIREWOLF_VR_HEADSETS=",
+		"DIREWOLF_VR_HEADSETS={}",
+		"DIREWOLF_VR_HEADSETS=[1]",
+		`DIREWOLF_VR_HEADSETS=[{"key":"x","name":"y"}]`,
+		`DIREWOLF_VR_HEADSETS=[{"key":"` + testHeadsetKey + `"}]`,
+		`DIREWOLF_VR_HEADSETS=[{"key":"` + testHeadsetKey + `","name":"q","last_connection":1}]`,
+		// A PEM block never matches in WiVRn, which would lock the headset out.
+		`DIREWOLF_VR_HEADSETS=[{"key":"-----BEGIN PUBLIC KEY-----\n` + testHeadsetKey + `\n-----END PUBLIC KEY-----\n","name":"q"}]`,
+		// nlohmann refuses a lone surrogate, and WiVRn would read no keys.
+		`DIREWOLF_VR_HEADSETS=[{"key":"` + testHeadsetKey + `","name":"\ud800"}]`,
+	} {
+		s := newVRStart(t)
+		path := filepath.Join(s.state, "wivrn", "known_keys.json")
+		if err := os.WriteFile(path, []byte("[]"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := s.run(t, "DIREWOLF_VR_PORT=20034", env)
+		if err == nil || !strings.Contains(out, "DIREWOLF_VR_HEADSETS") {
+			t.Errorf("%s: err %v, output %q; want a refusal naming DIREWOLF_VR_HEADSETS", env, err, out)
+		}
+		if _, err := os.Stat(s.steamLog); err == nil {
+			t.Errorf("%s: Steam started", env)
+		}
+	}
+	// Unset: an operator that never seeds would leave old keys in force.
+	s := newVRStart(t)
+	cmd := exec.CommandContext(t.Context(), "bash", filepath.Join(s.dir, "startup-app.sh")) //nolint:gosec // the test's own copy
+	cmd.Env = []string{"PATH=" + s.bin + ":" + os.Getenv("PATH"), "HOME=" + s.home, "DIREWOLF_STATE_ROOT=" + s.state,
+		"XDG_RUNTIME_DIR=" + s.runtime, "DIREWOLF_VR_PORT=20034"}
+	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "DIREWOLF_VR_HEADSETS is unset") {
+		t.Errorf("unset: err %v, output %q", err, out)
 	}
 }

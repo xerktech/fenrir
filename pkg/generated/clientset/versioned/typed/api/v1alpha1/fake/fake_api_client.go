@@ -32,6 +32,10 @@ func (c *FakeDirewolfV1alpha1) Apps(namespace string) v1alpha1.AppInterface {
 	return newFakeApps(c, namespace)
 }
 
+func (c *FakeDirewolfV1alpha1) Headsets(namespace string) v1alpha1.HeadsetInterface {
+	return newFakeHeadsets(c, namespace)
+}
+
 func (c *FakeDirewolfV1alpha1) Pairings(namespace string) v1alpha1.PairingInterface {
 	return newFakePairings(c, namespace)
 }

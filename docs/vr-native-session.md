@@ -100,7 +100,12 @@ This works as it does for Moonlight sessions.
 
 - There's no mirror to show the PIN. While pairing is enabled, the library page reads WiVRn's `Pin`
   property through the same agent and shows it behind Authentik.
-- Revoking a headset is a call to `RevokeKey` on that agent. There's no Pairing CR in VR mode.
+- A User's paired headsets are `Headset` objects, in both modes. The operator seeds WiVRn's known
+  keys from them at every start, so the keys file on the User's volume decides nothing.
+- Revoking a headset is deleting its Headset. That ends the User's Sessions seeded with it, the way
+  deleting a Pairing ends a Moonlight client's. `RevokeKey` isn't used: it only works while a
+  session runs, and the next start would bring the key back.
+- A new PIN pairing becomes a Headset once the agent reports WiVRn's `KnownKeys` (XERK-2669 part 2).
 
 ## Moonlight interplay
 

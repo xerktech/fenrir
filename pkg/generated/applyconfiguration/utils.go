@@ -42,6 +42,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apiv1alpha1.GameReferenceApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("GatewayReference"):
 		return &apiv1alpha1.GatewayReferenceApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("Headset"):
+		return &apiv1alpha1.HeadsetApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("HeadsetSpec"):
+		return &apiv1alpha1.HeadsetSpecApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("Pairing"):
 		return &apiv1alpha1.PairingApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("PairingReference"):

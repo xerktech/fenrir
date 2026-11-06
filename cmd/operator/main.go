@@ -226,6 +226,7 @@ func main() {
 	userInformer := direwolfFactory.Direwolf().V1alpha1().Users().Informer()
 	sessionInformer := direwolfFactory.Direwolf().V1alpha1().Sessions().Informer()
 	pairingInformer := direwolfFactory.Direwolf().V1alpha1().Pairings().Informer()
+	headsetInformer := direwolfFactory.Direwolf().V1alpha1().Headsets().Informer()
 	direwolfFactory.Start(appContext.Done())
 	defer direwolfFactory.Shutdown()
 
@@ -305,6 +306,10 @@ func main() {
 
 			DisconnectGracePeriod: *disconnectGracePeriod,
 		},
+	)
+	sessionController.WatchHeadsets(
+		direwolfClient.DirewolfV1alpha1().Headsets(*namespace),
+		generic.NewInformer[*direwolfv1alpha1.Headset](headsetInformer),
 	)
 
 	var libraryController *controllers.LibraryController

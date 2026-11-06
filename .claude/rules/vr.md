@@ -3,6 +3,8 @@ paths:
   - images/vr/**
   - images/gow-nvidia32/vr/**
   - pkg/controllers/*vr*.go
+  - pkg/controllers/headset*.go
+  - pkg/api/v1alpha1/headset.go
   - cmd/wolf-agent/vr_agent*.go
   - pkg/controllers/ports.go
   - pkg/controllers/ports_test.go
@@ -17,8 +19,10 @@ paths:
 
 - WiVRn (OpenXR runtime + server) with xrizer or OpenComposite as the OpenVR layer.
   Both layers ran Assetto Corsa; OpenComposite "looks better", xrizer is maintained.
-- Pin the server to the Quest client's release (Horizon store): a protocol mismatch is refused
-  (`wivrn_connection.cpp`), so bump server and store client together.
+- The server is built from the xerktech/WiVRn fork (`WIVRN_REPO`/`WIVRN_COMMIT`): AES-GCM stream
+  (XERK-2691) and a long-term `server_key.pem` the headset pins (XERK-2699).
+  - The protocol hash covers the AEAD revision, so the Horizon store client is refused: the Quest
+    runs the fork's APK from the same commit. Bump server and APK together.
 - ALVR + SteamVR is rejected, not a fallback to reach for: its TCP control port 9943 is a
   hard-coded const (no port block), its dashboard on 127.0.0.1:8082 lets any node process set a
   script ALVR runs, and its stream is plaintext.
@@ -78,9 +82,32 @@ paths:
   server.
 - Pairing: 6-digit PIN (SMP) while the known-keys list is empty, then only stored keys connect.
   The PIN goes to stderr and D-Bus only, so the user needs an authenticated place to see it.
-- The config dir holds the keys: writable and per-user persistent, never a read-only ConfigMap
-  ("Failed to save keys") and never the shared Steam home.
-- The stream is AES-128-CTR with no MAC (XERK-2691). Never set `--no-encrypt`.
+- WiVRn reads an unparseable `known_keys.json` as no keys, which opens PIN pairing: only ever
+  write it whole, from a list that parsed.
+- The config dir holds the keys (and `server_key.pem`): writable and per-user persistent, never a
+  read-only ConfigMap ("Failed to save keys") and never the shared Steam home.
+- Never set `--no-encrypt`; the fork's headset refuses an unencrypted server.
+
+## Headsets (XERK-2669)
+
+- A `Headset` CR (user, public key) is the only record of who may connect, not the volume.
+  - Its key is WiVRn's stored form, the PEM's bare base64 body: WiVRn strips the headset's PEM
+    (`clean_key`) and compares with `==`, so a seeded PEM block never matches and, the list being
+    non-empty, pairing is off too: the headset is locked out.
+  - Every vrPort App container gets `DIREWOLF_VR_HEADSETS` (WiVRn's known_keys format, the
+    User's Headsets sorted by name; an App's own value is replaced). `startup-app.sh` rewrites
+    `known_keys.json` from it at every start, so a key left on the volume is dropped.
+  - Unset, the image refuses to start: an operator that cannot revoke would leave old keys in
+    force. `[]` (no Headsets) opens PIN pairing, shown on the authenticated mirror only.
+  - The App pod's `vr-headsets` annotation lists the Headsets it was seeded with as `name/uid`.
+    One gone, being deleted, or re-created under its name (UID differs; cache miss confirmed live)
+    ends the Session on reconcile, and at once on any Headset event (`reconcileHeadset`, found by
+    annotation: a deleted object no longer names its User).
+  - The spec is immutable (CEL): a changed key would admit a headset without ending Sessions.
+  - Nothing yet turns a PIN pairing into a Headset: each session pairs anew until the vr-agent
+    (XERK-2668) reports WiVRn's `KnownKeys` and the operator records them (rest of XERK-2669).
+  - Tests: `headset_test.go`, `TestHeadsetCRDValidatesKeyAndImmutability`,
+    `TestVRStartSeedsKnownKeysFromHeadsets`, `TestVRStartRefusesBadHeadsetSeed`.
 
 ## Operator port (XERK-2664)
 

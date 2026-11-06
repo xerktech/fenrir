@@ -29,6 +29,7 @@ import (
 type DirewolfV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	AppsGetter
+	HeadsetsGetter
 	PairingsGetter
 	SessionsGetter
 	UsersGetter
@@ -41,6 +42,10 @@ type DirewolfV1alpha1Client struct {
 
 func (c *DirewolfV1alpha1Client) Apps(namespace string) AppInterface {
 	return newApps(c, namespace)
+}
+
+func (c *DirewolfV1alpha1Client) Headsets(namespace string) HeadsetInterface {
+	return newHeadsets(c, namespace)
 }
 
 func (c *DirewolfV1alpha1Client) Pairings(namespace string) PairingInterface {

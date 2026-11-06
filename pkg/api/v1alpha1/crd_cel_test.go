@@ -359,3 +359,40 @@ func TestSessionCRDAcceptsEncodedSessions(t *testing.T) {
 		}
 	}
 }
+
+// A Headset (XERK-2669) holds one key in WiVRn's stored form (bare base64,
+// never a PEM block: WiVRn would never match it) and never changes: a new key
+// under an old name would let another headset in without ending the old
+// one's Sessions.
+func TestHeadsetCRDValidatesKeyAndImmutability(t *testing.T) {
+	validate := crdValidator(t, "headsets")
+	const key = "MEIwBQYDK2VvAzkAqk1Wq0pXbcbn0mt3CzI1nlOJlKBQ+jDH0A2FErfGpkAx6tB3PdT5AmIoU7oz+t8SN0Z+cH0b5ZM="
+	headset := func(user, publicKey string) map[string]any {
+		return map[string]any{
+			"apiVersion": "direwolf.games-on-whales.github.io/v1alpha1",
+			"kind":       "Headset",
+			"metadata":   map[string]any{"name": "h", "namespace": "ns"},
+			"spec": map[string]any{
+				"userReference": map[string]any{"name": user},
+				"publicKey":     publicKey,
+			},
+		}
+	}
+	if errs := validate(headset("alex", key)); len(errs) > 0 {
+		t.Errorf("valid headset: %v", errs.ToAggregate())
+	}
+	pem := "-----BEGIN PUBLIC KEY-----\n" + key + "\n-----END PUBLIC KEY-----\n"
+	for _, bad := range []string{"", "A", pem, key + "\n", "MEIw BQYD", key + "x=", "=" + key, "AAAAA", "AA=A", strings.Repeat("A", 1025)} {
+		if errs := validate(headset("alex", bad)); len(errs) == 0 {
+			t.Errorf("publicKey %.40q: accepted", bad)
+		}
+	}
+	if errs := validate(headset("alex", key), headset("alex", key)); len(errs) > 0 {
+		t.Errorf("unchanged update: %v", errs.ToAggregate())
+	}
+	for _, changed := range []map[string]any{headset("sam", key), headset("alex", strings.Replace(key, "MEIw", "MEIx", 1))} {
+		if errs := validate(changed, headset("alex", key)); len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "immutable") {
+			t.Errorf("spec change: errors %v, want immutable", errs.ToAggregate())
+		}
+	}
+}
