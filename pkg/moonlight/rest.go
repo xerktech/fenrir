@@ -1036,7 +1036,8 @@ func (s *RESTServer) resumeHandler(w http.ResponseWriter, r *http.Request) {
 	var session *v1alpha1types.Session
 	for i := range sessions.Items {
 		candidate := &sessions.Items[i]
-		if candidate.DeletionTimestamp == nil &&
+		// A VR-mode Session has no Moonlight stream to resume.
+		if candidate.DeletionTimestamp == nil && !candidate.Spec.IsVR() &&
 			(session == nil || session.CreationTimestamp.Before(&candidate.CreationTimestamp)) {
 			session = candidate
 		}

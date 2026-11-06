@@ -32,7 +32,8 @@ type SessionStatusApplyConfiguration struct {
 	// Represents the observations of a session's state.
 	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	// The host ports allocated to the session's pod. Freed when the Session
-	// is deleted.
+	// is deleted. A VR-mode Session has only ports.vr: with no Wolf it gets
+	// no port block.
 	Ports *SessionPortsApplyConfiguration `json:"ports,omitempty"`
 	// The RTSP url to access the stream.
 	WolfSessionID *string `json:"wolfSessionID,omitempty"`
@@ -44,7 +45,8 @@ type SessionStatusApplyConfiguration struct {
 	AttachedGeneration *int64 `json:"attachedGeneration,omitempty"`
 	// When the client's stream went away. The pod is kept for the operator's
 	// disconnect grace period so /resume can re-attach, then the Session is
-	// deleted. Cleared on re-attach.
+	// deleted. Cleared on re-attach. In VR mode: when the headset
+	// disconnected; cleared when one connects again within the grace period.
 	DisconnectedAt *metav1.Time `json:"disconnectedAt,omitempty"`
 }
 

@@ -38,7 +38,7 @@ spec:
             type: object
           spec:
             description: |-
-              A session refers to a certain user playing a specific game with a specific
+              SessionSpec describes a session: a certain user playing a specific game with a specific
               client. This object is meant to live for the duration of the user's session.
 
               A session is created in response to a user's /launch request.
@@ -51,9 +51,13 @@ spec:
               binding.
 
               A session is created when moonlight calls /launch to launch a game.
+
+              A VR-mode Session (XERK-2667) has no Moonlight client: no Pairing, Wolf
+              config or gateway. The Moonlight fields stay required for Moonlight mode.
             properties:
               config:
-                description: Wolf-specific config for the session
+                description: Wolf-specific config for the session. Moonlight mode
+                  only.
                 properties:
                   aesIV:
                     type: string
@@ -99,7 +103,7 @@ spec:
                   The name of the Gateway used to access the moonlight server.
                   The gateway IP used for the stream session must be the same as the IP of
                   the moonlight server used to initiate the connection due to moonlight
-                  protocol restrictions.
+                  protocol restrictions. Moonlight mode only.
                 properties:
                   name:
                     type: string
@@ -108,7 +112,24 @@ spec:
                 required:
                 - name
                 type: object
+              mode:
+                default: Moonlight
+                description: |-
+                  Mode is how the user reaches the session. Moonlight (the default)
+                  streams it through Wolf to a Moonlight client. VR runs only the App,
+                  with no Wolf or wolf-agent, and a headset connects straight to the
+                  App's VR server on status.ports.vr (the App needs spec.vrPort).
+                  Fixed for the Session's life: its pod is built for one or the other.
+                enum:
+                - Moonlight
+                - VR
+                type: string
+                x-kubernetes-validations:
+                - message: mode is immutable
+                  rule: self == oldSelf
               pairingReference:
+                description: The Moonlight client's Pairing; required in Moonlight
+                  mode, absent in VR.
                 properties:
                   name:
                     type: string
@@ -123,12 +144,15 @@ spec:
                 - name
                 type: object
             required:
-            - config
             - gameReference
-            - gateway
-            - pairingReference
             - userReference
             type: object
+            x-kubernetes-validations:
+            - message: mode Moonlight needs config, pairingReference and gateway;
+                mode VR takes none of them
+              rule: 'has(self.mode) && self.mode == ''VR'' ? !has(self.config) &&
+                !has(self.pairingReference) && !has(self.gateway) : has(self.config)
+                && has(self.pairingReference) && has(self.gateway)'
           status:
             description: |-
               Session State machine
@@ -206,13 +230,15 @@ spec:
                 description: |-
                   When the client's stream went away. The pod is kept for the operator's
                   disconnect grace period so /resume can re-attach, then the Session is
-                  deleted. Cleared on re-attach.
+                  deleted. Cleared on re-attach. In VR mode: when the headset
+                  disconnected; cleared when one connects again within the grace period.
                 format: date-time
                 type: string
               ports:
                 description: |-
                   The host ports allocated to the session's pod. Freed when the Session
-                  is deleted.
+                  is deleted. A VR-mode Session has only ports.vr: with no Wolf it gets
+                  no port block.
                 properties:
                   audioRTP:
                     format: int32

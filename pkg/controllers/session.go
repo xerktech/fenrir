@@ -105,6 +105,10 @@ const podNotReadyRecheck = 5 * time.Second
 // a lookup: every retry fails the same way, so reconcilePod ends the Session.
 var errInvalidSpec = stderrors.New("invalid App or User spec")
 
+// nativeVRUnsupportedReason ends every VR-mode Session until this operator
+// can run one.
+const nativeVRUnsupportedReason = "native VR sessions (spec.mode VR) are not supported by this operator yet"
+
 func invalidSpec(err error) error { return fmt.Errorf("%w: %w", errInvalidSpec, err) }
 
 // errEndSessionFailed wraps a failed attempt to delete the Session (e.g. a
@@ -371,6 +375,11 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 		// port block is ours to free.
 		c.videoProgress.forget(namespace, name)
 		return c.releaseUnusedPorts()
+	} else if newObj.Spec.IsVR() {
+		// The API has the mode (XERK-2667); building and supervising its
+		// Wolf-less pod is XERK-2668. Never fall through to buildPod: it
+		// would start a Wolf pod no Moonlight client can reach.
+		return c.endSession(ctx, newObj, nativeVRUnsupportedReason)
 	} else if reason := c.expiredReason(newObj, time.Now()); reason != "" {
 		return c.endSession(ctx, newObj, reason)
 	}

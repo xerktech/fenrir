@@ -21,7 +21,7 @@ package v1alpha1
 // SessionSpecApplyConfiguration represents a declarative configuration of the SessionSpec type for use
 // with apply.
 //
-// A session refers to a certain user playing a specific game with a specific
+// SessionSpec describes a session: a certain user playing a specific game with a specific
 // client. This object is meant to live for the duration of the user's session.
 //
 // A session is created in response to a user's /launch request.
@@ -34,16 +34,26 @@ package v1alpha1
 // binding.
 //
 // A session is created when moonlight calls /launch to launch a game.
+//
+// A VR-mode Session (XERK-2667) has no Moonlight client: no Pairing, Wolf
+// config or gateway. The Moonlight fields stay required for Moonlight mode.
 type SessionSpecApplyConfiguration struct {
-	UserReference    *UserReferenceApplyConfiguration    `json:"userReference,omitempty"`
-	GameReference    *GameReferenceApplyConfiguration    `json:"gameReference,omitempty"`
+	// Mode is how the user reaches the session. Moonlight (the default)
+	// streams it through Wolf to a Moonlight client. VR runs only the App,
+	// with no Wolf or wolf-agent, and a headset connects straight to the
+	// App's VR server on status.ports.vr (the App needs spec.vrPort).
+	// Fixed for the Session's life: its pod is built for one or the other.
+	Mode          *string                          `json:"mode,omitempty"`
+	UserReference *UserReferenceApplyConfiguration `json:"userReference,omitempty"`
+	GameReference *GameReferenceApplyConfiguration `json:"gameReference,omitempty"`
+	// The Moonlight client's Pairing; required in Moonlight mode, absent in VR.
 	PairingReference *PairingReferenceApplyConfiguration `json:"pairingReference,omitempty"`
 	// The name of the Gateway used to access the moonlight server.
 	// The gateway IP used for the stream session must be the same as the IP of
 	// the moonlight server used to initiate the connection due to moonlight
-	// protocol restrictions.
+	// protocol restrictions. Moonlight mode only.
 	GatewayReference *GatewayReferenceApplyConfiguration `json:"gateway,omitempty"`
-	// Wolf-specific config for the session
+	// Wolf-specific config for the session. Moonlight mode only.
 	Config *SessionInfoApplyConfiguration `json:"config,omitempty"`
 }
 
@@ -51,6 +61,14 @@ type SessionSpecApplyConfiguration struct {
 // apply.
 func SessionSpec() *SessionSpecApplyConfiguration {
 	return &SessionSpecApplyConfiguration{}
+}
+
+// WithMode sets the Mode field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Mode field is set to the value of the last call.
+func (b *SessionSpecApplyConfiguration) WithMode(value string) *SessionSpecApplyConfiguration {
+	b.Mode = &value
+	return b
 }
 
 // WithUserReference sets the UserReference field in the declarative configuration to the given value

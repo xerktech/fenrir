@@ -20,7 +20,7 @@ type Session struct {
 	Status SessionStatus `json:"status"`
 }
 
-// A session refers to a certain user playing a specific game with a specific
+// SessionSpec describes a session: a certain user playing a specific game with a specific
 // client. This object is meant to live for the duration of the user's session.
 //
 // A session is created in response to a user's /launch request.
@@ -33,28 +33,63 @@ type Session struct {
 // binding.
 //
 // A session is created when moonlight calls /launch to launch a game.
+//
+// A VR-mode Session (XERK-2667) has no Moonlight client: no Pairing, Wolf
+// config or gateway. The Moonlight fields stay required for Moonlight mode.
+// +kubebuilder:validation:XValidation:rule="has(self.mode) && self.mode == 'VR' ? !has(self.config) && !has(self.pairingReference) && !has(self.gateway) : has(self.config) && has(self.pairingReference) && has(self.gateway)",message="mode Moonlight needs config, pairingReference and gateway; mode VR takes none of them"
 type SessionSpec struct {
+	// Mode is how the user reaches the session. Moonlight (the default)
+	// streams it through Wolf to a Moonlight client. VR runs only the App,
+	// with no Wolf or wolf-agent, and a headset connects straight to the
+	// App's VR server on status.ports.vr (the App needs spec.vrPort).
+	// Fixed for the Session's life: its pod is built for one or the other.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=Moonlight;VR
+	// +kubebuilder:default=Moonlight
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="mode is immutable"
+	Mode string `json:"mode,omitempty"`
+
 	//+kubebuilder:validation:Required
 	UserReference UserReference `json:"userReference"`
 
 	//+kubebuilder:validation:Required
 	GameReference GameReference `json:"gameReference"`
 
-	//+kubebuilder:validation:Required
-	PairingReference PairingReference `json:"pairingReference"`
+	// The Moonlight client's Pairing; required in Moonlight mode, absent in VR.
+	//+kubebuilder:validation:Optional
+	PairingReference PairingReference `json:"pairingReference,omitzero"`
 
 	// The name of the Gateway used to access the moonlight server.
 	// The gateway IP used for the stream session must be the same as the IP of
 	// the moonlight server used to initiate the connection due to moonlight
-	// protocol restrictions.
-	GatewayReference GatewayReference `json:"gateway"`
+	// protocol restrictions. Moonlight mode only.
+	//+kubebuilder:validation:Optional
+	GatewayReference GatewayReference `json:"gateway,omitzero"`
 
-	// Wolf-specific config for the session
-	Config SessionInfo `json:"config"`
+	// Wolf-specific config for the session. Moonlight mode only.
+	//+kubebuilder:validation:Optional
+	Config SessionInfo `json:"config,omitzero"`
 }
 
+// Session modes (SessionSpec.Mode).
 const (
+	SessionModeMoonlight = "Moonlight"
+	SessionModeVR        = "VR"
+)
+
+// IsVR reports whether the Session is a native VR session (no Moonlight).
+func (s *SessionSpec) IsVR() bool { return s.Mode == SessionModeVR }
+
+const (
+	// SessionHeadsetConnectedCondition is a VR-mode Session's headset: True
+	// while one is connected to its VR server (WiVRn's HeadsetConnected).
+	// Its lastTransitionTime is when the headset came or went; a False after
+	// a True also sets status.disconnectedAt. Never set in Moonlight mode.
+	SessionHeadsetConnectedCondition = "HeadsetConnected"
+
 	// SessionStreamStartedCondition is the Session condition for its stream.
+	// In VR mode it is True while the VR server streams to the headset
+	// (WiVRn's SessionRunning).
 	SessionStreamStartedCondition = "StreamStarted"
 	// SessionStreamRefusedReason marks a SessionStreamStartedCondition that
 	// is False for good: the operator will never start a stream for this
@@ -75,7 +110,8 @@ type SessionStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 
 	// The host ports allocated to the session's pod. Freed when the Session
-	// is deleted.
+	// is deleted. A VR-mode Session has only ports.vr: with no Wolf it gets
+	// no port block.
 	Ports SessionPorts `json:"ports"`
 
 	// The RTSP url to access the stream.
@@ -90,7 +126,8 @@ type SessionStatus struct {
 
 	// When the client's stream went away. The pod is kept for the operator's
 	// disconnect grace period so /resume can re-attach, then the Session is
-	// deleted. Cleared on re-attach.
+	// deleted. Cleared on re-attach. In VR mode: when the headset
+	// disconnected; cleared when one connects again within the grace period.
 	DisconnectedAt *metav1.Time `json:"disconnectedAt,omitempty"`
 }
 

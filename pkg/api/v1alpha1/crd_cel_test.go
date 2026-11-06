@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
 	"os"
 	"strings"
@@ -154,7 +155,8 @@ func TestAppCRDValidatesStateMounts(t *testing.T) {
 // crdValidator runs the API server's own CRD validation (rule compilation
 // and cost budget) over the generated CRD of the plural resource and returns
 // a func applying its schema and CEL validators to an object.
-func crdValidator(t *testing.T, plural string) func(obj map[string]any) field.ErrorList {
+// An old object makes it an update, so transition rules (oldSelf) run.
+func crdValidator(t *testing.T, plural string) func(obj map[string]any, old ...map[string]any) field.ErrorList {
 	t.Helper()
 	data, err := os.ReadFile("../../../crds/direwolf.games-on-whales.github.io_" + plural + ".yaml")
 	if err != nil {
@@ -183,9 +185,13 @@ func crdValidator(t *testing.T, plural string) func(obj map[string]any) field.Er
 	if err != nil {
 		t.Fatal(err)
 	}
-	return func(obj map[string]any) field.ErrorList {
+	return func(obj map[string]any, old ...map[string]any) field.ErrorList {
 		errs := schemavalidation.ValidateCustomResource(nil, obj, schemaValidator)
-		celErrs, _ := celValidator.Validate(context.Background(), nil, s, obj, nil, celconfig.RuntimeCELCostBudget)
+		var oldObj any
+		if len(old) > 0 {
+			oldObj = old[0]
+		}
+		celErrs, _ := celValidator.Validate(context.Background(), nil, s, obj, oldObj, celconfig.RuntimeCELCostBudget)
 		return append(errs, celErrs...)
 	}
 }
@@ -264,5 +270,92 @@ func TestSessionCRDBoundsClientIP(t *testing.T) {
 	// (The status also lacks its required ports; only the message matters.)
 	if errs := validate(session("192.0.2.10", strings.Repeat("x", 32769))); !strings.Contains(errs.ToAggregate().Error(), "conditions[0].message: Too long") {
 		t.Errorf("32769-character condition message: errors %v, want one on message", errs.ToAggregate())
+	}
+}
+
+// spec.mode (XERK-2667): a Moonlight Session keeps its required Moonlight
+// fields, a VR one has none of them, and the mode never changes.
+func TestSessionCRDValidatesMode(t *testing.T) {
+	validate := crdValidator(t, "sessions")
+	ref := map[string]any{"name": "x"}
+	config := map[string]any{
+		"aesKey": "k", "aesIV": "i", "surroundAudioFlags": int64(0),
+		"videoWidth": int64(1920), "videoHeight": int64(1080), "videoRefreshRate": int64(60),
+	}
+	moonlight := map[string]any{"config": config, "gateway": ref, "pairingReference": ref}
+	session := func(mode string, fields map[string]any) map[string]any {
+		spec := map[string]any{"gameReference": ref, "userReference": ref}
+		maps.Copy(spec, fields)
+		if mode != "" {
+			spec["mode"] = mode
+		}
+		return map[string]any{
+			"apiVersion": "direwolf.games-on-whales.github.io/v1alpha1",
+			"kind":       "Session",
+			"metadata":   map[string]any{"name": "s", "namespace": "ns"},
+			"spec":       spec,
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		mode    string
+		fields  map[string]any
+		wantErr string
+	}{
+		{name: "moonlight, mode unset", fields: moonlight},
+		{name: "moonlight", mode: "Moonlight", fields: moonlight},
+		{name: "vr", mode: "VR"},
+		{name: "moonlight without config", mode: "Moonlight", fields: map[string]any{"gateway": ref, "pairingReference": ref}, wantErr: "mode Moonlight needs"},
+		{name: "moonlight without pairing", fields: map[string]any{"config": config, "gateway": ref}, wantErr: "mode Moonlight needs"},
+		{name: "vr with config", mode: "VR", fields: map[string]any{"config": config}, wantErr: "mode VR takes none"},
+		{name: "vr with pairing", mode: "VR", fields: map[string]any{"pairingReference": ref}, wantErr: "mode VR takes none"},
+		{name: "vr with gateway", mode: "VR", fields: map[string]any{"gateway": ref}, wantErr: "mode VR takes none"},
+		{name: "unknown mode", mode: "Desktop", fields: moonlight, wantErr: "Unsupported value"},
+	} {
+		errs := validate(session(tc.mode, tc.fields))
+		switch {
+		case tc.wantErr == "" && len(errs) > 0:
+			t.Errorf("%s: unexpected errors: %v", tc.name, errs.ToAggregate())
+		case tc.wantErr != "" && (len(errs) != 1 || !strings.Contains(errs[0].Error(), tc.wantErr)):
+			t.Errorf("%s: errors %v, want one containing %q", tc.name, errs.ToAggregate(), tc.wantErr)
+		}
+	}
+	// The mode is fixed: the pod is built for one or the other.
+	if errs := validate(session("VR", nil), session("Moonlight", moonlight)); !strings.Contains(errs.ToAggregate().Error(), "mode is immutable") {
+		t.Errorf("Moonlight -> VR: errors %v, want mode is immutable", errs.ToAggregate())
+	}
+	if errs := validate(session("VR", nil), session("VR", nil)); len(errs) > 0 {
+		t.Errorf("unchanged VR Session update: unexpected errors: %v", errs.ToAggregate())
+	}
+}
+
+// A Session the Go type encodes passes the CRD in either mode: VR's unset
+// Moonlight fields must be left out (omitzero), not sent as {}.
+func TestSessionCRDAcceptsEncodedSessions(t *testing.T) {
+	validate := crdValidator(t, "sessions")
+	ref := "x"
+	for _, spec := range []SessionSpec{
+		{Mode: SessionModeVR, UserReference: UserReference{Name: ref}, GameReference: GameReference{Name: ref}},
+		{
+			UserReference: UserReference{Name: ref}, GameReference: GameReference{Name: ref},
+			PairingReference: PairingReference{Name: ref}, GatewayReference: GatewayReference{Name: ref},
+			Config: SessionInfo{AESKey: "k", AESIV: "i", SurroundAudioFlags: 196610, VideoWidth: 1920, VideoHeight: 1080, VideoRefreshRate: 60},
+		},
+	} {
+		data, err := json.Marshal(Session{Spec: spec})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var obj map[string]any
+		if err = json.Unmarshal(data, &obj); err != nil {
+			t.Fatal(err)
+		}
+		obj["apiVersion"] = "direwolf.games-on-whales.github.io/v1alpha1"
+		obj["kind"] = "Session"
+		obj["metadata"] = map[string]any{"name": "s", "namespace": "ns"}
+		delete(obj, "status") // its required ports are the operator's to write
+		if errs := validate(obj); len(errs) > 0 {
+			t.Errorf("mode %q: encoded Session %s refused: %v", spec.Mode, data, errs.ToAggregate())
+		}
 	}
 }

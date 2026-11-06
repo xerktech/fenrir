@@ -6,6 +6,8 @@ paths:
   - pkg/controllers/ports.go
   - pkg/controllers/ports_test.go
   - examples/vr*.yaml
+  - pkg/api/v1alpha1/session.go
+  - docs/vr-native-session.md
 ---
 
 # VR streaming (epic XERK-2656; spike report on XERK-2662)
@@ -91,6 +93,17 @@ paths:
   pods that never serve them. A pod then built without one is refused (InvalidSpec).
 - Without `--vr-port-range` a vrPort App's Sessions end InvalidSpec; the range must not overlap
   `--session-port-range` (operator exits). Tests: `vr_port_test.go`.
+
+## Native VR sessions (`spec.mode: VR`, XERK-2667)
+
+- Design and lifecycle: `docs/vr-native-session.md`. Mode is a Session field, fixed at create:
+  the same App can be launched from Moonlight (mirror) or natively.
+- A VR Session has no `config`, `pairingReference` or `gateway`; Moonlight mode still needs all
+  three (CEL). Its only port is `status.ports.vr`. Tests: `TestSessionCRDValidatesMode`.
+- Until XERK-2668, the operator ends every VR Session before building anything
+  (`nativeVRUnsupportedReason`): buildPod would start a Wolf pod nobody can reach.
+  Tests: `TestVRModeSessionEndsUntilSupported`.
+- moonlight-proxy's `/resume` never picks a VR Session. Tests: `TestResumeSkipsVRSession`.
 
 ## Runtime pitfalls
 
