@@ -191,10 +191,20 @@ spec:
             echo "assetto-corsa-vr: Assetto Corsa is not installed in /games; install it there and launch it flat once" >&2
             exit 1
           fi
-          # stateMounts are created root-owned; Steam and Wine run as PUID.
-          # Only the mount points: everything below them is the User's own.
+          # The stateMounts sit in volumes any game can write (the shared home,
+          # /games), and the runtime follows a link planted at a mount point:
+          # one at ~/.config/openvr -> /etc/cont-init.d put this User's files
+          # there, and GoW's entrypoint ran them as root (QA). So each must be
+          # a mount exactly where it is named, checked before the entrypoint
+          # runs, or the session ends.
           for d in "$HOME/.config/wivrn" "$HOME/.config/openxr" "$HOME/.config/openvr" "/games/$prefix"; do
-            chown "$PUID:$PGID" "$d"
+            if [ "$(realpath -e -- "$d")" != "$d" ] || ! mountpoint -q -- "$d"; then
+              echo "assetto-corsa-vr: $d is not this User's mount (a link in the shared volume?); refusing to start" >&2
+              exit 1
+            fi
+            # Created root-owned; Steam and Wine run as PUID. Only the mount
+            # point: everything below it is the User's own.
+            chown -h "$PUID:$PGID" -- "$d"
           done
           # As PUID: seed cfg/ from the shared prefix once, then force VR mode.
           # Lines of video.ini are kept; only the two keys are set.
@@ -203,16 +213,19 @@ spec:
           shared, cfg = sys.argv[1], sys.argv[2]
           if not os.path.lexists(cfg):
               if os.path.isdir(shared) and not os.path.islink(shared):
-                  shutil.copytree(shared, cfg, symlinks=True)
+                  # Links stay behind: in the shared prefix they point into
+                  # space every game can write.
+                  shutil.copytree(shared, cfg, ignore=lambda d, names: [n for n in names if os.path.islink(os.path.join(d, n))])
               else:
                   os.mkdir(cfg)
           path = os.path.join(cfg, "video.ini")
           want = {"VIDEO": {"FULLSCREEN": "0"}, "CAMERA": {"MODE": "OPENVR"}}
-          try:
-              with open(path, newline="") as f:
+          # A link is replaced, not followed. Bytes that aren't UTF-8 are kept
+          # as they were; a BOM is dropped (AC writes plain ASCII).
+          lines = []
+          if os.path.isfile(path) and not os.path.islink(path):
+              with open(path, newline="", encoding="utf-8-sig", errors="surrogateescape") as f:
                   lines = f.read().splitlines()
-          except FileNotFoundError:
-              lines = []
           out, section, done = [], None, set()
           def finish(sec):
               for k, v in want.get(sec, {}).items():
@@ -238,7 +251,11 @@ spec:
                   out.append(f"[{sec}]")
                   finish(sec)
           tmp = path + ".direwolf-tmp"
-          with open(tmp, "w", newline="") as f:
+          try:
+              os.unlink(tmp)
+          except FileNotFoundError:
+              pass
+          with open(tmp, "x", newline="", encoding="utf-8", errors="surrogateescape") as f:
               f.write("\r\n".join(out) + "\r\n")
           os.replace(tmp, path)
           PY

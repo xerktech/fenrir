@@ -534,7 +534,8 @@ func vrNotice(t *testing.T, host, stderr string, swayUp bool, done func(execs st
 shift 2
 printf '%s\n' "$*" >>"$EXECS"
 `)
-	writeExec(t, filepath.Join(bin, "pkill"), "exit 1\n")
+	// Logged: the old bar must go before each new one.
+	writeExec(t, filepath.Join(bin, "pkill"), "printf 'pkill %s\\n' \"$*\" >>\"$EXECS\"\nexit 1\n")
 	cmd := exec.CommandContext(t.Context(), "bash", "vr-notice", "21000")
 	cmd.Env = []string{
 		"PATH=" + bin + ":" + os.Getenv("PATH"), "XDG_RUNTIME_DIR=" + dir, "UP=" + up, "EXECS=" + execLog,
@@ -574,14 +575,17 @@ func TestVRNoticeShowsAddressAndPairingPIN(t *testing.T) {
 	stderr := "WiVRn v26.9 starting\nTo pair a new headset use PIN code: 012345\n"
 	want := "exec swaynag -y overlay -t warning -m 'VR headset: connect the WiVRn app to 10.10.10.34 port 21000 - pairing PIN 012345'"
 	execs, out := vrNotice(t, "10.10.10.34", stderr, true, func(e string) bool { return strings.Contains(e, want+"\n") })
-	if !strings.Contains(execs, want+"\n") {
-		t.Errorf("swaymsg execs:\n%s\nwant a line %s", execs, want)
+	if !strings.Contains(execs, "pkill -x swaynag\n"+want+"\n") {
+		t.Errorf("swaymsg execs:\n%s\nwant pkill -x swaynag, then %s", execs, want)
 	}
 	if out != stderr {
 		t.Errorf("stderr = %q, want wivrn-server's %q", out, stderr)
 	}
 	noPIN := func(e string) bool {
 		l := strings.Split(strings.TrimSpace(e), "\n")
+		if strings.HasPrefix(l[len(l)-1], "pkill") {
+			return false
+		}
 		return strings.Contains(e, "PIN") && !strings.Contains(l[len(l)-1], "PIN")
 	}
 	execs, _ = vrNotice(t, "10.10.10.34", stderr+"Headset pairing is disabled\n", true, noPIN)
@@ -599,6 +603,9 @@ func TestVRNoticeKeepsOtherTextOutOfSwaysExec(t *testing.T) {
 		t.Fatal("no bar shown")
 	}
 	for l := range strings.SplitSeq(strings.TrimSpace(execs), "\n") {
+		if strings.HasPrefix(l, "pkill ") {
+			continue
+		}
 		if strings.Count(l, "'") != 2 || strings.ContainsAny(strings.Trim(l[strings.Index(l, "'")+1:], "'"), ";,'") {
 			t.Errorf("exec %q carries quotes or separators", l)
 		}
@@ -612,12 +619,12 @@ func TestVRNoticeKeepsOtherTextOutOfSwaysExec(t *testing.T) {
 // up: it exits at the end of its input.
 func TestVRNoticeWaitsForSway(t *testing.T) {
 	start := time.Now()
-	execs, out := vrNotice(t, "10.0.0.1", "line one\nline two\n", false, func(string) bool { return time.Since(start) > 300*time.Millisecond })
+	execs, out := vrNotice(t, "10.0.0.1", "line one\nline two", false, func(string) bool { return time.Since(start) > 300*time.Millisecond })
 	if execs != "" {
 		t.Errorf("swaymsg exec ran without sway: %q", execs)
 	}
 	if out != "line one\nline two\n" {
-		t.Errorf("stderr = %q", out)
+		t.Errorf("stderr = %q, want both lines (the last has no newline)", out)
 	}
 }
 

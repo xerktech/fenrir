@@ -208,3 +208,50 @@ func TestVRExampleSeedsACConfigFromNothing(t *testing.T) {
 		t.Errorf("video.ini = %q, want %q", got, want)
 	}
 }
+
+// The seed copies no link out of the shared prefix and follows none in the
+// User's cfg; odd encodings neither end the session nor duplicate sections.
+func TestVRExampleSeedHandlesLinksAndEncodings(t *testing.T) {
+	script := vrExampleSeedScript(t)
+	dir := t.TempDir()
+	shared, cfg := filepath.Join(dir, "shared", "cfg"), filepath.Join(dir, "user", "cfg")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "evil"), filepath.Join(shared, "extension")); err != nil {
+		t.Fatal(err)
+	}
+	// A BOM and a Latin-1 byte.
+	if err := os.WriteFile(filepath.Join(shared, "video.ini"), []byte("\ufeff[VIDEO]\r\nFULLSCREEN=1\r\nNAME=caf\xe9\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runSeed(t, script, shared, cfg)
+	if _, err := os.Lstat(filepath.Join(cfg, "extension")); !os.IsNotExist(err) {
+		t.Errorf("shared link copied into the User's cfg: %v", err)
+	}
+	want := "[VIDEO]\r\nFULLSCREEN=0\r\nNAME=caf\xe9\r\n[CAMERA]\r\nMODE=OPENVR\r\n"
+	if got, _ := os.ReadFile(filepath.Join(cfg, "video.ini")); string(got) != want {
+		t.Errorf("video.ini = %q, want %q", got, want)
+	}
+	// A linked video.ini (or temp file) is replaced, its target left alone.
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"video.ini", "video.ini.direwolf-tmp"} {
+		_ = os.Remove(filepath.Join(cfg, name))
+		if err := os.Symlink(target, filepath.Join(cfg, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runSeed(t, script, shared, cfg)
+	if got, _ := os.ReadFile(target); string(got) != "x" {
+		t.Errorf("link target written: %q", got)
+	}
+	if fi, err := os.Lstat(filepath.Join(cfg, "video.ini")); err != nil || !fi.Mode().IsRegular() {
+		t.Errorf("video.ini not replaced by a file: %v %v", fi, err)
+	}
+}

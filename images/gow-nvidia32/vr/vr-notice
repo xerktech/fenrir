@@ -36,7 +36,8 @@ show() {
 trap '[[ -z $shower ]] || kill "$shower" 2>/dev/null' EXIT
 
 show
-while IFS= read -r line; do
+# || [[ -n $line ]]: a last line without a newline is passed on too.
+while IFS= read -r line || [[ -n $line ]]; do
   printf '%s\n' "$line" >&2
   case $line in
   "To pair a new headset use PIN code: "*)

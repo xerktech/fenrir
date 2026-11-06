@@ -122,8 +122,12 @@ paths:
   - Per-User state is `spec.stateMounts` on its `volumeClaimTemplate` PVC: the three VR config
     dirs, and AC's `Documents/Assetto Corsa` in the /games prefix (VR `video.ini`, CSP config).
     The shared prefix keeps its flat `video.ini`, so flat launches stay flat.
+  - The runtime follows a link planted at a mount point: those paths are in volumes every game
+    writes, and QA had `~/.config/openvr -> /etc/cont-init.d` run a game's script as root. So the
+    command, before the entrypoint, ends the session unless each is a mount exactly where named
+    (`realpath -e`, `mountpoint`), and chowns with `-h`. Residual: anything that runs earlier.
   - Its command seeds that cfg from the shared prefix (a second, read-only `games` mount) once,
-    then forces `[VIDEO] FULLSCREEN=0`, `[CAMERA] MODE=OPENVR`; it chowns only mount points.
+    skipping links, then forces `[VIDEO] FULLSCREEN=0`, `[CAMERA] MODE=OPENVR`.
   - Assumes AC in the /games library, launched flat once: a stateMount's missing mount point is
     created by the runtime as root, which in a missing compatdata dir would break the prefix.
   - The shared install keeps AssettoCorsa.exe = acs.exe (CM and the Kunos launcher can't run),
