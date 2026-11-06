@@ -30,6 +30,35 @@ esac
 
 [[ -n ${XDG_RUNTIME_DIR:-} && -d $XDG_RUNTIME_DIR ]] || die "XDG_RUNTIME_DIR is not a directory"
 
+# The session bus listens in the directory the operator shares with the pod's
+# vr-agent sidecar, which reads WiVRn's state there, whenever that directory is
+# mounted; otherwise in this container's /tmp. DIREWOLF_VR_BUS_DIR is for tests
+# only.
+bus_dir=${DIREWOLF_VR_BUS_DIR:-/run/direwolf-vr-bus}
+bus_config=$here/dbus-session.conf
+if [[ -e $bus_dir || -L $bus_dir ]]; then
+  [[ ! -L $bus_dir && -d $bus_dir && -w $bus_dir ]] ||
+    die "$bus_dir must be the writable bus directory the operator mounts"
+  # A socket left by an earlier start would stop the bus from listening.
+  [[ -L $bus_dir/bus || ! -d $bus_dir/bus ]] || die "$bus_dir/bus is a directory; it must be free for the session bus"
+  rm -f -- "$bus_dir/bus"
+  bus_config=$here/dbus-session-agent.conf
+fi
+
+# Native VR (a Session with spec.mode VR, XERK-2668): no Wolf, so no display to
+# render on. Sway runs headless (launch-comp starts it; without WAYLAND_DISPLAY
+# wlroots won't look for a parent compositor). Unset: a Moonlight session.
+case ${DIREWOLF_VR_MODE:-} in
+"") ;;
+native)
+  [[ $bus_config == "$here/dbus-session-agent.conf" ]] ||
+    die "$bus_dir must be the bus directory the operator mounts in native VR mode"
+  export WLR_BACKENDS=headless
+  unset WAYLAND_DISPLAY
+  ;;
+*) die "DIREWOLF_VR_MODE must be unset or native, got '${DIREWOLF_VR_MODE}'" ;;
+esac
+
 # WiVRn keeps its pairing keys in ~/.config/wivrn and rewrites
 # ~/.config/openxr/1/active_runtime.json and ~/.config/openvr/openvrpaths.vrpath
 # while it runs. In the shared Steam home every Proton game would then find a VR
@@ -85,8 +114,8 @@ audio=$XDG_RUNTIME_DIR/vr-audio
 mkdir -p "$audio"
 chmod 0700 "$audio"
 
-# Its own session bus (WiVRn needs one), listening in this container's /tmp.
-dbus-run-session --config-file="$here/dbus-session.conf" -- "$here/vr-services" "$port" "$audio" &
+# Its own session bus (WiVRn needs one), listening as chosen above.
+dbus-run-session --config-file="$bus_config" -- "$here/vr-services" "$port" "$audio" &
 services=$!
 app=
 # Stops the direct children when this exits. In the image it is PID 1, so its

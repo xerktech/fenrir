@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -329,9 +330,7 @@ func (s *RESTServer) serverInfoHandler(w http.ResponseWriter, r *http.Request) {
 		user := user.(*v1alpha1types.User)
 
 		// Return SERVER_BUSY if there exists any pod with direwolf/user = <user>
-		pods, err := s.PodLister.List(labels.SelectorFromSet(labels.Set{
-			"direwolf/user": user.Name,
-		}))
+		pods, err := s.PodLister.List(moonlightPodsOf(user))
 		if err != nil {
 			writeErrorResponse(w, 500, fmt.Errorf("failed to list pods: %s", err))
 			return
@@ -635,7 +634,9 @@ func (s *RESTServer) launchHandler(w http.ResponseWriter, r *http.Request) {
 		// at the old pod. It is very likely to happen before operator syncs and
 		// can create session, but perhaps should still check after operator returns
 		// the session URL.
-		if stopErr := s.stopSessionsForUser(ctx, user, false); stopErr != nil && !k8serrors.IsNotFound(stopErr) {
+		// A VR Session too: one session per user, and both would run
+		// Steam in the same home.
+		if stopErr := s.stopSessionsForUser(ctx, user, false, false); stopErr != nil && !k8serrors.IsNotFound(stopErr) {
 			return nil, fmt.Errorf("failed to stop existing sessions: %w", stopErr)
 		}
 
@@ -1134,7 +1135,9 @@ func (s *RESTServer) cancelHandler(w http.ResponseWriter, r *http.Request) {
 	// Detached from r.Context(): finish the cancel even if the client hangs up.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), launchSlotTimeout)
 	defer cancel()
-	err := s.stopSessionsForUser(ctx, user, true)
+	// Moonlight's quit stops only what Moonlight shows: never a native VR
+	// session, which serverinfo leaves out and the headset user still plays.
+	err := s.stopSessionsForUser(ctx, user, true, true)
 	if err != nil && !k8serrors.IsNotFound(err) {
 		writeErrorResponse(w, 500, fmt.Errorf("failed to cancel session: %s", err))
 		return
@@ -1142,7 +1145,18 @@ func (s *RESTServer) cancelHandler(w http.ResponseWriter, r *http.Request) {
 	sendXML(w, CancelResponse{Response: Response{StatusCode: 200}, Cancel: 1})
 }
 
-func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1types.User, shouldWait bool) error {
+// moonlightPodsOf selects user's session pods but native VR ones.
+func moonlightPodsOf(user *v1alpha1types.User) labels.Selector {
+	notVR, err := labels.NewRequirement(v1alpha1types.SessionModeLabel, selection.NotEquals, []string{v1alpha1types.SessionModeVR})
+	if err != nil {
+		panic(err) // constant input
+	}
+	return labels.SelectorFromSet(labels.Set{"direwolf/user": user.Name}).Add(*notVR)
+}
+
+// stopSessionsForUser deletes user's Sessions (with moonlightOnly, all but
+// native VR ones) and, with shouldWait, waits for the pods of those to go.
+func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1types.User, shouldWait, moonlightOnly bool) error {
 	// Live List, not the informer: a Session this user created moments ago
 	// (a quick relaunch) may not be cached yet and would be left running.
 	sessions, err := s.SessionClient.List(ctx, metav1.ListOptions{
@@ -1154,6 +1168,9 @@ func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1type
 
 	didDelete := false
 	for _, session := range sessions.Items {
+		if moonlightOnly && session.Spec.IsVR() {
+			continue
+		}
 		delErr := s.SessionClient.Delete(ctx, session.Name, metav1.DeleteOptions{})
 		if k8serrors.IsNotFound(delErr) {
 			// Deleted by someone else since the List: still stop the rest.
@@ -1175,11 +1192,13 @@ func (s *RESTServer) stopSessionsForUser(ctx context.Context, user *v1alpha1type
 	if shouldWait {
 		// Wait for pods to be cleaned up
 		err = wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, 25*time.Second, true, func(context.Context) (bool, error) {
-			pods, err := s.PodLister.List(labels.SelectorFromSet(labels.Set{
-				"direwolf/user": user.Name,
-			}))
-			if err != nil {
-				return false, err
+			selector := labels.SelectorFromSet(labels.Set{"direwolf/user": user.Name})
+			if moonlightOnly {
+				selector = moonlightPodsOf(user)
+			}
+			pods, listErr := s.PodLister.List(selector)
+			if listErr != nil {
+				return false, fmt.Errorf("listing pods: %w", listErr)
 			}
 			return len(pods) == 0, nil
 		})

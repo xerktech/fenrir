@@ -187,7 +187,11 @@ spec:
           set -euo pipefail
           trap "exit 0" SIGINT SIGTERM
           # Game containers wait for Wolf's display, or the stream never starts.
-          while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; do echo "Waiting for wayland display..." >&2; sleep 1; done
+          # A native VR Session (DIREWOLF_VR_MODE=native) has no Wolf: the
+          # image starts its own headless sway.
+          if [ "${DIREWOLF_VR_MODE:-}" != native ]; then
+            while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; do echo "Waiting for wayland display..." >&2; sleep 1; done
+          fi
 
           # Steam's default library, in the shared home (the steam image's
           # flat link names the same path).

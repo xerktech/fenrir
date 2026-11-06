@@ -51,7 +51,7 @@ func newVRStart(t *testing.T) *vrStart {
 	s := &vrStart{dir: t.TempDir(), bin: t.TempDir(), home: t.TempDir(), state: t.TempDir()}
 	s.runtime = shortTempDir(t)
 	s.steamLog = filepath.Join(s.dir, "steam.log")
-	for _, f := range []string{"startup-app.sh", "dbus-session.conf"} {
+	for _, f := range []string{"startup-app.sh", "dbus-session.conf", "dbus-session-agent.conf"} {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
@@ -301,18 +301,89 @@ func TestVRStartRefusesLinkedOrReadOnlyConfigDirs(t *testing.T) {
 }
 
 // The session bus must be a file: unix:tmpdir may be an abstract socket, which
-// lives in the network namespace.
+// lives in the network namespace. In native mode it is the operator's bus
+// directory (pkg/controllers VRBusAddress), which vr-agent reads.
 func TestVRSessionBusListensOnAFile(t *testing.T) {
-	b, err := os.ReadFile("dbus-session.conf")
-	if err != nil {
+	for conf, want := range map[string]string{
+		"dbus-session.conf":       "unix:dir=/tmp",
+		"dbus-session-agent.conf": "unix:path=/run/direwolf-vr-bus/bus",
+	} {
+		b, err := os.ReadFile(conf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		listens := regexp.MustCompile(`<listen>([^<]*)</listen>`).FindAllStringSubmatch(string(b), -1)
+		if len(listens) != 1 || listens[0][1] != want {
+			t.Errorf("%s listens on %v, want only %s", conf, listens, want)
+		}
+		if strings.Contains(string(b), "<include") {
+			t.Errorf("%s includes another config, which may add listeners", conf)
+		}
+	}
+}
+
+// Native VR mode (no Wolf): sway runs headless, not nested in a display that
+// isn't there, and the bus listens in the operator's bus directory, where a
+// stale socket is cleared first.
+func TestVRStartNativeMode(t *testing.T) {
+	s := newVRStart(t)
+	envLog := filepath.Join(s.dir, "env.log")
+	s.steam(`printf 'WLR_BACKENDS=%s WAYLAND_DISPLAY=%s\n' "$WLR_BACKENDS" "${WAYLAND_DISPLAY-unset}" >"` + envLog + "\"\n")
+	bus := shortTempDir(t)
+	if err := os.WriteFile(filepath.Join(bus, "bus"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	listens := regexp.MustCompile(`<listen>([^<]*)</listen>`).FindAllStringSubmatch(string(b), -1)
-	if len(listens) != 1 || listens[0][1] != "unix:dir=/tmp" {
-		t.Fatalf("listens on %v, want only unix:dir=/tmp", listens)
+	out, err := s.run(t, "DIREWOLF_VR_PORT=20034", "DIREWOLF_VR_MODE=native", "DIREWOLF_VR_BUS_DIR="+bus, "WAYLAND_DISPLAY=wayland-1")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
 	}
-	if strings.Contains(string(b), "<include") {
-		t.Fatal("includes another config, which may add listeners")
+	if b, _ := os.ReadFile(envLog); string(b) != "WLR_BACKENDS=headless WAYLAND_DISPLAY=unset\n" {
+		t.Errorf("Steam's startup got %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(s.dir, "dbus.log")); string(b) != "--config-file="+filepath.Join(s.dir, "dbus-session-agent.conf")+"\n" {
+		t.Errorf("dbus-run-session got %q; want the native bus config", b)
+	}
+	if _, err := os.Lstat(filepath.Join(bus, "bus")); !os.IsNotExist(err) {
+		t.Errorf("stale bus socket kept: %v", err)
+	}
+
+	// A Moonlight session keeps Wolf's display, and its bus in /tmp unless
+	// the operator mounts the bus directory.
+	s = newVRStart(t)
+	s.steam(`printf 'WLR_BACKENDS=%s WAYLAND_DISPLAY=%s\n' "${WLR_BACKENDS-unset}" "$WAYLAND_DISPLAY" >"` + envLog + "\"\n")
+	if out, err := s.run(t, "DIREWOLF_VR_PORT=20034", "WAYLAND_DISPLAY=wayland-1"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if b, _ := os.ReadFile(envLog); string(b) != "WLR_BACKENDS=unset WAYLAND_DISPLAY=wayland-1\n" {
+		t.Errorf("Moonlight mode: Steam's startup got %q", b)
+	}
+	s = newVRStart(t)
+	if out, err := s.run(t, "DIREWOLF_VR_PORT=20034", "DIREWOLF_VR_BUS_DIR="+bus); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if b, _ := os.ReadFile(filepath.Join(s.dir, "dbus.log")); string(b) != "--config-file="+filepath.Join(s.dir, "dbus-session-agent.conf")+"\n" {
+		t.Errorf("Moonlight mode with the bus directory: dbus-run-session got %q", b)
+	}
+}
+
+func TestVRStartRefusesBadNativeSetup(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, env := range map[string][]string{
+		"unknown mode":     {"DIREWOLF_VR_MODE=wolfless"},
+		"no bus directory": {"DIREWOLF_VR_MODE=native", "DIREWOLF_VR_BUS_DIR=" + filepath.Join(t.TempDir(), "missing")},
+		"bus is a file":    {"DIREWOLF_VR_MODE=native", "DIREWOLF_VR_BUS_DIR=" + file},
+	} {
+		s := newVRStart(t)
+		out, err := s.run(t, append([]string{"DIREWOLF_VR_PORT=20034"}, env...)...)
+		if err == nil || !strings.Contains(out, "direwolf-vr:") {
+			t.Errorf("%s: started (%v)\n%s", name, err, out)
+		}
+		if _, err := os.Stat(s.steamLog); err == nil {
+			t.Errorf("%s: Steam started", name)
+		}
 	}
 }
 

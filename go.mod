@@ -4,6 +4,7 @@ go 1.26.9
 
 require (
 	github.com/containerd/nri v0.12.3
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/miekg/dns v1.1.73

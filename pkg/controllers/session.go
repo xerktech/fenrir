@@ -105,10 +105,6 @@ const podNotReadyRecheck = 5 * time.Second
 // a lookup: every retry fails the same way, so reconcilePod ends the Session.
 var errInvalidSpec = stderrors.New("invalid App or User spec")
 
-// nativeVRUnsupportedReason ends every VR-mode Session until this operator
-// can run one.
-const nativeVRUnsupportedReason = "native VR sessions (spec.mode VR) are not supported by this operator yet"
-
 func invalidSpec(err error) error { return fmt.Errorf("%w: %w", errInvalidSpec, err) }
 
 // errEndSessionFailed wraps a failed attempt to delete the Session (e.g. a
@@ -196,6 +192,10 @@ type SessionController struct {
 	// vrPorts hands out VR ports (spec.vrPort); nil without VRPortRange.
 	vrPorts *portAllocator
 
+	// vrAgentPort is the port VR pods' vr-agent is dialled on: VRAgentPort,
+	// which tests replace with their fake agent's.
+	vrAgentPort int32
+
 	// videoProgress spots attached streams that stopped sending video.
 	videoProgress videoProgress
 
@@ -241,6 +241,7 @@ func NewSessionController(
 		PairingInformer:          pairingInformer,
 		Recorder:                 recorder,
 		ports:                    newPortAllocator(options.SessionPortRange),
+		vrAgentPort:              VRAgentPort,
 		SessionControllerOptions: options,
 	}
 	if options.VRPortRange != (PortRange{}) {
@@ -375,11 +376,6 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 		// port block is ours to free.
 		c.videoProgress.forget(namespace, name)
 		return c.releaseUnusedPorts()
-	} else if newObj.Spec.IsVR() {
-		// The API has the mode (XERK-2667); building and supervising its
-		// Wolf-less pod is XERK-2668. Never fall through to buildPod: it
-		// would start a Wolf pod no Moonlight client can reach.
-		return c.endSession(ctx, newObj, nativeVRUnsupportedReason)
 	} else if reason := c.expiredReason(newObj, time.Now()); reason != "" {
 		return c.endSession(ctx, newObj, reason)
 	}
@@ -461,6 +457,11 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	}
 
 	pod, podError := c.reconcilePod(ctx, newObj)
+	if newObj.Spec.IsVR() {
+		// No Wolf stream: the headset's state comes from the vr-agent
+		// sidecar (vr_session.go).
+		return c.finishVRReconcile(ctx, newObj, oldStatus, pod, podError)
+	}
 	switch {
 	case stderrors.Is(podError, errSessionEnded):
 		return nil
@@ -864,6 +865,12 @@ func (c *SessionController) expiredReason(session *v1alpha1types.Session, now ti
 		}
 		return ""
 	}
+	if session.Spec.IsVR() {
+		// No Wolf session ever: its headset wait starts when the pod is
+		// ready (disconnectedAt, above). Only a pod that never gets there
+		// (no GPU, a failing image pull) is reaped here.
+		return vrUnstartedReason(session, now)
+	}
 	if meta.FindStatusCondition(session.Status.Conditions, legacyDeploymentCondition) != nil &&
 		meta.FindStatusCondition(session.Status.Conditions, podCreatedCondition) == nil {
 		// Its game runs in a Deployment's pod, which this operator neither
@@ -883,6 +890,9 @@ func (c *SessionController) expiredReason(session *v1alpha1types.Session, now ti
 // /resume from a usable address may still save the game; the pod is looked
 // up live, as PodCreated can be False or missing while one runs.
 func (c *SessionController) unstreamableReason(ctx context.Context, session *v1alpha1types.Session) (string, error) {
+	if session.Spec.IsVR() {
+		return "", nil // no Moonlight client to stream to
+	}
 	_, ipErr := streamClientIP(session)
 	if ipErr == nil {
 		return "", nil
@@ -1088,7 +1098,8 @@ func (c *SessionController) warnApp(session *v1alpha1types.Session, reason, mess
 // session. Nothing restarts a container of a restartPolicy Never pod, so one
 // exited container (the game quitting, or a sidecar crashing) ends it.
 func (c *SessionController) checkPod(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod) (*corev1.Pod, error) {
-	return c.checkSessionPod(ctx, session, pod, true)
+	// A VR pod has no port block, only the VR port vrPortMoved checks.
+	return c.checkSessionPod(ctx, session, pod, !session.Spec.IsVR())
 }
 
 // checkPodContainers is checkPod for a split Session's App pod, which serves
@@ -1212,7 +1223,13 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 	if err != nil {
 		return nil, fmt.Errorf("failed to get app: %w", err)
 	}
-	if app.Spec.RequireAppPod && c.AppPodHostDir == "" {
+	vr := session.Spec.IsVR()
+	if vr && !app.Spec.VRPort {
+		return nil, invalidSpec(fmt.Errorf("app %s sets no vrPort, which a VR-mode Session needs", app.Name))
+	}
+	// A VR pod is always user-namespaced and off the host network
+	// (buildVRPod), with or without the split App pod.
+	if app.Spec.RequireAppPod && c.AppPodHostDir == "" && !vr {
 		return nil, invalidSpec(fmt.Errorf("app %s sets requireAppPod, but the operator runs without --app-pod-host-dir", app.Name))
 	}
 	if vrErr := c.checkVRPort(app, session); vrErr != nil {
@@ -1411,12 +1428,16 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 			{Name: "LD_LIBRARY_PATH", Value: "/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/lib"},
 			{Name: "GST_VAAPI_ALL_DRIVERS", Value: "1"},
 			{Name: "GST_DEBUG", Value: "2"},
-
-			// Gamescape envar injection. Ham-handed. Why not.
-			{Name: "GAMESCOPE_WIDTH", Value: strconv.Itoa(session.Spec.Config.VideoWidth)},
-			{Name: "GAMESCOPE_HEIGHT", Value: strconv.Itoa(session.Spec.Config.VideoHeight)},
-			{Name: "GAMESCOPE_REFRESH", Value: strconv.Itoa(session.Spec.Config.VideoRefreshRate)},
 		}...)
+		if !vr {
+			// Gamescape envar injection. Ham-handed. Why not. A VR Session
+			// has no client mode: zeros would set GoW's sway output to 0x0.
+			podToCreate.Spec.Containers[i].Env = append(podToCreate.Spec.Containers[i].Env, []corev1.EnvVar{
+				{Name: "GAMESCOPE_WIDTH", Value: strconv.Itoa(session.Spec.Config.VideoWidth)},
+				{Name: "GAMESCOPE_HEIGHT", Value: strconv.Itoa(session.Spec.Config.VideoHeight)},
+				{Name: "GAMESCOPE_REFRESH", Value: strconv.Itoa(session.Spec.Config.VideoRefreshRate)},
+			}...)
+		}
 
 		// Validate the main app container's resources against the user's policy.
 		validatedResources, err := validateAppResources(podToCreate.Spec.Containers[i].Resources, user.Spec.Resources)
@@ -2239,6 +2260,7 @@ var operatorVolumes = []string{
 	inputBridgeVolume,
 	appPodSessionsVolume,
 	udevEventsVolume,
+	vrBusVolume,
 }
 
 // validateNoOperatorVolumeMounts rejects App template containers (init too)
@@ -2403,7 +2425,7 @@ var operatorContainerNames = []string{
 	v1alpha1types.WolfContainerName, v1alpha1types.WolfAgentContainerName,
 	v1alpha1types.PulseAudioContainerName, v1alpha1types.InitContainerName,
 	v1alpha1types.SteamRelinkContainerName, v1alpha1types.InputBridgeContainerName,
-	v1alpha1types.UdevRelayContainerName,
+	v1alpha1types.UdevRelayContainerName, v1alpha1types.VRAgentContainerName,
 }
 
 // defaultProfileHoleCapability returns the first added capability with which
@@ -2747,6 +2769,10 @@ func (c *SessionController) allocatePorts(
 	ctx context.Context,
 	session *v1alpha1types.Session,
 ) error {
+	if session.Spec.IsVR() {
+		// No Wolf, so no port block: only the VR server's port.
+		return c.allocateVRPort(session)
+	}
 	owner := c.portOwner(session)
 	claimed := false
 	if session.Status.Ports.HTTP != 0 {
@@ -2775,8 +2801,11 @@ func (c *SessionController) claimRecordedPorts(sessions []*v1alpha1types.Session
 		if session.Status.Ports == (v1alpha1types.SessionPorts{}) {
 			continue
 		}
-		if err := c.ports.Claim(c.portOwner(session), session.Status.Ports); err != nil {
-			klog.Warningf("Session %s/%s: not restoring port allocation: %v", session.Namespace, session.Name, err)
+		// A VR Session records only ports.vr: it has no block to claim.
+		if session.Status.Ports.HTTP != 0 {
+			if err := c.ports.Claim(c.portOwner(session), session.Status.Ports); err != nil {
+				klog.Warningf("Session %s/%s: not restoring port allocation: %v", session.Namespace, session.Name, err)
+			}
 		}
 		if vr := session.Status.Ports.VR; vr != 0 && c.vrPorts != nil {
 			if err := c.vrPorts.ClaimBase(c.portOwner(session), vr); err != nil {
