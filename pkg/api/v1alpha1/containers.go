@@ -26,4 +26,7 @@ const (
 	// UdevRelayContainerName announces hotplugged devices in a user-namespaced
 	// App pod (pkg/inputbridge); it opens no device nodes.
 	UdevRelayContainerName = "udev-relay"
+	// VRAgentContainerName reports a native VR Session's headset state from
+	// the App's VR server over D-Bus (XERK-2668); it opens no device nodes.
+	VRAgentContainerName = "vr-agent"
 )

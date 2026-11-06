@@ -5,8 +5,8 @@ without Moonlight. Phase 2 (XERK-2665) already streams VR from an App in the spl
 is launched from Moonlight, and Moonlight's flat mirror shows the pairing PIN and carries the
 recenter key. Phase 3 removes Moonlight from that path.
 
-Status: the API is in place (this ticket). The operator still ends every VR-mode Session at once
-(`nativeVRUnsupportedReason`) until XERK-2668 builds and supervises their pods.
+Status: the API (XERK-2667) and the operator's pod and liveness (XERK-2668) are in place. Nothing
+creates VR Sessions yet: the library page is XERK-2670.
 
 ## API
 
@@ -71,12 +71,13 @@ backlog is 1. A probe is itself a connection attempt, so it could take the slot 
 
 How the operator reads the properties:
 
-- A small agent runs in the App container. The session bus listens at `unix:dir=/tmp` in that
-  container, so the agent has to run there. It serves HTTPS on the pod IP.
+- A `vr-agent` sidecar (the wolf-agent image) reads them. In native mode the image's session bus
+  listens on a file in an emptyDir only the App and vr-agent mount (`/run/direwolf-vr-bus/bus`).
+  It serves HTTPS on the pod IP.
 - The operator polls it every `streamPollInterval`, with a per-Session bearer token and a pinned
   serving cert, the same scheme as wolf-agent's (`agent_token.go`).
-- The game can read the token and could report false values. That only keeps its own Session alive
-  or ends it, which the App can already do.
+- The game never sees the token, but it shares the bus and could report false values. That only
+  keeps its own Session alive or ends it, which the App can already do.
 - An agent the operator can't reach changes no status. The pod's container exits still end the
   Session, as they do today.
 
@@ -104,8 +105,9 @@ This works as it does for Moonlight sessions.
 
 - `/resume` skips VR Sessions (this ticket). Otherwise it would write a Moonlight client's keys into
   a Session whose CRD forbids `config`. Tests: `TestResumeSkipsVRSession`.
-- For XERK-2668 to decide: `/cancel` (Moonlight's "quit") deletes all of a user's Sessions, VR
-  included. Recommendation: Moonlight's quit should stop only Moonlight Sessions.
+- `/cancel` (Moonlight's "quit") stops only Moonlight Sessions, and serverinfo leaves VR pods out,
+  so Moonlight never shows a VR session it can't resume or quit. A Moonlight `/launch` still
+  replaces the user's VR Session: both would run Steam in one home.
 - `--max-concurrent-sessions` counts users, VR included. That's correct: they share the node.
 
 ## Rollback

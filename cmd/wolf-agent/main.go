@@ -31,6 +31,10 @@ func main() {
 		runUdevRelay(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == vrAgentCommand {
+		runVRAgent(os.Args[2:])
+		return
+	}
 	appContext, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
 
