@@ -54,6 +54,15 @@ paths:
   reach its IPC socket there.
 - The session bus listens on `unix:dir=/tmp` (`dbus-session.conf`), never an abstract socket.
 - Either Steam or the VR services exiting ends the session. Tests: `images/gow-nvidia32/vr/vr_test.go`.
+- wivrn-server's stderr runs through `vr-notice`, which shows "connect ... to <host> port <port>"
+  and the pairing PIN in a swaynag overlay bar on the session's sway: the Moonlight mirror is the
+  authenticated place to see them (XERK-2665). `DIREWOLF_VR_HOST` is the App's `status.hostIP`.
+  - Only an address and 6 digits reach `swaymsg exec` (a shell, single-quoted): no `'`, `;` or
+    `,` in its text, as sway splits commands on the last two.
+  - It starts before sway (launch-comp starts sway inside GoW's Steam startup), so it waits on
+    `$XDG_RUNTIME_DIR/sway.socket`; a PIN not yet shown dies with its wivrn-server.
+- GoW's Steam startup sets `WINEDLLOVERRIDES=dxgi=n` outright; the image patches it to append
+  `DIREWOLF_WINEDLLOVERRIDES` (grep-guarded, so a GoW bump moving the line fails the build).
 
 ## Ports and auth
 
@@ -109,3 +118,15 @@ paths:
   `segoeui*.ttf` substitute (Segoe isn't redistributable) and `d3dcompiler_47` (Wine's compiler
   fails CSP's weather shaders: black scene), with `WINEDLLOVERRIDES=dwrite=n,b`.
 - Vanilla AC takes no Quest controller input; CSP 0.3.x gives controller and hand control.
+- The App is `examples/vr.yaml` (XERK-2665; deployed by digest from ArgoCD, XERK-2666).
+  - Per-User state is `spec.stateMounts` on its `volumeClaimTemplate` PVC: the three VR config
+    dirs, and AC's `Documents/Assetto Corsa` in the /games prefix (VR `video.ini`, CSP config).
+    The shared prefix keeps its flat `video.ini`, so flat launches stay flat.
+  - Its command seeds that cfg from the shared prefix (a second, read-only `games` mount) once,
+    then forces `[VIDEO] FULLSCREEN=0`, `[CAMERA] MODE=OPENVR`; it chowns only mount points.
+  - Assumes AC in the /games library, launched flat once: a stateMount's missing mount point is
+    created by the runtime as root, which in a missing compatdata dir would break the prefix.
+  - The shared install keeps AssettoCorsa.exe = acs.exe (CM and the Kunos launcher can't run),
+    and the Proton 9 pin; `steam -applaunch 244210` then starts acs.exe in either mode.
+  - Recenter: Ctrl+Space from the Moonlight keyboard, on track. A pad/wheel binding is untested.
+  - Its memory limit (24Gi) needs a User ceiling to match. Tests: `state_mounts_test.go`.

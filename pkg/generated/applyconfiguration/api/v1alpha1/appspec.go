@@ -74,6 +74,13 @@ type AppSpecApplyConfiguration struct {
 	// and handed to every App container as DIREWOLF_VR_PORT. A headset dials
 	// it at the node's IP. Needs requireAppPod.
 	VRPort *bool `json:"vrPort,omitempty"`
+	// StateMounts are directories kept per User and App: each is the
+	// subdirectory mounts/<name> of the volumeClaimTemplate's PVC, mounted at
+	// mountPath in every App container. For an App whose home is shared (the
+	// Steam home) but which needs some state of its own, such as a VR
+	// server's pairing keys. The App can't mount that PVC itself: it holds
+	// Wolf's data too. Needs volumeClaimTemplate.
+	StateMounts []StateMountApplyConfiguration `json:"stateMounts,omitempty"`
 }
 
 // AppSpecApplyConfiguration constructs a declarative configuration of the AppSpec type for use with
@@ -169,5 +176,18 @@ func (b *AppSpecApplyConfiguration) WithRequireAppPod(value bool) *AppSpecApplyC
 // If called multiple times, the VRPort field is set to the value of the last call.
 func (b *AppSpecApplyConfiguration) WithVRPort(value bool) *AppSpecApplyConfiguration {
 	b.VRPort = &value
+	return b
+}
+
+// WithStateMounts adds the given value to the StateMounts field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the StateMounts field.
+func (b *AppSpecApplyConfiguration) WithStateMounts(values ...*StateMountApplyConfiguration) *AppSpecApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithStateMounts")
+		}
+		b.StateMounts = append(b.StateMounts, *values[i])
+	}
 	return b
 }

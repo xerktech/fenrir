@@ -1,0 +1,210 @@
+package controllers
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	sigsyaml "sigs.k8s.io/yaml"
+
+	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+)
+
+// vrExampleFixture is a ports fixture whose App (the informer's copy, which
+// the controller reads back) carries examples/vr.yaml's spec, with the
+// operator flags it needs.
+func vrExampleFixture(t *testing.T) (*portsFixture, *v1alpha1types.App) {
+	t.Helper()
+	b, err := os.ReadFile("../../examples/vr.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vr v1alpha1types.App
+	if err := sigsyaml.UnmarshalStrict(b, &vr); err != nil {
+		t.Fatal(err)
+	}
+	f := newPortsFixture(t)
+	app := withVR(t, f)
+	app.Spec = vr.Spec
+	return f, app
+}
+
+// examples/vr.yaml builds: in the App pod, with the VR port, and every
+// stateMount on the per-User PVC under mounts/<name>, outside state/.
+func TestVRExampleBuildsWithStateMounts(t *testing.T) {
+	f, app := vrExampleFixture(t)
+	sess := f.session("alex-1", f.user)
+	if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	wolf, appPod, err := f.sc.buildPods(sess, testWolfPodUID)
+	if err != nil {
+		t.Fatalf("buildPods: %v", err)
+	}
+	if appPod == nil || appPod.Spec.HostNetwork {
+		t.Fatal("VR example not in an App pod off the host network")
+	}
+	if len(app.Spec.StateMounts) != 4 {
+		t.Fatalf("example has %d stateMounts, want 4", len(app.Spec.StateMounts))
+	}
+	v := volumeNamed(&appPod.Spec, "wolf-data")
+	if v == nil || v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != f.sc.pvcName(sess) {
+		t.Fatalf("App pod wolf-data = %+v, want the per-User PVC %s", v, f.sc.pvcName(sess))
+	}
+	for _, c := range appPod.Spec.Containers {
+		if isWolfPodContainer(c.Name) || c.Name == v1alpha1types.UdevRelayContainerName {
+			continue
+		}
+		for _, m := range app.Spec.StateMounts {
+			var got *corev1.VolumeMount
+			for i := range c.VolumeMounts {
+				if c.VolumeMounts[i].MountPath == m.MountPath {
+					got = &c.VolumeMounts[i]
+				}
+			}
+			if got == nil || got.Name != "wolf-data" || got.SubPath != path.Join("mounts", m.Name) || got.ReadOnly {
+				t.Errorf("container %s at %s = %+v, want wolf-data subPath mounts/%s", c.Name, m.MountPath, got, m.Name)
+			}
+		}
+	}
+	// None reaches the Wolf pod: its containers mount wolf-data whole.
+	for _, c := range wolf.Spec.Containers {
+		for _, m := range c.VolumeMounts {
+			if strings.HasPrefix(m.SubPath, "mounts/") {
+				t.Errorf("Wolf pod container %s mounts stateMount %s", c.Name, m.SubPath)
+			}
+		}
+	}
+}
+
+// The example stays within the App confinement rules (vr.md): no NET_ADMIN,
+// SYS_ADMIN, privilege, hostPath, host namespaces or operator volumes.
+func TestVRExampleAsksForNothingForbidden(t *testing.T) {
+	_, app := vrExampleFixture(t)
+	spec := app.Spec.Template.Spec
+	if spec.HostNetwork || spec.HostPID || spec.HostIPC || (spec.ShareProcessNamespace != nil && *spec.ShareProcessNamespace) {
+		t.Error("example asks for a host namespace or a shared process namespace")
+	}
+	for _, v := range spec.Volumes {
+		if v.HostPath != nil {
+			t.Errorf("volume %s is a hostPath", v.Name)
+		}
+	}
+	for _, c := range spec.Containers {
+		if sc := c.SecurityContext; sc != nil {
+			if sc.Privileged != nil && *sc.Privileged {
+				t.Errorf("container %s is privileged", c.Name)
+			}
+			if sc.Capabilities != nil {
+				for _, capName := range sc.Capabilities.Add {
+					if capName == "NET_ADMIN" || capName == "SYS_ADMIN" {
+						t.Errorf("container %s adds %s", c.Name, capName)
+					}
+				}
+			}
+		}
+	}
+	if err := validateNoOperatorVolumeMounts(&spec); err != nil {
+		t.Error(err)
+	}
+}
+
+// A stateMount at a path the operator or the App already mounts is refused
+// as an invalid spec, before any pod is sent.
+func TestStateMountCollisionIsInvalidSpec(t *testing.T) {
+	for _, p := range []string{"/tmp/.X11-unix", "/home/retro", "/games/"} {
+		f, app := vrExampleFixture(t)
+		app.Spec.StateMounts = append(app.Spec.StateMounts, v1alpha1types.StateMount{Name: "clash", MountPath: p})
+		sess := f.session("alex-1", f.user)
+		if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := f.sc.buildPods(sess, testWolfPodUID); !errors.Is(err, errInvalidSpec) || !strings.Contains(err.Error(), "mounts two volumes") {
+			t.Errorf("stateMount at %s: buildPods err = %v, want errInvalidSpec about two mounts", p, err)
+		}
+	}
+}
+
+// vrExampleSeedScript is the Python the example's command runs as PUID to
+// seed and set the per-User AC config.
+func vrExampleSeedScript(t *testing.T) string {
+	t.Helper()
+	_, app := vrExampleFixture(t)
+	cmd := strings.Join(app.Spec.Template.Spec.Containers[0].Command, "\n")
+	_, rest, ok := strings.Cut(cmd, "<<'PY'\n")
+	script, _, ok2 := strings.Cut(rest, "\nPY\n")
+	if !ok || !ok2 {
+		t.Fatal("no PY heredoc in examples/vr.yaml's command")
+	}
+	return script
+}
+
+func runSeed(t *testing.T, script, shared, cfg string) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "python3", "-I", "-", shared, cfg)
+	cmd.Stdin = strings.NewReader(script)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("seed: %v: %s", err, out)
+	}
+}
+
+// The VR copy of AC's cfg starts as the shared one, in VR mode and windowed,
+// with every other line kept; the shared (flat) one is never touched.
+func TestVRExampleSeedsACConfigInVRMode(t *testing.T) {
+	script := vrExampleSeedScript(t)
+	dir := t.TempDir()
+	shared, cfg := filepath.Join(dir, "shared", "cfg"), filepath.Join(dir, "user", "cfg")
+	if err := os.MkdirAll(filepath.Join(shared, "extension"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	flat := "[VIDEO]\r\nWIDTH=1920\r\nFULLSCREEN=1\r\n\r\n[CAMERA]\r\nMODE=DEFAULT\r\n[ASSETTO]\r\nX=1\r\n"
+	for name, body := range map[string]string{"video.ini": flat, "controls.ini": "[A]\r\nB=1\r\n", "extension/csp.ini": "c"} {
+		if err := os.WriteFile(filepath.Join(shared, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := "[VIDEO]\r\nWIDTH=1920\r\nFULLSCREEN=0\r\n\r\n[CAMERA]\r\nMODE=OPENVR\r\n[ASSETTO]\r\nX=1\r\n"
+	for range 2 { // and again: a second start changes nothing
+		runSeed(t, script, shared, cfg)
+		if got, _ := os.ReadFile(filepath.Join(cfg, "video.ini")); string(got) != want {
+			t.Errorf("VR video.ini = %q, want %q", got, want)
+		}
+	}
+	for name, body := range map[string]string{"controls.ini": "[A]\r\nB=1\r\n", "extension/csp.ini": "c"} {
+		if got, _ := os.ReadFile(filepath.Join(cfg, name)); string(got) != body {
+			t.Errorf("VR %s = %q, want the shared copy", name, got)
+		}
+	}
+	if got, _ := os.ReadFile(filepath.Join(shared, "video.ini")); string(got) != flat {
+		t.Errorf("shared video.ini changed to %q", got)
+	}
+	// Once seeded, the User's own copy is kept: the shared one is not re-copied.
+	if err := os.WriteFile(filepath.Join(cfg, "controls.ini"), []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runSeed(t, script, shared, cfg)
+	if got, _ := os.ReadFile(filepath.Join(cfg, "controls.ini")); string(got) != "mine" {
+		t.Errorf("User's controls.ini replaced: %q", got)
+	}
+}
+
+// With no shared cfg (AC never configured flat) the VR copy still gets both keys.
+func TestVRExampleSeedsACConfigFromNothing(t *testing.T) {
+	script := vrExampleSeedScript(t)
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "cfg")
+	runSeed(t, script, filepath.Join(dir, "missing"), cfg)
+	got, _ := os.ReadFile(filepath.Join(cfg, "video.ini"))
+	if want := "[VIDEO]\r\nFULLSCREEN=0\r\n[CAMERA]\r\nMODE=OPENVR\r\n"; string(got) != want {
+		t.Errorf("video.ini = %q, want %q", got, want)
+	}
+}

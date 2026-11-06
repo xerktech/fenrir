@@ -205,6 +205,11 @@ Three binaries in `cmd/`, all sharing `pkg/`:
     Template drift shows as `VolumeCreated` reason `TemplateDrift`. Tests: `session_pvc_test.go`.
     - Exception: `volumeAttributesClassName` follows the template once the claim is Bound (only
       then may it change); once set it can't be unset, so a dropped one stays (XERK-1554).
+    - `spec.stateMounts` (XERK-2665) mount its `mounts/<name>` at a path in every App container,
+      for an App whose home is shared but needs per-User state. App templates may never mount
+      `wolf-data` themselves: it holds Wolf's data. Keep them outside `state/`, where a game whose
+      home is `state/<app>` could plant a link. CEL needs `volumeClaimTemplate` (an emptyDir
+      would lose a VR server's pairing keys). Tests: `state_mounts_test.go`.
   - `App.spec.gpu` becomes a per-Session DRA ResourceClaim (`pkg/controllers/gpu_claim.go`).
     - `User.spec.resources` caps only requests/limits, never DRA claims: Apps are admin-authored
       and their author can already run any pod spec, so a per-User GPU policy adds no boundary

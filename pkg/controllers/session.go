@@ -1367,6 +1367,18 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 				SubPath:   fmt.Sprintf("state/%s", app.Name),
 			},
 		)
+		// spec.stateMounts: per-User directories on the same PVC, outside
+		// state/ so a game whose home is state/<app> can't plant a link in
+		// their place. A clash with another mount is left to validateBuiltPod.
+		for _, m := range app.Spec.StateMounts {
+			podToCreate.Spec.Containers[i].VolumeMounts = append(podToCreate.Spec.Containers[i].VolumeMounts,
+				corev1.VolumeMount{
+					Name:      "wolf-data",
+					MountPath: m.MountPath,
+					SubPath:   path.Join(stateMountsDir, m.Name),
+				},
+			)
+		}
 
 		podToCreate.Spec.Containers[i].Env = append(podToCreate.Spec.Containers[i].Env, []corev1.EnvVar{
 			// Standard GOW envars
@@ -2548,6 +2560,10 @@ const (
 // AppHomePath is HOME in the GOW app images. The operator mounts the App's own
 // state there (wolf-data, state/<app>) unless the App mounts something itself.
 const AppHomePath = "/home/retro"
+
+// stateMountsDir holds an App's spec.stateMounts on its wolf-data PVC, one
+// subdirectory each: beside state/, never inside it.
+const stateMountsDir = "mounts"
 
 // withMountUnlessTaken appends each of add to mounts unless mounts already
 // has something at its path.

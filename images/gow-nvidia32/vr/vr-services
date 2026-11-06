@@ -7,6 +7,7 @@ set -euo pipefail
 
 port=$1
 audio=$2
+here=$(dirname "$(readlink -f "$0")")
 config=$HOME/.config/wivrn/config.json
 # Seconds between checks, and failed checks in a row before a restart: the
 # first restart comes no sooner than interval*misses, which covers start-up.
@@ -47,8 +48,10 @@ supervise() {
   local pid misses started i
   while :; do
     started=$SECONDS
+    # Its stderr goes through vr-notice, which shows the address and pairing
+    # PIN on the session's display; $! stays wivrn-server's.
     PIPEWIRE_RUNTIME_DIR=$audio setsid wivrn-server -f "$config" \
-      --early-active-runtime --no-publish-service --no-instructions &
+      --early-active-runtime --no-publish-service --no-instructions 2> >("$here/vr-notice" "$port") &
     pid=$!
     misses=0
     while kill -0 "$pid" 2>/dev/null; do

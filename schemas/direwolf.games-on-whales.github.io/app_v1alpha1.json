@@ -68,6 +68,44 @@
           "description": "RequireAppPod refuses Sessions unless the operator runs the App in its\nown pod off the host network (--app-pod-host-dir). For an App whose\nprograms listen on 127.0.0.1 (Battle.net's client and Agent): in the\nhost-networked session pod that is the node's loopback, open to every\nprocess on the node, and two Sessions on one node collide on fixed ports.",
           "type": "boolean"
         },
+        "stateMounts": {
+          "description": "StateMounts are directories kept per User and App: each is the\nsubdirectory mounts/<name> of the volumeClaimTemplate's PVC, mounted at\nmountPath in every App container. For an App whose home is shared (the\nSteam home) but which needs some state of its own, such as a VR\nserver's pairing keys. The App can't mount that PVC itself: it holds\nWolf's data too. Needs volumeClaimTemplate.",
+          "items": {
+            "description": "StateMount is one of an App's per-User directories (AppSpec.StateMounts).",
+            "properties": {
+              "mountPath": {
+                "description": "MountPath is an absolute path in the App's containers, not \"/\".",
+                "maxLength": 4096,
+                "pattern": "^/.*[^/]$",
+                "type": "string"
+              },
+              "name": {
+                "description": "Name picks the directory, mounts/<name>, on the PVC: renaming one\nstarts it empty.",
+                "maxLength": 63,
+                "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mountPath",
+              "name"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          "maxItems": 16,
+          "type": "array",
+          "x-kubernetes-list-map-keys": [
+            "name"
+          ],
+          "x-kubernetes-list-type": "map",
+          "x-kubernetes-validations": [
+            {
+              "message": "stateMounts mountPaths must be unique",
+              "rule": "self.all(a, self.exists_one(b, b.mountPath == a.mountPath))"
+            }
+          ]
+        },
         "template": {
           "description": "The operator copies this metadata onto the session pod, so a key the API\nserver rejects there would fail every Session of the App: reject it here.\nLabel values get a schema pattern from hack/update-codegen.sh instead:\nCEL over unbounded map values exceeds the CRD cost budget.\nPlain regexes, not CEL's format library, which needs a newer API server\nthan the chart's kubeVersion floor.",
           "properties": {
@@ -7892,6 +7930,10 @@
         {
           "message": "vrPort needs requireAppPod",
           "rule": "!has(self.vrPort) || !self.vrPort || (has(self.requireAppPod) && self.requireAppPod)"
+        },
+        {
+          "message": "stateMounts needs volumeClaimTemplate",
+          "rule": "!has(self.stateMounts) || size(self.stateMounts) == 0 || has(self.volumeClaimTemplate)"
         }
       ],
       "additionalProperties": false

@@ -1,0 +1,58 @@
+#!/bin/bash
+# Shows how a headset reaches this session's VR server on the session's own
+# display, the flat mirror the Moonlight user sees (.claude/rules/vr.md). mDNS
+# is off, so the headset dials the node's address and port; WiVRn writes its
+# pairing PIN to stderr and D-Bus only. Reads wivrn-server's stderr on stdin,
+# passes every line on to stderr, and keeps one swaynag bar up to date.
+# Usage: vr-notice <port>   ($DIREWOLF_VR_HOST: the node's address, optional)
+set -uo pipefail
+
+port=$1
+# Only an address goes into the bar: it is run through sway's exec, a shell,
+# inside single quotes (so no quote in any text here either).
+host=${DIREWOLF_VR_HOST:-}
+[[ $host =~ ^[0-9A-Fa-f.:]+$ ]] || host="the server IP"
+# GoW's launch-comp.sh starts sway with this socket.
+sock=${SWAYSOCK:-${XDG_RUNTIME_DIR:-/tmp}/sway.socket}
+retry=${DIREWOLF_VR_NOTICE_RETRY:-2}
+pin=
+shower=
+
+# (Re)places the bar once sway is up: WiVRn starts before Steam and sway do.
+# The overlay layer stays above a fullscreen game.
+show() {
+  local msg="VR headset: connect the WiVRn app to $host port $port"
+  [[ -z $pin ]] || msg+=" - pairing PIN $pin"
+  [[ -z $shower ]] || kill "$shower" 2>/dev/null
+  (
+    until swaymsg -s "$sock" -t get_version >/dev/null 2>&1; do sleep "$retry"; done
+    # sway runs swaynag in this container as this user: the old bar goes first.
+    # No ; or , in the exec: sway would split its command there.
+    pkill -x swaynag
+    swaymsg -s "$sock" exec "swaynag -y overlay -t warning -m '$msg'" >/dev/null
+  ) &
+  shower=$!
+}
+trap '[[ -z $shower ]] || kill "$shower" 2>/dev/null' EXIT
+
+show
+while IFS= read -r line; do
+  printf '%s\n' "$line" >&2
+  case $line in
+  "To pair a new headset use PIN code: "*)
+    p=${line##*: }
+    if [[ $p =~ ^[0-9]{6}$ ]]; then
+      pin=$p
+      show
+    fi
+    ;;
+  "Headset pairing is disabled"*)
+    if [[ -n $pin ]]; then
+      pin=
+      show
+    fi
+    ;;
+  esac
+done
+# A bar already shown stays up; one still waiting for sway is dropped (EXIT),
+# as its PIN dies with this wivrn-server. The next one's notice replaces it.
