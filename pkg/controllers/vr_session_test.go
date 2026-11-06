@@ -462,6 +462,17 @@ func TestVRSessionEndsWhenAgentStaysUnreachable(t *testing.T) {
 	if len(agent.tokens) == 0 || s.Status.DisconnectedAt == nil || headset(s).Status == metav1.ConditionTrue {
 		t.Fatalf("NotReady started pod: polled %d times, status %+v", len(agent.tokens), s.Status)
 	}
+	// Further failed polls keep the clock: restarting it would never end
+	// the Session.
+	first := s.Status.DisconnectedAt.DeepCopy()
+	first.Time = first.Add(-time.Minute)
+	s.Status.DisconnectedAt = first
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Status.DisconnectedAt.Equal(first) {
+		t.Fatalf("a failed poll moved disconnectedAt from %v to %v", first, s.Status.DisconnectedAt)
+	}
 	s.Status.DisconnectedAt = &metav1.Time{Time: time.Now().Add(-f.sc.DisconnectGracePeriod - time.Second)}
 	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
 		t.Fatal(err)
