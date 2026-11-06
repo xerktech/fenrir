@@ -114,6 +114,47 @@ func TestAppCRDRequiresAppPodForVRPort(t *testing.T) {
 	}
 }
 
+// spec.stateMounts live on the volumeClaimTemplate's PVC: without one they
+// would be emptyDirs, and a VR server's pairing keys would go with each pod.
+func TestAppCRDValidatesStateMounts(t *testing.T) {
+	validate := crdValidator(t, "apps")
+	pvc := map[string]any{"spec": map[string]any{}}
+	mount := func(name, path string) any { return map[string]any{"name": name, "mountPath": path} }
+	for _, tc := range []struct {
+		name  string
+		extra map[string]any
+		want  string // "" for valid
+	}{
+		{name: "none"},
+		{name: "empty list", extra: map[string]any{"stateMounts": []any{}}},
+		{name: "with claim", extra: map[string]any{"volumeClaimTemplate": pvc, "stateMounts": []any{mount("wivrn", "/home/retro/.config/wivrn"), mount("ac", "/a b/c")}}},
+		{name: "without claim", extra: map[string]any{"stateMounts": []any{mount("wivrn", "/x")}}, want: "stateMounts needs volumeClaimTemplate"},
+		{name: "same path", extra: map[string]any{"volumeClaimTemplate": pvc, "stateMounts": []any{mount("a", "/x"), mount("b", "/x")}}, want: "mountPaths must be unique"},
+		{name: "name with a slash", extra: map[string]any{"volumeClaimTemplate": pvc, "stateMounts": []any{mount("../wolf", "/x")}}, want: "should match"},
+		{name: "relative path", extra: map[string]any{"volumeClaimTemplate": pvc, "stateMounts": []any{mount("a", "x")}}, want: "should match"},
+		{name: "root", extra: map[string]any{"volumeClaimTemplate": pvc, "stateMounts": []any{mount("a", "/")}}, want: "should match"},
+		{name: "trailing slash", extra: map[string]any{"volumeClaimTemplate": pvc, "stateMounts": []any{mount("a", "/x/")}}, want: "should match"},
+	} {
+		spec := map[string]any{
+			"title": "a", "id": int64(1), "isHDRSupported": false, "appAssetWebP": "AA==",
+			"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "game"}}}},
+		}
+		maps.Copy(spec, tc.extra)
+		errs := validate(map[string]any{
+			"apiVersion": "direwolf.games-on-whales.github.io/v1alpha1",
+			"kind":       "App",
+			"metadata":   map[string]any{"name": "a", "namespace": "ns"},
+			"spec":       spec,
+		})
+		switch {
+		case tc.want == "" && len(errs) > 0:
+			t.Errorf("%s: unexpected errors: %v", tc.name, errs.ToAggregate())
+		case tc.want != "" && (len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), tc.want)):
+			t.Errorf("%s: errors %v, want one containing %q", tc.name, errs.ToAggregate(), tc.want)
+		}
+	}
+}
+
 // crdValidator runs the API server's own CRD validation (rule compilation
 // and cost budget) over the generated CRD of the plural resource and returns
 // a func applying its schema and CEL validators to an object.

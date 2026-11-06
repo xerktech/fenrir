@@ -22,6 +22,7 @@ type App struct {
 // hostPort on the App pod, off the host network; in the host-networked
 // session pod a VR server would listen on the node's own network.
 // +kubebuilder:validation:XValidation:rule="!has(self.vrPort) || !self.vrPort || (has(self.requireAppPod) && self.requireAppPod)",message="vrPort needs requireAppPod"
+// +kubebuilder:validation:XValidation:rule="!has(self.stateMounts) || size(self.stateMounts) == 0 || has(self.volumeClaimTemplate)",message="stateMounts needs volumeClaimTemplate"
 type AppSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
@@ -96,6 +97,32 @@ type AppSpec struct {
 	// it at the node's IP. Needs requireAppPod.
 	// +kubebuilder:validation:Optional
 	VRPort bool `json:"vrPort,omitempty" xml:"-"`
+
+	// StateMounts are directories kept per User and App: each is the
+	// subdirectory mounts/<name> of the volumeClaimTemplate's PVC, mounted at
+	// mountPath in every App container. For an App whose home is shared (the
+	// Steam home) but which needs some state of its own, such as a VR
+	// server's pairing keys. The App can't mount that PVC itself: it holds
+	// Wolf's data too. Needs volumeClaimTemplate.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:XValidation:rule="self.all(a, self.exists_one(b, b.mountPath == a.mountPath))",message="stateMounts mountPaths must be unique"
+	StateMounts []StateMount `json:"stateMounts,omitempty" xml:"-"`
+}
+
+// StateMount is one of an App's per-User directories (AppSpec.StateMounts).
+type StateMount struct {
+	// Name picks the directory, mounts/<name>, on the PVC: renaming one
+	// starts it empty.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+	// MountPath is an absolute path in the App's containers, not "/".
+	// +kubebuilder:validation:MaxLength=4096
+	// +kubebuilder:validation:Pattern=`^/.*[^/]$`
+	MountPath string `json:"mountPath"`
 }
 
 // Positive means a nonzero digit before any suffix or exponent (the schema

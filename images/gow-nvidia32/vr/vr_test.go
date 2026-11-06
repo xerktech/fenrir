@@ -6,6 +6,7 @@ package vr
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -509,6 +510,148 @@ func TestVRImageIsPinnedAndBuilt(t *testing.T) {
 		}
 		if !strings.Contains(string(b), "- app: vr\n            context: images/gow-nvidia32\n            target: vr\n") {
 			t.Errorf("%s builds no vr target", wf)
+		}
+	}
+}
+
+// vrNotice runs vr-notice with stub swaymsg and pkill, feeding it the given
+// wivrn-server stderr and keeping its input open (as wivrn-server does) until
+// done(execs) holds or 5s pass. sway is "up" only if swayUp. Returns the
+// swaymsg exec log and vr-notice's own stderr.
+func vrNotice(t *testing.T, host, stderr string, swayUp bool, done func(execs string) bool) (execs, out string) {
+	t.Helper()
+	dir, bin := t.TempDir(), t.TempDir()
+	up := filepath.Join(dir, "up")
+	if swayUp {
+		if err := os.WriteFile(up, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execLog := filepath.Join(dir, "execs")
+	writeExec(t, filepath.Join(bin, "swaymsg"), `[ "$1" = -s ] || exit 2
+[ -e "$UP" ] || exit 1
+[ "$3" = -t ] && exit 0
+shift 2
+printf '%s\n' "$*" >>"$EXECS"
+`)
+	// Logged: the old bar must go before each new one.
+	writeExec(t, filepath.Join(bin, "pkill"), "printf 'pkill %s\\n' \"$*\" >>\"$EXECS\"\nexit 1\n")
+	cmd := exec.CommandContext(t.Context(), "bash", "vr-notice", "21000")
+	cmd.Env = []string{
+		"PATH=" + bin + ":" + os.Getenv("PATH"), "XDG_RUNTIME_DIR=" + dir, "UP=" + up, "EXECS=" + execLog,
+		"DIREWOLF_VR_HOST=" + host, "DIREWOLF_VR_NOTICE_RETRY=0.05",
+	}
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, errOut strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &errOut
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(in, stderr); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if b, _ := os.ReadFile(execLog); done(string(b)) {
+			break
+		}
+	}
+	_ = in.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Errorf("vr-notice: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("vr-notice wrote %q to stdout", stdout.String())
+	}
+	b, _ := os.ReadFile(execLog)
+	return string(b), errOut.String()
+}
+
+// The mirror shows the node's address and port, then WiVRn's PIN while it
+// pairs, and drops the PIN once pairing is off. Every line still reaches stderr.
+func TestVRNoticeShowsAddressAndPairingPIN(t *testing.T) {
+	stderr := "WiVRn v26.9 starting\nTo pair a new headset use PIN code: 012345\n"
+	want := "exec swaynag -y overlay -t warning -m 'VR headset: connect the WiVRn app to 10.10.10.34 port 21000 - pairing PIN 012345'"
+	execs, out := vrNotice(t, "10.10.10.34", stderr, true, func(e string) bool { return strings.Contains(e, want+"\n") })
+	if !strings.Contains(execs, "pkill -x swaynag\n"+want+"\n") {
+		t.Errorf("swaymsg execs:\n%s\nwant pkill -x swaynag, then %s", execs, want)
+	}
+	if out != stderr {
+		t.Errorf("stderr = %q, want wivrn-server's %q", out, stderr)
+	}
+	noPIN := func(e string) bool {
+		l := strings.Split(strings.TrimSpace(e), "\n")
+		if strings.HasPrefix(l[len(l)-1], "pkill") {
+			return false
+		}
+		return strings.Contains(e, "PIN") && !strings.Contains(l[len(l)-1], "PIN")
+	}
+	execs, _ = vrNotice(t, "10.10.10.34", stderr+"Headset pairing is disabled\n", true, noPIN)
+	lines := strings.Split(strings.TrimSpace(execs), "\n")
+	if last := lines[len(lines)-1]; strings.Contains(last, "PIN") || !strings.Contains(last, "10.10.10.34 port 21000'") {
+		t.Errorf("last bar after pairing = %q, want the address without a PIN", last)
+	}
+}
+
+// Nothing but an address and a 6-digit PIN reaches sway's exec (a shell).
+func TestVRNoticeKeepsOtherTextOutOfSwaysExec(t *testing.T) {
+	execs, _ := vrNotice(t, "1.2.3.4'; touch /tmp/x; '", "To pair a new headset use PIN code: 1'; id; '\n", true,
+		func(e string) bool { return e != "" })
+	if execs == "" {
+		t.Fatal("no bar shown")
+	}
+	for l := range strings.SplitSeq(strings.TrimSpace(execs), "\n") {
+		if strings.HasPrefix(l, "pkill ") {
+			continue
+		}
+		if strings.Count(l, "'") != 2 || strings.ContainsAny(strings.Trim(l[strings.Index(l, "'")+1:], "'"), ";,'") {
+			t.Errorf("exec %q carries quotes or separators", l)
+		}
+		if !strings.Contains(l, "connect the WiVRn app to the server IP port 21000'") {
+			t.Errorf("exec %q, want the placeholder address and no PIN", l)
+		}
+	}
+}
+
+// Before sway is up nothing is shown, and the notice never holds wivrn-server
+// up: it exits at the end of its input.
+func TestVRNoticeWaitsForSway(t *testing.T) {
+	start := time.Now()
+	execs, out := vrNotice(t, "10.0.0.1", "line one\nline two", false, func(string) bool { return time.Since(start) > 300*time.Millisecond })
+	if execs != "" {
+		t.Errorf("swaymsg exec ran without sway: %q", execs)
+	}
+	if out != "line one\nline two\n" {
+		t.Errorf("stderr = %q, want both lines (the last has no newline)", out)
+	}
+}
+
+// GoW's Steam startup sets WINEDLLOVERRIDES outright; the image makes it
+// append the App's own, and fails the build if that line moves.
+func TestVRImageAppendsAppDLLOverrides(t *testing.T) {
+	b, err := os.ReadFile("../Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"COPY --chmod=755 vr/startup-app.sh vr/vr-services vr/vr-notice /opt/direwolf/vr/",
+		"grep -qx 'export WINEDLLOVERRIDES=dxgi=n' /opt/direwolf/vr/steam-startup-app.sh",
+		`export WINEDLLOVERRIDES="dxgi=n${DIREWOLF_WINEDLLOVERRIDES:+;$DIREWOLF_WINEDLLOVERRIDES}"`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("Dockerfile lacks %s", want)
+		}
+	}
+	// The replacement line, run as the script would.
+	line := `export WINEDLLOVERRIDES="dxgi=n${DIREWOLF_WINEDLLOVERRIDES:+;$DIREWOLF_WINEDLLOVERRIDES}"; printf %s "$WINEDLLOVERRIDES"`
+	for env, want := range map[string]string{"": "dxgi=n", "dwrite=n,b": "dxgi=n;dwrite=n,b"} {
+		cmd := exec.CommandContext(t.Context(), "bash", "-c", line)
+		cmd.Env = []string{"DIREWOLF_WINEDLLOVERRIDES=" + env}
+		got, err := cmd.Output()
+		if err != nil || string(got) != want {
+			t.Errorf("DIREWOLF_WINEDLLOVERRIDES=%q: %q %v, want %q", env, got, err, want)
 		}
 	}
 }

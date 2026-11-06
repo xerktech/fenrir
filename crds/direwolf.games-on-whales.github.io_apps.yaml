@@ -91,6 +91,43 @@ spec:
                   host-networked session pod that is the node's loopback, open to every
                   process on the node, and two Sessions on one node collide on fixed ports.
                 type: boolean
+              stateMounts:
+                description: |-
+                  StateMounts are directories kept per User and App: each is the
+                  subdirectory mounts/<name> of the volumeClaimTemplate's PVC, mounted at
+                  mountPath in every App container. For an App whose home is shared (the
+                  Steam home) but which needs some state of its own, such as a VR
+                  server's pairing keys. The App can't mount that PVC itself: it holds
+                  Wolf's data too. Needs volumeClaimTemplate.
+                items:
+                  description: StateMount is one of an App's per-User directories
+                    (AppSpec.StateMounts).
+                  properties:
+                    mountPath:
+                      description: MountPath is an absolute path in the App's containers,
+                        not "/".
+                      maxLength: 4096
+                      pattern: ^/.*[^/]$
+                      type: string
+                    name:
+                      description: |-
+                        Name picks the directory, mounts/<name>, on the PVC: renaming one
+                        starts it empty.
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                  required:
+                  - mountPath
+                  - name
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: stateMounts mountPaths must be unique
+                  rule: self.all(a, self.exists_one(b, b.mountPath == a.mountPath))
               template:
                 description: |-
                   The operator copies this metadata onto the session pod, so a key the API
@@ -9280,6 +9317,8 @@ spec:
             - message: vrPort needs requireAppPod
               rule: '!has(self.vrPort) || !self.vrPort || (has(self.requireAppPod)
                 && self.requireAppPod)'
+            - message: stateMounts needs volumeClaimTemplate
+              rule: '!has(self.stateMounts) || size(self.stateMounts) == 0 || has(self.volumeClaimTemplate)'
         required:
         - spec
         type: object

@@ -1,0 +1,266 @@
+---
+# yaml-language-server: $schema=https://github.com/games-on-whaless/fenrir/raw/refs/heads/main/schemas/direwolf.games-on-whales.github.io/app_v1alpha1.json
+#
+# Assetto Corsa in VR (epic XERK-2656, XERK-2665; .claude/rules/vr.md). Launched
+# from Moonlight like any App: the Moonlight stream is a flat mirror of the game
+# on Wolf's lobby display, while a Quest running the WiVRn app connects to the VR
+# server in the App pod directly, by the node's IP and this Session's VR port.
+#
+# Connecting a headset (mDNS is off, so the headset can't find the server): a
+# bar across the top of the Moonlight mirror reads "VR headset: connect the WiVRn
+# app to <node IP> port <port>", plus " - pairing PIN <6 digits>" until a
+# headset is paired. In the WiVRn app add a server by that address and port and
+# enter the PIN. Once paired, only that headset connects (its key is kept per
+# User, below); WiVRn asks for a PIN again only if its key list is emptied.
+#
+# Seated height: WiVRn's seated origin is a fixed 1.6 m up (XERK-2689). Once the
+# car is on track (AC ignores input in the pit), press Ctrl+Space on the
+# Moonlight keyboard: AC recenters the seat at the headset's height.
+#
+# Deployed copy: xerktech/ArgoCD games/direwolf/app-*.yaml, image pinned by
+# digest (XERK-2666). It needs, all as the steam App has them:
+#   - the operator's --app-pod-host-dir (requireAppPod) and --vr-port-range
+#     (vrPort, XERK-2664);
+#   - the nvidia-icd and home-owner ConfigMaps and the steam-home-local and
+#     games-library PVCs (ArgoCD games/direwolf);
+#   - a User whose resources ceiling allows 24Gi of memory (16Gi was
+#     OOM-killed at Steam + AC start; XERK-2660).
+# One VR Session per GPU: a VR stream used ~50% of an RTX 3090's NVENC.
+#
+# Assetto Corsa itself, set up once in the shared Steam install (XERK-2660):
+#   - installed in the /games library (the per-User config mount below sits in
+#     its Proton prefix there), and launched flat once so the prefix exists;
+#   - pinned to Proton 9.0 (Steam > Properties > Compatibility);
+#   - AssettoCorsa.exe replaced by a copy of acs.exe: Content Manager can't run
+#     (.NET won't install under Proton, XERK-2690) and the Kunos launcher has no
+#     VR mode. A flat launch then starts acs.exe flat;
+#   - CSP 0.3.x, with winetricks corefonts and d3dcompiler_47 and a segoeui*.ttf
+#     substitute in the prefix (CSP 0.2.11 crashes in VR). This App sets the
+#     dwrite=n,b override CSP needs.
+# Steam's first launch may ask for AC's EULA and run "Processing Vulkan
+# shaders" (10+ minutes, skippable): answer both on the Moonlight mirror.
+apiVersion: direwolf.games-on-whales.github.io/v1alpha1
+kind: App
+metadata:
+  name: assetto-corsa-vr
+  namespace: direwolf
+spec:
+  id: 20
+  title: Assetto Corsa VR
+  # A plain 600x800 cover drawn for this example (headset and title).
+  appAssetWebP: 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
+  isHDRSupported: false
+  # WiVRn and Steam need the user-namespaced App pod, off the host network
+  # (XERK-1920, XERK-2692), and vrPort's hostPort lives there.
+  requireAppPod: true
+  # One port per Session from --vr-port-range, as DIREWOLF_VR_PORT: WiVRn's TCP
+  # and UDP, a hostPort on the node (XERK-2664).
+  vrPort: true
+  # The game renders, WiVRn encodes both eyes (NVENC) and Wolf encodes the
+  # mirror, all on this one card. The spike ran AC + WiVRn in 12Gi.
+  gpu:
+    memory: 12Gi
+    deviceClassName: gpu.nvidia.com
+  # The per-User (and App) PVC that stateMounts live on.
+  volumeClaimTemplate:
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+  # Kept per User, never in the shared Steam home:
+  #   - wivrn: WiVRn's config and paired headsets' keys; openxr, openvr: the
+  #     active runtime and openvrpaths.vrpath WiVRn writes while it runs (in the
+  #     shared home every Proton game would find a VR runtime). The image refuses
+  #     to start unless each of these three is a mount.
+  #   - ac-documents: AC's Documents/Assetto Corsa (cfg/video.ini in VR mode,
+  #     CSP's config in cfg/extension, setups), so flat launches keep the shared
+  #     prefix's flat video.ini. Seeded from the shared copy on first use.
+  stateMounts:
+  - name: wivrn
+    mountPath: /home/retro/.config/wivrn
+  - name: openxr
+    mountPath: /home/retro/.config/openxr
+  - name: openvr
+    mountPath: /home/retro/.config/openvr
+  - name: ac-documents
+    mountPath: /games/steamapps/compatdata/244210/pfx/drive_c/users/steamuser/Documents/Assetto Corsa
+  template:
+    spec:
+      volumes:
+      # The Steam home and game library every Steam App shares (ArgoCD pvc.yaml).
+      - name: steam-home
+        persistentVolumeClaim:
+          claimName: steam-home-local
+      - name: games
+        persistentVolumeClaim:
+          claimName: games-library
+      # NVIDIA's Vulkan ICD and EGL vendor manifests: the GPU claim injects the
+      # libraries only, and without them WiVRn composites on lavapipe and NVENC
+      # fails with CUDA error 999 (XERK-2660).
+      - name: nvidia-icd
+        configMap:
+          name: nvidia-icd
+      # Hands root-created home entries back to PUID (ArgoCD).
+      - name: home-owner
+        configMap:
+          name: home-owner
+      # Steam's Chromium UI fills the 64 MiB default /dev/shm.
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 4Gi
+      containers:
+      - name: app
+        # images/gow-nvidia32 target vr: the steam image plus WiVRn, xrizer and
+        # OpenComposite. Pin by digest where deployed.
+        image: ghcr.io/xerktech/fenrir/vr:main
+        resources:
+          requests:
+            cpu: "8"
+            memory: 24Gi
+          limits:
+            cpu: "8"
+            memory: 24Gi
+        # As the steam App: Proton's bwrap in the user-namespaced App pod. No
+        # SYS_ADMIN, NET_ADMIN, hostPath or privilege; WiVRn needs none.
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          allowPrivilegeEscalation: true
+          procMount: Unmasked
+          capabilities:
+            add: ["SYS_NICE", "SYS_PTRACE", "NET_RAW"]
+          seccompProfile:
+            type: Unconfined
+          appArmorProfile:
+            type: Unconfined
+        env:
+        - name: RUN_SWAY
+          value: "true"
+        - name: GBM_BACKENDS_PATH
+          value: /usr/lib/gbm:/usr/lib/x86_64-linux-gnu/gbm
+        # OpenComposite: AC's recenter (Ctrl+Space) was verified on it, and it
+        # looked better than xrizer in the spike.
+        - name: DIREWOLF_VR_OPENVR
+          value: opencomposite
+        # CSP's dwrite.dll (Steam passes it to Proton with GoW's own).
+        - name: DIREWOLF_WINEDLLOVERRIDES
+          value: dwrite=n,b
+        # The address the headset dials, shown on the mirror: the node's, as the
+        # VR port is a hostPort there.
+        - name: DIREWOLF_VR_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        volumeMounts:
+        - name: steam-home
+          mountPath: /home/retro
+        - name: games
+          mountPath: /games
+        # The shared prefix's AC Documents, read-only, for seeding the per-User
+        # copy that hides it at /games.
+        - name: games
+          mountPath: /run/direwolf-vr/games
+          readOnly: true
+        - name: nvidia-icd
+          mountPath: /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+          subPath: 10_nvidia.json
+          readOnly: true
+        - name: nvidia-icd
+          mountPath: /etc/vulkan/icd.d/nvidia_icd.json
+          subPath: nvidia_icd.json
+          readOnly: true
+        - name: home-owner
+          mountPath: /etc/cont-init.d/zz-home-owner.sh
+          subPath: zz-home-owner.sh
+          readOnly: true
+        - name: dshm
+          mountPath: /dev/shm
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          trap "exit 0" SIGINT SIGTERM
+          # Game containers wait for Wolf's display, or the stream never starts.
+          while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; do echo "Waiting for wayland display..." >&2; sleep 1; done
+
+          prefix=steamapps/compatdata/244210/pfx/drive_c/users/steamuser/Documents/Assetto\ Corsa
+          if [ ! -f /games/steamapps/appmanifest_244210.acf ]; then
+            echo "assetto-corsa-vr: Assetto Corsa is not installed in /games; install it there and launch it flat once" >&2
+            exit 1
+          fi
+          # The stateMounts sit in volumes any game can write (the shared home,
+          # /games), and the runtime follows a link planted at a mount point:
+          # one at ~/.config/openvr -> /etc/cont-init.d put this User's files
+          # there, and GoW's entrypoint ran them as root (QA). So each must be
+          # a mount exactly where it is named, checked before the entrypoint
+          # runs, or the session ends.
+          for d in "$HOME/.config/wivrn" "$HOME/.config/openxr" "$HOME/.config/openvr" "/games/$prefix"; do
+            if [ "$(realpath -e -- "$d")" != "$d" ] || ! mountpoint -q -- "$d"; then
+              echo "assetto-corsa-vr: $d is not this User's mount (a link in the shared volume?); refusing to start" >&2
+              exit 1
+            fi
+            # Created root-owned; Steam and Wine run as PUID. Only the mount
+            # point: everything below it is the User's own.
+            chown -h "$PUID:$PGID" -- "$d"
+          done
+          # As PUID: seed cfg/ from the shared prefix once, then force VR mode.
+          # Lines of video.ini are kept; only the two keys are set.
+          gosu "$PUID:$PGID" python3 -I - "/run/direwolf-vr/games/$prefix/cfg" "/games/$prefix/cfg" <<'PY'
+          import os, shutil, sys
+          shared, cfg = sys.argv[1], sys.argv[2]
+          if not os.path.lexists(cfg):
+              if os.path.isdir(shared) and not os.path.islink(shared):
+                  # Links stay behind: in the shared prefix they point into
+                  # space every game can write.
+                  shutil.copytree(shared, cfg, ignore=lambda d, names: [n for n in names if os.path.islink(os.path.join(d, n))])
+              else:
+                  os.mkdir(cfg)
+          path = os.path.join(cfg, "video.ini")
+          want = {"VIDEO": {"FULLSCREEN": "0"}, "CAMERA": {"MODE": "OPENVR"}}
+          # A link is replaced, not followed. Bytes that aren't UTF-8 are kept
+          # as they were; a BOM is dropped (AC writes plain ASCII).
+          lines = []
+          if os.path.isfile(path) and not os.path.islink(path):
+              with open(path, newline="", encoding="utf-8-sig", errors="surrogateescape") as f:
+                  lines = f.read().splitlines()
+          out, section, done = [], None, set()
+          def finish(sec):
+              for k, v in want.get(sec, {}).items():
+                  if (sec, k) not in done:
+                      out.append(f"{k}={v}")
+                      done.add((sec, k))
+          for line in lines:
+              s = line.strip()
+              if s.startswith("[") and s.endswith("]"):
+                  finish(section)
+                  section = s[1:-1].strip().upper()
+              elif "=" in s and section in want:
+                  k = s.split("=", 1)[0].strip().upper()
+                  if k in want[section]:
+                      if (section, k) in done:
+                          continue
+                      line = f"{k}={want[section][k]}"
+                      done.add((section, k))
+              out.append(line)
+          finish(section)
+          for sec in want:
+              if any((sec, k) not in done for k in want[sec]):
+                  out.append(f"[{sec}]")
+                  finish(sec)
+          tmp = path + ".direwolf-tmp"
+          try:
+              os.unlink(tmp)
+          except FileNotFoundError:
+              pass
+          with open(tmp, "x", newline="", encoding="utf-8", errors="surrogateescape") as f:
+              f.write("\r\n".join(out) + "\r\n")
+          os.replace(tmp, path)
+          PY
+
+          # GoW's Steam startup runs `steam ${STEAM_STARTUP_FLAGS}`: Big Picture
+          # with AC launched (AssettoCorsa.exe is acs.exe, see above).
+          export STEAM_STARTUP_FLAGS="-bigpicture -applaunch 244210"
+          exec /entrypoint.sh

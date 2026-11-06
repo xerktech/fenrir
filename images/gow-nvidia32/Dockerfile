@@ -340,9 +340,14 @@ COPY --from=vr-xrizer /out/ /
 # moves beside the vr scripts (startup-app.sh finds its siblings by its own
 # path) and ours takes its place.
 COPY --chmod=644 vr/dbus-session.conf /opt/direwolf/vr/
-COPY --chmod=755 vr/startup-app.sh vr/vr-services /opt/direwolf/vr/
+COPY --chmod=755 vr/startup-app.sh vr/vr-services vr/vr-notice /opt/direwolf/vr/
+# GoW's Steam startup sets WINEDLLOVERRIDES outright, so an App's own (CSP's
+# dwrite=n,b for Assetto Corsa) never reached the game: it now appends
+# DIREWOLF_WINEDLLOVERRIDES. The grep fails the build if a GoW bump moves it.
 RUN chmod 0755 /opt/direwolf /opt/direwolf/vr \
  && mv /opt/gow/startup-app.sh /opt/direwolf/vr/steam-startup-app.sh \
+ && grep -qx 'export WINEDLLOVERRIDES=dxgi=n' /opt/direwolf/vr/steam-startup-app.sh \
+ && sed -i 's|^export WINEDLLOVERRIDES=dxgi=n$|export WINEDLLOVERRIDES="dxgi=n${DIREWOLF_WINEDLLOVERRIDES:+;$DIREWOLF_WINEDLLOVERRIDES}"|' /opt/direwolf/vr/steam-startup-app.sh \
  && ln -s /opt/direwolf/vr/startup-app.sh /opt/gow/startup-app.sh
 # No setcap anywhere (with file caps gdbus ignores DBUS_SESSION_BUS_ADDRESS),
 # and nothing may link-fail at run time.
@@ -352,7 +357,7 @@ RUN ldconfig \
     ldd "$f" >/tmp/ldd || exit 1; ! grep 'not found' /tmp/ldd || { echo "$f: missing libraries" >&2; exit 1; }; \
   done && rm /tmp/ldd \
  && python3 -I -c 'import os,sys; bad=[os.path.join(d,f) for r in ("/usr/local","/opt") for d,_,fs in os.walk(r) for f in fs if not os.path.islink(os.path.join(d,f)) and "security.capability" in os.listxattr(os.path.join(d,f))]; bad and sys.exit("file capabilities on %s" % bad)' \
- && for c in pipewire pipewire-pulse wireplumber dbus-run-session ss mountpoint setsid; do \
+ && for c in pipewire pipewire-pulse wireplumber dbus-run-session ss mountpoint setsid swaymsg swaynag pkill; do \
     command -v "$c" >/dev/null || { echo "no $c" >&2; exit 1; }; \
   done \
  && test -d /usr/share/pipewire && test -f /usr/share/pipewire/client.conf \
