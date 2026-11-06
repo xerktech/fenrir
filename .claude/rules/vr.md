@@ -138,9 +138,11 @@ paths:
     point too, then a game's link in /games (QA reproduced it with runc; both stages test it).
   - The command still checks, before the entrypoint, that each is a mount exactly where named
     (`realpath -e`, `mountpoint`), and chowns with `-h`.
-  - Its command seeds that cfg from `Assetto Corsa.flat` (a second, read-only `games` mount)
+  - Its command seeds that cfg from `Assetto Corsa.flat` (a second, read-only `steam-home` mount)
     once, skipping links, then forces `[VIDEO] FULLSCREEN=0`, `[CAMERA] MODE=OPENVR`.
-  - Assumes AC in the /games library, launched flat once, or the command ends the session.
+  - Assumes AC in Steam's default library in the shared home
+    (`~/.steam/debian-installation/steamapps`), launched flat once, or the command ends the
+    session. The steam image's flat link and the example name that path: change them together.
   - The shared install keeps AssettoCorsa.exe = acs.exe (CM and the Kunos launcher can't run),
     and the Proton 9 pin; `steam -applaunch 244210` then starts acs.exe in either mode.
   - Recenter: Ctrl+Space from the Moonlight keyboard, on track. A pad/wheel binding is untested.

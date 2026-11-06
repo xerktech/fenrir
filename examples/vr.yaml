@@ -21,15 +21,16 @@
 # digest (XERK-2666). It needs, all as the steam App has them:
 #   - the operator's --app-pod-host-dir (requireAppPod) and --vr-port-range
 #     (vrPort, XERK-2664);
-#   - the nvidia-icd and home-owner ConfigMaps and the steam-home-local and
-#     games-library PVCs (ArgoCD games/direwolf);
+#   - the nvidia-icd and home-owner ConfigMaps and the steam-home-local PVC
+#     (ArgoCD games/direwolf);
 #   - a User whose resources ceiling allows 24Gi of memory (16Gi was
 #     OOM-killed at Steam + AC start; XERK-2660).
 # One VR Session per GPU: a VR stream used ~50% of an RTX 3090's NVENC.
 #
 # Assetto Corsa itself, set up once in the shared Steam install (XERK-2660):
-#   - installed in the /games library (the per-User config link below sits in
-#     its Proton prefix there), and launched flat once so the prefix exists;
+#   - installed in Steam's default library in the shared home, where every
+#     Steam game goes (the per-User config link below sits in its Proton
+#     prefix there), and launched flat once so the prefix exists;
 #   - flat sessions on the steam image (it links them to the flat config):
 #     after the first VR launch, flat AC from any other image (the Library)
 #     finds no Documents folder;
@@ -94,13 +95,11 @@ spec:
   template:
     spec:
       volumes:
-      # The Steam home and game library every Steam App shares (ArgoCD pvc.yaml).
+      # The Steam home every Steam App shares, AC's install with it (ArgoCD
+      # pvc.yaml). No games volume: nothing here is in /games.
       - name: steam-home
         persistentVolumeClaim:
           claimName: steam-home-local
-      - name: games
-        persistentVolumeClaim:
-          claimName: games-library
       # NVIDIA's Vulkan ICD and EGL vendor manifests: the GPU claim injects the
       # libraries only, and without them WiVRn composites on lavapipe and NVENC
       # fails with CUDA error 999 (XERK-2660).
@@ -162,12 +161,10 @@ spec:
         volumeMounts:
         - name: steam-home
           mountPath: /home/retro
-        - name: games
-          mountPath: /games
         # The shared prefix's flat AC Documents, read-only, for seeding the
         # per-User copy.
-        - name: games
-          mountPath: /run/direwolf-vr/games
+        - name: steam-home
+          mountPath: /run/direwolf-vr/home
           readOnly: true
         - name: nvidia-icd
           mountPath: /usr/share/glvnd/egl_vendor.d/10_nvidia.json
@@ -192,10 +189,13 @@ spec:
           # Game containers wait for Wolf's display, or the stream never starts.
           while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; do echo "Waiting for wayland display..." >&2; sleep 1; done
 
-          docs=/games/steamapps/compatdata/244210/pfx/drive_c/users/steamuser/Documents/Assetto\ Corsa
+          # Steam's default library, in the shared home (the steam image's
+          # flat link names the same path).
+          apps=/home/retro/.steam/debian-installation/steamapps
+          docs=$apps/compatdata/244210/pfx/drive_c/users/steamuser/Documents/Assetto\ Corsa
           state=/srv/direwolf/state
-          if [ ! -f /games/steamapps/appmanifest_244210.acf ]; then
-            echo "assetto-corsa-vr: Assetto Corsa is not installed in /games; install it there and launch it flat once" >&2
+          if [ ! -f "$apps/appmanifest_244210.acf" ]; then
+            echo "assetto-corsa-vr: Assetto Corsa is not installed in Steam's library in the home ($apps); install it there and launch it flat once" >&2
             exit 1
           fi
           # The operator mounts the stateMounts under $state, outside every
@@ -242,7 +242,7 @@ spec:
           LINK
           # As PUID: seed cfg/ from the shared prefix once, then force VR mode.
           # Lines of video.ini are kept; only the two keys are set.
-          gosu "$PUID:$PGID" python3 -I - "/run/direwolf-vr/${docs#/games/}.flat/cfg" "$state/ac-documents/cfg" <<'PY'
+          gosu "$PUID:$PGID" python3 -I - "/run/direwolf-vr/home/${docs#/home/retro/}.flat/cfg" "$state/ac-documents/cfg" <<'PY'
           import os, shutil, sys
           shared, cfg = sys.argv[1], sys.argv[2]
           if not os.path.lexists(cfg):
