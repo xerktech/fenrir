@@ -384,7 +384,7 @@ func TestVRExampleACPathsAgreeWithSteamImage(t *testing.T) {
 	c := app.Spec.Template.Spec.Containers[0]
 	cmd := strings.Join(c.Command, "\n")
 	var apps, docs string
-	for _, line := range strings.Split(cmd, "\n") {
+	for _, line := range strings.SplitSeq(cmd, "\n") {
 		line = strings.TrimSpace(line)
 		if v, ok := strings.CutPrefix(line, "apps="); ok {
 			apps = v
