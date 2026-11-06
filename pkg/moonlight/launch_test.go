@@ -1114,8 +1114,10 @@ func TestCancelLeavesVRSession(t *testing.T) {
 	}
 	f.server.PodLister = generic.NewLister[*corev1.Pod](pods).Namespaced(testNamespace)
 	user := &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "alice", Namespace: testNamespace}}
-	if got, _ := f.server.PodLister.List(moonlightPodsOf(user)); len(got) != 0 {
-		t.Errorf("serverinfo's pods include the VR pod: %v", got)
+	info := httptest.NewRecorder()
+	f.server.serverInfoHandler(info, httptest.NewRequestWithContext(context.WithValue(t.Context(), userContextKey{}, user), http.MethodGet, "/serverinfo", http.NoBody))
+	if body := info.Body.String(); !strings.Contains(body, "SUNSHINE_SERVER_FREE") {
+		t.Errorf("serverinfo with only a VR pod = %s, want the server free", body)
 	}
 
 	start := time.Now()
@@ -1131,10 +1133,10 @@ func TestCancelLeavesVRSession(t *testing.T) {
 		t.Errorf("VR Session: %v", err)
 	}
 
-	if err := f.server.stopSessionsForUser(t.Context(), user, false, false); err != nil {
-		t.Fatal(err)
+	if code, resp := f.launch(t, "alice"); code != http.StatusOK || resp.StatusCode != http.StatusOK {
+		t.Fatalf("launch = %d / %d %q", code, resp.StatusCode, resp.StatusMessage)
 	}
-	if n := f.sessionCount(t); n != 0 {
-		t.Errorf("a launch left %d sessions, want the VR one replaced", n)
+	if _, err := f.client.DirewolfV1alpha1().Sessions(testNamespace).Get(t.Context(), vr.Name, metav1.GetOptions{}); err == nil {
+		t.Error("a Moonlight launch kept the user's VR Session")
 	}
 }

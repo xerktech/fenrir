@@ -78,8 +78,9 @@ How the operator reads the properties:
   serving cert, the same scheme as wolf-agent's (`agent_token.go`).
 - The game never sees the token, but it shares the bus and could report false values. That only
   keeps its own Session alive or ends it, which the App can already do.
-- An agent the operator can't reach changes no status. The pod's container exits still end the
-  Session, as they do today.
+- An agent the operator can't reach counts as a disconnect: the grace period runs, and an answer
+  showing the headset connected stops it. Otherwise a hung bus or WiVRn would keep the Session (and
+  its GPU) forever. Container exits still end the Session, as they do today.
 
 ### Disconnect and grace period
 

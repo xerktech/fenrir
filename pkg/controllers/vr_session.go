@@ -64,6 +64,7 @@ const (
 	vrWaitingForHeadset = "WaitingForHeadset"
 	vrHeadsetConnected  = "Connected"
 	vrHeadsetGone       = "Disconnected"
+	vrAgentLost         = "AgentUnreachable"
 	vrConditionSuccess  = "Success"
 	// vrAgentTokenVolume is the Session's token Secret, as buildPod mounts it.
 	vrAgentTokenVolume = "wolf-agent-token"
@@ -199,19 +200,23 @@ func (c *SessionController) finishVRReconcile(ctx context.Context, session *v1al
 		})
 	}
 
-	ready := podError == nil && pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && podReady(pod)
-	var pollErr error
+	// Polled from the first time the pod is ready; after that also while it
+	// is not, since vr-agent's readiness is WiVRn answering.
+	started := meta.FindStatusCondition(session.Status.Conditions, v1alpha1types.SessionHeadsetConnectedCondition) != nil
+	ready := podError == nil && pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && (started || podReady(pod))
 	if ready {
-		pollErr = c.reconcileVRHeadset(ctx, session, pod)
+		pollErr := c.reconcileVRHeadset(ctx, session, pod)
 		switch {
 		case stderrors.Is(pollErr, errSessionEnded):
 			return nil
 		case stderrors.Is(pollErr, errEndSessionFailed):
 			return pollErr
 		case pollErr != nil:
-			// An agent we can't reach changes nothing: container exits still
-			// end the Session, and the grace period still runs out.
+			// A headset we can't see is gone: the grace period runs, and an
+			// answer showing it connected stops it. Nothing else would end a
+			// Session whose bus or WiVRn hung (the game can move the bus).
 			klog.Warningf("Session %s/%s: %v", session.Namespace, session.Name, pollErr)
+			lostVRAgent(session, pollErr)
 		}
 	}
 
@@ -281,6 +286,22 @@ func (c *SessionController) reconcileVRHeadset(ctx context.Context, session *v1a
 	}
 	meta.SetStatusCondition(&status.Conditions, stream)
 	return nil
+}
+
+// lostVRAgent records that vr-agent could not say whether a headset is
+// connected: as a disconnect, so the grace period ends a Session that stays
+// unreadable.
+func lostVRAgent(session *v1alpha1types.Session, err error) {
+	status := &session.Status
+	if meta.IsStatusConditionTrue(status.Conditions, v1alpha1types.SessionHeadsetConnectedCondition) {
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type: v1alpha1types.SessionHeadsetConnectedCondition, Status: metav1.ConditionFalse, Reason: vrAgentLost,
+			Message: "vr-agent did not answer: " + err.Error(),
+		})
+	}
+	if status.DisconnectedAt == nil {
+		status.DisconnectedAt = new(metav1.Now())
+	}
 }
 
 // pollVRAgent asks the pod's vr-agent for the headset's state, pinned to the

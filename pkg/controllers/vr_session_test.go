@@ -307,13 +307,21 @@ func TestVRSessionFollowsHeadset(t *testing.T) {
 		t.Fatalf("connected: %+v disconnectedAt %v", s.Status.Conditions, s.Status.DisconnectedAt)
 	}
 
-	// An agent we can't reach changes nothing.
+	// An agent we can't reach counts as a disconnect; its next answer
+	// showing the headset clears it.
 	agent.set(VRStatus{}, true)
 	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
 		t.Fatal(err)
 	}
+	if c := headset(s); c.Status != metav1.ConditionFalse || c.Reason != vrAgentLost || s.Status.DisconnectedAt == nil {
+		t.Fatalf("unreachable agent: %+v disconnectedAt %v; want the grace period running", c, s.Status.DisconnectedAt)
+	}
+	agent.set(VRStatus{HeadsetConnected: true}, false)
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatal(err)
+	}
 	if headset(s).Status != metav1.ConditionTrue || s.Status.DisconnectedAt != nil {
-		t.Fatalf("unreachable agent changed status: %+v", s.Status)
+		t.Fatalf("agent back: %+v", s.Status)
 	}
 
 	agent.set(VRStatus{}, false)
@@ -433,5 +441,32 @@ func TestClaimRecordedPortsVROnly(t *testing.T) {
 	other := f.session("blake-1", "blake")
 	if err := f.sc.allocatePorts(t.Context(), other); err != nil || other.Status.Ports.HTTP != 20000 {
 		t.Errorf("next Moonlight Session got %+v, %v; want the first block (the VR Session holds none)", other.Status.Ports, err)
+	}
+}
+
+// A started VR Session whose pod goes NotReady (vr-agent's readiness is WiVRn
+// answering) is still polled, and one that stays unreadable is ended after
+// the grace period: nothing else would ever end it (QA, XERK-2668).
+func TestVRSessionEndsWhenAgentStaysUnreachable(t *testing.T) {
+	f, s, agent := vrLifecycle(t, func(p *corev1.Pod) *corev1.Pod {
+		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+		return p
+	})
+	meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+		Type: v1alpha1types.SessionHeadsetConnectedCondition, Status: metav1.ConditionTrue, Reason: vrHeadsetConnected,
+	})
+	agent.set(VRStatus{}, true)
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatal(err)
+	}
+	if len(agent.tokens) == 0 || s.Status.DisconnectedAt == nil || headset(s).Status == metav1.ConditionTrue {
+		t.Fatalf("NotReady started pod: polled %d times, status %+v", len(agent.tokens), s.Status)
+	}
+	s.Status.DisconnectedAt = &metav1.Time{Time: time.Now().Add(-f.sc.DisconnectGracePeriod - time.Second)}
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatal(err)
+	}
+	if f.sessionExists(t, s.Name) {
+		t.Error("a VR Session nobody can read was kept past the grace period")
 	}
 }

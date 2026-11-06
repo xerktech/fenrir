@@ -40,6 +40,7 @@ if [[ -e $bus_dir || -L $bus_dir ]]; then
   [[ ! -L $bus_dir && -d $bus_dir && -w $bus_dir ]] ||
     die "$bus_dir must be the writable bus directory the operator mounts"
   # A socket left by an earlier start would stop the bus from listening.
+  [[ -L $bus_dir/bus || ! -d $bus_dir/bus ]] || die "$bus_dir/bus is a directory; it must be free for the session bus"
   rm -f -- "$bus_dir/bus"
   bus_config=$here/dbus-session-agent.conf
 fi
