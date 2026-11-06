@@ -76,10 +76,14 @@ type AppSpecApplyConfiguration struct {
 	VRPort *bool `json:"vrPort,omitempty"`
 	// StateMounts are directories kept per User and App: each is the
 	// subdirectory mounts/<name> of the volumeClaimTemplate's PVC, mounted at
-	// mountPath in every App container. For an App whose home is shared (the
-	// Steam home) but which needs some state of its own, such as a VR
-	// server's pairing keys. The App can't mount that PVC itself: it holds
-	// Wolf's data too. Needs volumeClaimTemplate.
+	// /srv/direwolf/state/<name> in every App container. For an App whose
+	// home is shared (the Steam home) but which needs some state of its own,
+	// such as a VR server's pairing keys. The App can't mount that PVC itself:
+	// it holds Wolf's data too. Needs volumeClaimTemplate.
+	//
+	// The path is fixed, never in a volume (XERK-2713): the runtime follows
+	// links at a mount point, so one in a volume a game writes could put the
+	// User's directory over /etc. The image links its own paths there.
 	StateMounts []StateMountApplyConfiguration `json:"stateMounts,omitempty"`
 }
 

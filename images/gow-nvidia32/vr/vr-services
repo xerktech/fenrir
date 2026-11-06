@@ -8,7 +8,7 @@ set -euo pipefail
 port=$1
 audio=$2
 here=$(dirname "$(readlink -f "$0")")
-config=$HOME/.config/wivrn/config.json
+config=${DIREWOLF_STATE_ROOT:-/srv/direwolf/state}/wivrn/config.json
 # Seconds between checks, and failed checks in a row before a restart: the
 # first restart comes no sooner than interval*misses, which covers start-up.
 interval=${DIREWOLF_VR_CHECK_INTERVAL:-5}

@@ -44,8 +44,8 @@ paths:
 - `/opt/gow/startup-app.sh` links to `vr/startup-app.sh`; GoW's Steam startup moves beside it as
   `steam-startup-app.sh`. Siblings are found by the script's own path (tests copy them).
 - It refuses to start (the session ends) without `DIREWOLF_VR_PORT` (XERK-2664 sets it on App
-  containers when `spec.vrPort`), or unless `~/.config/{wivrn,openxr,openvr}` are each a mount:
-  the App mounts a per-user volume there. It never falls back to the shared home or port 9757.
+  containers when `spec.vrPort`), or unless `/srv/direwolf/state/{wivrn,openxr,openvr}` are each
+  a mount (the App's `spec.stateMounts`). It never falls back to the shared home or port 9757.
 - startup-app.sh rewrites WiVRn's `config.json` whole at every start, keeping no user key: WiVRn
   parses keys in one try block, and one of the wrong type would leave the port on 9757.
 - PipeWire, WirePlumber and pipewire-pulse run with `XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR/vr-audio`:
@@ -119,17 +119,26 @@ paths:
   fails CSP's weather shaders: black scene), with `WINEDLLOVERRIDES=dwrite=n,b`.
 - Vanilla AC takes no Quest controller input; CSP 0.3.x gives controller and hand control.
 - The App is `examples/vr.yaml` (XERK-2665; deployed by digest from ArgoCD, XERK-2666).
-  - Per-User state is `spec.stateMounts` on its `volumeClaimTemplate` PVC: the three VR config
-    dirs, and AC's `Documents/Assetto Corsa` in the /games prefix (VR `video.ini`, CSP config).
-    The shared prefix keeps its flat `video.ini`, so flat launches stay flat.
-  - The runtime follows a link planted at a mount point: those paths are in volumes every game
-    writes, and QA had `~/.config/openvr -> /etc/cont-init.d` run a game's script as root. So the
-    command, before the entrypoint, ends the session unless each is a mount exactly where named
-    (`realpath -e`, `mountpoint`), and chowns with `-h`. Residual: anything that runs earlier.
-  - Its command seeds that cfg from the shared prefix (a second, read-only `games` mount) once,
-    skipping links, then forces `[VIDEO] FULLSCREEN=0`, `[CAMERA] MODE=OPENVR`.
-  - Assumes AC in the /games library, launched flat once: a stateMount's missing mount point is
-    created by the runtime as root, which in a missing compatdata dir would break the prefix.
+  - Per-User state is `spec.stateMounts` on its `volumeClaimTemplate` PVC, at
+    `/srv/direwolf/state/<name>` (XERK-2713): the three VR config dirs, and AC's
+    `Documents/Assetto Corsa` (VR `video.ini`, CSP config).
+  - Never mount them in a volume a game writes (the shared home, /games): runc follows a link at a
+    mount point, and QA had `~/.config/openvr -> /etc/cont-init.d` run a game's script as root.
+    The shared paths are links to the fixed root instead, which each container resolves to its
+    own mount. A game replacing one redirects only file access as uid 1000, which the shared
+    home already allows.
+  - `startup-app.sh` links `~/.config/{wivrn,openxr,openvr}` there; in a flat session they
+    dangle, so no Proton game finds a VR runtime. Pressure-vessel shares `/srv` like the home
+    (steam-runtime-tools `wrap-home.c`), so games resolve the links.
+  - The command makes the prefix's `Documents/Assetto Corsa` a link to `ac-documents` and moves
+    the flat copy to `Assetto Corsa.flat`; the steam image links that path to `.flat`, so flat
+    sessions keep the flat config. The vr image removes that image link: under the root runc
+    would follow it into /games. Flat AC outside the steam image (the Library) finds nothing.
+  - The command still checks, before the entrypoint, that each is a mount exactly where named
+    (`realpath -e`, `mountpoint`), and chowns with `-h`.
+  - Its command seeds that cfg from `Assetto Corsa.flat` (a second, read-only `games` mount)
+    once, skipping links, then forces `[VIDEO] FULLSCREEN=0`, `[CAMERA] MODE=OPENVR`.
+  - Assumes AC in the /games library, launched flat once, or the command ends the session.
   - The shared install keeps AssettoCorsa.exe = acs.exe (CM and the Kunos launcher can't run),
     and the Proton 9 pin; `steam -applaunch 244210` then starts acs.exe in either mode.
   - Recenter: Ctrl+Space from the Moonlight keyboard, on track. A pad/wheel binding is untested.

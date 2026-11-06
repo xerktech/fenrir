@@ -69,25 +69,18 @@
           "type": "boolean"
         },
         "stateMounts": {
-          "description": "StateMounts are directories kept per User and App: each is the\nsubdirectory mounts/<name> of the volumeClaimTemplate's PVC, mounted at\nmountPath in every App container. For an App whose home is shared (the\nSteam home) but which needs some state of its own, such as a VR\nserver's pairing keys. The App can't mount that PVC itself: it holds\nWolf's data too. Needs volumeClaimTemplate.",
+          "description": "StateMounts are directories kept per User and App: each is the\nsubdirectory mounts/<name> of the volumeClaimTemplate's PVC, mounted at\n/srv/direwolf/state/<name> in every App container. For an App whose\nhome is shared (the Steam home) but which needs some state of its own,\nsuch as a VR server's pairing keys. The App can't mount that PVC itself:\nit holds Wolf's data too. Needs volumeClaimTemplate.\n\nThe path is fixed, never in a volume (XERK-2713): the runtime follows\nlinks at a mount point, so one in a volume a game writes could put the\nUser's directory over /etc. The image links its own paths there.",
           "items": {
             "description": "StateMount is one of an App's per-User directories (AppSpec.StateMounts).",
             "properties": {
-              "mountPath": {
-                "description": "MountPath is an absolute path in the App's containers, not \"/\".",
-                "maxLength": 4096,
-                "pattern": "^/.*[^/]$",
-                "type": "string"
-              },
               "name": {
-                "description": "Name picks the directory, mounts/<name>, on the PVC: renaming one\nstarts it empty.",
+                "description": "Name picks the directory, mounts/<name>, on the PVC, and where it is\nmounted, /srv/direwolf/state/<name>: renaming one starts it empty.",
                 "maxLength": 63,
                 "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
                 "type": "string"
               }
             },
             "required": [
-              "mountPath",
               "name"
             ],
             "type": "object",
@@ -98,13 +91,7 @@
           "x-kubernetes-list-map-keys": [
             "name"
           ],
-          "x-kubernetes-list-type": "map",
-          "x-kubernetes-validations": [
-            {
-              "message": "stateMounts mountPaths must be unique",
-              "rule": "self.all(a, self.exists_one(b, b.mountPath == a.mountPath))"
-            }
-          ]
+          "x-kubernetes-list-type": "map"
         },
         "template": {
           "description": "The operator copies this metadata onto the session pod, so a key the API\nserver rejects there would fail every Session of the App: reject it here.\nLabel values get a schema pattern from hack/update-codegen.sh instead:\nCEL over unbounded map values exceeds the CRD cost budget.\nPlain regexes, not CEL's format library, which needs a newer API server\nthan the chart's kubeVersion floor.",

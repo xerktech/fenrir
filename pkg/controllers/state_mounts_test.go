@@ -64,12 +64,12 @@ func TestVRExampleBuildsWithStateMounts(t *testing.T) {
 		for _, m := range app.Spec.StateMounts {
 			var got *corev1.VolumeMount
 			for i := range c.VolumeMounts {
-				if c.VolumeMounts[i].MountPath == m.MountPath {
+				if c.VolumeMounts[i].MountPath == path.Join(stateMountsRoot, m.Name) {
 					got = &c.VolumeMounts[i]
 				}
 			}
 			if got == nil || got.Name != "wolf-data" || got.SubPath != path.Join("mounts", m.Name) || got.ReadOnly {
-				t.Errorf("container %s at %s = %+v, want wolf-data subPath mounts/%s", c.Name, m.MountPath, got, m.Name)
+				t.Errorf("container %s stateMount %s = %+v, want wolf-data subPath mounts/%s", c.Name, m.Name, got, m.Name)
 			}
 		}
 	}
@@ -115,19 +115,43 @@ func TestVRExampleAsksForNothingForbidden(t *testing.T) {
 	}
 }
 
-// A stateMount at a path the operator or the App already mounts is refused
-// as an invalid spec, before any pod is sent.
-func TestStateMountCollisionIsInvalidSpec(t *testing.T) {
-	for _, p := range []string{"/tmp/.X11-unix", "/home/retro", "/games/"} {
+// No other mount may sit at, above or under the stateMounts' root: links in
+// that volume would redirect them (a game's link to /etc in the shared home,
+// XERK-2713), or links in the User's own directories would redirect it.
+func TestStateMountRootCollisionIsInvalidSpec(t *testing.T) {
+	for _, p := range []string{"/srv", "srv/direwolf", "/srv/direwolf/", "/srv/direwolf/state", "/srv/direwolf/state/wivrn", "/srv/direwolf/state/wivrn/keys", "/srv/direwolf/state/other"} {
 		f, app := vrExampleFixture(t)
-		app.Spec.StateMounts = append(app.Spec.StateMounts, v1alpha1types.StateMount{Name: "clash", MountPath: p})
+		c := &app.Spec.Template.Spec.Containers[0]
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: "games", MountPath: p})
 		sess := f.session("alex-1", f.user)
 		if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := f.sc.buildPods(sess, testWolfPodUID); !errors.Is(err, errInvalidSpec) || !strings.Contains(err.Error(), "mounts two volumes") {
-			t.Errorf("stateMount at %s: buildPods err = %v, want errInvalidSpec about two mounts", p, err)
+		if _, _, err := f.sc.buildPods(sess, testWolfPodUID); !errors.Is(err, errInvalidSpec) || !strings.Contains(err.Error(), stateMountsRoot) && !strings.Contains(err.Error(), "mounts two volumes") {
+			t.Errorf("App mount at %s: buildPods err = %v, want errInvalidSpec about %s", p, err, stateMountsRoot)
 		}
+	}
+	// Beside the root is fine, as is any of it in an App without stateMounts.
+	f, app := vrExampleFixture(t)
+	c := &app.Spec.Template.Spec.Containers[0]
+	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: "games", MountPath: "/srv/other"})
+	sess := f.session("alex-1", f.user)
+	if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.sc.buildPods(sess, testWolfPodUID); err != nil {
+		t.Errorf("App mount at /srv/other: buildPods err = %v", err)
+	}
+	f, app = vrExampleFixture(t)
+	app.Spec.StateMounts = nil
+	c = &app.Spec.Template.Spec.Containers[0]
+	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: "games", MountPath: "/srv"})
+	sess = f.session("alex-1", f.user)
+	if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.sc.buildPods(sess, testWolfPodUID); err != nil {
+		t.Errorf("App without stateMounts mounting /srv: buildPods err = %v", err)
 	}
 }
 
@@ -253,5 +277,92 @@ func TestVRExampleSeedHandlesLinksAndEncodings(t *testing.T) {
 	}
 	if fi, err := os.Lstat(filepath.Join(cfg, "video.ini")); err != nil || !fi.Mode().IsRegular() {
 		t.Errorf("video.ini not replaced by a file: %v %v", fi, err)
+	}
+}
+
+// vrExampleLinkScript is the Python the example's command runs as PUID to
+// turn AC's Documents folder in the shared prefix into a link to the User's
+// mount (XERK-2713).
+func vrExampleLinkScript(t *testing.T) string {
+	t.Helper()
+	_, app := vrExampleFixture(t)
+	cmd := strings.Join(app.Spec.Template.Spec.Containers[0].Command, "\n")
+	_, rest, ok := strings.Cut(cmd, "<<'LINK'\n")
+	script, _, ok2 := strings.Cut(rest, "\nLINK\n")
+	if !ok || !ok2 {
+		t.Fatal("no LINK heredoc in examples/vr.yaml's command")
+	}
+	return script
+}
+
+func runLink(t *testing.T, script, docs, target string) (string, error) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "python3", "-I", "-", docs, target)
+	cmd.Stdin = strings.NewReader(script)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// The shared folder moves to "Assetto Corsa.flat" (contents kept) and a link
+// to the User's mount takes its place; a planted link is replaced, never
+// followed; what the script can't place safely ends the session.
+func TestVRExampleLinksACDocumentsToState(t *testing.T) {
+	script := vrExampleLinkScript(t)
+	dir := t.TempDir()
+	docs, target := filepath.Join(dir, "Documents", "Assetto Corsa"), "/srv/direwolf/state/ac-documents"
+	if err := os.MkdirAll(filepath.Join(docs, "cfg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(docs, "cfg", "video.ini"), []byte("flat"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // and again, with the link in place
+		if out, err := runLink(t, script, docs, target); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		if got, err := os.Readlink(docs); err != nil || got != target {
+			t.Fatalf("Documents/Assetto Corsa -> %q (%v), want %s", got, err, target)
+		}
+		if got, _ := os.ReadFile(filepath.Join(docs+".flat", "cfg", "video.ini")); string(got) != "flat" {
+			t.Errorf("flat video.ini = %q, want the shared copy kept", got)
+		}
+	}
+	// A game's link elsewhere is replaced, its target untouched.
+	if err := os.Remove(docs); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc", docs); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runLink(t, script, docs, target); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if got, _ := os.Readlink(docs); got != target {
+		t.Errorf("planted link not replaced: -> %q", got)
+	}
+	// Never launched flat: no Documents folder, no link.
+	if out, err := runLink(t, script, filepath.Join(dir, "missing", "Assetto Corsa"), target); err == nil || !strings.Contains(out, "launch Assetto Corsa flat once") {
+		t.Errorf("missing prefix: err %v, output %q; want a refusal", err, out)
+	}
+	// A folder and a flat copy both: neither is the script's to drop.
+	both := filepath.Join(dir, "both", "Assetto Corsa")
+	for _, d := range []string{both, both + ".flat"} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := runLink(t, script, both, target); err == nil || !strings.Contains(out, "move one aside") {
+		t.Errorf("both folders: err %v, output %q; want a refusal", err, out)
+	}
+	// No flat copy yet (AC never wrote one): an empty one is made for flat sessions.
+	fresh := filepath.Join(dir, "fresh", "Assetto Corsa")
+	if err := os.MkdirAll(filepath.Dir(fresh), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runLink(t, script, fresh, target); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if fi, err := os.Lstat(fresh + ".flat"); err != nil || !fi.IsDir() {
+		t.Errorf("no flat folder made: %v %v", fi, err)
 	}
 }

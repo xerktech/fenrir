@@ -23,11 +23,9 @@ package v1alpha1
 //
 // StateMount is one of an App's per-User directories (AppSpec.StateMounts).
 type StateMountApplyConfiguration struct {
-	// Name picks the directory, mounts/<name>, on the PVC: renaming one
-	// starts it empty.
+	// Name picks the directory, mounts/<name>, on the PVC, and where it is
+	// mounted, /srv/direwolf/state/<name>: renaming one starts it empty.
 	Name *string `json:"name,omitempty"`
-	// MountPath is an absolute path in the App's containers, not "/".
-	MountPath *string `json:"mountPath,omitempty"`
 }
 
 // StateMountApplyConfiguration constructs a declarative configuration of the StateMount type for use with
@@ -41,13 +39,5 @@ func StateMount() *StateMountApplyConfiguration {
 // If called multiple times, the Name field is set to the value of the last call.
 func (b *StateMountApplyConfiguration) WithName(value string) *StateMountApplyConfiguration {
 	b.Name = &value
-	return b
-}
-
-// WithMountPath sets the MountPath field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the MountPath field is set to the value of the last call.
-func (b *StateMountApplyConfiguration) WithMountPath(value string) *StateMountApplyConfiguration {
-	b.MountPath = &value
 	return b
 }

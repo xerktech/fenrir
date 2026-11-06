@@ -33,14 +33,29 @@ esac
 # WiVRn keeps its pairing keys in ~/.config/wivrn and rewrites
 # ~/.config/openxr/1/active_runtime.json and ~/.config/openvr/openvrpaths.vrpath
 # while it runs. In the shared Steam home every Proton game would then find a VR
-# runtime, and all users' headsets would share one key list: each must be a
-# per-user volume the App mounts there, writable.
+# runtime, and all users' headsets would share one key list: each is a
+# per-user directory the operator mounts at $state/<name> (the App's
+# spec.stateMounts), and ~/.config/<name> links there. The link resolves in
+# each container to its own mount (and to nothing in a flat session); the
+# mount itself never sits in the shared home, where a link a game planted at
+# the mount point would put it over /etc (XERK-2713). Pressure-vessel shares
+# /srv with games. DIREWOLF_STATE_ROOT is for tests only.
+state=${DIREWOLF_STATE_ROOT:-/srv/direwolf/state}
+mkdir -p "$HOME/.config"
 for d in wivrn openxr openvr; do
-  dir=$HOME/.config/$d
-  # mountpoint follows a link: one into the shared home would pass.
-  [[ ! -L $dir ]] || die "$dir is a symlink; it must be a per-user volume mounted by the App"
-  mountpoint -q "$dir" || die "$dir must be a per-user volume mounted by the App, not the shared home"
+  dir=$state/$d
+  # mountpoint follows a link.
+  [[ ! -L $dir ]] || die "$dir is a symlink; it must be the per-user volume the operator mounts (App spec.stateMounts: $d)"
+  mountpoint -q "$dir" || die "$dir must be the per-user volume the operator mounts (App spec.stateMounts: $d)"
   [[ -w $dir ]] || die "$dir is not writable"
+  link=$HOME/.config/$d
+  if [[ $(readlink -- "$link" || true) != "$dir" ]]; then
+    # An empty directory is an old mount point (XERK-2665); anything else
+    # there is not ours to delete.
+    [[ -L $link || ! -e $link ]] || rmdir -- "$link" 2>/dev/null ||
+      die "$link is in the way of a link to $dir; move it aside"
+    ln -sfnT -- "$dir" "$link"
+  fi
 done
 
 # WiVRn's config, rewritten whole at every start. No user keys are kept: WiVRn
@@ -50,7 +65,7 @@ done
 # headset dials the node's IP and port. "hid-forwarding": false: it needs the
 # uinput device, which App pods never get. No "application": WiVRn would start
 # it on every headset connect, beside the game Steam runs.
-config=$HOME/.config/wivrn/config.json
+config=$state/wivrn/config.json
 rm -f "$config.tmp"
 cat >"$config.tmp" <<JSON
 {

@@ -28,8 +28,11 @@
 # One VR Session per GPU: a VR stream used ~50% of an RTX 3090's NVENC.
 #
 # Assetto Corsa itself, set up once in the shared Steam install (XERK-2660):
-#   - installed in the /games library (the per-User config mount below sits in
+#   - installed in the /games library (the per-User config link below sits in
 #     its Proton prefix there), and launched flat once so the prefix exists;
+#   - flat sessions on the steam image (it links them to the flat config):
+#     after the first VR launch, flat AC from any other image (the Library)
+#     finds no Documents folder;
 #   - pinned to Proton 9.0 (Steam > Properties > Compatibility);
 #   - AssettoCorsa.exe replaced by a copy of acs.exe: Content Manager can't run
 #     (.NET won't install under Proton, XERK-2690) and the Kunos launcher has no
@@ -68,23 +71,26 @@ spec:
       resources:
         requests:
           storage: 1Gi
-  # Kept per User, never in the shared Steam home:
+  # Kept per User, never in the shared Steam home. The operator mounts each at
+  # /srv/direwolf/state/<name>, never in a volume a game writes: the runtime
+  # follows a link at a mount point, so a game's link could put it over /etc
+  # (XERK-2713). The shared places link there instead, and each container
+  # resolves the link to its own User's mount.
   #   - wivrn: WiVRn's config and paired headsets' keys; openxr, openvr: the
-  #     active runtime and openvrpaths.vrpath WiVRn writes while it runs (in the
-  #     shared home every Proton game would find a VR runtime). The image refuses
-  #     to start unless each of these three is a mount.
+  #     active runtime and openvrpaths.vrpath WiVRn writes while it runs. The
+  #     image links ~/.config/<name> to them (in a flat session the links lead
+  #     nowhere, so no Proton game finds a VR runtime) and refuses to start
+  #     unless each is a mount.
   #   - ac-documents: AC's Documents/Assetto Corsa (cfg/video.ini in VR mode,
-  #     CSP's config in cfg/extension, setups), so flat launches keep the shared
-  #     prefix's flat video.ini. Seeded from the shared copy on first use.
+  #     CSP's config in cfg/extension, setups). The command below turns that
+  #     folder in the shared prefix into a link here, keeping the flat copy as
+  #     "Assetto Corsa.flat", which the steam image links flat sessions to. It
+  #     is seeded from the flat copy on first use.
   stateMounts:
   - name: wivrn
-    mountPath: /home/retro/.config/wivrn
   - name: openxr
-    mountPath: /home/retro/.config/openxr
   - name: openvr
-    mountPath: /home/retro/.config/openvr
   - name: ac-documents
-    mountPath: /games/steamapps/compatdata/244210/pfx/drive_c/users/steamuser/Documents/Assetto Corsa
   template:
     spec:
       volumes:
@@ -158,8 +164,8 @@ spec:
           mountPath: /home/retro
         - name: games
           mountPath: /games
-        # The shared prefix's AC Documents, read-only, for seeding the per-User
-        # copy that hides it at /games.
+        # The shared prefix's flat AC Documents, read-only, for seeding the
+        # per-User copy.
         - name: games
           mountPath: /run/direwolf-vr/games
           readOnly: true
@@ -186,29 +192,56 @@ spec:
           # Game containers wait for Wolf's display, or the stream never starts.
           while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; do echo "Waiting for wayland display..." >&2; sleep 1; done
 
-          prefix=steamapps/compatdata/244210/pfx/drive_c/users/steamuser/Documents/Assetto\ Corsa
+          docs=/games/steamapps/compatdata/244210/pfx/drive_c/users/steamuser/Documents/Assetto\ Corsa
+          state=/srv/direwolf/state
           if [ ! -f /games/steamapps/appmanifest_244210.acf ]; then
             echo "assetto-corsa-vr: Assetto Corsa is not installed in /games; install it there and launch it flat once" >&2
             exit 1
           fi
-          # The stateMounts sit in volumes any game can write (the shared home,
-          # /games), and the runtime follows a link planted at a mount point:
-          # one at ~/.config/openvr -> /etc/cont-init.d put this User's files
-          # there, and GoW's entrypoint ran them as root (QA). So each must be
-          # a mount exactly where it is named, checked before the entrypoint
-          # runs, or the session ends.
-          for d in "$HOME/.config/wivrn" "$HOME/.config/openxr" "$HOME/.config/openvr" "/games/$prefix"; do
+          # The operator mounts the stateMounts under $state, outside every
+          # volume (XERK-2713). Each must be a mount exactly where named, or
+          # the session ends before the entrypoint runs.
+          for d in "$state/wivrn" "$state/openxr" "$state/openvr" "$state/ac-documents"; do
             if [ "$(realpath -e -- "$d")" != "$d" ] || ! mountpoint -q -- "$d"; then
-              echo "assetto-corsa-vr: $d is not this User's mount (a link in the shared volume?); refusing to start" >&2
+              echo "assetto-corsa-vr: $d is not this User's mount (spec.stateMounts); refusing to start" >&2
               exit 1
             fi
             # Created root-owned; Steam and Wine run as PUID. Only the mount
             # point: everything below it is the User's own.
             chown -h "$PUID:$PGID" -- "$d"
           done
+          # As PUID: AC's Documents folder in the shared prefix becomes a link
+          # to this User's mount; the flat copy moves beside it, where the
+          # steam image's own link sends flat sessions. Only in the shared
+          # prefix, never through it: a link is replaced, not followed.
+          gosu "$PUID:$PGID" python3 -I - "$docs" "$state/ac-documents" <<'LINK'
+          import os, sys
+          docs, target = sys.argv[1], sys.argv[2]
+          flat = docs + ".flat"
+          if not os.path.isdir(os.path.dirname(docs)):
+              sys.exit(f"assetto-corsa-vr: no {os.path.dirname(docs)}; launch Assetto Corsa flat once")
+          if os.path.islink(docs):
+              if os.readlink(docs) == target:
+                  sys.exit(0)
+          elif os.path.isdir(docs):
+              if os.path.lexists(flat):
+                  sys.exit(f"assetto-corsa-vr: both {docs} and {flat} exist; move one aside")
+              os.rename(docs, flat)
+          elif os.path.lexists(docs):
+              sys.exit(f"assetto-corsa-vr: {docs} is neither a folder nor a link; move it aside")
+          if not os.path.lexists(flat):
+              os.mkdir(flat)
+          tmp = docs + ".direwolf-link"
+          try:
+              os.unlink(tmp)
+          except FileNotFoundError:
+              pass
+          os.symlink(target, tmp)
+          os.replace(tmp, docs)
+          LINK
           # As PUID: seed cfg/ from the shared prefix once, then force VR mode.
           # Lines of video.ini are kept; only the two keys are set.
-          gosu "$PUID:$PGID" python3 -I - "/run/direwolf-vr/games/$prefix/cfg" "/games/$prefix/cfg" <<'PY'
+          gosu "$PUID:$PGID" python3 -I - "/run/direwolf-vr/${docs#/games/}.flat/cfg" "$state/ac-documents/cfg" <<'PY'
           import os, shutil, sys
           shared, cfg = sys.argv[1], sys.argv[2]
           if not os.path.lexists(cfg):
