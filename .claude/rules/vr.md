@@ -5,6 +5,7 @@ paths:
   - pkg/controllers/*vr*.go
   - pkg/controllers/headset*.go
   - pkg/api/v1alpha1/headset.go
+  - cmd/wolf-agent/vr_agent*.go
   - pkg/controllers/ports.go
   - pkg/controllers/ports_test.go
   - examples/vr*.yaml
@@ -59,6 +60,9 @@ paths:
   goes to the headset, not the Moonlight stream. wivrn-server keeps the real runtime dir: games
   reach its IPC socket there.
 - The session bus listens on `unix:dir=/tmp` (`dbus-session.conf`), never an abstract socket.
+  - When `/run/direwolf-vr-bus` is mounted (always in native mode), on `unix:path=` there instead
+    (`dbus-session-agent.conf`), for the `vr-agent` sidecar. Keep it equal to `VRBusAddress`
+    (`TestWiVRnStatusOverDBus` reads the image's file).
 - Either Steam or the VR services exiting ends the session. Tests: `images/gow-nvidia32/vr/vr_test.go`.
 - wivrn-server's stderr runs through `vr-notice`, which shows "connect ... to <host> port <port>"
   and the pairing PIN in a swaynag overlay bar on the session's sway: the Moonlight mirror is the
@@ -127,10 +131,30 @@ paths:
   the same App can be launched from Moonlight (mirror) or natively.
 - A VR Session has no `config`, `pairingReference` or `gateway`; Moonlight mode still needs all
   three (CEL). Its only port is `status.ports.vr`. Tests: `TestSessionCRDValidatesMode`.
-- Until XERK-2668, the operator ends every VR Session before building anything
-  (`nativeVRUnsupportedReason`): buildPod would start a Wolf pod nobody can reach.
-  Tests: `TestVRModeSessionEndsUntilSupported`.
+- The pod (`buildVRPod`, XERK-2668) is `buildPod`'s minus Wolf's containers and volumes, so every
+  App check still runs; one pod, `hostUsers: false`, off the host network, never split, no port
+  block (`checkPod` skips the block check). It needs no `--app-pod-host-dir`.
+  - XDG_RUNTIME_DIR is the pod's own 64Mi memory emptyDir; `DIREWOLF_VR_MODE=native` makes the
+    image run sway headless (`WLR_BACKENDS=headless`, `WAYLAND_DISPLAY` unset). The App's command
+    must skip its wait for Wolf's display then (`examples/vr.yaml`).
+  - No GAMESCOPE_* env: with no client mode GoW would set sway's output to 0x0.
+- Liveness: the `vr-agent` sidecar (wolf-agent image) reads WiVRn's `HeadsetConnected` /
+  `SessionRunning` over the App's bus and serves them behind the Session's token and pinned cert
+  (the wolf-agent Secret), polled every `streamPollInterval` on the pod IP, port `VRAgentPort`.
+  - A sidecar, not an agent in the App: the token stays out of the game's reach, and the agent
+    ships with the chart, not the hand-pinned App digest.
+  - It runs as uid 1000: the bus's EXTERNAL auth admits only its owner (GoW's PUID).
+  - Ready only once WiVRn answers. First ready: `HeadsetConnected` False `WaitingForHeadset` and
+    `disconnectedAt` set, so the grace period covers putting the headset on. A connect clears it;
+    a disconnect sets it. A zero `--disconnect-grace-period` ends a VR Session once it is ready.
+  - An unreachable agent counts as a disconnect (`AgentUnreachable`), and a started pod is polled
+    even NotReady: else a hung bus or WiVRn (the game can move the bus) held the GPU forever (QA).
+  - The Moonlight reaper skips VR Sessions; one whose pod is never ready goes after `vrUnstartedTTL`.
+  - Tests: `vr_session_test.go`, `cmd/wolf-agent/vr_agent_test.go`.
 - moonlight-proxy's `/resume` never picks a VR Session. Tests: `TestResumeSkipsVRSession`.
+- Moonlight never sees one: `/cancel` skips VR Sessions and serverinfo and the cancel wait skip
+  pods labelled `direwolf/session-mode=VR`. A Moonlight `/launch` still replaces it (one Steam home).
+  Tests: `TestCancelLeavesVRSession`.
 
 ## Runtime pitfalls
 

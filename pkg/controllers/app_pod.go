@@ -390,6 +390,11 @@ func podUsesClaim(spec *corev1.PodSpec, name string) bool {
 // buildPods renders the session's pods: the one session pod, or with
 // AppPodHostDir the Wolf pod and the App pod (see splitAppPod for wolfUID).
 func (c *SessionController) buildPods(session *v1alpha1types.Session, wolfUID types.UID) (wolf, app *corev1.Pod, err error) {
+	if session.Spec.IsVR() {
+		// One pod, App only (vr_session.go); never split.
+		pod, vrErr := c.buildVRPod(session)
+		return pod, nil, vrErr
+	}
 	pod, err := c.buildPod(session)
 	if err != nil || c.AppPodHostDir == "" {
 		return pod, nil, err

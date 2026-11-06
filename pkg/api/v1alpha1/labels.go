@@ -11,6 +11,11 @@ const SessionPodLabel = "direwolf/session"
 // SessionPodLabelValue is the value the operator sets for SessionPodLabel.
 const SessionPodLabelValue = "true"
 
+// SessionModeLabel is SessionModeVR on a native VR Session's pod (XERK-2668).
+// moonlight-proxy leaves those pods out of what it shows and waits for: a
+// Moonlight client can't resume or quit a VR session.
+const SessionModeLabel = "direwolf/session-mode"
+
 // LibraryPodLabel marks the operator's on-demand Library pod (Steam + Heroic
 // desktop). moonlight-proxy refuses launches while a pod carrying it exists:
 // the Library and game sessions share one Steam home, which has one writer.

@@ -1068,7 +1068,7 @@ func TestCancelToleratesSessionAlreadyDeleted(t *testing.T) {
 		}
 		return true, nil, k8serrors.NewNotFound(v1alpha1types.Resource("sessions"), gone.Name)
 	})
-	if err := f.server.stopSessionsForUser(t.Context(), &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "alice"}}, false); err != nil {
+	if err := f.server.stopSessionsForUser(t.Context(), &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "alice"}}, false, false); err != nil {
 		t.Fatalf("stopSessionsForUser = %v, want the NotFound tolerated", err)
 	}
 	if _, err := f.client.DirewolfV1alpha1().Sessions(testNamespace).Get(t.Context(), other.Name, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
@@ -1090,8 +1090,53 @@ func TestStopSessionsWaitHonoursContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	err := f.server.stopSessionsForUser(ctx, &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "alice"}}, true)
+	err := f.server.stopSessionsForUser(ctx, &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "alice"}}, true, false)
 	if elapsed := time.Since(start); err == nil || elapsed > 2*time.Second {
 		t.Errorf("stopSessionsForUser = %v after %s, want an error once the context ends", err, elapsed)
+	}
+}
+
+// Moonlight's quit stops only Moonlight Sessions (XERK-2668): a native VR
+// Session is the headset's, which Moonlight never shows, so /cancel neither
+// deletes it nor waits for its pod. A new /launch still replaces it: both
+// would run Steam in one home.
+func TestCancelLeavesVRSession(t *testing.T) {
+	vr := sessionFor("alice")
+	vr.Name = "alice-vr"
+	vr.Spec = v1alpha1types.SessionSpec{Mode: v1alpha1types.SessionModeVR, UserReference: vr.Spec.UserReference, GameReference: vr.Spec.GameReference}
+	f := newLaunchFixture(t, &RESTServerOptions{}, sessionFor("alice"), vr)
+	pods := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	if err := pods.Add(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "alice-vr", Namespace: testNamespace,
+		Labels: map[string]string{"direwolf/user": "alice", v1alpha1types.SessionModeLabel: v1alpha1types.SessionModeVR},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	f.server.PodLister = generic.NewLister[*corev1.Pod](pods).Namespaced(testNamespace)
+	user := &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "alice", Namespace: testNamespace}}
+	info := httptest.NewRecorder()
+	f.server.serverInfoHandler(info, httptest.NewRequestWithContext(context.WithValue(t.Context(), userContextKey{}, user), http.MethodGet, "/serverinfo", http.NoBody))
+	if body := info.Body.String(); !strings.Contains(body, "SUNSHINE_SERVER_FREE") {
+		t.Errorf("serverinfo with only a VR pod = %s, want the server free", body)
+	}
+
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	f.server.cancelHandler(rec, httptest.NewRequestWithContext(context.WithValue(t.Context(), userContextKey{}, user), http.MethodGet, "/cancel", http.NoBody))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<cancel>1</cancel>") || time.Since(start) > 5*time.Second {
+		t.Fatalf("cancel = %d %s after %s, want 200 at once", rec.Code, rec.Body, time.Since(start))
+	}
+	if n := f.sessionCount(t); n != 1 {
+		t.Fatalf("%d sessions left, want the VR one", n)
+	}
+	if _, err := f.client.DirewolfV1alpha1().Sessions(testNamespace).Get(t.Context(), vr.Name, metav1.GetOptions{}); err != nil {
+		t.Errorf("VR Session: %v", err)
+	}
+
+	if code, resp := f.launch(t, "alice"); code != http.StatusOK || resp.StatusCode != http.StatusOK {
+		t.Fatalf("launch = %d / %d %q", code, resp.StatusCode, resp.StatusMessage)
+	}
+	if _, err := f.client.DirewolfV1alpha1().Sessions(testNamespace).Get(t.Context(), vr.Name, metav1.GetOptions{}); err == nil {
+		t.Error("a Moonlight launch kept the user's VR Session")
 	}
 }

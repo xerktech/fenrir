@@ -320,7 +320,7 @@ RUN ln -sfnT /srv/direwolf/state/ac-documents /srv/direwolf/ac-documents \
 # The session starts the VR services, then Steam as before: GoW's startup-app
 # moves beside the vr scripts (startup-app.sh finds its siblings by its own
 # path) and ours takes its place.
-COPY --chmod=644 vr/dbus-session.conf /opt/direwolf/vr/
+COPY --chmod=644 vr/dbus-session.conf vr/dbus-session-agent.conf /opt/direwolf/vr/
 COPY --chmod=755 vr/startup-app.sh vr/vr-services vr/vr-notice /opt/direwolf/vr/
 # GoW's Steam startup sets WINEDLLOVERRIDES outright, so an App's own (CSP's
 # dwrite=n,b for Assetto Corsa) never reached the game: it now appends
