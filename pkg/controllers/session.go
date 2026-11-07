@@ -393,12 +393,14 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 		c.videoProgress.forget(namespace, name)
 		return c.releaseUnusedPorts()
 	} else if reason := c.expiredReason(newObj, time.Now()); reason != "" {
-		if newObj.Spec.IsVR() && newObj.Status.DisconnectedAt == nil {
+		err := c.endSession(ctx, newObj, reason)
+		if err == nil && newObj.Spec.IsVR() && newObj.Status.DisconnectedAt == nil {
 			// Its pod never became ready (vrUnstartedReason): the VR page
-			// can't show a deleted Session, so tell the App's author.
+			// can't show a deleted Session, so tell the App's author. Only
+			// once it is gone: a failed delete may find the pod ready next.
 			c.warnApp(newObj, "VRPodNeverReady", reason)
 		}
-		return c.endSession(ctx, newObj, reason)
+		return err
 	}
 	if reason, err := c.revokedReason(ctx, newObj); err != nil {
 		return err
