@@ -74,6 +74,15 @@ const (
 type VRStatus struct {
 	HeadsetConnected bool `json:"headsetConnected"`
 	SessionRunning   bool `json:"sessionRunning"`
+	// KnownKeys are the headset keys WiVRn admits: the seeded ones, plus any
+	// paired by PIN since (recordPairedHeadsets).
+	KnownKeys []VRKnownKey `json:"knownKeys,omitempty"`
+}
+
+// VRKnownKey is one of WiVRn's KnownKeys.
+type VRKnownKey struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
 }
 
 // vrUnstartedReason is why a VR Session never got a ready pod, or "".
@@ -285,6 +294,11 @@ func (c *SessionController) reconcileVRHeadset(ctx context.Context, session *v1a
 		stream.Status, stream.Reason = metav1.ConditionTrue, "Streaming"
 	}
 	meta.SetStatusCondition(&status.Conditions, stream)
+	// Never an error of the poll's: that would read as a lost headset. The
+	// next poll retries.
+	if err := c.recordPairedHeadsets(ctx, session, pod, vr.KnownKeys); err != nil {
+		klog.Warningf("Session %s/%s: recording paired headsets: %v", session.Namespace, session.Name, err)
+	}
 	return nil
 }
 
@@ -334,7 +348,9 @@ func (c *SessionController) pollVRAgent(ctx context.Context, session *v1alpha1ty
 		return VRStatus{}, fmt.Errorf("polling vr-agent: %s", resp.Status)
 	}
 	var vr VRStatus
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&vr); err != nil {
+	// Room for maxUserHeadsets keys and more: an overlong list is cut, and
+	// fails to decode, rather than read whole.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&vr); err != nil {
 		return VRStatus{}, fmt.Errorf("polling vr-agent: %w", err)
 	}
 	return vr, nil

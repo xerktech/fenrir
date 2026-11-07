@@ -214,6 +214,8 @@ type SessionController struct {
 	podController     generic.Controller[*corev1.Pod]
 	pairingController generic.Controller[*v1alpha1types.Pairing]
 	headsetController generic.Controller[*v1alpha1types.Headset]
+	// headsetBackoff skips keys whose Headset create failed (headset.go).
+	headsetBackoff headsetBackoff
 	SessionControllerOptions
 }
 
