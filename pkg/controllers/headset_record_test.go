@@ -18,12 +18,11 @@ import (
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
 
-// seededWith is a vrLifecycle pod mutation: a VR App pod seeded with headsets.
-func seededWith(headsets string) func(*corev1.Pod) *corev1.Pod {
-	return func(p *corev1.Pod) *corev1.Pod {
-		p.Annotations[vrHeadsetsAnnotation] = headsets
-		return p
-	}
+// seededWithNone is a vrLifecycle pod mutation: a VR App pod seeded with no
+// headsets, so it pairs by PIN.
+func seededWithNone(p *corev1.Pod) *corev1.Pod {
+	p.Annotations[vrHeadsetsAnnotation] = ""
+	return p
 }
 
 func (f *portsFixture) livePod(t *testing.T, name string) *corev1.Pod {
@@ -55,7 +54,7 @@ func (f *portsFixture) headsetNames(t *testing.T) []string {
 // confirms it (a Headset holds it), the pod names it, so revoking it ends
 // the Session, and pending clears.
 func TestNativeVRKeepsPINPairingPending(t *testing.T) {
-	f, s, agent := vrLifecycle(t, seededWith(""))
+	f, s, agent := vrLifecycle(t, seededWithNone)
 	watchHeadsets(t, f)
 	agent.set(VRStatus{HeadsetConnected: true, KnownKeys: []VRKnownKey{{Name: "Quest 3", Key: testHeadsetKeyA}}}, false)
 
@@ -222,7 +221,7 @@ func TestAnnotateHeadsetsNeedsCurrentPod(t *testing.T) {
 // the pod still ends the Session: WiVRn trusts the key there (QA,
 // XERK-2747). Its name is the pending key's recordedHeadsetName.
 func TestRevokeBeforePollEndsSession(t *testing.T) {
-	f, s, agent := vrLifecycle(t, seededWith(""))
+	f, s, agent := vrLifecycle(t, seededWithNone)
 	watchHeadsets(t, f)
 	agent.set(VRStatus{HeadsetConnected: true, KnownKeys: []VRKnownKey{{Name: "Quest 3", Key: testHeadsetKeyA}}}, false)
 	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
@@ -293,7 +292,7 @@ func TestOldHeadsetKeyKeepsPairingPending(t *testing.T) {
 func TestRevokeBeforePollEdgeCases(t *testing.T) {
 	setup := func(t *testing.T) (*portsFixture, *v1alpha1types.Session, string) {
 		t.Helper()
-		f, s, agent := vrLifecycle(t, seededWith(""))
+		f, s, agent := vrLifecycle(t, seededWithNone)
 		watchHeadsets(t, f)
 		agent.set(VRStatus{HeadsetConnected: true, KnownKeys: []VRKnownKey{{Key: testHeadsetKeyA}}}, false)
 		if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
@@ -363,7 +362,7 @@ func TestRevokeBeforePollEdgeCases(t *testing.T) {
 // Every VR Session holding the revoked key pending ends, and a failed end of
 // one is returned for retry without sparing the others (QA, XERK-2747).
 func TestRevokeBeforePollEndsEverySession(t *testing.T) {
-	f, s, agent := vrLifecycle(t, seededWith(""))
+	f, s, agent := vrLifecycle(t, seededWithNone)
 	watchHeadsets(t, f)
 	agent.set(VRStatus{HeadsetConnected: true, KnownKeys: []VRKnownKey{{Key: testHeadsetKeyA}}}, false)
 	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
