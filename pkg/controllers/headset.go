@@ -2,16 +2,22 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
@@ -208,4 +214,162 @@ func (c *SessionController) reconcileHeadset(namespace, name string, _ *v1alpha1
 		errs = append(errs, err)
 	}
 	return stderrors.Join(errs...)
+}
+
+// maxUserHeadsets caps a User's Headsets the operator records from pairings:
+// the game shares WiVRn's config dir and could list any number of keys.
+const maxUserHeadsets = 8
+
+// wivrnKeyPattern is the CRD's publicKey pattern: WiVRn's stored form.
+var wivrnKeyPattern = regexp.MustCompile(`^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`)
+
+// headsetObjectName is the Headset recordPairedHeadsets makes for user's key:
+// one per key, so a second report of it finds the first.
+func headsetObjectName(user, key string) string {
+	sum := sha256.Sum256([]byte(key))
+	if len(user) > 200 {
+		user = user[:200]
+	}
+	return strings.TrimRight(user, ".-") + "-" + hex.EncodeToString(sum[:6])
+}
+
+// seededKeys returns the keys pod's WiVRn was seeded with, from its App
+// containers' vrHeadsetsEnv.
+func seededKeys(pod *corev1.Pod) map[string]bool {
+	res := map[string]bool{}
+	for _, ctrs := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+		for i := range ctrs {
+			for _, e := range ctrs[i].Env {
+				if e.Name != vrHeadsetsEnv {
+					continue
+				}
+				var keys []wivrnKnownKey
+				if json.Unmarshal([]byte(e.Value), &keys) == nil {
+					for _, k := range keys {
+						res[k.Key] = true
+					}
+				}
+			}
+		}
+	}
+	return res
+}
+
+// recordPairedHeadsets turns each key WiVRn admits but no Headset holds (a
+// PIN pairing this session) into a Headset of the session's User, so the
+// next session admits it, and adds it to pod's vrHeadsetsAnnotation, so
+// revoking it ends this session too.
+//
+// A key the pod was seeded with is never recorded: its Headset was revoked
+// after the pod started (the cache may not show the Session ended yet), and
+// recording it would undo the revoke.
+func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod, known []VRKnownKey) error {
+	if c.HeadsetClient == nil || len(known) == 0 {
+		return nil
+	}
+	user := session.Spec.UserReference.Name
+	existing, err := c.userHeadsets(session.Namespace, user)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for _, h := range existing {
+		have[h.Spec.PublicKey] = true
+	}
+	seeded := seededKeys(pod)
+	var added []string
+	count := len(existing)
+	for _, k := range known {
+		if have[k.Key] || seeded[k.Key] || len(k.Key) > 1024 || len(k.Key) < 4 || !wivrnKeyPattern.MatchString(k.Key) {
+			continue
+		}
+		if count >= maxUserHeadsets {
+			klog.Warningf("Session %s/%s: user %s has %d headsets; not recording another", session.Namespace, session.Name, user, count)
+			break
+		}
+		h, err := c.createHeadset(ctx, session, k)
+		if err != nil {
+			return err
+		}
+		if h == nil {
+			continue
+		}
+		have[k.Key] = true
+		count++
+		klog.Infof("Session %s/%s: recorded headset %s for user %s", session.Namespace, session.Name, h.Name, user)
+		added = append(added, h.Name+"/"+string(h.UID))
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	return c.addSeededHeadsets(ctx, pod, added)
+}
+
+// createHeadset records k for session's User, or returns the Headset already
+// recording it (nil: its name is taken by another key or User).
+func (c *SessionController) createHeadset(ctx context.Context, session *v1alpha1types.Session, k VRKnownKey) (*v1alpha1types.Headset, error) {
+	user := session.Spec.UserReference.Name
+	display := strings.ToValidUTF8(k.Name, "")
+	for len(display) > 128 {
+		_, size := utf8.DecodeLastRuneInString(display)
+		display = display[:len(display)-size]
+	}
+	h := &v1alpha1types.Headset{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      headsetObjectName(user, k.Key),
+			Namespace: session.Namespace,
+		},
+		Spec: v1alpha1types.HeadsetSpec{
+			UserReference: v1alpha1types.UserReference{Name: user},
+			PublicKey:     k.Key,
+			DisplayName:   display,
+		},
+	}
+	// Garbage collected with its User.
+	if u, err := c.UserInformer.Namespaced(session.Namespace).Get(user); err == nil {
+		h.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: v1alpha1types.GroupVersion.String(), Kind: "User", Name: u.Name, UID: u.UID,
+		}}
+	}
+	created, err := c.HeadsetClient.Create(ctx, h, metav1.CreateOptions{})
+	if err == nil {
+		return created, nil
+	} else if !errors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("failed to create headset %s: %w", h.Name, err)
+	}
+	live, err := c.HeadsetClient.Get(ctx, h.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get headset %s: %w", h.Name, err)
+	}
+	if live.Spec.UserReference.Name != user || live.Spec.PublicKey != k.Key || live.DeletionTimestamp != nil {
+		klog.Warningf("Session %s/%s: headset name %s is taken; not recording the key", session.Namespace, session.Name, h.Name)
+		return nil, nil
+	}
+	return live, nil
+}
+
+// addSeededHeadsets appends entries to pod's vrHeadsetsAnnotation, guarded by
+// the live pod's resourceVersion so a concurrent change is not lost.
+func (c *SessionController) addSeededHeadsets(ctx context.Context, pod *corev1.Pod, entries []string) error {
+	live, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get pod %s: %w", pod.Name, err)
+	}
+	value := live.Annotations[vrHeadsetsAnnotation]
+	for _, e := range entries {
+		if !slices.Contains(strings.Split(value, ","), e) {
+			value = strings.TrimPrefix(value+","+e, ",")
+		}
+	}
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
+		"resourceVersion": live.ResourceVersion,
+		"annotations":     map[string]string{vrHeadsetsAnnotation: value},
+	}})
+	if err != nil {
+		return fmt.Errorf("failed to encode pod patch: %w", err)
+	}
+	if _, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("failed to record headsets on pod %s: %w", pod.Name, err)
+	}
+	return nil
 }

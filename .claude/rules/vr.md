@@ -104,8 +104,15 @@ paths:
     ends the Session on reconcile, and at once on any Headset event (`reconcileHeadset`, found by
     annotation: a deleted object no longer names its User).
   - The spec is immutable (CEL): a changed key would admit a headset without ending Sessions.
-  - Nothing yet turns a PIN pairing into a Headset: each session pairs anew until the vr-agent
-    (XERK-2668) reports WiVRn's `KnownKeys` and the operator records them (rest of XERK-2669).
+  - A native session records PIN pairings (`recordPairedHeadsets`): vr-agent reports WiVRn's
+    `KnownKeys`; each key no Headset holds becomes `<user>-<sha256 prefix>` (owned by the User,
+    capped at `maxUserHeadsets`) and joins the pod's annotation, so revoking it ends this session.
+    - Never a key the pod was seeded with: its Headset was revoked after the pod started.
+    - Failures only log: a poll error reads as a lost headset.
+    - Accepted: the game shares WiVRn's config dir as the same uid, so a key it plants becomes a
+      Headset, as it persisted on the volume before. The cap bounds it.
+  - Moonlight-mode VR pods run no vr-agent, so there every session pairs anew (XERK-2740).
+    Tests: `headset_pairing_test.go`.
   - Tests: `headset_test.go`, `TestHeadsetCRDValidatesKeyAndImmutability`,
     `TestVRStartSeedsKnownKeysFromHeadsets`, `TestVRStartRefusesBadHeadsetSeed`.
 

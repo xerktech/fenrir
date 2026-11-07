@@ -61,6 +61,20 @@ func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, err
 			return controllers.VRStatus{}, fmt.Errorf("WiVRn's %s: %w", name, err)
 		}
 	}
+	// The keys WiVRn admits, a(ssx): name, key, last connection. The
+	// operator records a newly paired one as a Headset (XERK-2669).
+	if v, ok := props["KnownKeys"]; ok {
+		var keys []struct {
+			Name, Key      string
+			LastConnection int64
+		}
+		if err := v.Store(&keys); err != nil {
+			return controllers.VRStatus{}, fmt.Errorf("WiVRn's KnownKeys: %w", err)
+		}
+		for _, k := range keys {
+			st.KnownKeys = append(st.KnownKeys, controllers.VRKnownKey{Name: k.Name, Key: k.Key})
+		}
+	}
 	return st, nil
 }
 
