@@ -214,8 +214,6 @@ type SessionController struct {
 	podController     generic.Controller[*corev1.Pod]
 	pairingController generic.Controller[*v1alpha1types.Pairing]
 	headsetController generic.Controller[*v1alpha1types.Headset]
-	// headsetBackoff skips keys whose Headset create failed (headset.go).
-	headsetBackoff headsetBackoff
 	SessionControllerOptions
 }
 
@@ -1033,7 +1031,11 @@ func (c *SessionController) reconcileSessionPod(ctx context.Context, session *v1
 		return nil, err
 	}
 	// Before the pod, which mounts it.
-	if tokenErr := c.reconcileAgentToken(ctx, session); tokenErr != nil {
+	tokenSecret := agentTokenSecretName(session.Name)
+	if session.Spec.IsVR() {
+		tokenSecret = vrAgentTokenSecretName(session.Name)
+	}
+	if tokenErr := c.reconcileTokenSecret(ctx, session, tokenSecret); tokenErr != nil {
 		return nil, tokenErr
 	}
 	// Before the pod, which references it by name.
@@ -2295,6 +2297,7 @@ var operatorVolumes = []string{
 	appPodSessionsVolume,
 	udevEventsVolume,
 	vrBusVolume,
+	vrAgentOwnTokenVolume,
 }
 
 // validateNoOperatorVolumeMounts rejects App template containers (init too)

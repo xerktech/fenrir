@@ -66,8 +66,15 @@ const (
 	vrHeadsetGone       = "Disconnected"
 	vrAgentLost         = "AgentUnreachable"
 	vrConditionSuccess  = "Success"
-	// vrAgentTokenVolume is the Session's token Secret, as buildPod mounts it.
+	// vrAgentTokenVolume is wolf-agent's token Secret, as buildPod mounts
+	// it: vr-agent's in pods from before XERK-2747.
 	vrAgentTokenVolume = "wolf-agent-token"
+	// vrAgentOwnTokenVolume is vr-agent's own token Secret
+	// (vrAgentTokenSecretName).
+	vrAgentOwnTokenVolume = "vr-agent-token"
+	// vrStatusMaxBytes caps vr-agent's reply (TestVRAgentWorstReplyFitsOperatorRead):
+	// an overlong list is cut, and fails to decode, rather than read whole.
+	vrStatusMaxBytes = 64 << 10
 )
 
 // VRStatus is vr-agent's reply on VRStatusPath: WiVRn's properties.
@@ -75,7 +82,7 @@ type VRStatus struct {
 	HeadsetConnected bool `json:"headsetConnected"`
 	SessionRunning   bool `json:"sessionRunning"`
 	// KnownKeys are the headset keys WiVRn admits: the seeded ones, plus any
-	// paired by PIN since (recordPairedHeadsets).
+	// paired by PIN (or planted by the game) since (trackPairedHeadsets).
 	KnownKeys []VRKnownKey `json:"knownKeys,omitempty"`
 }
 
@@ -118,6 +125,10 @@ func (c *SessionController) buildVRPod(session *v1alpha1types.Session) (*corev1.
 			corev1.EnvVar{Name: vrModeEnv, Value: vrModeNative})
 	}
 	spec.Containers = append(spec.Containers, c.vrAgentContainer())
+	// Created by reconcilePod before the pod.
+	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: vrAgentOwnTokenVolume, VolumeSource: corev1.VolumeSource{
+		Secret: &corev1.SecretVolumeSource{SecretName: vrAgentTokenSecretName(session.Name)},
+	}})
 	spec.Volumes = slices.DeleteFunc(spec.Volumes, func(v corev1.Volume) bool { return !podUsesVolume(spec, v.Name) })
 	for i := range spec.Volumes {
 		if spec.Volumes[i].Name == wolfRuntimeVolume {
@@ -146,7 +157,8 @@ func (c *SessionController) buildVRPod(session *v1alpha1types.Session) (*corev1.
 
 // vrAgentContainer reads WiVRn's state from the App's session bus. It runs as
 // the desktop user (the bus refuses other uids) with nothing else: the token
-// and key are its alone, and the App never mounts them.
+// and key are its alone (its own Secret, never wolf-agent's), and the App
+// never mounts them.
 func (c *SessionController) vrAgentContainer() corev1.Container {
 	probe := func(p string) *corev1.Probe {
 		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
@@ -184,7 +196,7 @@ func (c *SessionController) vrAgentContainer() corev1.Container {
 			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: vrAgentTokenVolume, MountPath: wolfAgentTokenMountPath, ReadOnly: true},
+			{Name: vrAgentOwnTokenVolume, MountPath: wolfAgentTokenMountPath, ReadOnly: true},
 			{Name: vrBusVolume, MountPath: VRBusDir},
 		},
 	}
@@ -265,7 +277,12 @@ func (c *SessionController) reconcileVRHeadset(ctx context.Context, session *v1a
 		}
 	}
 
-	vr, err := c.pollVRAgent(ctx, session, pod.Status.PodIP)
+	// A pod from before XERK-2747 mounts wolf-agent's Secret.
+	secret := vrAgentTokenSecretName(session.Name)
+	if !podUsesVolume(&pod.Spec, vrAgentOwnTokenVolume) {
+		secret = agentTokenSecretName(session.Name)
+	}
+	vr, err := c.pollVRAgent(ctx, session, pod.Status.PodIP, secret)
 	if err != nil {
 		return err
 	}
@@ -296,8 +313,8 @@ func (c *SessionController) reconcileVRHeadset(ctx context.Context, session *v1a
 	meta.SetStatusCondition(&status.Conditions, stream)
 	// Never an error of the poll's: that would read as a lost headset. The
 	// next poll retries.
-	if err := c.recordPairedHeadsets(ctx, session, pod, vr.KnownKeys); err != nil {
-		klog.Warningf("Session %s/%s: recording paired headsets: %v", session.Namespace, session.Name, err)
+	if err := c.trackPairedHeadsets(ctx, session, pod, vr.KnownKeys); err != nil {
+		klog.Warningf("Session %s/%s: tracking paired headsets: %v", session.Namespace, session.Name, err)
 	}
 	return nil
 }
@@ -321,8 +338,8 @@ func lostVRAgent(session *v1alpha1types.Session, err error) {
 // pollVRAgent asks the pod's vr-agent for the headset's state, pinned to the
 // Session's cert: a stranger in the pod's network namespace (the App can bind
 // the port first) fails the handshake before it sees the token.
-func (c *SessionController) pollVRAgent(ctx context.Context, session *v1alpha1types.Session, podIP string) (VRStatus, error) {
-	token, tlsConfig, err := c.agentCredentials(ctx, session)
+func (c *SessionController) pollVRAgent(ctx context.Context, session *v1alpha1types.Session, podIP, secret string) (VRStatus, error) {
+	token, tlsConfig, err := c.tokenCredentials(ctx, session, secret)
 	if stderrors.Is(err, errAgentCertMissing) {
 		return VRStatus{}, c.endSessionErr(ctx, session, err.Error())
 	} else if err != nil {
@@ -348,9 +365,7 @@ func (c *SessionController) pollVRAgent(ctx context.Context, session *v1alpha1ty
 		return VRStatus{}, fmt.Errorf("polling vr-agent: %s", resp.Status)
 	}
 	var vr VRStatus
-	// Room for maxUserHeadsets keys and more: an overlong list is cut, and
-	// fails to decode, rather than read whole.
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&vr); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, vrStatusMaxBytes)).Decode(&vr); err != nil {
 		return VRStatus{}, fmt.Errorf("polling vr-agent: %w", err)
 	}
 	return vr, nil

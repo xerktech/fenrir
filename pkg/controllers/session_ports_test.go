@@ -340,6 +340,13 @@ func readyPod(sess *v1alpha1types.Session) *corev1.Pod {
 	}
 }
 
+// vrTokenSecret is tokenSecret under vr-agent's own Secret name.
+func vrTokenSecret(sess *v1alpha1types.Session) *corev1.Secret {
+	sec := tokenSecret(sess)
+	sec.Name = vrAgentTokenSecretName(sess.Name)
+	return sec
+}
+
 func tokenSecret(sess *v1alpha1types.Session) *corev1.Secret {
 	pems, err := testAgentCert()
 	if err != nil {

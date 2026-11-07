@@ -48,6 +48,12 @@ type SessionStatusApplyConfiguration struct {
 	// deleted. Cleared on re-attach. In VR mode: when the headset
 	// disconnected; cleared when one connects again within the grace period.
 	DisconnectedAt *metav1.Time `json:"disconnectedAt,omitempty"`
+	// Headset keys the VR server of a pod seeded with no Headsets reports
+	// knowing and no Headset of the User holds (XERK-2742): a PIN pairing,
+	// or a key the game planted, as nothing in the pod tells them apart.
+	// They are never seeded; the User confirms the one they paired on the
+	// library page, which creates its Headset. They go with the Session.
+	PendingHeadsets []PendingHeadsetApplyConfiguration `json:"pendingHeadsets,omitempty"`
 }
 
 // SessionStatusApplyConfiguration constructs a declarative configuration of the SessionStatus type for use with
@@ -106,5 +112,18 @@ func (b *SessionStatusApplyConfiguration) WithAttachedGeneration(value int64) *S
 // If called multiple times, the DisconnectedAt field is set to the value of the last call.
 func (b *SessionStatusApplyConfiguration) WithDisconnectedAt(value metav1.Time) *SessionStatusApplyConfiguration {
 	b.DisconnectedAt = &value
+	return b
+}
+
+// WithPendingHeadsets adds the given value to the PendingHeadsets field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the PendingHeadsets field.
+func (b *SessionStatusApplyConfiguration) WithPendingHeadsets(values ...*PendingHeadsetApplyConfiguration) *SessionStatusApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithPendingHeadsets")
+		}
+		b.PendingHeadsets = append(b.PendingHeadsets, *values[i])
+	}
 	return b
 }

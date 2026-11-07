@@ -9,12 +9,8 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
 	"unicode"
-	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -122,30 +118,6 @@ func withVRHeadsets(spec *corev1.PodSpec, headsets []*v1alpha1types.Headset) (st
 // seededHeadset is one entry of vrHeadsetsAnnotation.
 type seededHeadset struct{ name, uid string }
 
-// placeholderPrefix starts a placeholder's UID field: "~<unix seconds>",
-// written by recordPairedHeadsets before its create.
-const placeholderPrefix = "~"
-
-// placeholderPending is how long a placeholder with no Headset behind it
-// still holds: its create may be in flight (another worker can read the pod
-// between the two). Past it, the record counts as revoked.
-const placeholderPending = time.Minute
-
-func placeholderEntry(name string, now time.Time) string {
-	return name + "/" + placeholderPrefix + strconv.FormatInt(now.Unix(), 10)
-}
-
-// pendingPlaceholder is whether want is a placeholder younger than
-// placeholderPending at now.
-func pendingPlaceholder(want seededHeadset, now time.Time) bool {
-	ts, ok := strings.CutPrefix(want.uid, placeholderPrefix)
-	if !ok {
-		return false
-	}
-	sec, err := strconv.ParseInt(ts, 10, 64)
-	return err == nil && now.Sub(time.Unix(sec, 0)) < placeholderPending
-}
-
 // podHeadsets returns the Headsets pod was seeded with.
 func podHeadsets(pod *corev1.Pod) []seededHeadset {
 	v := pod.Annotations[vrHeadsetsAnnotation]
@@ -167,20 +139,8 @@ func isSeeded(pod *corev1.Pod, name string) bool {
 
 // stillSeeded is whether h is the live Headset seeded as want: not
 // re-created under its name, and not being deleted (held by a finalizer).
-//
-// A placeholder (UID field "~<time>", written by recordPairedHeadsets before
-// its create) holds while the Headset of that name is the operator's record
-// of its own User and key (whose name it is). With no Headset it holds only
-// while pending (headsetRevokedReason); then the record was revoked (or
-// never made), so the Session ends.
 func stillSeeded(h *v1alpha1types.Headset, want seededHeadset) bool {
-	if h.DeletionTimestamp != nil {
-		return false
-	}
-	if strings.HasPrefix(want.uid, placeholderPrefix) {
-		return h.Name == headsetObjectName(h.Spec.UserReference.Name, h.Spec.PublicKey)
-	}
-	return string(h.UID) == want.uid
+	return h.DeletionTimestamp == nil && string(h.UID) == want.uid
 }
 
 // headsetRevokedReason says why pod's Session must end because a Headset its
@@ -202,8 +162,6 @@ func (c *SessionController) headsetRevokedReason(ctx context.Context, pod *corev
 		live, err := c.HeadsetClient.Get(ctx, want.name, metav1.GetOptions{})
 		switch {
 		case err == nil && stillSeeded(live, want):
-			continue
-		case errors.IsNotFound(err) && pendingPlaceholder(want, time.Now()):
 			continue
 		case err == nil || errors.IsNotFound(err):
 			return fmt.Sprintf("its headset %s was revoked", want.name), nil
@@ -258,9 +216,9 @@ func (c *SessionController) reconcileHeadset(namespace, name string, _ *v1alpha1
 	return stderrors.Join(errs...)
 }
 
-// maxUserHeadsets caps a User's Headsets the operator records from pairings:
-// the game shares WiVRn's config dir and could list any number of keys.
-const maxUserHeadsets = 8
+// maxPendingHeadsets bounds a Session's pendingHeadsets: a PIN pairing adds
+// one key, so more are the game's.
+const maxPendingHeadsets = 4
 
 // wivrnKeyPattern is the CRD's publicKey pattern: WiVRn's stored form.
 var wivrnKeyPattern = regexp.MustCompile(`^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`)
@@ -270,9 +228,13 @@ func IsWiVRnKey(key string) bool {
 	return len(key) >= 4 && len(key) <= 1024 && wivrnKeyPattern.MatchString(key)
 }
 
+// headsetNameMaxLen is the CRDs' limit on a headset's name. OpenAPI's
+// maxLength counts characters (code points), not bytes.
+const headsetNameMaxLen = 128
+
 // CleanHeadsetName is a headset's own name as a Headset's displayName: valid
 // UTF-8 with no control, format (bidi) or line/paragraph-separator runes, cut
-// to the CRD's 128 bytes on a rune boundary.
+// to the CRD's 128 characters.
 func CleanHeadsetName(name string) string {
 	name = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
@@ -280,303 +242,110 @@ func CleanHeadsetName(name string) string {
 		}
 		return r
 	}, strings.ToValidUTF8(name, ""))
-	for len(name) > 128 {
-		_, size := utf8.DecodeLastRuneInString(name)
-		name = name[:len(name)-size]
+	if r := []rune(name); len(r) > headsetNameMaxLen {
+		name = string(r[:headsetNameMaxLen])
 	}
 	return name
 }
 
-// headsetObjectName is the Headset recordPairedHeadsets makes for user's key:
-// one per key, so a second report of it finds the first.
-func headsetObjectName(user, key string) string {
-	sum := sha256.Sum256([]byte(key))
-	if len(user) > 200 {
-		user = user[:200]
-	}
-	return strings.TrimRight(user, ".-") + "-" + hex.EncodeToString(sum[:6])
+// pairingWasOpen is whether pod's WiVRn was seeded with no Headsets, so it
+// paired by PIN: only there can a headset have paired.
+func pairingWasOpen(pod *corev1.Pod) bool {
+	v, ok := pod.Annotations[vrHeadsetsAnnotation]
+	return ok && v == ""
 }
 
-// seededKeys returns the keys pod's WiVRn was seeded with, from its App
-// containers' vrHeadsetsEnv.
-func seededKeys(pod *corev1.Pod) map[string]bool {
-	res := map[string]bool{}
-	for _, ctrs := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
-		for i := range ctrs {
-			for _, e := range ctrs[i].Env {
-				if e.Name != vrHeadsetsEnv {
-					continue
-				}
-				var keys []wivrnKnownKey
-				if json.Unmarshal([]byte(e.Value), &keys) == nil {
-					for _, k := range keys {
-						res[k.Key] = true
-					}
-				}
-			}
-		}
-	}
-	return res
+// recordedHeadsetName names the Headset confirmed for user's key: the same
+// on every confirm, so a repeat finds the one it made.
+func recordedHeadsetName(user, key string) string {
+	sum := sha256.Sum256([]byte(user + "\x00" + key))
+	return "headset-" + hex.EncodeToString(sum[:10])
 }
 
-// recordPairedHeadsets turns each key WiVRn admits but no Headset holds (a
-// PIN pairing this session) into a Headset of the session's User, so the
-// next session admits it, and adds every Headset WiVRn admits to pod's
-// vrHeadsetsAnnotation, so revoking it ends this session too. The
-// annotation is read live and patched each poll until it holds them all: a
-// failed patch or create is retried by the next poll.
+// trackPairedHeadsets follows the keys pod's WiVRn knows, as its vr-agent
+// reported them, while the pod paired by PIN (XERK-2742, XERK-2747).
 //
-// Nothing is recorded while any Headset the pod records is revoked (gone,
-// terminating or re-created): the revoke may have landed during this poll,
-// WiVRn still lists its key, and recording it under any name would undo the
-// revoke for the next session. The Session ends on its own reconcile. Nor
-// is a key the pod was seeded with, for the same reason.
-func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod, known []VRKnownKey) error {
-	if c.HeadsetClient == nil || len(known) == 0 {
+// A key no Headset of the User holds goes to the Session's pendingHeadsets,
+// never into a Headset: the game runs as WiVRn's uid and owns its bus, so it
+// can plant a key or pair one itself, and nothing here tells that from the
+// User's headset. The User confirms on the library page (confirmHeadset).
+//
+// A key a Headset of the User does hold (one just confirmed) is named in the
+// pod's vrHeadsetsAnnotation: WiVRn trusts it in this Session, so revoking
+// it must end it, as for a seeded Headset. The pod then no longer paired by
+// PIN, and its keys stop being followed; its other pending keys are dropped,
+// as a pairing adds only the one confirmed.
+func (c *SessionController) trackPairedHeadsets(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod, known []VRKnownKey) error {
+	if c.HeadsetClient == nil || !pairingWasOpen(pod) {
 		return nil
 	}
-	live, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get pod %s: %w", pod.Name, err)
-	}
-	// The User's Headsets first, the revoke check second: a delete after
-	// this snapshot leaves its key in byKey (adopted, never created again),
-	// and one before it is caught by the check's live GET.
-	user := session.Spec.UserReference.Name
-	existing, err := c.userHeadsets(session.Namespace, user)
+	held, err := c.userHeadsets(session.Namespace, session.Spec.UserReference.Name)
 	if err != nil {
 		return err
 	}
-	if reason, revokeErr := c.headsetRevokedReason(ctx, live); revokeErr != nil || reason != "" {
-		return revokeErr
+	seen := map[string]metav1.Time{}
+	for _, p := range session.Status.PendingHeadsets {
+		seen[p.Key] = p.FirstSeen
 	}
-	recorded := map[string]bool{}
-	for _, h := range podHeadsets(live) {
-		recorded[h.name] = true
-		recorded[h.name+"/"+h.uid] = true
-	}
-	byKey := map[string]*v1alpha1types.Headset{}
-	for _, h := range existing {
-		byKey[h.Spec.PublicKey] = h
-	}
-	seeded := seededKeys(live)
-	var add []string
-	var errs []error
-	count := len(existing)
+	var (
+		pending   []v1alpha1types.PendingHeadset
+		confirmed []string
+		errs      []error
+	)
 	for _, k := range known {
-		if h := byKey[k.Key]; h != nil {
-			if entry := h.Name + "/" + string(h.UID); !recorded[entry] {
-				recorded[entry] = true
-				add = append(add, entry)
+		if !IsWiVRnKey(k.Key) {
+			errs = append(errs, stderrors.New("WiVRn reports a key not in its stored form; ignoring it"))
+			continue
+		}
+		if i := slices.IndexFunc(held, func(h *v1alpha1types.Headset) bool { return h.Spec.PublicKey == k.Key }); i >= 0 {
+			if entry := held[i].Name + "/" + string(held[i].UID); !slices.Contains(confirmed, entry) {
+				confirmed = append(confirmed, entry)
 			}
 			continue
 		}
-		// A key whose Headset the pod records by the operator's name but no
-		// Headset holds was revoked: never again (also covered by the check
-		// above, unless the delete lands between its reads).
-		if seeded[k.Key] || recorded[headsetObjectName(user, k.Key)] || !IsWiVRnKey(k.Key) {
+		if slices.ContainsFunc(pending, func(p v1alpha1types.PendingHeadset) bool { return p.Key == k.Key }) {
 			continue
 		}
-		if count >= maxUserHeadsets {
-			klog.V(2).Infof("Session %s/%s: user %s has %d headsets; not recording another", session.Namespace, session.Name, user, count)
+		if len(pending) == maxPendingHeadsets {
+			errs = append(errs, fmt.Errorf("WiVRn knows more than %d unconfirmed keys; listing only the first", maxPendingHeadsets))
 			break
 		}
-		// A placeholder first: once the Headset exists, a revoke must find
-		// this pod (reconcileHeadset) and stop a later poll re-creating it,
-		// even if the operator dies or the UID's patch fails right after.
-		name := headsetObjectName(user, k.Key)
-		// Writes only when the name is free and no create failed lately:
-		// each pod write re-queues the Session, which polls again.
-		if c.headsetBackoff.active(name) {
-			continue
+		first, ok := seen[k.Key]
+		if !ok {
+			first = metav1.Now()
 		}
-		if taken, err := c.HeadsetClient.Get(ctx, name, metav1.GetOptions{}); err == nil {
-			if taken.Spec.UserReference.Name == user && taken.Spec.PublicKey == k.Key && taken.DeletionTimestamp == nil {
-				// Ours, not yet in the cache (maybe from a create that
-				// errored after the API server committed it).
-				c.headsetBackoff.clear(name)
-				entry := taken.Name + "/" + string(taken.UID)
-				byKey[k.Key] = taken
-				count++
-				recorded[entry] = true
-				add = append(add, entry)
-			} else {
-				klog.V(2).Infof("Session %s/%s: headset name %s is taken; not recording the key", session.Namespace, session.Name, name)
-			}
-			continue
-		} else if !errors.IsNotFound(err) {
-			errs = append(errs, fmt.Errorf("failed to get headset %s: %w", name, err))
-			break
-		}
-		placeholder := placeholderEntry(name, time.Now())
-		reserved, err := c.patchSeededHeadsets(ctx, live, withSeededEntries(live.Annotations[vrHeadsetsAnnotation], placeholder))
-		if err != nil {
-			errs = append(errs, err)
-			break
-		}
-		live = reserved
-		recorded[name] = true
-		h, err := c.createHeadset(ctx, session, k)
-		if err != nil || h == nil {
-			c.headsetBackoff.set(name)
-			// No Headset: the placeholder would end the Session, so drop
-			// it. Failing that, the Session ends, which is safe.
-			if p, undoErr := c.patchSeededHeadsets(ctx, live, withoutSeededEntry(live.Annotations[vrHeadsetsAnnotation], placeholder)); undoErr != nil {
-				errs = append(errs, undoErr)
-			} else {
-				live = p
-			}
-			if err != nil {
-				errs = append(errs, err)
-				break
-			}
-			continue
-		}
-		c.headsetBackoff.clear(name)
-		byKey[k.Key] = h
-		count++
-		klog.Infof("Session %s/%s: recorded headset %s for user %s", session.Namespace, session.Name, h.Name, user)
-		entry := h.Name + "/" + string(h.UID)
-		recorded[entry] = true
-		add = append(add, entry)
+		pending = append(pending, v1alpha1types.PendingHeadset{Key: k.Key, Name: CleanHeadsetName(k.Name), FirstSeen: first})
 	}
-	if len(add) > 0 {
-		if _, err := c.patchSeededHeadsets(ctx, live, withSeededEntries(live.Annotations[vrHeadsetsAnnotation], add...)); err != nil {
-			errs = append(errs, err)
-		}
+	if len(confirmed) > 0 {
+		// A PIN pairing adds one key and the User confirmed it: any other
+		// key here is the game's, never to be offered again (QA).
+		pending = nil
+	}
+	session.Status.PendingHeadsets = pending
+	if len(confirmed) > 0 {
+		slices.Sort(confirmed)
+		errs = append(errs, c.annotateHeadsets(ctx, pod, strings.Join(confirmed, ",")))
 	}
 	return stderrors.Join(errs...)
 }
 
-// createHeadset records k for session's User, or returns the Headset already
-// recording it (nil: its name is taken by another key or User).
-func (c *SessionController) createHeadset(ctx context.Context, session *v1alpha1types.Session, k VRKnownKey) (*v1alpha1types.Headset, error) {
-	user := session.Spec.UserReference.Name
-	display := CleanHeadsetName(k.Name)
-	h := &v1alpha1types.Headset{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      headsetObjectName(user, k.Key),
-			Namespace: session.Namespace,
-		},
-		Spec: v1alpha1types.HeadsetSpec{
-			UserReference: v1alpha1types.UserReference{Name: user},
-			PublicKey:     k.Key,
-			DisplayName:   display,
-		},
-	}
-	// Garbage collected with its User, read live on a cache miss: without
-	// an owner it would outlive the User and pass to a new one of its name.
-	u, err := c.UserInformer.Namespaced(session.Namespace).Get(user)
-	if errors.IsNotFound(err) {
-		u, err = c.UserClient.Get(ctx, user, metav1.GetOptions{})
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get user %s: %w", user, err)
-	}
-	h.OwnerReferences = []metav1.OwnerReference{{
-		APIVersion: v1alpha1types.GroupVersion.String(), Kind: "User", Name: u.Name, UID: u.UID,
-	}}
-	created, err := c.HeadsetClient.Create(ctx, h, metav1.CreateOptions{})
-	if err == nil {
-		return created, nil
-	} else if !errors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("failed to create headset %s: %w", h.Name, err)
-	}
-	live, err := c.HeadsetClient.Get(ctx, h.Name, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get headset %s: %w", h.Name, err)
-	}
-	if live.Spec.UserReference.Name != user || live.Spec.PublicKey != k.Key || live.DeletionTimestamp != nil {
-		klog.V(2).Infof("Session %s/%s: headset name %s is taken; not recording the key", session.Namespace, session.Name, h.Name)
-		return nil, nil
-	}
-	return live, nil
-}
-
-// withSeededEntries adds entries to a vrHeadsetsAnnotation value; an entry
-// replaces that name's placeholder.
-func withSeededEntries(value string, entries ...string) string {
-	var list []string
-	if value != "" {
-		list = strings.Split(value, ",")
-	}
-	for _, e := range entries {
-		name, _, _ := strings.Cut(e, "/")
-		list = slices.DeleteFunc(list, func(x string) bool { return strings.HasPrefix(x, name+"/"+placeholderPrefix) })
-		if !slices.Contains(list, e) {
-			list = append(list, e)
-		}
-	}
-	return strings.Join(list, ",")
-}
-
-// withoutSeededEntry removes entry from a vrHeadsetsAnnotation value.
-func withoutSeededEntry(value, entry string) string {
-	if value == "" {
-		return ""
-	}
-	return strings.Join(slices.DeleteFunc(strings.Split(value, ","), func(x string) bool { return x == entry }), ",")
-}
-
-// patchSeededHeadsets sets live's vrHeadsetsAnnotation to value, guarded by
-// its resourceVersion so a concurrent change is not lost (a conflict is
-// retried by the next poll), and returns the patched pod.
-func (c *SessionController) patchSeededHeadsets(ctx context.Context, live *corev1.Pod, value string) (*corev1.Pod, error) {
+// annotateHeadsets records value as the Headsets pod's WiVRn trusts.
+func (c *SessionController) annotateHeadsets(ctx context.Context, pod *corev1.Pod, value string) error {
 	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
-		"resourceVersion": live.ResourceVersion,
+		// Fails the patch if the pod changed since it was read: another
+		// poll may have recorded first, or the pod is no longer the one
+		// whose empty annotation said it paired by PIN.
+		"resourceVersion": pod.ResourceVersion,
 		"annotations":     map[string]string{vrHeadsetsAnnotation: value},
 	}})
 	if err != nil {
-		return nil, fmt.Errorf("failed to encode pod patch: %w", err)
+		return fmt.Errorf("failed to encode pod patch: %w", err)
 	}
-	patched, err := c.K8sClient.CoreV1().Pods(live.Namespace).Patch(ctx, live.Name, types.MergePatchType, patch, metav1.PatchOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to record headsets on pod %s: %w", live.Name, err)
+	if _, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{
+		FieldManager: "direwolf-session-controller-pod",
+	}); err != nil {
+		return fmt.Errorf("failed to record headsets %s on pod %s/%s: %w", value, pod.Namespace, pod.Name, err)
 	}
-	return patched, nil
-}
-
-// headsetBackoffMin and headsetBackoffMax bound how long
-// recordPairedHeadsets leaves a key whose create failed, doubling on each
-// failure in a row: retried every poll, its placeholder's two pod writes
-// would re-queue the Session in a loop, while one transient error must not
-// cost a short session its pairing.
-const (
-	headsetBackoffMin = 15 * time.Second
-	headsetBackoffMax = 5 * time.Minute
-)
-
-// headsetBackoff remembers failed creates by Headset name.
-type headsetBackoff struct {
-	mu      sync.Mutex
-	until   map[string]time.Time
-	backoff map[string]time.Duration
-}
-
-func (b *headsetBackoff) active(name string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	t, ok := b.until[name]
-	return ok && time.Now().Before(t)
-}
-
-// set backs name off after a failed create: headsetBackoffMin, doubled for
-// each failure since its last success, up to headsetBackoffMax.
-func (b *headsetBackoff) set(name string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.until == nil {
-		b.until, b.backoff = map[string]time.Time{}, map[string]time.Duration{}
-	}
-	d := min(max(2*b.backoff[name], headsetBackoffMin), headsetBackoffMax)
-	b.backoff[name] = d
-	b.until[name] = time.Now().Add(d)
-}
-
-// clear forgets name's failures once it is recorded.
-func (b *headsetBackoff) clear(name string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.until, name)
-	delete(b.backoff, name)
+	klog.Infof("Pod %s/%s: WiVRn trusts confirmed headsets %s", pod.Namespace, pod.Name, value)
+	return nil
 }
