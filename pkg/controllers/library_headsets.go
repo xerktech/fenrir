@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,6 +42,11 @@ type HeadsetConfirmation struct {
 	// LibraryProxySecretHeader. It must differ from the Library's: a
 	// request with it is served the page and never the Library.
 	Secret []byte
+	// confirm serializes confirms: pendingFor drops a Session's keys once
+	// one is confirmed, but two confirms read it before either created its
+	// Headset, so both were saved (XERK-2709). One operator replica serves
+	// this page, so a mutex is enough.
+	confirm sync.Mutex
 }
 
 func (h *HeadsetConfirmation) hasProxySecret(r *http.Request) bool {
@@ -158,6 +164,16 @@ func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, libraryHeadsetsFormMax)
 		key := r.PostFormValue("key")
+		// Read again under the lock: a confirm that finished meanwhile may
+		// have taken this key's Session.
+		s.HeadsetConfirmation.confirm.Lock()
+		defer s.HeadsetConfirmation.confirm.Unlock()
+		pending, err = s.HeadsetConfirmation.pendingFor(r.Context(), user.Name)
+		if err != nil {
+			klog.Errorf("Headsets page: %v", err)
+			writeLibraryPage(w, http.StatusInternalServerError, "Try again in a minute.", false, false)
+			return
+		}
 		if key != "" {
 			// Confirmed already (a second click): done.
 			done, err := s.HeadsetConfirmation.anyConfirmed(r.Context(), user.Name, []v1alpha1types.PendingHeadset{{Key: key}})

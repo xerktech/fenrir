@@ -129,6 +129,9 @@ paths:
       whose `recordedHeadsetName` is the event's, gone live, ends
       (`endSessionsOfUnrecordedHeadset`, either mode).
       Residual: an operator down for that whole window misses it; the key is then pending again.
+      A Headset re-created under that name for another key or user counts as gone (XERK-2709).
+      Accepted: a Headset an admin makes by hand under another name for a pending key, deleted
+      before a poll, ends nothing (the delete event has no key); the key is pending again.
     - The page is `/.direwolf/headsets` on the library server (`library_headsets.go`); it
       confirms only a key pending in the signed-in User's own Sessions, as
       `headset-<sha256(user, key)>`, owned by the User (GC'd with it).
@@ -139,6 +142,9 @@ paths:
     - Its POST must be the page's own clicked form: `Sec-Fetch-Site: same-origin` (the Library
       host is same-site, not cross-site), `-Mode: navigate`, `-User: ?1` (never a script's fetch;
       QA, XERK-2747). Tests: `TestHeadsetsPageHasItsOwnHost`, `TestHeadsetsPageRefuses`.
+    - Confirms run one at a time, re-reading the pending keys under the lock: two at once for
+      one Session's keys both saved (XERK-2709). One operator replica serves the page; a second
+      replica would need a server-side guard. Tests: `TestHeadsetsPageConfirmsOneKeyPerSessionAtOnce`.
     - Nothing on the headset shows a fingerprint yet, so a game's lookalike key can still be
       confirmed by mistake (XERK-2743).
     - A failure is logged, never ends the Session: it costs only a PIN next time.
@@ -197,7 +203,13 @@ paths:
   port `VRAgentPort`.
   - A sidecar, not an agent in the App: the token stays out of the game's reach, and the agent
     ships with the chart, not the hand-pinned App digest.
-  - It runs as uid 1000: the bus's EXTERNAL auth admits only its owner (GoW's PUID).
+  - It runs as the App's PUID/PGID (1000 if unset or empty, as GoW reads them; the last of a
+    repeated name): the bus's EXTERNAL auth admits only its owner. In a native VR pod an id the
+    spec can't tell (valueFrom, not a number, 0, two containers disagreeing) is InvalidSpec
+    (`vrAgentIDs`, XERK-2709); a fixed 1000 left such pods never ready for 15 min.
+    - In a Moonlight split App pod it falls back to 1000 with a warning: nothing waits on
+      vr-agent there, so the stream keeps working and only confirmation is lost.
+    - Not read: a PUID from `envFrom` (ConfigMap/Secret) stays 1000 unseen. Set PUID as a value.
   - Ready only once WiVRn answers. First ready: `HeadsetConnected` False `WaitingForHeadset` and
     `disconnectedAt` set, so the grace period covers putting the headset on. A connect clears it;
     a disconnect sets it. A zero `--disconnect-grace-period` ends a VR Session once it is ready.

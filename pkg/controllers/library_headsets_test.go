@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
 	"games-on-whales.github.io/direwolf/pkg/generic"
 )
 
@@ -254,4 +257,42 @@ func TestHeadsetsPageHasItsOwnHost(t *testing.T) {
 	if rec := headsetsRequest(s, http.MethodPost, libraryStartPath, sam); rec.Code != http.StatusNotFound {
 		t.Errorf("headsets host start: HTTP %d, want 404", rec.Code)
 	}
+}
+
+// Two confirms at once for different keys of one Session save one Headset:
+// a PIN pairing adds one key, the rest are the game's. Each used to read the
+// Session's keys as unconfirmed before either created its Headset
+// (XERK-2709). The first create is held so the second runs meanwhile.
+func TestHeadsetsPageConfirmsOneKeyPerSessionAtOnce(t *testing.T) {
+	pendingC := v1alpha1types.PendingHeadset{Key: "Q0NDQw==", Name: "game's", FirstSeen: metav1.Now()}
+	f, s := headsetsServer(t, pendingA, pendingC)
+	// Held outside the fake clientset, which serializes its own calls.
+	s.HeadsetConfirmation.Headsets = &slowFirstCreate{HeadsetInterface: s.HeadsetConfirmation.Headsets}
+	var wg sync.WaitGroup
+	codes := make([]int, 2)
+	for i, key := range []string{testHeadsetKeyA, pendingC.Key} {
+		wg.Go(func() { codes[i] = confirmRequest(s, "sam", key, nil).Code })
+		if i == 0 {
+			time.Sleep(50 * time.Millisecond) // the first is in its create
+		}
+	}
+	wg.Wait()
+	if hs := f.headsets(t); len(hs) != 1 {
+		t.Errorf("saved %d headsets (HTTP %v), want 1", len(hs), codes)
+	}
+	if !slices.Contains(codes, http.StatusConflict) {
+		t.Errorf("HTTP %v, want one refused as no longer waiting", codes)
+	}
+}
+
+// slowFirstCreate holds the first Create for a while before making it.
+type slowFirstCreate struct {
+	v1alpha1client.HeadsetInterface
+	once sync.Once
+}
+
+//nolint:gocritic // HeadsetInterface's signature
+func (c *slowFirstCreate) Create(ctx context.Context, h *v1alpha1types.Headset, opts metav1.CreateOptions) (*v1alpha1types.Headset, error) {
+	c.once.Do(func() { time.Sleep(300 * time.Millisecond) })
+	return c.HeadsetInterface.Create(ctx, h, opts) //nolint:wrapcheck // a pass-through
 }

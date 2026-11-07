@@ -228,26 +228,38 @@ func (c *SessionController) endSessionsOfUnrecordedHeadset(ctx context.Context, 
 	if err != nil {
 		return fmt.Errorf("failed to list sessions: %w", err)
 	}
-	sessions = slices.DeleteFunc(slices.Clone(sessions), func(s *v1alpha1types.Session) bool {
+	// The pending key each Session holds under name.
+	keys := map[*v1alpha1types.Session]string{}
+	for _, s := range sessions {
+		if s.DeletionTimestamp != nil {
+			continue
+		}
 		// Either mode: a Moonlight Session's split App pod pairs by PIN too
 		// (XERK-2740, trackAppPodPairing).
-		return s.DeletionTimestamp != nil || !slices.ContainsFunc(s.Status.PendingHeadsets, func(p v1alpha1types.PendingHeadset) bool {
-			return recordedHeadsetName(s.Spec.UserReference.Name, p.Key) == name
-		})
-	})
-	if len(sessions) == 0 {
+		for _, p := range s.Status.PendingHeadsets {
+			if recordedHeadsetName(s.Spec.UserReference.Name, p.Key) == name {
+				keys[s] = p.Key
+				break
+			}
+		}
+	}
+	if len(keys) == 0 {
 		return nil
 	}
 	// The watch can lag: a Headset just created (the confirm itself) is
 	// not revoked. Any other error is retried, never read as gone.
 	h, err := c.HeadsetClient.Get(ctx, name, metav1.GetOptions{})
-	if err == nil && h.DeletionTimestamp == nil {
-		return nil
-	} else if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("failed to get headset %s/%s: %w", namespace, name, err)
 	}
 	var errs []error
-	for _, s := range sessions {
+	for s, key := range keys {
+		// Still this Session's confirm: kept. One re-created under the name
+		// for another key or user revoked it as surely as a delete
+		// (XERK-2709): WiVRn still trusts the old key in the Session.
+		if err == nil && h.DeletionTimestamp == nil && h.Spec.PublicKey == key && h.Spec.UserReference.Name == s.Spec.UserReference.Name {
+			continue
+		}
 		errs = append(errs, c.endSession(ctx, s, fmt.Sprintf("its headset %s was revoked", name)))
 	}
 	return stderrors.Join(errs...)
