@@ -63,6 +63,9 @@ paths:
   - When `/run/direwolf-vr-bus` is mounted (native mode, and a vrPort App's split App pod), on
     `unix:path=` there instead (`dbus-session-agent.conf`), for the `vr-agent` sidecar. Keep it
     equal to `VRBusAddress` (`TestWiVRnStatusOverDBus` reads the image's file).
+- ArgoCD's `app-assetto-vr.yaml` pins this image and copies `examples/vr.yaml`'s command by hand:
+  bump both after a VR change here, or production keeps the old behaviour (XERK-2671 found it
+  on a pre-native, upstream-WiVRn image whose command waited for Wolf's display).
 - Either Steam or the VR services exiting ends the session. Tests: `images/gow-nvidia32/vr/vr_test.go`.
 - wivrn-server's stderr runs through `vr-notice`, which shows "connect ... to <host> port <port>"
   and the pairing PIN in a swaynag overlay bar on the session's sway: the Moonlight mirror is the
@@ -82,6 +85,9 @@ paths:
   server.
 - Pairing: 6-digit PIN (SMP) while the known-keys list is empty, then only stored keys connect.
   The PIN goes to stderr and D-Bus only, so the user needs an authenticated place to see it.
+- Never let the PIN reach the container log: Loki serves every pod's log to any pod, and the VR
+  port is reachable from other session pods, so another user's game could pair (XERK-2671).
+  `vr-notice` redacts it from every line it passes on. Tests: `TestVRNoticeShowsAddressAndPairingPIN`.
 - WiVRn reads an unparseable `known_keys.json` as no keys, which opens PIN pairing: only ever
   write it whole, from a list that parsed.
 - The config dir holds the keys (and `server_key.pem`): writable and per-user persistent, never a

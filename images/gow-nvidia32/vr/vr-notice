@@ -3,7 +3,9 @@
 # display, the flat mirror the Moonlight user sees (.claude/rules/vr.md). mDNS
 # is off, so the headset dials the node's address and port; WiVRn writes its
 # pairing PIN to stderr and D-Bus only. Reads wivrn-server's stderr on stdin,
-# passes every line on to stderr, and keeps one swaynag bar up to date.
+# passes every line on to stderr (the container log) except the PIN's digits,
+# and keeps one swaynag bar up to date. The log is no place for the PIN: Loki
+# serves every pod's log to any pod, so another user's game could pair with it.
 # Usage: vr-notice <port>   ($DIREWOLF_VR_HOST: the node's address, optional)
 set -uo pipefail
 
@@ -38,9 +40,9 @@ trap '[[ -z $shower ]] || kill "$shower" 2>/dev/null' EXIT
 show
 # || [[ -n $line ]]: a last line without a newline is passed on too.
 while IFS= read -r line || [[ -n $line ]]; do
-  printf '%s\n' "$line" >&2
   case $line in
   "To pair a new headset use PIN code: "*)
+    printf '%s\n' "To pair a new headset use PIN code: (redacted from the log)" >&2
     p=${line##*: }
     if [[ $p =~ ^[0-9]{6}$ ]]; then
       pin=$p
@@ -48,10 +50,17 @@ while IFS= read -r line || [[ -n $line ]]; do
     fi
     ;;
   "Headset pairing is disabled"*)
+    printf '%s\n' "$line" >&2
     if [[ -n $pin ]]; then
       pin=
       show
     fi
+    ;;
+  *)
+    # WiVRn prints the PIN again in "Cannot enable pairing while session is
+    # active.<PIN>" (main.cpp, on_handle_enable_pairing).
+    [[ -z $pin ]] || line=${line//"$pin"/"(PIN)"}
+    printf '%s\n' "$line" >&2
     ;;
   esac
 done

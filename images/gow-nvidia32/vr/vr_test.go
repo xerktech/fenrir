@@ -646,13 +646,17 @@ printf '%s\n' "$*" >>"$EXECS"
 // pairs, and drops the PIN once pairing is off. Every line still reaches stderr.
 func TestVRNoticeShowsAddressAndPairingPIN(t *testing.T) {
 	stderr := "WiVRn v26.9 starting\nTo pair a new headset use PIN code: 012345\n"
+	if _, out := vrNotice(t, "10.10.10.34", stderr+"Cannot enable pairing while session is active.012345\n", true,
+		func(e string) bool { return strings.Contains(e, "PIN 012345") }); strings.Contains(out, "012345") {
+		t.Errorf("stderr = %q, carries the PIN", out)
+	}
 	want := "exec swaynag -y overlay -t warning -m 'VR headset: connect the WiVRn app to 10.10.10.34 port 21000 - pairing PIN 012345'"
 	execs, out := vrNotice(t, "10.10.10.34", stderr, true, func(e string) bool { return strings.Contains(e, want+"\n") })
 	if !strings.Contains(execs, "pkill -x swaynag\n"+want+"\n") {
 		t.Errorf("swaymsg execs:\n%s\nwant pkill -x swaynag, then %s", execs, want)
 	}
-	if out != stderr {
-		t.Errorf("stderr = %q, want wivrn-server's %q", out, stderr)
+	if want := "WiVRn v26.9 starting\nTo pair a new headset use PIN code: (redacted from the log)\n"; out != want {
+		t.Errorf("stderr = %q, want %q (no PIN digits)", out, want)
 	}
 	noPIN := func(e string) bool {
 		l := strings.Split(strings.TrimSpace(e), "\n")
