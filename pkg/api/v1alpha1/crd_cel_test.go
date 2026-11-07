@@ -341,6 +341,13 @@ func TestSessionCRDAcceptsEncodedSessions(t *testing.T) {
 			PairingReference: PairingReference{Name: ref}, GatewayReference: GatewayReference{Name: ref},
 			Config: SessionInfo{AESKey: "k", AESIV: "i", SurroundAudioFlags: 196610, VideoWidth: 1920, VideoHeight: 1080, VideoRefreshRate: 60},
 		},
+		{
+			// A client whose surroundAudioInfo parses to 0: the flags must be
+			// sent as 0, or the required field reads as missing (XERK-2709).
+			UserReference: UserReference{Name: ref}, GameReference: GameReference{Name: ref},
+			PairingReference: PairingReference{Name: ref}, GatewayReference: GatewayReference{Name: ref},
+			Config: SessionInfo{AESKey: "k", AESIV: "i", VideoWidth: 1920, VideoHeight: 1080, VideoRefreshRate: 60},
+		},
 	} {
 		data, err := json.Marshal(Session{Spec: spec})
 		if err != nil {

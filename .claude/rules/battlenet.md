@@ -84,6 +84,20 @@ paths:
       from memory, so it is skipped while any wineserver of the user runs.
     - Unverified live: that Wine reinstalls the pad from such an edit as it did after
       `wine reg delete`. Tests: `battlenet_pad_repair_test.go`.
+    - It also drops the driver keys under `Control\Class` that no kept device names, in the removed
+      devices' classes and HIDClass: Wine makes new ones on reinstall, and the broken instance's
+      own (InfPath only) is named by nothing (QA on Wine 9, XERK-2709).
+    - It refuses root unless its user namespace maps one id (`unshare -r`): the host's root and an
+      App pod's (65536 ids, `kubectl exec`) override other users' files. By hand over a user's
+      prefix, a planted link, `..` past one or a directory swapped mid-run led an owner-checking
+      version into another prefix (QA). Run it as the prefix's owner (`runuser -u <user>`).
+      `BATTLENET_PAD_REPAIR_UID_MAP` names the map in tests (not launch-battlenet's `BATTLENET_UID_MAP`,
+      which the launch tests fake); CI (no root) skips the refusal test.
+    - The launch tests run the script in its own PID namespace where unshare works (not on CI):
+      its game check scans every process, and another run's stub game made them flake. A test's
+      own processes go in as decoys (`decoy`), never started from Go outside it; the whole process
+      group is killed after. `TestLaunchBattlenetDecoysRun` proves decoys start: a field-split bug
+      once made every "ignores" test pass with none running.
 
 ## Managed WoW addons (XERK-2366)
 

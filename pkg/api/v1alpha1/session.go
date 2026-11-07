@@ -191,7 +191,7 @@ type SessionInfo struct {
 	VideoRefreshRate int `json:"videoRefreshRate,omitempty"`
 
 	//+kubebuilder:validation:Required
-	SurroundAudioFlags int `json:"surroundAudioFlags,omitempty"`
+	SurroundAudioFlags int `json:"surroundAudioFlags"` // no omitempty: clients send 0, and a missing required field is refused (XERK-2709)
 
 	// The client supports Sunshine's encrypted RTSP (it sent corever>=1 on
 	// /launch or /resume), so Wolf is asked to encrypt RTSP with AESKey.

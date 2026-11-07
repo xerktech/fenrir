@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -26,6 +27,23 @@ const (
 		"#time=1db2f0c\n\n"
 	regPadClassLower = "[System\\\\CurrentControlSet\\\\Control\\\\DeviceClasses\\\\{4d1e55b2-f16f-11cf-88cb-001111000030}\\\\##?#hid#vid_045e&pid_02ea&xi_00#1&2d595ca7&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}] 1730000000\n" +
 		"#time=1db2f0c\n\"DeviceInstance\"=\"HID\\\\VID_045E&PID_02EA&XI_00\\\\1&2d595ca7&0&0000\"\n\n"
+	// The broken instance's old driver key, which a reinstall replaces, and
+	// one a kept device still names.
+	regPadDriverClass = "[System\\\\ControlSet001\\\\Control\\\\Class\\\\{745a17a0-74d3-11d0-b6fe-00a0c90f57da}\\\\0003] 1730000000\n" +
+		"#time=1db2f0c\n\"DriverDesc\"=\"HID device\"\n\n" +
+		"[System\\\\ControlSet001\\\\Control\\\\Class\\\\{745a17a0-74d3-11d0-b6fe-00a0c90f57da}\\\\0003\\\\Settings] 1730000000\n#time=1\n\n"
+	regKeptDriverClass = "[System\\\\ControlSet001\\\\Control\\\\Class\\\\{745a17a0-74d3-11d0-b6fe-00a0c90f57da}\\\\0001] 1730000000\n" +
+		"#time=1db2f0c\n\n"
+	regPadBusDriverClass = "[System\\\\ControlSet001\\\\Control\\\\Class\\\\{4d36e97d-e325-11ce-bfc1-08002be10318}\\\\0002] 1730000000\n" +
+		"#time=1db2f0c\n\n"
+	regKeptLookalikeClass = "[System\\\\ControlSet001\\\\Control\\\\Class\\\\{745a17a0-74d3-11d0-b6fe-00a0c90f57da}\\\\00030] 1730000000\n" +
+		"#time=1db2f0c\n\n" +
+		"[System\\\\CurrentControlSet\\\\Enum\\\\HID\\\\VID_1234&PID_5678\\\\1] 1730000000\n" +
+		"#time=1db2f0c\n\"Driver\"=\"{745a17a0-74d3-11d0-b6fe-00a0c90f57da}\\\\00030\"\n\n"
+	regOtherClassUnnamed = "[System\\\\ControlSet001\\\\Control\\\\Class\\\\{4d36e972-e325-11ce-bfc1-08002be10318}\\\\0007] 1730000000\n" +
+		"#time=1db2f0c\n\n"
+	regKeptSystemDevice = "[System\\\\CurrentControlSet\\\\Enum\\\\ROOT\\\\WINEBUS\\\\0000] 1730000000\n" +
+		"#time=1db2f0c\n\"Driver\"=\"{4d36e97d-e325-11ce-bfc1-08002be10318}\\\\0002\"\n\n"
 	regPadBus = "[System\\\\CurrentControlSet\\\\Enum\\\\WINEXINPUT\\\\VID_045E&PID_02EA&XI_00\\\\1&2d595ca7&0&0000] 1730000000\n" +
 		"#time=1db2f0c\n\"Driver\"=\"{4d36e97d-e325-11ce-bfc1-08002be10318}\\\\0002\"\n\n"
 	regPadWinebus = "[System\\\\ControlSet001\\\\Enum\\\\WINEBUS\\\\VID_045E&PID_02EA\\\\0&0&0] 1730000000\n" +
@@ -37,13 +55,31 @@ const (
 	regLookalike = "[Software\\\\Wine\\\\VID_045E&PID_02EA&XI_00\\\\x] 1730000000\n#time=1\n\n"
 )
 
+// padRepair runs the script on path. As the host's root it would refuse, so
+// there it runs as root of a user namespace of its own, as in an App pod.
+func padRepair(t *testing.T, path string) *exec.Cmd {
+	t.Helper()
+	argv := []string{"python3", "-I", battlenetPadRepair, path}
+	if os.Geteuid() == 0 {
+		if !userNamespaceWorks() {
+			t.Skip("as the host's root the repair refuses, and unshare -Ur is not available")
+		}
+		argv = append([]string{"unshare", "-Ur"}, argv...)
+	}
+	return exec.CommandContext(t.Context(), argv[0], argv[1:]...) //nolint:gosec // the script under test
+}
+
+var userNamespaceWorks = sync.OnceValue(func() bool {
+	return exec.Command("unshare", "-Ur", "true").Run() == nil
+})
+
 func runPadRepair(t *testing.T, reg string) (got, log string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "system.reg")
 	if err := os.WriteFile(path, []byte(reg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.CommandContext(t.Context(), "python3", "-I", battlenetPadRepair, path).CombinedOutput()
+	out, err := padRepair(t, path).CombinedOutput()
 	if err != nil {
 		t.Fatalf("battlenet-pad-repair: %v\n%s", err, out)
 	}
@@ -69,6 +105,18 @@ func TestBattlenetPadRepairDropsHalfInstalledPad(t *testing.T) {
 			regHead + regKeyboard + regOtherPad},
 		{"lowercase Enum", regHead + regKeyboard + strings.ToLower(regPadParams) + regOtherPad,
 			regHead + regKeyboard + regOtherPad},
+		// As QA saw it on Wine 9: the broken instance names no driver key,
+		// yet its own (0003, HIDClass) is there; the bus device names 0002.
+		// Kept: the keyboard's 0001, a 00030 a kept device names (not 0003's
+		// prefix match), and another class's unnamed key.
+		{"old driver keys", regHead + regKeyboard + regKeptDriverClass + regKeptLookalikeClass + regOtherClassUnnamed +
+			strings.Replace(regPadKey, "\"Driver\"=\"{745a17a0-74d3-11d0-b6fe-00a0c90f57da}\\\\0000\"\n", "", 1) +
+			regPadBus + regPadDriverClass + regPadBusDriverClass + regOtherPad,
+			regHead + regKeyboard + regKeptDriverClass + regKeptLookalikeClass + regOtherClassUnnamed + regOtherPad},
+		// A driver key a kept device also names stays, though a removed pad
+		// key named it too.
+		{"driver key a kept device names", regHead + regKeptSystemDevice + regPadParams + regPadBus + regPadBusDriverClass,
+			regHead + regKeptSystemDevice + regPadBusDriverClass},
 		{"healthy", regHead + regKeyboard + regPadKey + regPadParams + regPadBus + regPadClass,
 			regHead + regKeyboard + regPadKey + regPadParams + regPadBus + regPadClass},
 		{"no pad", regHead + regKeyboard, regHead + regKeyboard},
@@ -89,7 +137,7 @@ func TestBattlenetPadRepairKeepsABackup(t *testing.T) {
 	if err := os.WriteFile(path, []byte(reg), 0o640); err != nil { //nolint:gosec // test fixture
 		t.Fatal(err)
 	}
-	if out, err := exec.CommandContext(t.Context(), "python3", "-I", battlenetPadRepair, path).CombinedOutput(); err != nil {
+	if out, err := padRepair(t, path).CombinedOutput(); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	if b, err := os.ReadFile(path + ".direwolf-pad-repair.bak"); err != nil || string(b) != reg {
@@ -105,6 +153,11 @@ func TestBattlenetPadRepairKeepsABackup(t *testing.T) {
 
 // launch-battlenet repairs the prefix before it starts the client.
 func TestLaunchBattlenetRepairsHalfInstalledPad(t *testing.T) {
+	// As the host's root the repair refuses; the launch runs it as root of
+	// its own namespace only where unshare works.
+	if os.Geteuid() == 0 && !userNamespaceWorks() {
+		t.Skip("as root without unshare -Ur the repair refuses (TestBattlenetPadRepairRefusesRoot)")
+	}
 	var reg string
 	r := runLaunchBattlenetWith(t, true, func(games string) {
 		reg = filepath.Join(filepath.Dir(games), ".local", "share", "battlenet", "pfx", "system.reg")
@@ -123,20 +176,13 @@ func TestLaunchBattlenetRepairsHalfInstalledPad(t *testing.T) {
 // A running wineserver of the user rewrites system.reg from memory, so the
 // repair is skipped while one runs.
 func TestLaunchBattlenetSkipsPadRepairBesideWineserver(t *testing.T) {
-	sleep, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A process whose name is wineserver: a link to sleep.
+	// A process whose name is wineserver: a script of that name (the kernel
+	// names a script's process after it). Not a link to sleep: a multi-call
+	// coreutils, as on the CI runner, reads the name as a tool it lacks.
 	ws := filepath.Join(t.TempDir(), "wineserver")
-	if err := os.Symlink(sleep, ws); err != nil {
+	if err := os.WriteFile(ws, []byte("#!/bin/sh\ntrap 'kill $! 2>/dev/null; exit 0' TERM\nsleep \"$1\" &\nwait\n"), 0o755); err != nil { //nolint:gosec // an executable
 		t.Fatal(err)
 	}
-	cmd := exec.CommandContext(t.Context(), ws, "120")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	var reg string
 	const broken = regHead + regKeyboard + regPadParams
 	r := runLaunchBattlenetWith(t, true, func(games string) {
@@ -144,7 +190,7 @@ func TestLaunchBattlenetSkipsPadRepairBesideWineserver(t *testing.T) {
 		if err := os.WriteFile(reg, []byte(broken), 0o644); err != nil { //nolint:gosec // test fixture
 			t.Fatal(err)
 		}
-	}, []string{"wow"}, "GAME_SECONDS=3")
+	}, []string{"wow"}, "GAME_SECONDS=3", decoy(ws, "wineserver"))
 	if r.code != 0 {
 		t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
 	}
@@ -186,7 +232,7 @@ func TestBattlenetPadRepairFollowsALink(t *testing.T) {
 	if err := os.Symlink("real.reg", link); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.CommandContext(t.Context(), "python3", "-I", battlenetPadRepair, link).CombinedOutput(); err != nil {
+	if out, err := padRepair(t, link).CombinedOutput(); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
@@ -194,5 +240,45 @@ func TestBattlenetPadRepairFollowsALink(t *testing.T) {
 	}
 	if b, err := os.ReadFile(target); err != nil || string(b) != regHead {
 		t.Errorf("target %q (%v), want the pad's keys gone", b, err)
+	}
+}
+
+// Never as a root that can override other users' files: the host's
+// (identity map), an App pod's (65536 ids), or one whose map can't be read.
+// Run by hand over a user's prefix, a planted link or a directory swapped
+// mid-run led it into another user's prefix (QA), so it refuses and changes
+// nothing. Root of a one-id namespace (padRepair's unshare -Ur) may run.
+func TestBattlenetPadRepairRefusesRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (CI runners have no user namespaces to fake one)")
+	}
+	for name, uidMap := range map[string]*string{
+		"host":       new("         0          0 4294967295\n"),
+		"App pod":    new("         0 3507355648      65536\n"),
+		"two ranges": new("0 1000 1\n1 100000 65535\n"),
+		"unreadable": nil,
+	} {
+		path := filepath.Join(t.TempDir(), "system.reg")
+		if err := os.WriteFile(path, []byte(regHead+regPadParams), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mapFile := filepath.Join(t.TempDir(), "uid_map")
+		if uidMap != nil {
+			if err := os.WriteFile(mapFile, []byte(*uidMap), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cmd := exec.CommandContext(t.Context(), "python3", "-I", battlenetPadRepair, path)
+		cmd.Env = append(os.Environ(), "BATTLENET_PAD_REPAIR_UID_MAP="+mapFile)
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "not run as root") {
+			t.Errorf("%s: err %v, want a refusal\n%s", name, err, out)
+		}
+		if b, _ := os.ReadFile(path); string(b) != regHead+regPadParams {
+			t.Errorf("%s: changed: %q", name, b)
+		}
+		if entries, _ := os.ReadDir(filepath.Dir(path)); len(entries) != 1 {
+			t.Errorf("%s: left %d files, want only system.reg", name, len(entries))
+		}
 	}
 }

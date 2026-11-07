@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -147,8 +149,33 @@ func runLaunchBattlenetWith(t *testing.T, install bool, setup func(games string)
 	// game was once not seen within 20s. Tests of the timeout set a short one.
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", append([]string{launchBattlenet}, args...)...) //nolint:gosec // the script under test
+	var decoys strings.Builder
+	env = slices.DeleteFunc(slices.Clone(env), func(e string) bool {
+		d, ok := strings.CutPrefix(e, decoyEnv)
+		if ok {
+			decoys.WriteString(d + "\n")
+		}
+		return ok
+	})
+	decoyFile := filepath.Join(stub, "decoys")
+	if err := os.WriteFile(decoyFile, []byte(decoys.String()), 0o644); err != nil { //nolint:gosec // test fixture
+		t.Fatal(err)
+	}
+	argv := append([]string{"bash", "-c", withDecoys, "with-decoys", decoyFile, launchBattlenet}, args...)
+	if pidNamespaceWorks() {
+		argv = append([]string{"unshare", "-Upfr", "--mount-proc", "--kill-child"}, argv...)
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // the script under test
 	cmd.WaitDelay = time.Second
+	// Its own process group, killed whole: without unshare (CI) a killed
+	// wrapper would leave its decoys running into later tests (QA).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	defer func() {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}()
 	cmd.Env = append([]string{"PATH=" + filepath.Join(stub, "bin") + ":" + os.Getenv("PATH"), "HOME=" + home,
 		"SWAY_STOP_ON_APP_EXIT=yes", "BATTLENET_GAMES=" + games,
 		"STUB_LOG=" + r.log, "STUB_DIR=" + stub,
@@ -169,6 +196,62 @@ func runLaunchBattlenetWith(t *testing.T, install bool, setup func(games string)
 	}
 	return r
 }
+
+// The script runs in a PID namespace of its own where unshare can make one:
+// its game check scans every process, and another test run's stub game on the
+// same host (a concurrent session's) counted as this one's (XERK-2709). CI
+// runners refuse unprivileged user namespaces; there it runs as before.
+// A test's own processes the script must see are decoys, started in there
+// beside it (a child namespace's processes are visible from its parent, not
+// the other way round) and stopped with it.
+
+// decoy is an env entry for runLaunchBattlenetWith: prog (sleep if empty)
+// runs beside the script as argv0, for the script's whole run.
+func decoy(prog, argv0 string) string { return decoyFor(prog, argv0, 300) }
+
+// decoyFor is decoy for at most seconds. Fields are split on \x1f, never
+// whitespace: an IFS tab strips an empty first field, and then no decoy ran
+// at all (QA, XERK-2709).
+func decoyFor(prog, argv0 string, seconds int) string {
+	if prog == "" {
+		prog = "sleep"
+	}
+	return decoyEnv + prog + "\x1f" + argv0 + "\x1f" + strconv.Itoa(seconds)
+}
+
+const decoyEnv = "DIREWOLF_TEST_DECOY="
+
+// withDecoys starts the decoys listed in $1 (prog, argv0 and seconds per
+// line, split on \x1f), runs
+// the script ($2 on) and stops them.
+const withDecoys = `decoys=$1; shift
+pids=()
+names=()
+while IFS=$'\x1f' read -r prog argv0 seconds; do
+  # Off the test's output: a decoy's leftover child must not hold it open.
+  bash -c 'exec -a "$0" "$1" "$2"' "$argv0" "$prog" "$seconds" </dev/null >/dev/null 2>&1 &
+  pids+=($!)
+  names+=("$argv0")
+done <"$decoys"
+# Each must be its own program before the script looks: a fixed wait was too
+# short on a CI runner (XERK-2709).
+for i in "${!pids[@]}"; do
+  for _ in $(seq 100); do
+    # Its argv0, or (a script's) its name.
+    IFS= read -r -d '' first <"/proc/${pids[$i]}/cmdline"
+    IFS= read -r comm <"/proc/${pids[$i]}/comm"
+    [ "$first" = "${names[$i]}" ] || [ "$comm" = "${names[$i]:0:15}" ] && break
+    sleep 0.05
+  done # waiting for this one
+done
+bash "$@"
+status=$?
+[ ${#pids[@]} -eq 0 ] || kill "${pids[@]}" 2>/dev/null
+exit $status`
+
+var pidNamespaceWorks = sync.OnceValue(func() bool {
+	return exec.Command("unshare", "-Upfr", "--mount-proc", "true").Run() == nil
+})
 
 // freePort returns a loopback TCP port nothing listens on.
 func freePort(t *testing.T) string {
@@ -340,20 +423,16 @@ func TestLaunchBattlenetInstalledCheckIgnoresCase(t *testing.T) {
 // Proton's wrappers for a started Wow.exe name the game's path with its
 // arguments, as Proton's run and Wine show them; they are not the game.
 func TestLaunchBattlenetIgnoresDirectStartWrappers(t *testing.T) {
+	env := append(make([]string, 0, 8), "BATTLENET_LAUNCH_TIMEOUT=3")
 	for _, argv0 := range []string{
 		`/opt/proton-cachyos/files/lib/wine/x86_64-unix/wine-preloader /opt/proton-cachyos/files/lib/wine c:\windows\system32\steam.exe /games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`,
 		`c:\windows\system32\steam.exe /games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`,
 		`C:\windows\system32\steam.exe Z:\games\battlenet\World of Warcraft\_forever_\Wow.exe -launcherlogin -uid wowf`,
 		`/usr/bin/python3 /opt/proton-cachyos/proton run /games/battlenet/World of Warcraft/_forever_/Wow.exe -launcherlogin -uid wowf`,
 	} {
-		decoy := exec.CommandContext(t.Context(), "bash", "-c", `exec -a "$0" sleep 30`, argv0)
-		if err := decoy.Start(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = decoy.Process.Kill(); _ = decoy.Wait() })
+		env = append(env, decoy("", argv0))
 	}
-	r := runLaunchBattlenetWith(t, true, func(games string) { installForever(t, games) }, []string{"wowf"},
-		"BATTLENET_LAUNCH_TIMEOUT=3")
+	r := runLaunchBattlenetWith(t, true, func(games string) { installForever(t, games) }, []string{"wowf"}, env...)
 	if r.code != 1 {
 		t.Fatalf("exit %d, want 1: a wrapper counted as the game\n%s", r.code, r.out)
 	}
@@ -484,6 +563,7 @@ func TestLaunchBattlenetLaunchesAnywayAfterTheReadyWait(t *testing.T) {
 // Other processes whose command lines name the game, or another product's
 // game, are not the game (with no game started, the launch times out).
 func TestLaunchBattlenetIgnoresLookalikeProcesses(t *testing.T) {
+	env := append(make([]string, 0, 8), "BATTLENET_LAUNCH_TIMEOUT=3")
 	for _, argv0 := range []string{
 		`bash Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe -launcherlogin -uid wow`,
 		`bash Z:\games\battlenet\World of Warcraft\_retail_\Wow.exe -launcherlogin -uid wow`,
@@ -491,13 +571,9 @@ func TestLaunchBattlenetIgnoresLookalikeProcesses(t *testing.T) {
 		`Z:\games\WowB.exe -uid wow`, `Z:/games/Wow.exe.bak`,
 		`C:/Program Files (x86)/Battle.net/BlizzardError.exe -exe Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe`,
 		`C:/Program Files (x86)/Battle.net/Battle.net.exe --game=Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe`} {
-		decoy := exec.CommandContext(t.Context(), "bash", "-c", `exec -a "$0" sleep 30`, argv0)
-		if err := decoy.Start(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = decoy.Process.Kill(); _ = decoy.Wait() })
+		env = append(env, decoy("", argv0))
 	}
-	r := runLaunchBattlenet(t, true, []string{"wow"}, "BATTLENET_LAUNCH_TIMEOUT=3")
+	r := runLaunchBattlenet(t, true, []string{"wow"}, env...)
 	if r.code != 1 {
 		t.Fatalf("exit %d, want 1: a lookalike counted as the game\n%s", r.code, r.out)
 	}
@@ -732,5 +808,16 @@ func TestLaunchBattlenetLeavesOddConfigWtfAlone(t *testing.T) {
 	}, []string{"wow"}, "GAME_SECONDS=3")
 	if _, err := os.Lstat(target); r.code != 0 || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("exit %d, dangling link's target %v, want 0 and no file written through it\n%s", r.code, err, r.out)
+	}
+}
+
+// The decoys run: one with the game's own command line is taken for the game
+// (a guard for the decoy plumbing: decoys that never start pass every
+// "ignores" test vacuously, as one QA pass found).
+func TestLaunchBattlenetDecoysRun(t *testing.T) {
+	r := runLaunchBattlenet(t, true, []string{"wow"}, "BATTLENET_LAUNCH_TIMEOUT=30",
+		decoyFor("", "Z:/games/battlenet/World of Warcraft/_retail_/Wow.exe -launcherlogin -uid wow", 4))
+	if r.code != 0 || !strings.Contains(r.out, "wow is running") {
+		t.Fatalf("exit %d, want the decoy seen as the game\n%s", r.code, r.out)
 	}
 }
