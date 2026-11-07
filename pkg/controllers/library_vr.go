@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/klog/v2"
 
@@ -39,17 +40,31 @@ const (
 	// libraryVRStatusTimeout bounds the vr-agent read for the PIN: the page
 	// is shown without it rather than held.
 	libraryVRStatusTimeout = 3 * time.Second
-	// libraryVRRefresh is how often a page waiting on the session reloads.
-	libraryVRRefresh = 5
+	// libraryVRRefresh is how often a page waiting on the session reloads;
+	// libraryVRIdleRefresh once a headset is connected, to notice it leave.
+	libraryVRRefresh     = 5
+	libraryVRIdleRefresh = 30
+	// libraryVRStatusTTL is how long a vr-agent read is reused: each costs
+	// a Secret GET on the operator's shared client, and open tabs refresh.
+	libraryVRStatusTTL = 3 * time.Second
 )
+
+// vrUserLabel names the User on Sessions and every pod built for one.
+const vrUserLabel = "direwolf/user"
 
 // VRLaunch turns on the VR page, on the headsets page's host.
 type VRLaunch struct {
 	Apps generic.NamespacedLister[*v1alpha1types.App]
-	// Sessions and Pods are read live: a Session or Library pod created a
-	// moment ago, maybe by another replica or moonlight-proxy, must count.
+	// Sessions and Pods are read live when starting a session: a Session or
+	// pod created a moment ago, maybe by another replica or moonlight-proxy,
+	// must count.
 	Sessions v1alpha1client.SessionInterface
 	Pods     corev1client.PodInterface
+	// SessionCache and SessionPods (the session pod informer) serve page
+	// views: those refresh in open tabs, and live reads would spend the
+	// operator's shared API rate limit, which the session controller needs.
+	SessionCache generic.NamespacedLister[*v1alpha1types.Session]
+	SessionPods  generic.NamespacedLister[*corev1.Pod]
 	// Status reads a ready VR pod's vr-agent (SessionController.ReadVRStatus).
 	Status func(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod) (VRStatus, error)
 	// MaxConcurrentSessions caps how many users may play at once, as
@@ -59,6 +74,16 @@ type VRLaunch struct {
 
 	// launchMu serializes this replica's checks and creates.
 	launchMu sync.Mutex
+
+	statusMu sync.Mutex
+	// statuses is the last vr-agent read per Session UID.
+	statuses map[types.UID]cachedVRStatus
+}
+
+type cachedVRStatus struct {
+	at     time.Time
+	status VRStatus
+	err    error
 }
 
 // Messages the page shows when it refuses to start a session.
@@ -68,6 +93,8 @@ const (
 	vrBusyMessage            = "Someone else is playing right now. Try again later."
 	vrMoonlightMessage       = "You have a game running in Moonlight. Quit it there (or wait for it to end) before playing in VR."
 	vrStoppingMessage        = "Your last VR session is stopping. Try again in a moment."
+	vrGameStoppingMessage    = "Your last game is still shutting down. Try again in a moment."
+	vrOtherAppMessage        = "Your VR session of another game is running. Stop it first to play this one."
 	vrNoAppMessage           = "That game can't be played in VR here."
 	vrTryAgainMessage        = "Try again in a minute."
 )
@@ -155,6 +182,25 @@ func userSubmittedForm(r *http.Request) bool {
 		r.Header.Get("Sec-Fetch-User") == "?1"
 }
 
+// cachedUserSessions is user's Sessions from the informer, for page views.
+func (v *VRLaunch) cachedUserSessions(ctx context.Context, user string) ([]v1alpha1types.Session, error) {
+	if v.SessionCache == nil {
+		return v.userSessions(ctx, user)
+	}
+	all, err := v.SessionCache.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("listing sessions: %w", err)
+	}
+	var res []v1alpha1types.Session
+	for _, s := range all {
+		if s.Spec.UserReference.Name == user {
+			res = append(res, *s)
+		}
+	}
+	slices.SortFunc(res, func(a, b v1alpha1types.Session) int { return strings.Compare(a.Name, b.Name) })
+	return res, nil
+}
+
 // userSessions is user's Sessions, read live.
 func (v *VRLaunch) userSessions(ctx context.Context, user string) ([]v1alpha1types.Session, error) {
 	list, err := v.Sessions.List(ctx, metav1.ListOptions{})
@@ -221,10 +267,22 @@ func (v *VRLaunch) launch(ctx context.Context, user *v1alpha1types.User, appName
 			return vrMoonlightMessage, nil
 		case s.DeletionTimestamp != nil:
 			return vrStoppingMessage, nil
+		case s.Spec.GameReference.Name != app.Name:
+			return vrOtherAppMessage, nil
 		default:
 			// A second click, or another tab: the page shows it.
 			return "", nil
 		}
+	}
+	// A deleted Session goes at once while its pods still terminate, and
+	// still run Steam in the shared home: as the Library's gameRunning does,
+	// any pod built for user's sessions holds the lock (the split App pod
+	// carries only direwolf/user).
+	if busy, podErr := v.userPodRunning(ctx, user.Name); podErr != nil || busy {
+		if podErr != nil {
+			return "", podErr
+		}
+		return vrGameStoppingMessage, nil
 	}
 	if reason, refErr := v.libraryRefusal(ctx, user); refErr != nil || reason != "" {
 		return reason, refErr
@@ -249,9 +307,9 @@ func (v *VRLaunch) launch(ctx context.Context, user *v1alpha1types.User, appName
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: fmt.Sprintf("%s-%s-", user.Name, app.Name),
 			Labels: map[string]string{
-				"direwolf":      strconv.FormatBool(true),
-				"direwolf/app":  app.Name,
-				"direwolf/user": user.Name,
+				"direwolf":     strconv.FormatBool(true),
+				"direwolf/app": app.Name,
+				vrUserLabel:    user.Name,
 			},
 		},
 		Spec: v1alpha1types.SessionSpec{
@@ -276,6 +334,22 @@ func (v *VRLaunch) launch(ctx context.Context, user *v1alpha1types.User, appName
 	}
 	klog.Infof("VR page: user %s started VR session %s of app %s", user.Name, session.Name, app.Name)
 	return "", nil
+}
+
+// userPodRunning is whether a pod of user's sessions exists, terminating or
+// not. Read live.
+func (v *VRLaunch) userPodRunning(ctx context.Context, user string) (bool, error) {
+	pods, err := v.Pods.List(ctx, metav1.ListOptions{LabelSelector: vrUserLabel})
+	if err != nil {
+		return false, fmt.Errorf("listing session pods: %w", err)
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Labels[vrUserLabel] == user && p.Labels[v1alpha1types.LibraryPodLabel] == "" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // stop ends user's VR Sessions; their Moonlight ones are Moonlight's to quit.
@@ -319,7 +393,13 @@ func (v *VRLaunch) view(ctx context.Context, s *v1alpha1types.Session) vrView {
 	if view.stopping {
 		return view
 	}
-	pod, err := v.Pods.Get(ctx, s.Name, metav1.GetOptions{})
+	var pod *corev1.Pod
+	var err error
+	if v.SessionPods != nil {
+		pod, err = v.SessionPods.Get(s.Name)
+	} else {
+		pod, err = v.Pods.Get(ctx, s.Name, metav1.GetOptions{})
+	}
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			klog.Warningf("VR page: getting pod %s: %v", s.Name, err)
@@ -333,9 +413,7 @@ func (v *VRLaunch) view(ctx context.Context, s *v1alpha1types.Session) vrView {
 	}
 	view.ready, view.host, view.port = true, pod.Status.HostIP, s.Status.Ports.VR
 	if v.Status != nil {
-		sctx, cancel := context.WithTimeout(ctx, libraryVRStatusTimeout)
-		defer cancel()
-		st, err := v.Status(sctx, s, pod)
+		st, err := v.readStatus(ctx, s, pod)
 		switch {
 		case err != nil:
 			klog.V(2).Infof("VR page: reading session %s's VR server: %v", s.Name, err)
@@ -349,9 +427,36 @@ func (v *VRLaunch) view(ctx context.Context, s *v1alpha1types.Session) vrView {
 	return view
 }
 
+// readStatus is s's vr-agent status, reused for libraryVRStatusTTL.
+func (v *VRLaunch) readStatus(ctx context.Context, s *v1alpha1types.Session, pod *corev1.Pod) (VRStatus, error) {
+	now := time.Now()
+	v.statusMu.Lock()
+	if c, ok := v.statuses[s.UID]; ok && now.Sub(c.at) < libraryVRStatusTTL {
+		v.statusMu.Unlock()
+		return c.status, c.err
+	}
+	v.statusMu.Unlock()
+	sctx, cancel := context.WithTimeout(ctx, libraryVRStatusTimeout)
+	defer cancel()
+	st, err := v.Status(sctx, s, pod)
+	v.statusMu.Lock()
+	defer v.statusMu.Unlock()
+	if v.statuses == nil {
+		v.statuses = map[types.UID]cachedVRStatus{}
+	}
+	// Drop stale entries (ended Sessions) as we go.
+	for uid, c := range v.statuses {
+		if now.Sub(c.at) >= libraryVRStatusTTL {
+			delete(v.statuses, uid)
+		}
+	}
+	v.statuses[s.UID] = cachedVRStatus{at: now, status: st, err: err}
+	return st, err
+}
+
 // showPage writes the page for user, with notice (a refusal) above it.
 func (v *VRLaunch) showPage(ctx context.Context, w http.ResponseWriter, user *v1alpha1types.User, status int, notice string) {
-	own, err := v.userSessions(ctx, user.Name)
+	own, err := v.cachedUserSessions(ctx, user.Name)
 	if err != nil {
 		klog.Errorf("VR page: user %s: %v", user.Name, err)
 		writeLibraryPage(w, http.StatusInternalServerError, vrTryAgainMessage, false, false)
@@ -361,7 +466,7 @@ func (v *VRLaunch) showPage(ctx context.Context, w http.ResponseWriter, user *v1
 	if notice != "" {
 		fmt.Fprintf(&b, `<p class="notice">%s</p>`, html.EscapeString(notice))
 	}
-	refresh := false
+	refresh := 0
 	idx := slices.IndexFunc(own, func(s v1alpha1types.Session) bool { return s.Spec.IsVR() })
 	switch {
 	case idx >= 0:
@@ -406,23 +511,23 @@ func writeVRApps(b *strings.Builder, apps []*v1alpha1types.App) {
 	}
 	b.WriteString(`<p>Pick a game. Then open the WiVRn app on your headset and connect to the address shown here.</p>`)
 	for _, a := range apps {
-		fmt.Fprintf(b, `<form method="post" action="%s"><input type="hidden" name="action" value="play"><input type="hidden" name="app" value="%s"><button type="submit">Play %s in VR</button></form>`,
+		fmt.Fprintf(b, `<form method="post" action="%s"><input type="hidden" name="action" value="play"><input type="hidden" name="app" value="%s"><button type="submit">Play %s</button></form>`,
 			libraryVRPath, html.EscapeString(a.Name), html.EscapeString(appTitle(a)))
 	}
 }
 
-// writeVRSession describes view and reports whether the page should reload
-// to follow it.
-func writeVRSession(b *strings.Builder, view *vrView) bool {
+// writeVRSession describes view and returns how often, in seconds, the page
+// should reload to follow it.
+func writeVRSession(b *strings.Builder, view *vrView) int {
 	title := html.EscapeString(view.app)
 	stop := `<form method="post" action="` + libraryVRPath + `"><input type="hidden" name="action" value="stop"><button type="submit">Stop the VR session</button></form>`
 	switch {
 	case view.stopping:
 		fmt.Fprintf(b, `<p>Stopping %s…</p>`, title)
-		return true
+		return libraryVRRefresh
 	case !view.ready:
 		fmt.Fprintf(b, `<p>Starting %s… The first start can take several minutes.</p>%s`, title, stop)
-		return true
+		return libraryVRRefresh
 	}
 	addr := html.EscapeString(view.host)
 	port := strconv.Itoa(int(view.port))
@@ -444,13 +549,16 @@ func writeVRSession(b *strings.Builder, view *vrView) bool {
 	}
 	b.WriteString(`<p><small>With no headset connected the session stops by itself after a while.</small></p>`)
 	b.WriteString(stop)
-	return !view.headset
+	if view.headset {
+		return libraryVRIdleRefresh
+	}
+	return libraryVRRefresh
 }
 
-func writeVRPage(w http.ResponseWriter, status int, body string, refresh bool) {
+func writeVRPage(w http.ResponseWriter, status int, body string, refresh int) {
 	meta := ""
-	if refresh {
-		meta = fmt.Sprintf(`<meta http-equiv="refresh" content="%d">`, libraryVRRefresh)
+	if refresh > 0 {
+		meta = fmt.Sprintf(`<meta http-equiv="refresh" content="%d">`, refresh)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

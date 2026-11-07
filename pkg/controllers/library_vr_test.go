@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,6 +71,7 @@ func newVRFixture(t *testing.T, sessions ...*v1alpha1types.Session) *vrFixture {
 		vrApp("flat", "Flat Game", false, false, ""),
 		vrApp("hidden-vr", "Hidden VR", true, true, ""),
 		vrApp("dana-vr", "Dana's VR", true, false, "dana"),
+		vrApp("beat", "Beat", true, false, ""),
 	} {
 		if err := apps.Add(a); err != nil {
 			t.Fatal(err)
@@ -242,6 +244,21 @@ func TestVRPageBacksOutWhenLibraryStartsAfterCreate(t *testing.T) {
 		_, _ = f.k8s.CoreV1().Pods(libraryTestNS).Create(context.Background(), libraryPod(0, false), metav1.CreateOptions{})
 		return false, nil, nil
 	})
+	// The back-out deletes only the Session it made (UID precondition): the
+	// fake clientset ignores preconditions, so the request is checked.
+	var deleteUID types.UID
+	f.dw.PrependReactor("delete", "sessions", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		del, ok := action.(k8stesting.DeleteActionImpl)
+		if p := del.GetDeleteOptions().Preconditions; ok && p != nil && p.UID != nil {
+			deleteUID = *p.UID
+		}
+		return false, nil, nil
+	})
+	defer func() {
+		if deleteUID != "sam-ac-1" {
+			t.Errorf("back-out delete precondition UID %q, want the created Session's", deleteUID)
+		}
+	}()
 	rec := f.play("sam", "ac")
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "game library is open") {
 		t.Errorf("HTTP %d\n%s", rec.Code, rec.Body)
@@ -283,6 +300,42 @@ func TestVRPageRefusesWhileBusy(t *testing.T) {
 	})
 }
 
+// A deleted Session goes at once while its pods terminate, still running
+// Steam: any pod of the User's holds the lock (QA, XERK-2670). Another
+// User's pod doesn't, nor does a Library pod.
+func TestVRPageWaitsForUsersPods(t *testing.T) {
+	f := newVRFixture(t)
+	pod := func(name, user string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: libraryTestNS,
+			Labels: map[string]string{"direwolf/user": user}, DeletionTimestamp: &metav1.Time{Time: libraryTestNow}, Finalizers: []string{"test"}}}
+	}
+	f.addPod(t, pod("alex-old-app", "alex"))
+	f.addPod(t, pod("sam-old-app", "sam"))
+	if rec := f.play("sam", "ac"); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "still shutting down") {
+		t.Errorf("HTTP %d\n%s", rec.Code, rec.Body)
+	}
+	if n := len(f.sessions(t)); n != 0 {
+		t.Errorf("%d sessions created", n)
+	}
+	if err := f.k8s.CoreV1().Pods(libraryTestNS).Delete(context.Background(), "sam-old-app", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.play("sam", "ac"); rec.Code != http.StatusSeeOther {
+		t.Errorf("after the pod went: HTTP %d\n%s", rec.Code, rec.Body)
+	}
+}
+
+// Playing another game while a VR session runs says so; it starts nothing.
+func TestVRPageRefusesSecondGame(t *testing.T) {
+	f := newVRFixture(t, pageVRSession("sam-ac-1", "sam"))
+	if rec := f.play("sam", "beat"); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "another game is running") {
+		t.Errorf("HTTP %d\n%s", rec.Code, rec.Body)
+	}
+	if n := len(f.sessions(t)); n != 1 {
+		t.Errorf("%d sessions", n)
+	}
+}
+
 // Stop ends only the signed-in User's VR Sessions.
 func TestVRPageStop(t *testing.T) {
 	f := newVRFixture(t, pageVRSession("sam-ac-1", "sam"), pageVRSession("alex-ac-1", "alex"))
@@ -318,6 +371,7 @@ func TestVRPageShowsAddressAndPin(t *testing.T) {
 	f := newVRFixture(t, sess)
 	f.addPod(t, readyVRPod(sess))
 	f.status = VRStatus{Pin: "042137"}
+	f.s.VRLaunch.statuses = nil // a fresh read, not the cached one
 	body := f.get("sam").Body.String()
 	for _, want := range []string{"10.10.10.34", "21003", "042137", "Stop the VR session", `http-equiv="refresh"`} {
 		if !strings.Contains(body, want) {
@@ -326,23 +380,106 @@ func TestVRPageShowsAddressAndPin(t *testing.T) {
 	}
 	for _, pin := range []string{"<b>1</b>", "1234567"} {
 		f.status = VRStatus{Pin: pin}
+		f.s.VRLaunch.statuses = nil // a fresh read, not the cached one
 		if body := f.get("sam").Body.String(); strings.Contains(body, "PIN") {
 			t.Errorf("PIN %q shown:\n%s", pin, body)
 		}
 	}
 	// An unreachable agent still shows the address.
 	f.status, f.statusErr = VRStatus{}, errors.New("down")
+	f.s.VRLaunch.statuses = nil // a fresh read, not the cached one
 	if body := f.get("sam").Body.String(); !strings.Contains(body, "21003") || strings.Contains(body, "PIN") {
 		t.Errorf("agent down:\n%s", body)
 	}
 	// Connected: no refresh, no PIN.
 	f.status, f.statusErr = VRStatus{HeadsetConnected: true}, nil
-	if body := f.get("sam").Body.String(); !strings.Contains(body, "headset is connected") || strings.Contains(body, `http-equiv="refresh"`) {
+	f.s.VRLaunch.statuses = nil // a fresh read, not the cached one
+	if body := f.get("sam").Body.String(); !strings.Contains(body, "headset is connected") || !strings.Contains(body, `content="30"`) {
 		t.Errorf("connected:\n%s", body)
 	}
 	// Another user sees none of it.
 	if body := f.get("alex").Body.String(); strings.Contains(body, "21003") || strings.Contains(body, "042137") {
 		t.Errorf("alex sees sam's session:\n%s", body)
+	}
+}
+
+// No address before the pod is Ready on a node, or before the port is known.
+func TestVRPageWaitsForReadyPod(t *testing.T) {
+	for name, edit := range map[string]func(*corev1.Pod, *v1alpha1types.Session){
+		"not ready": func(p *corev1.Pod, _ *v1alpha1types.Session) {
+			p.Status.Conditions[0].Status = corev1.ConditionFalse
+		},
+		"no host IP": func(p *corev1.Pod, _ *v1alpha1types.Session) { p.Status.HostIP = "" },
+		"no port":    func(_ *corev1.Pod, s *v1alpha1types.Session) { s.Status.Ports.VR = 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			sess := pageVRSession("sam-ac-1", "sam")
+			sess.Status.Ports.VR = 21003
+			pod := readyVRPod(sess)
+			edit(pod, sess)
+			f := newVRFixture(t, sess)
+			f.addPod(t, pod)
+			f.status = VRStatus{Pin: "042137"}
+			if body := f.get("sam").Body.String(); !strings.Contains(body, "Starting") || strings.Contains(body, "042137") ||
+				strings.Contains(body, "Address") {
+				t.Errorf("page:\n%s", body)
+			}
+		})
+	}
+}
+
+// vr-agent is read with a deadline and at most once per libraryVRStatusTTL:
+// each read costs a Secret GET on the operator's shared client.
+func TestVRPageBoundsAgentReads(t *testing.T) {
+	sess := pageVRSession("sam-ac-1", "sam")
+	sess.Status.Ports.VR = 21003
+	f := newVRFixture(t, sess)
+	f.addPod(t, readyVRPod(sess))
+	var reads atomic.Int32
+	f.s.VRLaunch.Status = func(ctx context.Context, _ *v1alpha1types.Session, _ *corev1.Pod) (VRStatus, error) {
+		reads.Add(1)
+		if d, ok := ctx.Deadline(); !ok || time.Until(d) > libraryVRStatusTimeout {
+			t.Errorf("vr-agent read without its %s deadline", libraryVRStatusTimeout)
+		}
+		return VRStatus{Pin: "042137"}, nil
+	}
+	for range 3 {
+		if body := f.get("sam").Body.String(); !strings.Contains(body, "042137") {
+			t.Fatalf("page:\n%s", body)
+		}
+	}
+	if n := reads.Load(); n != 1 {
+		t.Errorf("%d vr-agent reads, want 1", n)
+	}
+}
+
+// Page views read the informers, never the API server: open tabs reload
+// every few seconds (QA, XERK-2670).
+func TestVRPageViewsReadTheCache(t *testing.T) {
+	sess := pageVRSession("sam-ac-1", "sam")
+	sess.Status.Ports.VR = 21003
+	f := newVRFixture(t)
+	pod := readyVRPod(sess)
+	nsIndex := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}
+	sessions := cache.NewIndexer(cache.MetaNamespaceKeyFunc, nsIndex)
+	pods := cache.NewIndexer(cache.MetaNamespaceKeyFunc, nsIndex)
+	if err := sessions.Add(sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := pods.Add(pod); err != nil {
+		t.Fatal(err)
+	}
+	f.s.VRLaunch.SessionCache = generic.NewLister[*v1alpha1types.Session](sessions).Namespaced(libraryTestNS)
+	f.s.VRLaunch.SessionPods = generic.NewLister[*corev1.Pod](pods).Namespaced(libraryTestNS)
+	f.status = VRStatus{HeadsetConnected: true}
+	f.dw.ClearActions()
+	f.k8s.ClearActions()
+	body := f.get("sam").Body.String()
+	if !strings.Contains(body, "21003") || !strings.Contains(body, `content="30"`) {
+		t.Errorf("page:\n%s", body)
+	}
+	if a := append(f.dw.Actions(), f.k8s.Actions()...); len(a) != 0 {
+		t.Errorf("page view made API calls: %v", a)
 	}
 }
 

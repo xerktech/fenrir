@@ -387,6 +387,8 @@ func main() {
 				Apps:                  generic.NewLister[*direwolfv1alpha1.App](appInformer.GetIndexer()).Namespaced(*namespace),
 				Sessions:              direwolfClient.DirewolfV1alpha1().Sessions(*namespace),
 				Pods:                  k8sClient.CoreV1().Pods(*namespace),
+				SessionCache:          generic.NewLister[*direwolfv1alpha1.Session](sessionInformer.GetIndexer()).Namespaced(*namespace),
+				SessionPods:           generic.NewLister[*corev1.Pod](podInformer.GetIndexer()).Namespaced(*namespace),
 				Status:                sessionController.ReadVRStatus,
 				MaxConcurrentSessions: *maxSessions,
 			}
