@@ -517,3 +517,79 @@ func TestVRAgentPolledWithItsOwnToken(t *testing.T) {
 		t.Errorf("HeadsetConnected %+v: polled without its own Secret", c)
 	}
 }
+
+// vr-agent joins the App's session bus as the App's own user, from its
+// PUID/PGID: the bus admits only its owner's uid, so a fixed 1000 left an App
+// of another PUID with a vr-agent that never went ready (XERK-2709). An id
+// the spec can't tell ends the Session up front.
+func TestVRAgentRunsAsTheAppsUser(t *testing.T) {
+	f := newPortsFixture(t)
+	app := withNativeVR(t, f)
+	app.Spec.Template.Spec.Containers[0].Env = append(app.Spec.Template.Spec.Containers[0].Env,
+		corev1.EnvVar{Name: "PUID", Value: "1001"}, corev1.EnvVar{Name: "PGID", Value: "1002"})
+	s := vrSession(f)
+	if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Create(t.Context(), s, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	pod, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Get(t.Context(), s.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range pod.Spec.Containers {
+		if c.Name != v1alpha1types.VRAgentContainerName {
+			continue
+		}
+		if sc := c.SecurityContext; sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 1001 || sc.RunAsGroup == nil || *sc.RunAsGroup != 1002 {
+			t.Errorf("vr-agent securityContext %+v, want 1001:1002", c.SecurityContext)
+		}
+		return
+	}
+	t.Fatal("no vr-agent")
+}
+
+func TestVRAgentIDs(t *testing.T) {
+	app := func(env ...corev1.EnvVar) corev1.Container { return corev1.Container{Name: "app", Env: env} }
+	for _, tc := range []struct {
+		name     string
+		ctrs     []corev1.Container
+		uid, gid int64
+		bad      bool
+	}{
+		{"unset", []corev1.Container{app()}, 1000, 1000, false},
+		{"PUID only", []corev1.Container{app(corev1.EnvVar{Name: "PUID", Value: "1001"})}, 1001, 1000, false},
+		{"both", []corev1.Container{app(corev1.EnvVar{Name: "PUID", Value: "1001"}, corev1.EnvVar{Name: "PGID", Value: "100"})}, 1001, 100, false},
+		{"agreeing containers", []corev1.Container{app(corev1.EnvVar{Name: "PUID", Value: "1001"}), {Name: "side", Env: []corev1.EnvVar{{Name: "PUID", Value: "1001"}}}}, 1001, 1000, false},
+		{"operator containers ignored", []corev1.Container{app(), {Name: v1alpha1types.UdevRelayContainerName, Env: []corev1.EnvVar{{Name: "PUID", Value: "0"}}}}, 1000, 1000, false},
+		{"empty, as GoW reads it", []corev1.Container{app(corev1.EnvVar{Name: "PUID", Value: ""})}, 1000, 1000, false},
+		{"listed twice: the last wins", []corev1.Container{app(corev1.EnvVar{Name: "PUID", Value: "1000"}, corev1.EnvVar{Name: "PUID", Value: "1001"})}, 1001, 1000, false},
+		{"root", []corev1.Container{app(corev1.EnvVar{Name: "PUID", Value: "0"})}, 0, 0, true},
+		{"not a number", []corev1.Container{app(corev1.EnvVar{Name: "PGID", Value: "games"})}, 0, 0, true},
+		{"too large", []corev1.Container{app(corev1.EnvVar{Name: "PUID", Value: "4294967296"})}, 0, 0, true},
+		{"from a source", []corev1.Container{app(corev1.EnvVar{Name: "PUID", ValueFrom: &corev1.EnvVarSource{}})}, 0, 0, true},
+		{"disagreeing containers", []corev1.Container{app(corev1.EnvVar{Name: "PUID", Value: "1001"}), {Name: "side", Env: []corev1.EnvVar{{Name: "PUID", Value: "1002"}}}}, 0, 0, true},
+	} {
+		uid, gid, err := vrAgentIDs(&corev1.PodSpec{Containers: tc.ctrs})
+		if (err != nil) != tc.bad || (!tc.bad && (uid != tc.uid || gid != tc.gid)) {
+			t.Errorf("%s: %d:%d, %v; want %d:%d, error %v", tc.name, uid, gid, err, tc.uid, tc.gid, tc.bad)
+		}
+	}
+}
+
+// An App whose PUID vr-agent can't take ends its Session at once, not after
+// the 15-minute unstarted reaper.
+func TestVRSessionWithUnusablePUIDEnds(t *testing.T) {
+	f := newPortsFixture(t)
+	app := withNativeVR(t, f)
+	app.Spec.Template.Spec.Containers[0].Env = append(app.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{Name: "PUID", Value: "0"})
+	s := vrSession(f)
+	if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Create(t.Context(), s, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.sc.Reconcile(portsTestNS, s.Name, s)
+	if f.sessionExists(t, s.Name) {
+		t.Error("VR Session with PUID=0 kept")
+	}
+}

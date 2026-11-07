@@ -406,7 +406,7 @@ func TestSplitVRAppPodRunsVRAgent(t *testing.T) {
 		t.Error("flat App pod runs vr-agent")
 	}
 	// Native mode keeps its readiness gate.
-	if c := f.sc.vrAgentContainer(true, vrAgentTokenVolume); c.ReadinessProbe == nil {
+	if c := f.sc.vrAgentContainer(true, vrAgentTokenVolume, vrAgentUID, vrAgentUID); c.ReadinessProbe == nil {
 		t.Error("native vr-agent lost its readiness probe")
 	}
 }
@@ -545,6 +545,42 @@ func TestRevokeBeforePollEdgeCases(t *testing.T) {
 		}
 	})
 
+	// A Headset re-created under the name for another key (or user) is no
+	// confirm of this Session's key: WiVRn still trusts the old one there
+	// (XERK-2709).
+	t.Run("re-created for another key", func(t *testing.T) {
+		f, s, name := setup(t)
+		f.createHeadsetObj(t, name, f.user, testHeadsetKeyB, "", func(*v1alpha1types.Headset) {})
+		if err := f.sc.reconcileHeadset(portsTestNS, name, nil); err != nil {
+			t.Fatal(err)
+		}
+		if f.sessionExists(t, s.Name) {
+			t.Error("session outlived its headset re-created for another key")
+		}
+	})
+
+	t.Run("re-created for another user", func(t *testing.T) {
+		f, s, name := setup(t)
+		f.createHeadsetObj(t, name, "someone-else", testHeadsetKeyA, "", func(*v1alpha1types.Headset) {})
+		if err := f.sc.reconcileHeadset(portsTestNS, name, nil); err != nil {
+			t.Fatal(err)
+		}
+		if f.sessionExists(t, s.Name) {
+			t.Error("session outlived its headset re-created for another user")
+		}
+	})
+
+	t.Run("still confirmed", func(t *testing.T) {
+		f, s, name := setup(t)
+		f.createHeadsetObj(t, name, f.user, testHeadsetKeyA, "", func(*v1alpha1types.Headset) {})
+		if err := f.sc.reconcileHeadset(portsTestNS, name, nil); err != nil {
+			t.Fatal(err)
+		}
+		if !f.sessionExists(t, s.Name) {
+			t.Error("a confirmed headset's event ended its session")
+		}
+	})
+
 	t.Run("GET fails", func(t *testing.T) {
 		f, s, name := setup(t)
 		f.dw.PrependReactor("get", "headsets", func(k8stesting.Action) (bool, runtime.Object, error) {
@@ -626,6 +662,37 @@ func TestRevokeBeforePollEndsEverySession(t *testing.T) {
 	for _, n := range []string{s.Name, other.Name} {
 		if want := n == failed; f.sessionExists(t, n) != want {
 			t.Errorf("session %s exists %v, want %v (failed delete: %s)", n, !want, want, failed)
+		}
+	}
+}
+
+// In a split App pod vr-agent runs as the App's user too (XERK-2709). One it
+// can't take keeps the Moonlight stream: vr-agent there only offers pairings
+// for confirmation, and nothing waits on it, so it falls back to 1000.
+func TestSplitVRAppPodVRAgentTakesAppsUser(t *testing.T) {
+	for _, tc := range []struct {
+		puid     string
+		uid, gid int64
+	}{{"1001", 1001, 1002}, {"0", vrAgentUID, vrAgentUID}} {
+		f := newPortsFixture(t)
+		app := withVR(t, f)
+		ctr := &app.Spec.Template.Spec.Containers[0]
+		ctr.Env = append(ctr.Env, corev1.EnvVar{Name: "PUID", Value: tc.puid}, corev1.EnvVar{Name: "PGID", Value: "1002"})
+		sess := f.session("alex-1", f.user)
+		if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+		_, pod, err := f.sc.buildPods(sess, testWolfPodUID)
+		if err != nil {
+			t.Fatalf("PUID %s: %v", tc.puid, err)
+		}
+		i := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == v1alpha1types.VRAgentContainerName })
+		if i < 0 {
+			t.Fatalf("PUID %s: App pod has no vr-agent", tc.puid)
+		}
+		if sc := pod.Spec.Containers[i].SecurityContext; sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != tc.uid ||
+			sc.RunAsGroup == nil || *sc.RunAsGroup != tc.gid {
+			t.Errorf("PUID %s: vr-agent securityContext %+v, want %d:%d", tc.puid, sc, tc.uid, tc.gid)
 		}
 	}
 }

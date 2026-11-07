@@ -53,8 +53,8 @@ const (
 	// sway, and its session bus on VRBusAddress.
 	vrModeEnv    = "DIREWOLF_VR_MODE"
 	vrModeNative = "native"
-	// vrAgentUID is the desktop user (GoW's PUID default): D-Bus's EXTERNAL
-	// auth lets only the bus owner's uid connect.
+	// vrAgentUID is the desktop user when the App sets no PUID (GoW's
+	// default): D-Bus's EXTERNAL auth lets only the bus owner's uid connect.
 	vrAgentUID int64 = 1000
 	// vrUnstartedTTL reaps a VR Session whose pod never became ready. Longer
 	// than unstartedSessionTTL: no Moonlight launch is waiting, and the vr
@@ -125,7 +125,11 @@ func (c *SessionController) buildVRPod(session *v1alpha1types.Session) (*corev1.
 		ctr.Env = append(slices.DeleteFunc(ctr.Env, func(e corev1.EnvVar) bool { return e.Name == vrModeEnv }),
 			corev1.EnvVar{Name: vrModeEnv, Value: vrModeNative})
 	}
-	spec.Containers = append(spec.Containers, c.vrAgentContainer(true, vrAgentOwnTokenVolume))
+	uid, gid, err := vrAgentIDs(spec)
+	if err != nil {
+		return nil, invalidSpec(err)
+	}
+	spec.Containers = append(spec.Containers, c.vrAgentContainer(true, vrAgentOwnTokenVolume, uid, gid))
 	// Created by reconcileSessionPod before the pod (XERK-2747).
 	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: vrAgentOwnTokenVolume, VolumeSource: corev1.VolumeSource{
 		Secret: &corev1.SecretVolumeSource{SecretName: vrAgentTokenSecretName(session.Name)},
@@ -167,17 +171,83 @@ func vrBusVolumeSpec() corev1.Volume {
 // listens there) and vr-agent its own token Secret, never wolf-agent's (that
 // one drives Wolf). Call it after the App pod's volumes are pruned.
 func (c *SessionController) withVRAgent(session *v1alpha1types.Session, spec *corev1.PodSpec) {
+	uid, gid, err := vrAgentIDs(spec)
+	if err != nil {
+		// Here vr-agent only offers a PIN pairing for confirmation; the
+		// stream doesn't wait on it. So the Session keeps streaming, as it
+		// did before vr-agent took the App's ids, with confirmation off in
+		// effect (a bus of another uid refuses it).
+		klog.Warningf("Session %s/%s: vr-agent can't take the App's user (%v); it runs as %d and headset confirmation won't work", session.Namespace, session.Name, err, vrAgentUID)
+		uid, gid = vrAgentUID, vrAgentUID
+	}
 	for i := range spec.Containers {
 		if ctr := &spec.Containers[i]; ctr.Name != v1alpha1types.UdevRelayContainerName {
 			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: vrBusVolume, MountPath: VRBusDir})
 		}
 	}
-	spec.Containers = append(spec.Containers, c.vrAgentContainer(false, vrAgentOwnTokenVolume))
+	spec.Containers = append(spec.Containers, c.vrAgentContainer(false, vrAgentOwnTokenVolume, uid, gid))
 	spec.Volumes = append(spec.Volumes, vrBusVolumeSpec(), corev1.Volume{
 		Name: vrAgentOwnTokenVolume,
 		// Created by reconcileAppPod before the pod.
 		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: vrAgentTokenSecretName(session.Name)}},
 	})
+}
+
+// GoW images' desktop user ids.
+const (
+	puidEnv = "PUID"
+	pgidEnv = "PGID"
+)
+
+// vrAgentIDs is the uid and gid vr-agent runs as: the App's desktop user,
+// whose session bus admits no other uid under EXTERNAL auth. GoW images take
+// it from PUID/PGID, 1000 by default. With any other, a vr-agent of uid 1000
+// was refused, never went ready, and the Session was reaped 15 minutes later
+// as "never became ready" (XERK-2709). So the App's PUID/PGID are read here;
+// one the pod spec can't tell (valueFrom, not a number, root, or two App
+// containers disagreeing) is an invalid spec.
+func vrAgentIDs(spec *corev1.PodSpec) (uid, gid int64, err error) {
+	ids := map[string]int64{}
+	for _, ctr := range spec.Containers {
+		if ctr.Name == v1alpha1types.UdevRelayContainerName || ctr.Name == v1alpha1types.VRAgentContainerName {
+			continue
+		}
+		// As Kubernetes reads env: the last entry of a name wins.
+		last := map[string]corev1.EnvVar{}
+		for _, e := range ctr.Env {
+			if e.Name == puidEnv || e.Name == pgidEnv {
+				last[e.Name] = e
+			}
+		}
+		for _, name := range []string{puidEnv, pgidEnv} {
+			e, ok := last[name]
+			if !ok {
+				continue
+			}
+			if e.ValueFrom != nil {
+				return 0, 0, fmt.Errorf("container %q sets %s from a source; a VR App must set it as a value", ctr.Name, name)
+			}
+			id := vrAgentUID // GoW's setup reads an empty one as 1000
+			if e.Value != "" {
+				var err error
+				if id, err = strconv.ParseInt(e.Value, 10, 32); err != nil || id <= 0 {
+					return 0, 0, fmt.Errorf("container %q sets %s=%q; a VR App needs a non-root numeric id", ctr.Name, name, e.Value)
+				}
+			}
+			if prev, ok := ids[name]; ok && prev != id {
+				return 0, 0, fmt.Errorf("the App's containers set %s to both %d and %d; vr-agent can join only one bus owner", name, prev, id)
+			}
+			ids[name] = id
+		}
+	}
+	uid, gid = vrAgentUID, vrAgentUID
+	if id, ok := ids[puidEnv]; ok {
+		uid = id
+	}
+	if id, ok := ids[pgidEnv]; ok {
+		gid = id
+	}
+	return uid, gid, nil
 }
 
 // vrAgentContainer reads WiVRn's state from the App's session bus. It runs as
@@ -189,7 +259,7 @@ func (c *SessionController) withVRAgent(session *v1alpha1types.Session, spec *co
 // starts once WiVRn answers). Never in a split App pod: the stream waits for
 // that pod to be ready, and the App waits for the stream's display before
 // it starts WiVRn.
-func (c *SessionController) vrAgentContainer(gateReady bool, tokenVolume string) corev1.Container {
+func (c *SessionController) vrAgentContainer(gateReady bool, tokenVolume string, uid, gid int64) corev1.Container {
 	probe := func(p string) *corev1.Probe {
 		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
 			Path: p, Port: intstr.FromInt32(VRAgentPort), Scheme: corev1.URISchemeHTTPS,
@@ -221,8 +291,8 @@ func (c *SessionController) vrAgentContainer(gateReady bool, tokenVolume string)
 			corev1.ResourceMemory: resource.MustParse("32Mi"),
 		}},
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:                new(vrAgentUID),
-			RunAsGroup:               new(vrAgentUID),
+			RunAsUser:                new(uid),
+			RunAsGroup:               new(gid),
 			RunAsNonRoot:             new(true),
 			AllowPrivilegeEscalation: new(false),
 			ReadOnlyRootFilesystem:   new(true),
