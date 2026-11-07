@@ -105,7 +105,9 @@ This works as it does for Moonlight sessions.
 - Revoking a headset is deleting its Headset. That ends the User's Sessions seeded with it, the way
   deleting a Pairing ends a Moonlight client's. `RevokeKey` isn't used: it only works while a
   session runs, and the next start would bring the key back.
-- A new PIN pairing becomes a Headset once the agent reports WiVRn's `KnownKeys` (XERK-2669 part 2).
+- A new PIN pairing becomes a Headset: the agent reports WiVRn's `KnownKeys`, and the operator
+  records the one key of a pod seeded with none (`recordPairedHeadsets`, XERK-2740). Moonlight
+  mode does the same through a vr-agent in the split App pod.
 
 ## Moonlight interplay
 

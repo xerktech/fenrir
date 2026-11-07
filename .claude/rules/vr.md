@@ -60,9 +60,9 @@ paths:
   goes to the headset, not the Moonlight stream. wivrn-server keeps the real runtime dir: games
   reach its IPC socket there.
 - The session bus listens on `unix:dir=/tmp` (`dbus-session.conf`), never an abstract socket.
-  - When `/run/direwolf-vr-bus` is mounted (always in native mode), on `unix:path=` there instead
-    (`dbus-session-agent.conf`), for the `vr-agent` sidecar. Keep it equal to `VRBusAddress`
-    (`TestWiVRnStatusOverDBus` reads the image's file).
+  - When `/run/direwolf-vr-bus` is mounted (native mode, and a split App pod since XERK-2740), on
+    `unix:path=` there instead (`dbus-session-agent.conf`), for the `vr-agent` sidecar. Keep it
+    equal to `VRBusAddress` (`TestWiVRnStatusOverDBus` reads the image's file).
 - Either Steam or the VR services exiting ends the session. Tests: `images/gow-nvidia32/vr/vr_test.go`.
 - wivrn-server's stderr runs through `vr-notice`, which shows "connect ... to <host> port <port>"
   and the pairing PIN in a swaynag overlay bar on the session's sway: the Moonlight mirror is the
@@ -104,8 +104,19 @@ paths:
     ends the Session on reconcile, and at once on any Headset event (`reconcileHeadset`, found by
     annotation: a deleted object no longer names its User).
   - The spec is immutable (CEL): a changed key would admit a headset without ending Sessions.
-  - Nothing yet turns a PIN pairing into a Headset: each session pairs anew until the vr-agent
-    (XERK-2668) reports WiVRn's `KnownKeys` and the operator records them (rest of XERK-2669).
+  - A PIN pairing becomes a Headset (`recordPairedHeadsets`, XERK-2740): vr-agent reports
+    WiVRn's `KnownKeys`; a pod seeded with none (annotation present, empty) records its one key.
+    - Never from a pod seeded with any key: WiVRn pairs only on an empty list, so a new key there
+      came from elsewhere (the game, same uid, can write `known_keys.json`). Two or more: none.
+    - The Headset is `headset-<sha256(user, key)>`, then named in the pod's annotation, so revoking
+      it ends the Session and the pod stops recording (it is no longer seeded with none).
+    - A failure is logged, never ends the Session: it costs only a PIN next time.
+  - Moonlight mode: a vrPort App's split App pod runs vr-agent too, with the bus dir and the
+    Session's token Secret (`withVRAgent`); polled from the Moonlight reconcile while it records.
+    - No readiness probe there: the stream waits for the App pod to be Ready, and the App waits
+      for the stream's display before it starts WiVRn. A deadlock otherwise.
+    - An App pod from before has no vr-agent and is never polled.
+    - Tests: `headset_record_test.go`.
   - Tests: `headset_test.go`, `TestHeadsetCRDValidatesKeyAndImmutability`,
     `TestVRStartSeedsKnownKeysFromHeadsets`, `TestVRStartRefusesBadHeadsetSeed`.
 

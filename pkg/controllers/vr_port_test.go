@@ -136,7 +136,7 @@ func TestVRPortReachesAppPod(t *testing.T) {
 						got = append(got, e.Value)
 					}
 				}
-				operator := isWolfPodContainer(c.Name) || c.Name == v1alpha1types.UdevRelayContainerName
+				operator := isWolfPodContainer(c.Name) || c.Name == v1alpha1types.UdevRelayContainerName || c.Name == v1alpha1types.VRAgentContainerName
 				switch {
 				case operator && len(got) != 0:
 					t.Errorf("operator container %s/%s got %s", pod.Name, c.Name, vrPortEnv)

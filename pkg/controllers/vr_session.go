@@ -66,6 +66,8 @@ const (
 	vrHeadsetGone       = "Disconnected"
 	vrAgentLost         = "AgentUnreachable"
 	vrConditionSuccess  = "Success"
+	// vrStatusMaxBytes caps vr-agent's reply: room for a few dozen keys.
+	vrStatusMaxBytes = 64 << 10
 	// vrAgentTokenVolume is the Session's token Secret, as buildPod mounts it.
 	vrAgentTokenVolume = "wolf-agent-token"
 )
@@ -74,6 +76,16 @@ const (
 type VRStatus struct {
 	HeadsetConnected bool `json:"headsetConnected"`
 	SessionRunning   bool `json:"sessionRunning"`
+	// KnownKeys are the keys WiVRn lets connect: those it was seeded with,
+	// plus one a PIN pairing added (recordPairedHeadsets).
+	KnownKeys []VRKnownKey `json:"knownKeys,omitempty"`
+}
+
+// VRKnownKey is one entry of WiVRn's KnownKeys: the name it shows and the
+// key in its stored form (HeadsetSpec.PublicKey).
+type VRKnownKey struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
 }
 
 // vrUnstartedReason is why a VR Session never got a ready pod, or "".
@@ -108,7 +120,7 @@ func (c *SessionController) buildVRPod(session *v1alpha1types.Session) (*corev1.
 		ctr.Env = append(slices.DeleteFunc(ctr.Env, func(e corev1.EnvVar) bool { return e.Name == vrModeEnv }),
 			corev1.EnvVar{Name: vrModeEnv, Value: vrModeNative})
 	}
-	spec.Containers = append(spec.Containers, c.vrAgentContainer())
+	spec.Containers = append(spec.Containers, c.vrAgentContainer(true))
 	spec.Volumes = slices.DeleteFunc(spec.Volumes, func(v corev1.Volume) bool { return !podUsesVolume(spec, v.Name) })
 	for i := range spec.Volumes {
 		if spec.Volumes[i].Name == wolfRuntimeVolume {
@@ -116,10 +128,7 @@ func (c *SessionController) buildVRPod(session *v1alpha1types.Session) (*corev1.
 			spec.Volumes[i].VolumeSource = wolfRuntimeVolumeSource()
 		}
 	}
-	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: vrBusVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
-		Medium:    corev1.StorageMediumMemory,
-		SizeLimit: new(resource.MustParse("1Mi")),
-	}}})
+	spec.Volumes = append(spec.Volumes, vrBusVolumeSpec())
 	spec.ResourceClaims = slices.DeleteFunc(spec.ResourceClaims, func(rc corev1.PodResourceClaim) bool { return !podUsesClaim(spec, rc.Name) })
 	spec.HostUsers = new(false)
 	spec.HostNetwork = false
@@ -135,14 +144,47 @@ func (c *SessionController) buildVRPod(session *v1alpha1types.Session) (*corev1.
 	return pod, nil
 }
 
+// vrBusVolumeSpec is vrBusVolume: tiny and in memory, it holds one socket.
+func vrBusVolumeSpec() corev1.Volume {
+	return corev1.Volume{Name: vrBusVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+		Medium:    corev1.StorageMediumMemory,
+		SizeLimit: new(resource.MustParse("1Mi")),
+	}}}
+}
+
+// withVRAgent adds vr-agent to a Moonlight Session's split App pod of a VR
+// App (XERK-2740), so a PIN pairing there is recorded as a Headset too: the
+// App's containers get the bus directory (the image's session bus then
+// listens there) and vr-agent the Session's token Secret, as tokenVolume
+// declares it in the Wolf pod. Call it after the App pod's volumes are
+// pruned.
+func (c *SessionController) withVRAgent(spec *corev1.PodSpec, tokenVolume corev1.Volume) {
+	for i := range spec.Containers {
+		if ctr := &spec.Containers[i]; ctr.Name != v1alpha1types.UdevRelayContainerName {
+			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: vrBusVolume, MountPath: VRBusDir})
+		}
+	}
+	spec.Containers = append(spec.Containers, c.vrAgentContainer(false))
+	spec.Volumes = append(spec.Volumes, vrBusVolumeSpec(), tokenVolume)
+}
+
 // vrAgentContainer reads WiVRn's state from the App's session bus. It runs as
 // the desktop user (the bus refuses other uids) with nothing else: the token
 // and key are its alone, and the App never mounts them.
-func (c *SessionController) vrAgentContainer() corev1.Container {
+//
+// gateReady makes it the pod's readiness (native mode: the headset wait
+// starts once WiVRn answers). Never in a split App pod: the stream waits for
+// that pod to be ready, and the App waits for the stream's display before
+// it starts WiVRn.
+func (c *SessionController) vrAgentContainer(gateReady bool) corev1.Container {
 	probe := func(p string) *corev1.Probe {
 		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
 			Path: p, Port: intstr.FromInt32(VRAgentPort), Scheme: corev1.URISchemeHTTPS,
 		}}}
+	}
+	var readiness *corev1.Probe
+	if gateReady {
+		readiness = probe("/readyz")
 	}
 	return corev1.Container{
 		Name:            v1alpha1types.VRAgentContainerName,
@@ -159,7 +201,7 @@ func (c *SessionController) vrAgentContainer() corev1.Container {
 		Ports: []corev1.ContainerPort{{Name: "vr-agent", ContainerPort: VRAgentPort, Protocol: corev1.ProtocolTCP}},
 		// Ready once WiVRn answers on the bus: the headset wait (and its
 		// grace period) starts then.
-		ReadinessProbe: probe("/readyz"),
+		ReadinessProbe: readiness,
 		LivenessProbe:  probe("/livez"),
 		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("10m"),
@@ -260,6 +302,10 @@ func (c *SessionController) reconcileVRHeadset(ctx context.Context, session *v1a
 	if err != nil {
 		return err
 	}
+	// A failure costs only a PIN next session; it never ends this one.
+	if err := c.recordPairedHeadsets(ctx, session, pod, vr.KnownKeys); err != nil {
+		klog.Warningf("Session %s/%s: %v", session.Namespace, session.Name, err)
+	}
 	headset := meta.FindStatusCondition(status.Conditions, v1alpha1types.SessionHeadsetConnectedCondition)
 	switch {
 	case vr.HeadsetConnected:
@@ -334,8 +380,31 @@ func (c *SessionController) pollVRAgent(ctx context.Context, session *v1alpha1ty
 		return VRStatus{}, fmt.Errorf("polling vr-agent: %s", resp.Status)
 	}
 	var vr VRStatus
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&vr); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, vrStatusMaxBytes)).Decode(&vr); err != nil {
 		return VRStatus{}, fmt.Errorf("polling vr-agent: %w", err)
 	}
 	return vr, nil
+}
+
+// recordAppPodPairing records a PIN pairing in a Moonlight Session's split
+// App pod (XERK-2740), as reconcileVRHeadset does in native mode. Polled only
+// while that pod paired by PIN and has not recorded one; a failure is logged,
+// never the stream's concern.
+func (c *SessionController) recordAppPodPairing(ctx context.Context, session *v1alpha1types.Session, wolfPod *corev1.Pod) {
+	name := wolfPod.Annotations[appPodAnnotation]
+	if name == "" || c.HeadsetClient == nil {
+		return
+	}
+	pod, err := c.podController.Informer().Namespaced(wolfPod.Namespace).Get(name)
+	if err != nil || !pairingWasOpen(pod) || pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" ||
+		!slices.ContainsFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == v1alpha1types.VRAgentContainerName }) {
+		return // an App pod from before XERK-2740 has no vr-agent
+	}
+	vr, err := c.pollVRAgent(ctx, session, pod.Status.PodIP)
+	if err == nil {
+		err = c.recordPairedHeadsets(ctx, session, pod, vr.KnownKeys)
+	}
+	if err != nil {
+		klog.Warningf("Session %s/%s: recording a paired headset: %v", session.Namespace, session.Name, err)
+	}
 }

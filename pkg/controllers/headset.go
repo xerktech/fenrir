@@ -2,16 +2,22 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
@@ -208,4 +214,111 @@ func (c *SessionController) reconcileHeadset(namespace, name string, _ *v1alpha1
 		errs = append(errs, err)
 	}
 	return stderrors.Join(errs...)
+}
+
+// headsetKeyPattern is HeadsetSpec.PublicKey's CRD pattern: a key that fails
+// it would be refused on create anyway.
+var headsetKeyPattern = regexp.MustCompile(`^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`)
+
+const (
+	headsetKeyMaxLen  = 1024
+	headsetNameMaxLen = 128
+)
+
+// pairingWasOpen is whether pod's WiVRn was seeded with no Headsets, so it
+// paired by PIN: only then can a key it knows be a new pairing. A pod seeded
+// with any key never pairs (WiVRn opens pairing only on an empty list), so a
+// new key in it came from elsewhere (the game can write known_keys.json) and
+// is never recorded.
+func pairingWasOpen(pod *corev1.Pod) bool {
+	v, ok := pod.Annotations[vrHeadsetsAnnotation]
+	return ok && v == ""
+}
+
+// recordedHeadsetName names the Headset recorded for user's key: the same on
+// every poll, so a retry finds the one it made.
+func recordedHeadsetName(user, key string) string {
+	sum := sha256.Sum256([]byte(user + "\x00" + key))
+	return "headset-" + hex.EncodeToString(sum[:10])
+}
+
+// recordPairedHeadsets turns a PIN pairing in pod's WiVRn (reported by its
+// vr-agent as known) into a Headset of the Session's User, so the next VR
+// session is seeded with it instead of asking for a PIN again (XERK-2740).
+// The pod's vrHeadsetsAnnotation then names it, so revoking it ends this
+// Session like any seeded Headset, and pairing is no longer open to record.
+//
+// Only a pod seeded with none records, and only one key: WiVRn closes
+// pairing once a key is stored. Several keys there didn't come from one PIN
+// pairing; none is recorded.
+func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod, known []VRKnownKey) error {
+	if c.HeadsetClient == nil || !pairingWasOpen(pod) || len(known) == 0 {
+		return nil
+	}
+	if len(known) > 1 {
+		return fmt.Errorf("WiVRn knows %d keys after a PIN pairing, which adds one; recording none", len(known))
+	}
+	k := known[0]
+	if len(k.Key) < 4 || len(k.Key) > headsetKeyMaxLen || !headsetKeyPattern.MatchString(k.Key) {
+		return stderrors.New("WiVRn's paired key is not in its stored form; not recording it")
+	}
+	user := session.Spec.UserReference.Name
+	h, err := c.pairedHeadset(ctx, session.Namespace, user, k)
+	if err != nil {
+		return err
+	}
+	value := h.Name + "/" + string(h.UID)
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
+		// The resourceVersion fails the patch if the pod changed since it
+		// was read: another poll may have recorded first.
+		"resourceVersion": pod.ResourceVersion,
+		"annotations":     map[string]string{vrHeadsetsAnnotation: value},
+	}})
+	if err != nil {
+		return err
+	}
+	if _, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{
+		FieldManager: "direwolf-session-controller-pod",
+	}); err != nil {
+		return fmt.Errorf("failed to record headset %s on pod %s/%s: %w", h.Name, pod.Namespace, pod.Name, err)
+	}
+	klog.Infof("Session %s/%s: recorded the headset paired by PIN as Headset %s", session.Namespace, session.Name, h.Name)
+	return nil
+}
+
+// pairedHeadset returns user's Headset with k's key, creating it if there is
+// none.
+func (c *SessionController) pairedHeadset(ctx context.Context, namespace, user string, k VRKnownKey) (*v1alpha1types.Headset, error) {
+	existing, err := c.userHeadsets(namespace, user)
+	if err != nil {
+		return nil, err
+	}
+	if i := slices.IndexFunc(existing, func(h *v1alpha1types.Headset) bool { return h.Spec.PublicKey == k.Key }); i >= 0 {
+		return existing[i], nil
+	}
+	name := recordedHeadsetName(user, k.Key)
+	display := strings.ToValidUTF8(k.Name, "")
+	for len(display) > headsetNameMaxLen {
+		_, size := utf8.DecodeLastRuneInString(display)
+		display = display[:len(display)-size]
+	}
+	h, err := c.HeadsetClient.Create(ctx, &v1alpha1types.Headset{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: v1alpha1types.HeadsetSpec{
+			UserReference: v1alpha1types.UserReference{Name: user},
+			PublicKey:     k.Key,
+			DisplayName:   display,
+		},
+	}, metav1.CreateOptions{FieldManager: "direwolf-session-controller"})
+	if errors.IsAlreadyExists(err) {
+		// Made by an earlier poll whose pod patch failed.
+		h, err = c.HeadsetClient.Get(ctx, name, metav1.GetOptions{})
+		if err == nil && (h.Spec.UserReference.Name != user || h.Spec.PublicKey != k.Key || h.DeletionTimestamp != nil) {
+			return nil, fmt.Errorf("headset %s/%s exists for another user or key, or is being deleted", namespace, name)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to record headset %s/%s: %w", namespace, name, err)
+	}
+	return h, nil
 }

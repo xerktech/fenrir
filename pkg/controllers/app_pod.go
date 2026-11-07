@@ -222,6 +222,13 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 	app.Spec.Volumes = append(app.Spec.Volumes, corev1.Volume{Name: udevEventsVolume, VolumeSource: corev1.VolumeSource{
 		HostPath: &corev1.HostPathVolumeSource{Path: c.sessionHostDir(session, "events"), Type: new(corev1.HostPathDirectoryOrCreate)},
 	}})
+	if _, vr := app.Annotations[vrPortAnnotation]; vr {
+		i := slices.IndexFunc(combined.Spec.Volumes, func(v corev1.Volume) bool { return v.Name == vrAgentTokenVolume })
+		if i < 0 {
+			return nil, nil, fmt.Errorf("session pod has no %s volume for vr-agent", vrAgentTokenVolume)
+		}
+		c.withVRAgent(&app.Spec, combined.Spec.Volumes[i])
+	}
 	app.Spec.HostUsers = new(false)
 	app.Spec.HostNetwork = false
 	app.Spec.HostIPC = false

@@ -116,7 +116,7 @@ func TestVRPodSeededWithUsersHeadsets(t *testing.T) {
 		for _, ctrs := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
 			for _, c := range ctrs {
 				got := headsetEnv(&c)
-				operator := isWolfPodContainer(c.Name) || c.Name == v1alpha1types.UdevRelayContainerName
+				operator := isWolfPodContainer(c.Name) || c.Name == v1alpha1types.UdevRelayContainerName || c.Name == v1alpha1types.VRAgentContainerName
 				if operator {
 					if len(got) != 0 {
 						t.Errorf("operator container %s/%s got %s", pod.Name, c.Name, vrHeadsetsEnv)

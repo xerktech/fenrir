@@ -18,8 +18,8 @@ import (
 	"games-on-whales.github.io/direwolf/pkg/wolfapi"
 )
 
-// vrAgentCommand runs the vr-agent sidecar of a native VR Session's pod
-// (XERK-2668): it reads WiVRn's state from the App's session bus and serves it
+// vrAgentCommand runs the vr-agent sidecar of a VR App's pod (a native VR
+// Session's, XERK-2668, or a Moonlight Session's split App pod, XERK-2740): it reads WiVRn's state from the App's session bus and serves it
 // to the operator, behind the Session's bearer token and pinned cert. The pod
 // is off the host network, so only the pod network reaches it.
 const vrAgentCommand = "vr-agent"
@@ -34,8 +34,8 @@ const (
 	vrBusTimeout = 5 * time.Second
 )
 
-// wivrnStatus reads WiVRn's HeadsetConnected and SessionRunning from the bus
-// at address.
+// wivrnStatus reads WiVRn's HeadsetConnected, SessionRunning and KnownKeys
+// from the bus at address.
 func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, vrBusTimeout)
 	defer cancel()
@@ -59,6 +59,21 @@ func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, err
 		}
 		if err := v.Store(dst); err != nil {
 			return controllers.VRStatus{}, fmt.Errorf("WiVRn's %s: %w", name, err)
+		}
+	}
+	// Read leniently: liveness must not hang on it. A WiVRn without it
+	// reports no keys, so nothing is recorded.
+	if v, ok := props["KnownKeys"]; ok {
+		var keys []struct {
+			Name           string
+			Key            string
+			LastConnection int64
+		}
+		if err := v.Store(&keys); err != nil {
+			return controllers.VRStatus{}, fmt.Errorf("WiVRn's KnownKeys: %w", err)
+		}
+		for _, k := range keys {
+			st.KnownKeys = append(st.KnownKeys, controllers.VRKnownKey{Name: k.Name, Key: k.Key})
 		}
 	}
 	return st, nil
