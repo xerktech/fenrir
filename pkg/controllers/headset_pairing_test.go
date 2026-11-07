@@ -582,3 +582,30 @@ func emptyHeadsetInformer(t *testing.T) generic.Informer[*v1alpha1types.Headset]
 	factory.WaitForCacheSync(stop)
 	return generic.NewInformer[*v1alpha1types.Headset](inf)
 }
+
+// Recording a key, by create or by adopting it, forgets its failures: a
+// later failure backs off from the minimum again.
+func TestRecordingClearsHeadsetBackoff(t *testing.T) {
+	f, s, pod := recordFixture(t, "[]")
+	name := headsetObjectName(f.user, testHeadsetKeyA)
+	f.sc.headsetBackoff.set(name)
+	f.sc.headsetBackoff.until[name] = time.Now().Add(-time.Second) // expired
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Name: "q", Key: testHeadsetKeyA}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.sc.headsetBackoff.backoff[name]; ok {
+		t.Error("created: backoff kept")
+	}
+	// Adopted (our Headset, not yet cached) on a fresh pod.
+	f, s, pod = recordFixture(t, "[]")
+	f.createHeadset(t, name, f.user, testHeadsetKeyA, "")
+	f.sc.HeadsetInformer = emptyHeadsetInformer(t)
+	f.sc.headsetBackoff.set(name)
+	f.sc.headsetBackoff.until[name] = time.Now().Add(-time.Second)
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Name: "q", Key: testHeadsetKeyA}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.sc.headsetBackoff.backoff[name]; ok {
+		t.Error("adopted: backoff kept")
+	}
+}

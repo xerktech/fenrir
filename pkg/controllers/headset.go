@@ -392,7 +392,9 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 		}
 		if taken, err := c.HeadsetClient.Get(ctx, name, metav1.GetOptions{}); err == nil {
 			if taken.Spec.UserReference.Name == user && taken.Spec.PublicKey == k.Key && taken.DeletionTimestamp == nil {
-				// Ours, not yet in the cache.
+				// Ours, not yet in the cache (maybe from a create that
+				// errored after the API server committed it).
+				c.headsetBackoff.clear(name)
 				entry := taken.Name + "/" + string(taken.UID)
 				byKey[k.Key] = taken
 				count++
