@@ -104,17 +104,36 @@ paths:
     ends the Session on reconcile, and at once on any Headset event (`reconcileHeadset`, found by
     annotation: a deleted object no longer names its User).
   - The spec is immutable (CEL): a changed key would admit a headset without ending Sessions.
-  - Never create a Headset from what the App's bus reports alone (XERK-2742): every App process
-    is uid 1000, WiVRn's uid and the bus owner, so a game can plant a key in `known_keys.json`
-    and make WiVRn republish `KnownKeys` (`RevokeKey`), or PIN-pair itself (it reads `Pin` and
-    reaches WiVRn on loopback). Nothing on the bus proves a human paired a headset.
-  - So a key the vr-agent reports that no Headset holds is only pending: the operator keeps it
-    in the Session's status, where it dies with the Session, and never seeds it.
-  - It becomes a Headset only when the User confirms it on the Authentik-protected library page
-    (user from the trusted header, never from a request field; POST only). The page shows each
+  - A native session records PIN pairings (`recordPairedHeadsets`): vr-agent reports WiVRn's
+    `KnownKeys`; each key no Headset holds becomes `<user>-<sha256 prefix>` (owned by the User,
+    capped at `maxUserHeadsets`) and joins the pod's annotation, so revoking it ends this session.
+    - Nothing while any Headset the pod records is revoked, whatever its name: WiVRn still lists
+      the key, and a Headset of it under any name undoes the revoke (QA). Nor a seeded key.
+    - The annotation is read live and topped up each poll with every Headset WiVRn admits, so a
+      failed create or patch (kubelet's writes conflict) retries; failures only log, since a
+      poll error reads as a lost headset.
+    - List the User's Headsets before the revoke check, never after: a delete between them would
+      drop the key from the snapshot and re-create it (QA).
+    - A placeholder `name/~<unix>` goes on the pod before the create, the UID after: a revoke of a
+      Headset whose UID never reached the pod (crash, conflict) still ends the Session (within
+      `placeholderPending`) and is never re-created. It holds while its Headset is the
+      operator's own record, or for that minute with none (a create in flight).
+    - Every pod write re-queues the Session, which polls again: a taken name is checked live
+      before any write, and a failed create backs off (`headsetBackoff`, 15s doubling to 5m), or it loops (QA).
+    - vr-agent sends at most 32 keys, only CRD-valid ones, names cleaned (`CleanHeadsetName`),
+      HTML escaping off: past the operator's 64KiB read the poll fails and the session ends.
+      JSON escapes grow `<` or control runes sixfold. `TestVRAgentWorstReplyFitsOperatorRead`.
+    - Known hole (XERK-2742): this is forgeable. Every App process is uid 1000, WiVRn's uid and
+      the bus owner, so a game can plant a key in `known_keys.json` and make WiVRn republish
+      `KnownKeys` (`RevokeKey`), or PIN-pair itself (it reads `Pin`, reaches WiVRn on loopback).
+      The cap bounds it; nothing on the bus proves a human paired. Replacement: XERK-2747.
+  - Target design (XERK-2742), replacing the auto-create above: a reported key no Headset holds
+    stays pending in the Session's status (dies with it, never seeded) until the User confirms it
+    on the Authentik library page (user from the trusted header, POST only). The page shows each
     pending key's fingerprint, headset-supplied name and first-seen time, and warns when more
-    than one is pending: a key the user didn't pair right then is the game's.
-  - Until confirmed the headset works for that Session only, as WiVRn already allows.
+    than one is pending. Until confirmed the headset works for that Session only.
+  - Moonlight-mode VR pods run no vr-agent, so there every session pairs anew (XERK-2740).
+    Tests: `headset_pairing_test.go`.
   - Tests: `headset_test.go`, `TestHeadsetCRDValidatesKeyAndImmutability`,
     `TestVRStartSeedsKnownKeysFromHeadsets`, `TestVRStartRefusesBadHeadsetSeed`.
 
