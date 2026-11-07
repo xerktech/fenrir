@@ -123,8 +123,15 @@ paths:
     - vr-agent sends at most 32 keys, only CRD-valid ones, names cleaned (`CleanHeadsetName`),
       HTML escaping off: past the operator's 64KiB read the poll fails and the session ends.
       JSON escapes grow `<` or control runes sixfold. `TestVRAgentWorstReplyFitsOperatorRead`.
-    - Accepted: the game shares WiVRn's config dir as the same uid, so a key it plants becomes a
-      Headset, as it persisted on the volume before. The cap bounds it.
+    - Known hole (XERK-2742): this is forgeable. Every App process is uid 1000, WiVRn's uid and
+      the bus owner, so a game can plant a key in `known_keys.json` and make WiVRn republish
+      `KnownKeys` (`RevokeKey`), or PIN-pair itself (it reads `Pin`, reaches WiVRn on loopback).
+      The cap bounds it; nothing on the bus proves a human paired. Replacement: XERK-2747.
+  - Target design (XERK-2742), replacing the auto-create above: a reported key no Headset holds
+    stays pending in the Session's status (dies with it, never seeded) until the User confirms it
+    on the Authentik library page (user from the trusted header, POST only). The page shows each
+    pending key's fingerprint, headset-supplied name and first-seen time, and warns when more
+    than one is pending. Until confirmed the headset works for that Session only.
   - Moonlight-mode VR pods run no vr-agent, so there every session pairs anew (XERK-2740).
     Tests: `headset_pairing_test.go`.
   - Tests: `headset_test.go`, `TestHeadsetCRDValidatesKeyAndImmutability`,

@@ -107,6 +107,10 @@ This works as it does for Moonlight sessions.
   session runs, and the next start would bring the key back.
 - A new PIN pairing becomes a Headset: the agent reports WiVRn's `KnownKeys`, and the operator
   records each key no Headset holds, except one the pod was seeded with (that one was revoked).
+  This is forgeable (XERK-2742): the game runs as WiVRn's uid and owns its bus, so it can plant
+  or pair a key of its own. The target design keeps such keys pending in the Session's status for
+  the user to confirm on the library page (fingerprint, headset name, time seen); confirming
+  creates the Headset, and an unconfirmed key works for that Session only.
 
 ## Moonlight interplay
 
