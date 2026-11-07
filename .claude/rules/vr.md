@@ -112,8 +112,11 @@ paths:
     - The annotation is read live and topped up each poll with every Headset WiVRn admits, so a
       failed create or patch (kubelet's writes conflict) retries; failures only log, since a
       poll error reads as a lost headset.
-    - vr-agent sends at most 32 keys (1024-byte key, 128-byte name): past the operator's 64KiB
-      read the poll fails and the session ends.
+    - List the User's Headsets before the revoke check, never after: a delete between them would
+      drop the key from the snapshot and re-create it (QA).
+    - vr-agent sends at most 32 keys, only CRD-valid ones, names cleaned (`CleanHeadsetName`),
+      HTML escaping off: past the operator's 64KiB read the poll fails and the session ends.
+      JSON escapes grow `<` or control runes sixfold. `TestVRAgentWorstReplyFitsOperatorRead`.
     - Accepted: the game shares WiVRn's config dir as the same uid, so a key it plants becomes a
       Headset, as it persisted on the volume before. The cap bounds it.
   - Moonlight-mode VR pods run no vr-agent, so there every session pairs anew (XERK-2740).

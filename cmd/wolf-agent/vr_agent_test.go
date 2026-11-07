@@ -150,7 +150,8 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 	// than the last: godbus's SetMust writes into a same-length old slice
 	// that its exporter may still be reading (a race in the test only).
 	flood := make([]knownKey, 0, maxReportedKeys+12)
-	flood = append(flood, knownKey{"big", strings.Repeat("A", 2000), 0}, knownKey{strings.Repeat("é", 10000), "AAAA", 0})
+	flood = append(flood, knownKey{"big", strings.Repeat("A", 2000), 0}, knownKey{"<", strings.Repeat("<", 1024), 0},
+		knownKey{"a" + strings.Repeat("é", 10000), "AAAA", 0})
 	for range maxReportedKeys + 10 {
 		flood = append(flood, knownKey{"k", "AAAA", 0})
 	}
@@ -159,11 +160,32 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 	if err != nil || len(st.KnownKeys) != maxReportedKeys {
 		t.Fatalf("flooded KnownKeys: %d, %v; want %d", len(st.KnownKeys), err, maxReportedKeys)
 	}
-	if first := st.KnownKeys[0]; len(first.Name) > 128 || !utf8.ValidString(first.Name) || !strings.HasPrefix(first.Name, "é") {
-		t.Errorf("first reported key %.40q...: want the long name cut, the long key dropped", first.Name)
+	// The odd-byte prefix makes a byte cut land mid-rune.
+	if first := st.KnownKeys[0]; len(first.Name) > 128 || !utf8.ValidString(first.Name) || !strings.HasPrefix(first.Name, "aé") {
+		t.Errorf("first reported key %.40q...: want the long name cut on a rune, the bad keys dropped", first.Name)
 	}
 	props.SetMust(wivrnInterface, "SessionRunning", true)
 	if st, err := wivrnStatus(ctx, addr); err != nil || !st.SessionRunning {
 		t.Fatalf("after SessionRunning: %+v, %v", st, err)
+	}
+}
+
+// The worst reply vr-agent can send (maxReportedKeys entries of the longest
+// key and the most-escaped name it keeps) fits the operator's 64KiB read:
+// past it the poll fails, which reads as a lost headset (QA, XERK-2669).
+func TestVRAgentWorstReplyFitsOperatorRead(t *testing.T) {
+	key := strings.Repeat("A", 1024)
+	name := controllers.CleanHeadsetName(strings.Repeat(`"\<>&`, 100))
+	st := controllers.VRStatus{HeadsetConnected: true}
+	for range maxReportedKeys {
+		st.KnownKeys = append(st.KnownKeys, controllers.VRKnownKey{Name: name, Key: key})
+	}
+	h := vrAgentHandler(func() string { return "secret" }, func(context.Context) (controllers.VRStatus, error) { return st, nil })
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, controllers.VRStatusPath, http.NoBody)
+	r.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if n := w.Body.Len(); w.Code != http.StatusOK || n > 64<<10 {
+		t.Fatalf("worst reply: %d, %d bytes; want 200 within 64KiB", w.Code, n)
 	}
 }

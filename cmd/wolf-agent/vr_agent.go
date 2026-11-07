@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"time"
-	"unicode/utf8"
 
 	"github.com/godbus/dbus/v5"
 	"k8s.io/klog/v2"
@@ -34,8 +33,9 @@ const (
 	// the App's VR services (vr-services restarts wivrn-server).
 	vrBusTimeout = 5 * time.Second
 	// maxReportedKeys bounds KnownKeys in a reply: well over the operator's
-	// per-User cap, well under its 64KiB read (each entry is cut to a
-	// 1024-byte key and a 128-byte name).
+	// per-User cap, well under its 64KiB read: an entry is at most a
+	// 1024-byte base64 key and a 128-byte name that JSON escapes to <= 256
+	// (only " and \ escape: no control runes, HTML escaping off).
 	maxReportedKeys = 32
 )
 
@@ -82,11 +82,12 @@ func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, err
 			if len(st.KnownKeys) == maxReportedKeys {
 				break
 			}
-			// Longer than the CRD admits: never recorded, so not sent.
-			if len(k.Key) > 1024 {
+			// Only what the operator would record: a key the CRD admits
+			// (base64, no JSON escapes) and a cleaned name.
+			if !controllers.IsWiVRnKey(k.Key) {
 				continue
 			}
-			st.KnownKeys = append(st.KnownKeys, controllers.VRKnownKey{Name: truncateUTF8(k.Name, 128), Key: k.Key})
+			st.KnownKeys = append(st.KnownKeys, controllers.VRKnownKey{Name: controllers.CleanHeadsetName(k.Name), Key: k.Key})
 		}
 	}
 	return st, nil
@@ -118,7 +119,10 @@ func vrAgentHandler(token func() string, status func(context.Context) (controlle
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(st)
+		// Unescaped <, >, &: escaped, a 128-byte name could take 768.
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(st)
 	})))
 	return mux
 }
@@ -150,13 +154,4 @@ func runVRAgent(args []string) {
 		klog.Error("vr-agent: ", err)
 		os.Exit(1)
 	}
-}
-
-// truncateUTF8 cuts s to at most n bytes, on a rune boundary.
-func truncateUTF8(s string, n int) string {
-	for len(s) > n {
-		_, size := utf8.DecodeLastRuneInString(s)
-		s = s[:len(s)-size]
-	}
-	return s
 }

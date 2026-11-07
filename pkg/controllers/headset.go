@@ -224,6 +224,28 @@ const maxUserHeadsets = 8
 // wivrnKeyPattern is the CRD's publicKey pattern: WiVRn's stored form.
 var wivrnKeyPattern = regexp.MustCompile(`^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`)
 
+// IsWiVRnKey is whether key is in WiVRn's stored form, as the CRD admits it.
+func IsWiVRnKey(key string) bool {
+	return len(key) >= 4 && len(key) <= 1024 && wivrnKeyPattern.MatchString(key)
+}
+
+// CleanHeadsetName is a headset's own name as a Headset's displayName: valid
+// UTF-8 with no control, format (bidi) or line/paragraph-separator runes, cut
+// to the CRD's 128 bytes on a rune boundary.
+func CleanHeadsetName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(name, ""))
+	for len(name) > 128 {
+		_, size := utf8.DecodeLastRuneInString(name)
+		name = name[:len(name)-size]
+	}
+	return name
+}
+
 // headsetObjectName is the Headset recordPairedHeadsets makes for user's key:
 // one per key, so a second report of it finds the first.
 func headsetObjectName(user, key string) string {
@@ -276,6 +298,14 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 	if err != nil {
 		return fmt.Errorf("failed to get pod %s: %w", pod.Name, err)
 	}
+	// The User's Headsets first, the revoke check second: a delete after
+	// this snapshot leaves its key in byKey (adopted, never created again),
+	// and one before it is caught by the check's live GET.
+	user := session.Spec.UserReference.Name
+	existing, err := c.userHeadsets(session.Namespace, user)
+	if err != nil {
+		return err
+	}
 	if reason, revokeErr := c.headsetRevokedReason(ctx, live); revokeErr != nil || reason != "" {
 		return revokeErr
 	}
@@ -283,11 +313,6 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 	for _, h := range podHeadsets(live) {
 		recorded[h.name] = true
 		recorded[h.name+"/"+h.uid] = true
-	}
-	user := session.Spec.UserReference.Name
-	existing, err := c.userHeadsets(session.Namespace, user)
-	if err != nil {
-		return err
 	}
 	byKey := map[string]*v1alpha1types.Headset{}
 	for _, h := range existing {
@@ -305,7 +330,10 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 			}
 			continue
 		}
-		if seeded[k.Key] || len(k.Key) > 1024 || len(k.Key) < 4 || !wivrnKeyPattern.MatchString(k.Key) {
+		// A key whose Headset the pod records by the operator's name but no
+		// Headset holds was revoked: never again (also covered by the check
+		// above, unless the delete lands between its reads).
+		if seeded[k.Key] || recorded[headsetObjectName(user, k.Key)] || !IsWiVRnKey(k.Key) {
 			continue
 		}
 		if count >= maxUserHeadsets {
@@ -337,17 +365,7 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 // recording it (nil: its name is taken by another key or User).
 func (c *SessionController) createHeadset(ctx context.Context, session *v1alpha1types.Session, k VRKnownKey) (*v1alpha1types.Headset, error) {
 	user := session.Spec.UserReference.Name
-	// The headset names itself: no control or bidi characters.
-	display := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
-			return -1
-		}
-		return r
-	}, strings.ToValidUTF8(k.Name, ""))
-	for len(display) > 128 {
-		_, size := utf8.DecodeLastRuneInString(display)
-		display = display[:len(display)-size]
-	}
+	display := CleanHeadsetName(k.Name)
 	h := &v1alpha1types.Headset{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      headsetObjectName(user, k.Key),
