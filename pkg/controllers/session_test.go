@@ -1018,7 +1018,7 @@ func TestBuildPodRejectsAppMountOfOperatorVolume(t *testing.T) {
 		"subPath":     {MountPath: "/x", SubPath: "tls.key"},
 		"subPathExpr": {MountPath: "/x", SubPathExpr: "$(POD_NAME)"},
 	}
-	for _, name := range []string{"wolf-agent-token", "wolf-cfg", "wolf-data"} {
+	for _, name := range []string{"wolf-agent-token", "wolf-cfg", "wolf-data", vrAgentOwnTokenVolume, vrBusVolume} {
 		for kind, mount := range mounts {
 			for _, initCtr := range []bool{false, true} {
 				sc, _, sess, _ := reconcileFixtures(t, "../../examples/user.yaml", "../../examples/steam.yaml")

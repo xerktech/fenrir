@@ -134,9 +134,12 @@ func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeHeadsetsPage(w, pending)
 	case http.MethodPost:
-		// Same-site only: a cross-site form must not confirm a key for the
-		// signed-in user.
-		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		// This page's own form, submitted by the user: same-origin (a
+		// sibling subdomain the Authentik cookie reaches is same-site), a
+		// navigation (never a script's fetch), user-activated (QA,
+		// XERK-2747). Browsers set these headers; a script cannot.
+		if r.Header.Get("Sec-Fetch-Site") != "same-origin" || r.Header.Get("Sec-Fetch-Mode") != "navigate" ||
+			r.Header.Get("Sec-Fetch-User") != "?1" {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

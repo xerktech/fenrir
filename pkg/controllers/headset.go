@@ -213,6 +213,38 @@ func (c *SessionController) reconcileHeadset(namespace, name string, _ *v1alpha1
 		}
 		errs = append(errs, err)
 	}
+	errs = append(errs, c.endSessionsOfUnrecordedHeadset(ctx, namespace, name))
+	return stderrors.Join(errs...)
+}
+
+// endSessionsOfUnrecordedHeadset ends the VR Sessions whose pending key the
+// User confirmed as Headset name, if that Headset is gone again before a poll
+// named it in the pod (XERK-2747): WiVRn trusts the key in that Session, so
+// the revoke must end it, as for a recorded one. A confirmed Headset's name
+// is recordedHeadsetName, so the pending key names it. Only a Headset event
+// gets here, so the Headset existed: a key nobody confirmed is not revoked.
+func (c *SessionController) endSessionsOfUnrecordedHeadset(ctx context.Context, namespace, name string) error {
+	sessions, err := c.SessionInformer.Namespaced(namespace).List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("failed to list sessions: %w", err)
+	}
+	var errs []error
+	for _, s := range sessions {
+		if !s.Spec.IsVR() || s.DeletionTimestamp != nil || !slices.ContainsFunc(s.Status.PendingHeadsets, func(p v1alpha1types.PendingHeadset) bool {
+			return recordedHeadsetName(s.Spec.UserReference.Name, p.Key) == name
+		}) {
+			continue
+		}
+		// The watch can lag: a Headset just created (the confirm itself)
+		// is not revoked.
+		h, err := c.HeadsetClient.Get(ctx, name, metav1.GetOptions{})
+		if err == nil && h.DeletionTimestamp == nil {
+			return nil
+		} else if err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to get headset %s/%s: %w", namespace, name, err)
+		}
+		errs = append(errs, c.endSession(ctx, s, fmt.Sprintf("its headset %s was revoked", name)))
+	}
 	return stderrors.Join(errs...)
 }
 
@@ -287,6 +319,11 @@ func (c *SessionController) trackPairedHeadsets(ctx context.Context, session *v1
 	for _, p := range session.Status.PendingHeadsets {
 		seen[p.Key] = p.FirstSeen
 	}
+	// Whether a key the User confirmed was pending here: only then is it
+	// this Session's pairing. A key of an older Headset can be the game's
+	// (every App container's seed env lists them), and must not drop the
+	// real pairing's key from the list (QA).
+	paired := false
 	var (
 		pending   []v1alpha1types.PendingHeadset
 		confirmed []string
@@ -300,6 +337,9 @@ func (c *SessionController) trackPairedHeadsets(ctx context.Context, session *v1
 		if i := slices.IndexFunc(held, func(h *v1alpha1types.Headset) bool { return h.Spec.PublicKey == k.Key }); i >= 0 {
 			if entry := held[i].Name + "/" + string(held[i].UID); !slices.Contains(confirmed, entry) {
 				confirmed = append(confirmed, entry)
+			}
+			if _, ok := seen[k.Key]; ok {
+				paired = true
 			}
 			continue
 		}
@@ -316,7 +356,7 @@ func (c *SessionController) trackPairedHeadsets(ctx context.Context, session *v1
 		}
 		pending = append(pending, v1alpha1types.PendingHeadset{Key: k.Key, Name: CleanHeadsetName(k.Name), FirstSeen: first})
 	}
-	if len(confirmed) > 0 {
+	if paired {
 		// A PIN pairing adds one key and the User confirmed it: any other
 		// key here is the game's, never to be offered again (QA).
 		pending = nil

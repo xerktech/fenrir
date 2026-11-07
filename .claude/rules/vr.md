@@ -113,12 +113,19 @@ paths:
       (at most `maxPendingHeadsets`, first-seen kept). Pending keys are never seeded; they die
       with the Session. A seeded pod's reports are ignored: its PIN pairing is closed.
     - The User confirms on the library page `/.direwolf/headsets` (`library_headsets.go`): user
-      from the trusted header, only their own Sessions' keys, same-site POST only. It shows
-      fingerprint, name and first-seen, and warns when more than one waits. It creates
+      from the trusted header, only their own Sessions' keys. The POST must be the page's own
+      clicked form (`Sec-Fetch-Site: same-origin`, `-Mode: navigate`, `-User: ?1`): same-site
+      would admit any subdomain the Authentik cookie reaches, and a script can't fake these.
+      It shows fingerprint, name and first-seen, and warns when more than one waits. It creates
       `headset-<sha256(user, key)>`, owned by the User (GC'd with it).
     - A key a Headset holds is then written to the pod's annotation (resourceVersion-guarded patch,
-      retried next poll), so revoking it ends this Session; the Session's other pending keys are
-      dropped and never offered again (a pairing adds one key).
+      retried next poll), so revoking it ends this Session. If the Session's own pending key was
+      the one confirmed, its other pending keys are dropped and never offered again (a pairing
+      adds one key); an older Headset's key (the game reads them from the seed env) drops none.
+    - A revoke before that poll is caught by the Headset event: a VR Session with a pending key
+      whose `recordedHeadsetName` is the event's, gone live, ends
+      (`endSessionsOfUnrecordedHeadset`).
+      Residual: an operator down for that whole window misses it; the key is then pending again.
     - Nothing on the headset shows a fingerprint yet, so a game's lookalike key can still be
       confirmed by mistake (XERK-2743).
     - vr-agent sends at most 32 keys, only CRD-valid ones, names cleaned (`CleanHeadsetName`, 128

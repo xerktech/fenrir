@@ -150,7 +150,8 @@ func TestTrackPairedHeadsets(t *testing.T) {
 			f := newPortsFixture(t)
 			watchHeadsets(t, f)
 			s := f.session("alex-1", f.user)
-			s.Status.PendingHeadsets = []v1alpha1types.PendingHeadset{{Key: "R09ORQ==", FirstSeen: metav1.Now()}}
+			// Two, so "untouched" differs from tracking any one key (QA).
+			s.Status.PendingHeadsets = []v1alpha1types.PendingHeadset{{Key: "R09ORQ==", FirstSeen: metav1.Now()}, {Key: "VFdP", FirstSeen: metav1.Now()}}
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: portsTestNS, Annotations: map[string]string{}}}
 			if tc.annot {
 				pod.Annotations[vrHeadsetsAnnotation] = tc.seeded
@@ -161,7 +162,7 @@ func TestTrackPairedHeadsets(t *testing.T) {
 			}
 			want := tc.pending
 			if !tc.annot || tc.seeded != "" {
-				want = 1 // untouched
+				want = 2 // untouched
 			}
 			if len(s.Status.PendingHeadsets) != want {
 				t.Errorf("pending %+v, want %d", s.Status.PendingHeadsets, want)
@@ -213,5 +214,74 @@ func TestAnnotateHeadsetsNeedsCurrentPod(t *testing.T) {
 	md, _ := sent["metadata"].(map[string]any)
 	if md["resourceVersion"] != "42" {
 		t.Errorf("patch %v carries no resourceVersion precondition (pod at %q)", sent, created.ResourceVersion)
+	}
+}
+
+// A Headset the User confirms and revokes before the next poll names it on
+// the pod still ends the Session: WiVRn trusts the key there (QA,
+// XERK-2747). Its name is the pending key's recordedHeadsetName.
+func TestRevokeBeforePollEndsSession(t *testing.T) {
+	f, s, agent := vrLifecycle(t, seededWith(""))
+	watchHeadsets(t, f)
+	agent.set(VRStatus{HeadsetConnected: true, KnownKeys: []VRKnownKey{{Name: "Quest 3", Key: testHeadsetKeyA}}}, false)
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatal(err)
+	}
+	for range 500 {
+		if c, err := f.sc.SessionInformer.Namespaced(portsTestNS).Get(s.Name); err == nil && len(c.Status.PendingHeadsets) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	name := recordedHeadsetName(f.user, testHeadsetKeyA)
+
+	// A Headset event while it exists (the confirm itself) ends nothing.
+	f.createHeadset(t, name, f.user, testHeadsetKeyA, "Quest 3")
+	f.waitHeadsets(t, 1)
+	if err := f.sc.reconcileHeadset(portsTestNS, name, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !f.sessionExists(t, s.Name) {
+		t.Fatal("confirming ended the Session")
+	}
+	// Nor does an event of another Headset of the User.
+	if err := f.sc.reconcileHeadset(portsTestNS, "unrelated", nil); err != nil || !f.sessionExists(t, s.Name) {
+		t.Fatalf("an unrelated Headset's event: %v, session exists %v", err, f.sessionExists(t, s.Name))
+	}
+
+	if err := f.dw.DirewolfV1alpha1().Headsets(portsTestNS).Delete(context.Background(), name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sc.reconcileHeadset(portsTestNS, name, nil); err != nil {
+		t.Fatal(err)
+	}
+	if f.sessionExists(t, s.Name) {
+		t.Error("session outlived its confirmed headset revoked before the pod recorded it")
+	}
+}
+
+// A key of a Headset the User already had (the game can read it from the
+// seed env) is recorded on the pod, but does not drop the Session's real
+// pairing from the list (QA, XERK-2747).
+func TestOldHeadsetKeyKeepsPairingPending(t *testing.T) {
+	f := newPortsFixture(t)
+	watchHeadsets(t, f)
+	f.createHeadset(t, "older", f.user, testHeadsetKeyB, "")
+	f.waitHeadsets(t, 1)
+	s := f.session("alex-1", f.user)
+	pod := readyPod(s)
+	pod.Annotations[vrHeadsetsAnnotation] = ""
+	if _, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	known := []VRKnownKey{{Name: "Quest 3", Key: testHeadsetKeyA}, {Name: "game", Key: testHeadsetKeyB}}
+	if err := f.sc.trackPairedHeadsets(context.Background(), s, pod, known); err != nil {
+		t.Fatal(err)
+	}
+	if p := s.Status.PendingHeadsets; len(p) != 1 || p[0].Key != testHeadsetKeyA {
+		t.Errorf("pending %+v, want the PIN-paired key kept", p)
+	}
+	if got := f.livePod(t, pod.Name).Annotations[vrHeadsetsAnnotation]; got != "older/older-uid" {
+		t.Errorf("pod %s = %q, want the older Headset WiVRn admits", vrHeadsetsAnnotation, got)
 	}
 }
