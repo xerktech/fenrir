@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
@@ -591,5 +592,27 @@ func TestVRSessionWithUnusablePUIDEnds(t *testing.T) {
 	_ = f.sc.Reconcile(portsTestNS, s.Name, s)
 	if f.sessionExists(t, s.Name) {
 		t.Error("VR Session with PUID=0 kept")
+	}
+}
+
+// The VR reaper records why on the App: the VR page can't show a deleted
+// Session, so without it the Session just vanished (XERK-2758).
+func TestVRSessionUnstartedReaperWarnsApp(t *testing.T) {
+	f, s := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := vrSession(f)
+		s.CreationTimestamp = metav1.NewTime(time.Now().Add(-vrUnstartedTTL - time.Minute))
+		return s
+	}, nil)
+	withNativeVR(t, f)
+	recorder := record.NewFakeRecorder(10)
+	f.sc.Recorder = recorder
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatalf("Reconcile = %v, want the Session ended", err)
+	}
+	if f.sessionExists(t, s.Name) {
+		t.Error("a VR Session whose pod never got ready was kept")
+	}
+	if len(recorder.Events) != 1 || !strings.HasPrefix(<-recorder.Events, "Warning VRPodNeverReady Session "+s.Name) {
+		t.Error("no Warning VRPodNeverReady Event for the ended Session")
 	}
 }
