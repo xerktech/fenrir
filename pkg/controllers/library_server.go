@@ -94,6 +94,10 @@ type LibraryServer struct {
 	// own proxy secret; nil serves none.
 	HeadsetConfirmation *HeadsetConfirmation
 
+	// VRLaunch serves libraryVRPath on the headsets host (XERK-2670); nil
+	// serves none. Needs HeadsetConfirmation (its host).
+	VRLaunch *VRLaunch
+
 	// states is each library's *libraryState, by owner ("" the shared one).
 	states sync.Map
 }
@@ -298,6 +302,8 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case libraryHeadsetsPath:
 			s.serveHeadsets(w, r)
+		case libraryVRPath:
+			s.serveVR(w, r)
 		case "/":
 			http.Redirect(w, r, libraryHeadsetsPath, http.StatusSeeOther)
 		default:
@@ -311,7 +317,7 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Never on the Library's origin, nor passed on to the pod.
-	if r.URL.Path == libraryHeadsetsPath {
+	if r.URL.Path == libraryHeadsetsPath || r.URL.Path == libraryVRPath {
 		http.NotFound(w, r)
 		return
 	}

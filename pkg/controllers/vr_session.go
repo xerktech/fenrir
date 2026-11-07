@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
@@ -84,6 +85,24 @@ type VRStatus struct {
 	// KnownKeys are the keys WiVRn lets connect: those it was seeded with,
 	// plus any a PIN pairing (or the game) added (trackPairedHeadsets).
 	KnownKeys []VRKnownKey `json:"knownKeys,omitempty"`
+	// Pin is WiVRn's pairing PIN while PIN pairing is open (no Headset
+	// seeded), else "". Shown only on the VR page, behind Authentik
+	// (XERK-2670); never written to the Session, which more can read.
+	Pin string `json:"pin,omitempty"`
+}
+
+// IsWiVRnPin reports whether pin is a pairing PIN as WiVRn shows it: six
+// digits. Anything else is not shown.
+func IsWiVRnPin(pin string) bool {
+	if len(pin) != 6 {
+		return false
+	}
+	for _, c := range pin {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // VRKnownKey is one entry of WiVRn's KnownKeys: the name it shows and the
@@ -378,6 +397,28 @@ func (c *SessionController) pollVRAgent(ctx context.Context, session *v1alpha1ty
 	} else if err != nil {
 		return VRStatus{}, err
 	}
+	return c.fetchVRStatus(ctx, token, tlsConfig, podIP)
+}
+
+// ReadVRStatus reads a native VR Session's state from its pod's vr-agent for
+// the VR page (XERK-2670). Unlike the reconcile's poll it never ends the
+// Session: a page view must not.
+func (c *SessionController) ReadVRStatus(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod) (VRStatus, error) {
+	if pod.Status.PodIP == "" {
+		return VRStatus{}, stderrors.New("the VR pod has no IP yet")
+	}
+	secret := vrAgentTokenSecretName(session.Name)
+	if !podUsesVolume(&pod.Spec, vrAgentOwnTokenVolume) {
+		secret = agentTokenSecretName(session.Name)
+	}
+	token, tlsConfig, err := c.tokenCredentials(ctx, session, secret)
+	if err != nil {
+		return VRStatus{}, err
+	}
+	return c.fetchVRStatus(ctx, token, tlsConfig, pod.Status.PodIP)
+}
+
+func (c *SessionController) fetchVRStatus(ctx context.Context, token string, tlsConfig *tls.Config, podIP string) (VRStatus, error) {
 	transport := &http.Transport{TLSClientConfig: tlsConfig}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{

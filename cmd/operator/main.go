@@ -71,6 +71,8 @@ func main() {
 		"Header the trusted proxy names the signed-in user in; a User of that name with spec.library gets their own Library")
 	libraryImage := flag.String("library-image", cmp.Or(os.Getenv("LIBRARY_IMAGE"), "ghcr.io/games-on-whales/fenrir/library:main"),
 		"Library (Steam + Heroic desktop) image")
+	maxSessions := flag.Int("max-concurrent-sessions", 1,
+		"How many users may play at once; the VR page refuses further VR sessions (-1 = unlimited). Keep equal to moonlight-proxy's")
 	headsetsProxySecretFile := flag.String("headsets-proxy-secret-file", "",
 		"File holding the secret the headset confirmation page's own proxy sends in "+controllers.LibraryProxySecretHeader+
 			". It serves that page on its own host, never the Library's (the desktop runs user code there). Empty: no page; needs --library-port")
@@ -147,6 +149,9 @@ func main() {
 		klog.Fatalf("--session-tolerations: %v", err)
 	}
 
+	if *maxSessions == 0 || *maxSessions < -1 {
+		klog.Fatal("--max-concurrent-sessions must be >= 1, or -1 for unlimited")
+	}
 	if *disconnectGracePeriod < 0 {
 		klog.Fatalf("--disconnect-grace-period must not be negative, got %s", *disconnectGracePeriod)
 	}
@@ -373,6 +378,17 @@ func main() {
 				Sessions: generic.NewLister[*direwolfv1alpha1.Session](sessionInformer.GetIndexer()).Namespaced(*namespace),
 				Headsets: direwolfClient.DirewolfV1alpha1().Headsets(*namespace),
 				Secret:   headsetsProxySecret,
+			}
+		}
+		// The VR page (XERK-2670) shares the headsets page's host: never
+		// the Library's.
+		if headsetsProxySecret != nil && *vrPortRange != "" {
+			libraryServer.VRLaunch = &controllers.VRLaunch{
+				Apps:                  generic.NewLister[*direwolfv1alpha1.App](appInformer.GetIndexer()).Namespaced(*namespace),
+				Sessions:              direwolfClient.DirewolfV1alpha1().Sessions(*namespace),
+				Pods:                  k8sClient.CoreV1().Pods(*namespace),
+				Status:                sessionController.ReadVRStatus,
+				MaxConcurrentSessions: *maxSessions,
 			}
 		}
 		if provisionOpts.Enabled() {

@@ -41,7 +41,7 @@ const (
 	maxReportedKeys = 32
 )
 
-// wivrnStatus reads WiVRn's HeadsetConnected and SessionRunning from the bus
+// wivrnStatus reads WiVRn's HeadsetConnected, SessionRunning, Pin and KnownKeys from the bus
 // at address.
 func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, vrBusTimeout)
@@ -66,6 +66,14 @@ func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, err
 		}
 		if err := v.Store(dst); err != nil {
 			return controllers.VRStatus{}, fmt.Errorf("WiVRn's %s: %w", name, err)
+		}
+	}
+	// The pairing PIN, while WiVRn pairs by PIN (XERK-2670): the VR page
+	// shows it behind Authentik. Six digits or nothing.
+	if v, ok := props["Pin"]; ok {
+		var pin string
+		if err := v.Store(&pin); err == nil && controllers.IsWiVRnPin(pin) {
+			st.Pin = pin
 		}
 	}
 	// The keys WiVRn admits, a(ssx): name, key, last connection. The

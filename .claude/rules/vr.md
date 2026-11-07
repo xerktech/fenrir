@@ -162,6 +162,22 @@ paths:
     `TestHeadsetCRDValidatesKeyAndImmutability`,
     `TestVRStartSeedsKnownKeysFromHeadsets`, `TestVRStartRefusesBadHeadsetSeed`.
 
+## VR page (XERK-2670; `library_vr.go`, `/.direwolf/vr`)
+
+- Served only on the headsets host (its proxy secret), never the Library's: desktop code serves
+  same-origin pages there that could read the PIN or start sessions (XERK-2750). Needs
+  `--headsets-proxy-secret-file` and `--vr-port-range`. POSTs need `userSubmittedForm`.
+- The Library lock is checked before and after the Session create (the Library's `EnsurePod`
+  does the mirror image); drop either check and two racing starts can both survive.
+- It never deletes a Moonlight Session to start VR, and its stop never touches one.
+- The PIN is read live from vr-agent (`ReadVRStatus`, which never ends a Session) and never
+  written to the Session. The address is the pod's `status.hostIP` and `status.ports.vr`, shown
+  only once the pod the Session controls is Ready.
+- Its session cap is the operator's `--max-concurrent-sessions`; keep it equal to moonlight-proxy's.
+  The two processes don't share a lock, so a VR start and a Moonlight launch at the same instant
+  can both pass the cap.
+- Tests: `library_vr_test.go`.
+
 ## Operator port (XERK-2664)
 
 - `App.spec.vrPort` (CEL: needs `requireAppPod`) gets one port per Session from `--vr-port-range`
