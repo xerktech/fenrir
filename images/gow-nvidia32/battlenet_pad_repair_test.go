@@ -180,7 +180,7 @@ func TestLaunchBattlenetSkipsPadRepairBesideWineserver(t *testing.T) {
 	// names a script's process after it). Not a link to sleep: a multi-call
 	// coreutils, as on the CI runner, reads the name as a tool it lacks.
 	ws := filepath.Join(t.TempDir(), "wineserver")
-	if err := os.WriteFile(ws, []byte("#!/bin/sh\nsleep \"$1\"\n"), 0o755); err != nil { //nolint:gosec // an executable
+	if err := os.WriteFile(ws, []byte("#!/bin/sh\ntrap 'kill $! 2>/dev/null; exit 0' TERM\nsleep \"$1\" &\nwait\n"), 0o755); err != nil { //nolint:gosec // an executable
 		t.Fatal(err)
 	}
 	var reg string

@@ -228,7 +228,8 @@ const withDecoys = `decoys=$1; shift
 pids=()
 names=()
 while IFS=$'\x1f' read -r prog argv0 seconds; do
-  bash -c 'exec -a "$0" "$1" "$2"' "$argv0" "$prog" "$seconds" &
+  # Off the test's output: a decoy's leftover child must not hold it open.
+  bash -c 'exec -a "$0" "$1" "$2"' "$argv0" "$prog" "$seconds" </dev/null >/dev/null 2>&1 &
   pids+=($!)
   names+=("$argv0")
 done <"$decoys"
