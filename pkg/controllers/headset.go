@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
@@ -257,59 +258,88 @@ func seededKeys(pod *corev1.Pod) map[string]bool {
 
 // recordPairedHeadsets turns each key WiVRn admits but no Headset holds (a
 // PIN pairing this session) into a Headset of the session's User, so the
-// next session admits it, and adds it to pod's vrHeadsetsAnnotation, so
-// revoking it ends this session too.
+// next session admits it, and adds every Headset WiVRn admits to pod's
+// vrHeadsetsAnnotation, so revoking it ends this session too. The
+// annotation is read live and patched each poll until it holds them all: a
+// failed patch or create is retried by the next poll.
 //
-// A key the pod was seeded with is never recorded: its Headset was revoked
-// after the pod started (the cache may not show the Session ended yet), and
-// recording it would undo the revoke.
+// A key whose Headset this pod already records (seeded, or recorded this
+// session) but no longer exists is never recorded again: it was revoked
+// after the pod started or the poll began, and recording it would undo the
+// revoke. The Session ends on its own reconcile.
 func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod, known []VRKnownKey) error {
 	if c.HeadsetClient == nil || len(known) == 0 {
 		return nil
+	}
+	live, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get pod %s: %w", pod.Name, err)
+	}
+	recorded := map[string]bool{}
+	for _, h := range podHeadsets(live) {
+		recorded[h.name] = true
+		recorded[h.name+"/"+h.uid] = true
 	}
 	user := session.Spec.UserReference.Name
 	existing, err := c.userHeadsets(session.Namespace, user)
 	if err != nil {
 		return err
 	}
-	have := map[string]bool{}
+	byKey := map[string]*v1alpha1types.Headset{}
 	for _, h := range existing {
-		have[h.Spec.PublicKey] = true
+		byKey[h.Spec.PublicKey] = h
 	}
-	seeded := seededKeys(pod)
-	var added []string
+	seeded := seededKeys(live)
+	var add []string
+	var errs []error
 	count := len(existing)
 	for _, k := range known {
-		if have[k.Key] || seeded[k.Key] || len(k.Key) > 1024 || len(k.Key) < 4 || !wivrnKeyPattern.MatchString(k.Key) {
+		if h := byKey[k.Key]; h != nil {
+			if entry := h.Name + "/" + string(h.UID); !recorded[entry] {
+				recorded[entry] = true
+				add = append(add, entry)
+			}
+			continue
+		}
+		if seeded[k.Key] || recorded[headsetObjectName(user, k.Key)] || len(k.Key) > 1024 || len(k.Key) < 4 || !wivrnKeyPattern.MatchString(k.Key) {
 			continue
 		}
 		if count >= maxUserHeadsets {
-			klog.Warningf("Session %s/%s: user %s has %d headsets; not recording another", session.Namespace, session.Name, user, count)
+			klog.V(2).Infof("Session %s/%s: user %s has %d headsets; not recording another", session.Namespace, session.Name, user, count)
 			break
 		}
 		h, err := c.createHeadset(ctx, session, k)
 		if err != nil {
-			return err
+			errs = append(errs, err)
+			break
 		}
 		if h == nil {
 			continue
 		}
-		have[k.Key] = true
+		byKey[k.Key] = h
 		count++
 		klog.Infof("Session %s/%s: recorded headset %s for user %s", session.Namespace, session.Name, h.Name, user)
-		added = append(added, h.Name+"/"+string(h.UID))
+		entry := h.Name + "/" + string(h.UID)
+		recorded[entry] = true
+		add = append(add, entry)
 	}
-	if len(added) == 0 {
-		return nil
+	if len(add) > 0 {
+		errs = append(errs, c.addSeededHeadsets(ctx, live, add))
 	}
-	return c.addSeededHeadsets(ctx, pod, added)
+	return stderrors.Join(errs...)
 }
 
 // createHeadset records k for session's User, or returns the Headset already
 // recording it (nil: its name is taken by another key or User).
 func (c *SessionController) createHeadset(ctx context.Context, session *v1alpha1types.Session, k VRKnownKey) (*v1alpha1types.Headset, error) {
 	user := session.Spec.UserReference.Name
-	display := strings.ToValidUTF8(k.Name, "")
+	// The headset names itself: no control or bidi characters.
+	display := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(k.Name, ""))
 	for len(display) > 128 {
 		_, size := utf8.DecodeLastRuneInString(display)
 		display = display[:len(display)-size]
@@ -325,12 +355,18 @@ func (c *SessionController) createHeadset(ctx context.Context, session *v1alpha1
 			DisplayName:   display,
 		},
 	}
-	// Garbage collected with its User.
-	if u, err := c.UserInformer.Namespaced(session.Namespace).Get(user); err == nil {
-		h.OwnerReferences = []metav1.OwnerReference{{
-			APIVersion: v1alpha1types.GroupVersion.String(), Kind: "User", Name: u.Name, UID: u.UID,
-		}}
+	// Garbage collected with its User, read live on a cache miss: without
+	// an owner it would outlive the User and pass to a new one of its name.
+	u, err := c.UserInformer.Namespaced(session.Namespace).Get(user)
+	if errors.IsNotFound(err) {
+		u, err = c.UserClient.Get(ctx, user, metav1.GetOptions{})
 	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user %s: %w", user, err)
+	}
+	h.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: v1alpha1types.GroupVersion.String(), Kind: "User", Name: u.Name, UID: u.UID,
+	}}
 	created, err := c.HeadsetClient.Create(ctx, h, metav1.CreateOptions{})
 	if err == nil {
 		return created, nil
@@ -342,19 +378,16 @@ func (c *SessionController) createHeadset(ctx context.Context, session *v1alpha1
 		return nil, fmt.Errorf("failed to get headset %s: %w", h.Name, err)
 	}
 	if live.Spec.UserReference.Name != user || live.Spec.PublicKey != k.Key || live.DeletionTimestamp != nil {
-		klog.Warningf("Session %s/%s: headset name %s is taken; not recording the key", session.Namespace, session.Name, h.Name)
+		klog.V(2).Infof("Session %s/%s: headset name %s is taken; not recording the key", session.Namespace, session.Name, h.Name)
 		return nil, nil
 	}
 	return live, nil
 }
 
-// addSeededHeadsets appends entries to pod's vrHeadsetsAnnotation, guarded by
-// the live pod's resourceVersion so a concurrent change is not lost.
-func (c *SessionController) addSeededHeadsets(ctx context.Context, pod *corev1.Pod, entries []string) error {
-	live, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get pod %s: %w", pod.Name, err)
-	}
+// addSeededHeadsets appends entries to live's vrHeadsetsAnnotation, guarded
+// by its resourceVersion so a concurrent change is not lost (a conflict is
+// retried by the next poll).
+func (c *SessionController) addSeededHeadsets(ctx context.Context, live *corev1.Pod, entries []string) error {
 	value := live.Annotations[vrHeadsetsAnnotation]
 	for _, e := range entries {
 		if !slices.Contains(strings.Split(value, ","), e) {
@@ -368,8 +401,8 @@ func (c *SessionController) addSeededHeadsets(ctx context.Context, pod *corev1.P
 	if err != nil {
 		return fmt.Errorf("failed to encode pod patch: %w", err)
 	}
-	if _, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
-		return fmt.Errorf("failed to record headsets on pod %s: %w", pod.Name, err)
+	if _, err := c.K8sClient.CoreV1().Pods(live.Namespace).Patch(ctx, live.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("failed to record headsets on pod %s: %w", live.Name, err)
 	}
 	return nil
 }

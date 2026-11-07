@@ -2,14 +2,21 @@ package controllers
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
@@ -140,8 +147,10 @@ func TestRecordPairedHeadsetsSkipsAndCaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := len(podHeadsets(live)); n != maxUserHeadsets-1 {
-		t.Errorf("pod records %d headsets, want the %d new ones", n, maxUserHeadsets-1)
+	// The new ones, and "mine": WiVRn admits it, so revoking it must end
+	// this session too.
+	if n := len(podHeadsets(live)); n != maxUserHeadsets {
+		t.Errorf("pod records %d headsets, want all %d WiVRn admits", n, maxUserHeadsets)
 	}
 }
 
@@ -169,5 +178,86 @@ func TestHeadsetObjectNameIsAValidName(t *testing.T) {
 		if len(n) > 253 || strings.HasPrefix(n, "-") || n != headsetObjectName(user, testHeadsetKeyA) || n == headsetObjectName(user, testHeadsetKeyB) {
 			t.Errorf("headsetObjectName(%.10q...) = %q", user, n)
 		}
+	}
+}
+
+// A Headset recorded this session and then revoked (WiVRn still lists its
+// key, as when the revoke lands during a poll) is not recorded again: that
+// would undo the revoke for the next session (QA, XERK-2669).
+func TestRevokedRecordedKeyIsNotReRecorded(t *testing.T) {
+	f, s, pod := recordFixture(t, "[]")
+	name := headsetObjectName(f.user, testHeadsetKeyA)
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, vrHeadsetsAnnotation, name+"/old-uid")
+	if _, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Patch(context.Background(), pod.Name, "application/merge-patch+json", []byte(patch), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Name: "q", Key: testHeadsetKeyA}}); err != nil {
+		t.Fatal(err)
+	}
+	if hs := f.headsets(t); len(hs) != 0 {
+		t.Errorf("re-recorded a revoked headset: %+v", hs)
+	}
+}
+
+// A failed annotation patch (a conflict with kubelet's status writes) or a
+// failed create is retried by the next poll, so a recorded Headset always
+// reaches the pod's annotation and revoking it ends the session.
+func TestRecordedHeadsetReachesPodAfterFailures(t *testing.T) {
+	f, s, pod := recordFixture(t, "[]")
+	k8s, ok := f.sc.K8sClient.(*k8sfake.Clientset)
+	if !ok {
+		t.Fatal("not a fake clientset")
+	}
+	fails := 1
+	k8s.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if fails > 0 {
+			fails--
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, stderrors.New("modified"))
+		}
+		return false, nil, nil
+	})
+	creates := 0
+	f.dw.PrependReactor("create", "headsets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		creates++
+		if creates == 2 { // key B's first create
+			return true, nil, apierrors.NewServiceUnavailable("try again")
+		}
+		return false, nil, nil
+	})
+	known := []VRKnownKey{{Name: "a", Key: testHeadsetKeyA}, {Name: "b", Key: testHeadsetKeyB}}
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, known); err == nil {
+		t.Fatal("first poll: no error, want the failed create and patch")
+	}
+	f.waitHeadsets(t, 1)
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, known); err != nil {
+		t.Fatal(err)
+	}
+	f.waitHeadsets(t, 2)
+	live, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{testHeadsetKeyA, testHeadsetKeyB} {
+		if !isSeeded(live, headsetObjectName(f.user, key)) {
+			t.Errorf("pod annotation %q lacks %s", live.Annotations[vrHeadsetsAnnotation], headsetObjectName(f.user, key))
+		}
+	}
+}
+
+// The headset names itself: control and bidi characters are dropped, and
+// the name is cut to the CRD's 128 bytes on a rune boundary.
+func TestRecordedHeadsetDisplayName(t *testing.T) {
+	f, s, pod := recordFixture(t, "[]")
+	name := "Quest\u202e\n3\x00" + strings.Repeat("é", 100)
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Name: name, Key: testHeadsetKeyA}}); err != nil {
+		t.Fatal(err)
+	}
+	hs := f.headsets(t)
+	if len(hs) != 1 {
+		t.Fatalf("headsets = %d", len(hs))
+	}
+	got := hs[0].Spec.DisplayName
+	if !strings.HasPrefix(got, "Quest3é") || len(got) > 128 || strings.ContainsAny(got, "\u202e\n\x00") || !utf8.ValidString(got) {
+		t.Errorf("displayName = %q (%d bytes)", got, len(got))
 	}
 }

@@ -32,6 +32,9 @@ const (
 	// Each read dials the bus afresh: the bus and WiVRn come and go with
 	// the App's VR services (vr-services restarts wivrn-server).
 	vrBusTimeout = 5 * time.Second
+	// maxReportedKeys bounds KnownKeys in a reply: well over the operator's
+	// per-User cap, well under its 64KiB read (a key and name are < 1.2KiB).
+	maxReportedKeys = 32
 )
 
 // wivrnStatus reads WiVRn's HeadsetConnected and SessionRunning from the bus
@@ -71,7 +74,9 @@ func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, err
 		if err := v.Store(&keys); err != nil {
 			return controllers.VRStatus{}, fmt.Errorf("WiVRn's KnownKeys: %w", err)
 		}
-		for _, k := range keys {
+		// Bounded, so a game flooding the keys file can't grow the reply
+		// past what the operator reads (it would read as a lost headset).
+		for _, k := range keys[:min(len(keys), maxReportedKeys)] {
 			st.KnownKeys = append(st.KnownKeys, controllers.VRKnownKey{Name: k.Name, Key: k.Key})
 		}
 	}

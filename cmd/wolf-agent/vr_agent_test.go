@@ -143,6 +143,15 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 	if st, err := wivrnStatus(ctx, addr); err != nil || !reflect.DeepEqual(st.KnownKeys, want) {
 		t.Fatalf("KnownKeys: %+v, %v; want %+v", st.KnownKeys, err, want)
 	}
+	// A flood (the game shares WiVRn's keys file) is cut to maxReportedKeys.
+	flood := make([]knownKey, maxReportedKeys+10)
+	for i := range flood {
+		flood[i] = knownKey{"k", "AAAA", 0}
+	}
+	props.SetMust(wivrnInterface, "KnownKeys", flood)
+	if st, err := wivrnStatus(ctx, addr); err != nil || len(st.KnownKeys) != maxReportedKeys {
+		t.Fatalf("flooded KnownKeys: %d, %v; want %d", len(st.KnownKeys), err, maxReportedKeys)
+	}
 	props.SetMust(wivrnInterface, "SessionRunning", true)
 	if st, err := wivrnStatus(ctx, addr); err != nil || !st.SessionRunning {
 		t.Fatalf("after SessionRunning: %+v, %v", st, err)
