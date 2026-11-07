@@ -238,7 +238,7 @@ for i in "${!pids[@]}"; do
   for _ in $(seq 100); do
     IFS= read -r -d '' first <"/proc/${pids[$i]}/cmdline" && [ "$first" = "${names[$i]}" ] && break
     sleep 0.05
-  done
+  done # waiting for this one
 done
 bash "$@"
 status=$?
