@@ -83,9 +83,11 @@ func TestNativeVRKeepsPINPairingPending(t *testing.T) {
 		t.Errorf("pod %s = %q before confirmation", vrHeadsetsAnnotation, got)
 	}
 
-	// Confirmed on the library page.
+	// Confirmed on the library page; the game added a key meanwhile. A
+	// pairing adds one key, so that one is never offered.
 	f.createHeadset(t, "confirmed", f.user, testHeadsetKeyA, "Quest 3")
 	f.waitHeadsets(t, 1)
+	agent.set(VRStatus{HeadsetConnected: true, KnownKeys: []VRKnownKey{{Name: "Quest 3", Key: testHeadsetKeyA}, {Name: "Quest 3", Key: testHeadsetKeyB}}}, false)
 	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
 		t.Fatal(err)
 	}
@@ -343,6 +345,12 @@ func TestSplitVRAppPodRunsVRAgent(t *testing.T) {
 	if volumeNamed(&app.Spec, vrAgentTokenVolume) != nil {
 		t.Error("App pod holds the wolf-agent token")
 	}
+	// No App template may mount them (validateNoOperatorVolumeMounts).
+	for _, v := range []string{vrAgentOwnTokenVolume, vrBusVolume} {
+		if !slices.Contains(operatorVolumes, v) {
+			t.Errorf("%s is not in operatorVolumes", v)
+		}
+	}
 	if v := volumeNamed(&app.Spec, vrBusVolume); v == nil || v.EmptyDir == nil || v.EmptyDir.Medium != corev1.StorageMediumMemory {
 		t.Errorf("bus volume %+v", v)
 	}
@@ -378,5 +386,35 @@ func TestSplitVRAppPodRunsVRAgent(t *testing.T) {
 	// Native mode keeps its readiness gate.
 	if c := f.sc.vrAgentContainer(true, vrAgentTokenVolume); c.ReadinessProbe == nil {
 		t.Error("native vr-agent lost its readiness probe")
+	}
+}
+
+// The split App pod's vr-agent token Secret is created, owned by the
+// Session, before the App pod that mounts it.
+func TestReconcileAppPodCreatesVRAgentToken(t *testing.T) {
+	f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := podReadySession(f)
+		s.Status.Ports.VR = 21000
+		return s
+	}, func(s *v1alpha1types.Session) []runtime.Object {
+		p := readyPod(s)
+		p.Annotations[appPodAnnotation] = s.Name + "-app"
+		p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{Type: corev1.PodInitialized, Status: corev1.ConditionTrue})
+		return []runtime.Object{p}
+	})
+	withVR(t, f)
+	waitPod(t, f, sess.Name)
+	if _, err := f.sc.reconcilePod(context.Background(), sess); err != nil {
+		t.Fatalf("reconcilePod: %v", err)
+	}
+	if _, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Get(context.Background(), sess.Name+"-app", metav1.GetOptions{}); err != nil {
+		t.Fatalf("App pod not created: %v", err)
+	}
+	sec, err := f.sc.K8sClient.CoreV1().Secrets(portsTestNS).Get(context.Background(), vrAgentTokenSecretName(sess.Name), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("no vr-agent token Secret: %v", err)
+	}
+	if owner := metav1.GetControllerOf(sec); owner == nil || owner.UID != sess.UID || len(sec.Data[wolfAgentTokenKey]) == 0 || len(sec.Data[corev1.TLSCertKey]) == 0 {
+		t.Errorf("Secret %+v", sec)
 	}
 }

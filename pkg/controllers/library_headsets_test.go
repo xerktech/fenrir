@@ -11,6 +11,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
@@ -82,6 +83,41 @@ func TestHeadsetsPageListsOwnPending(t *testing.T) {
 	}
 	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") {
 		t.Errorf("CSP %q", csp)
+	}
+}
+
+// Once the User confirmed a Session's key, its other keys (the game's) are
+// not offered, even before the operator drops them. A key pending in two
+// Sessions is listed once.
+func TestHeadsetsPageHidesLeftoversAfterConfirming(t *testing.T) {
+	gameKey := v1alpha1types.PendingHeadset{Key: "R09ORQ==", Name: "Quest 3", FirstSeen: metav1.Now()}
+	f, s := headsetsServer(t, pendingA, gameKey)
+	if rec := confirmRequest(s, "sam", testHeadsetKeyA, nil); rec.Code != http.StatusSeeOther {
+		t.Fatalf("HTTP %d", rec.Code)
+	}
+	rec := serveLibraryRequest(s, http.MethodGet, libraryHeadsetsPath, "10.1.0.5:5555", http.Header{DefaultLibraryUserHeader: {"sam"}})
+	if strings.Contains(rec.Body.String(), headsetFingerprint(gameKey.Key)) || !strings.Contains(rec.Body.String(), "No headset is waiting") {
+		t.Errorf("leftover offered:\n%s", rec.Body)
+	}
+	if rec := confirmRequest(s, "sam", gameKey.Key, nil); rec.Code != http.StatusConflict || len(f.headsets(t)) != 1 {
+		t.Errorf("leftover confirmable: HTTP %d, headsets %d", rec.Code, len(f.headsets(t)))
+	}
+
+	_, s = headsetsServer(t, pendingA)
+	sess := &v1alpha1types.Session{ObjectMeta: metav1.ObjectMeta{Name: "sam-2", Namespace: libraryTestNS}}
+	sess.Spec.UserReference.Name = "sam"
+	sess.Status.PendingHeadsets = []v1alpha1types.PendingHeadset{pendingA}
+	idx := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	all, _ := s.HeadsetConfirmation.Sessions.List(labels.Everything())
+	for _, o := range append(all, sess) {
+		if err := idx.Add(o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.HeadsetConfirmation.Sessions = generic.NewLister[*v1alpha1types.Session](idx).Namespaced(libraryTestNS)
+	rec = serveLibraryRequest(s, http.MethodGet, libraryHeadsetsPath, "10.1.0.5:5555", http.Header{DefaultLibraryUserHeader: {"sam"}})
+	if n := strings.Count(rec.Body.String(), headsetFingerprint(testHeadsetKeyA)); n != 1 {
+		t.Errorf("key listed %d times", n)
 	}
 }
 

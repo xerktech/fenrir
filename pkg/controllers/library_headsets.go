@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -38,8 +39,10 @@ type HeadsetConfirmation struct {
 }
 
 // pendingFor is the keys awaiting user's confirmation across their Sessions,
-// one per key, oldest first.
-func (h *HeadsetConfirmation) pendingFor(user string) ([]v1alpha1types.PendingHeadset, error) {
+// one per key, oldest first. A Session one of whose keys the User already
+// confirmed offers none: a PIN pairing adds one key, so the rest are the
+// game's (the operator drops them at its next poll).
+func (h *HeadsetConfirmation) pendingFor(ctx context.Context, user string) ([]v1alpha1types.PendingHeadset, error) {
 	sessions, err := h.Sessions.List(labels.Everything())
 	if err != nil {
 		return nil, fmt.Errorf("listing sessions: %w", err)
@@ -47,6 +50,13 @@ func (h *HeadsetConfirmation) pendingFor(user string) ([]v1alpha1types.PendingHe
 	var res []v1alpha1types.PendingHeadset
 	for _, s := range sessions {
 		if s.Spec.UserReference.Name != user || s.DeletionTimestamp != nil {
+			continue
+		}
+		confirmed, err := h.anyConfirmed(ctx, user, s.Status.PendingHeadsets)
+		if err != nil {
+			return nil, err
+		}
+		if confirmed {
 			continue
 		}
 		for _, p := range s.Status.PendingHeadsets {
@@ -59,8 +69,23 @@ func (h *HeadsetConfirmation) pendingFor(user string) ([]v1alpha1types.PendingHe
 	return res, nil
 }
 
-// headsetFingerprint is a short digest of key the user can compare with the
-// one their headset shows.
+// anyConfirmed is whether user already confirmed one of pending.
+func (h *HeadsetConfirmation) anyConfirmed(ctx context.Context, user string, pending []v1alpha1types.PendingHeadset) (bool, error) {
+	for _, p := range pending {
+		hs, err := h.Headsets.Get(ctx, recordedHeadsetName(user, p.Key), metav1.GetOptions{})
+		switch {
+		case apierrors.IsNotFound(err):
+		case err != nil:
+			return false, fmt.Errorf("getting headset: %w", err)
+		case hs.Spec.UserReference.Name == user && hs.Spec.PublicKey == p.Key:
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// headsetFingerprint is a short digest of key, to tell entries apart. WiVRn
+// shows none on the headset to compare it with.
 func headsetFingerprint(key string) string {
 	der, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
@@ -98,7 +123,7 @@ func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
 		writeLibraryPage(w, http.StatusInternalServerError, "Try again in a minute.", false, false)
 		return
 	}
-	pending, err := s.HeadsetConfirmation.pendingFor(user.Name)
+	pending, err := s.HeadsetConfirmation.pendingFor(r.Context(), user.Name)
 	if err != nil {
 		klog.Errorf("Headsets page: %v", err)
 		writeLibraryPage(w, http.StatusInternalServerError, "Try again in a minute.", false, false)
@@ -117,6 +142,19 @@ func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, libraryHeadsetsFormMax)
 		key := r.PostFormValue("key")
+		if key != "" {
+			// Confirmed already (a second click): done.
+			done, err := s.HeadsetConfirmation.anyConfirmed(r.Context(), user.Name, []v1alpha1types.PendingHeadset{{Key: key}})
+			if err != nil {
+				klog.Errorf("Headsets page: %v", err)
+				writeLibraryPage(w, http.StatusInternalServerError, "Try again in a minute.", false, false)
+				return
+			}
+			if done {
+				http.Redirect(w, r, libraryHeadsetsPath, http.StatusSeeOther)
+				return
+			}
+		}
 		i := slices.IndexFunc(pending, func(p v1alpha1types.PendingHeadset) bool { return p.Key == key })
 		if key == "" || i < 0 {
 			writeLibraryPage(w, http.StatusConflict, "That headset is no longer waiting. Pair it again in a VR session.", false, false)
@@ -169,7 +207,7 @@ func writeHeadsetsPage(w http.ResponseWriter, pending []v1alpha1types.PendingHea
 	case 0:
 		b.WriteString(`<p>No headset is waiting. Pair one by PIN in a VR session, then reload this page.</p>`)
 	case 1:
-		b.WriteString(`<p>Confirm the headset you just paired, so it connects without a PIN next time.</p>`)
+		b.WriteString(`<p>A headset is waiting. Confirm it only if you paired it by PIN just now: the game can add a key of its own. Confirmed, it connects without a PIN next time.</p>`)
 	default:
 		b.WriteString(`<p><strong>More than one headset is waiting.</strong> A PIN pairing adds one: confirm only the one you paired just now. Any other was added by the game; leave it.</p>`)
 	}

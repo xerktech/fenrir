@@ -269,7 +269,8 @@ func recordedHeadsetName(user, key string) string {
 // A key a Headset of the User does hold (one just confirmed) is named in the
 // pod's vrHeadsetsAnnotation: WiVRn trusts it in this Session, so revoking
 // it must end it, as for a seeded Headset. The pod then no longer paired by
-// PIN, and its keys stop being followed.
+// PIN, and its keys stop being followed; its other pending keys are dropped,
+// as a pairing adds only the one confirmed.
 func (c *SessionController) trackPairedHeadsets(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod, known []VRKnownKey) error {
 	if c.HeadsetClient == nil || !pairingWasOpen(pod) {
 		return nil
@@ -308,6 +309,11 @@ func (c *SessionController) trackPairedHeadsets(ctx context.Context, session *v1
 			first = metav1.Now()
 		}
 		pending = append(pending, v1alpha1types.PendingHeadset{Key: k.Key, Name: headsetDisplayName(k.Name), FirstSeen: first})
+	}
+	if len(confirmed) > 0 {
+		// A PIN pairing adds one key and the User confirmed it: any other
+		// key here is the game's, never to be offered again (QA).
+		pending = nil
 	}
 	session.Status.PendingHeadsets = pending
 	if len(confirmed) > 0 {

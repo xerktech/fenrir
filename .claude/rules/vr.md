@@ -120,6 +120,9 @@ paths:
     present and empty: WiVRn pairs only on an empty list.
     - A reported key a Headset of the User holds (just confirmed) is added to the pod's
       annotation, so revoking it ends the Session; the pod then stops being followed.
+    - Once one of a Session's keys is confirmed its other pending keys are never offered (the
+      page skips the Session, the operator drops them): a pairing adds one key, the rest are the
+      game's. QA found the leftover offered as "the headset you just paired".
     - The page is `/.direwolf/headsets` on the library server (`library_headsets.go`); it
       confirms only a key pending in the signed-in User's own Sessions, as
       `headset-<sha256(user, key)>`.
