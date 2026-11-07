@@ -127,6 +127,9 @@ controllers:
           #   --library-proxy-secret-file=<file; the proxy sends it in X-Direwolf-Proxy-Secret>
           #   --library-home-pvc=<shared Steam home PVC>
           #   --library-games-pvc=<shared game library PVC>
+          # The VR headset confirmation page needs a host of its own (never
+          # the Library's) whose proxy sends a different secret:
+          #   --headsets-proxy-secret-file=<file; that proxy's X-Direwolf-Proxy-Secret>
           # The catalogue (one App per installed game, read from the Library)
           # is off unless a base App is named; each is copied per game and its
           # pod template must run $DIREWOLF_LAUNCH_COMMAND:

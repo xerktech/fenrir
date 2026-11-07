@@ -126,6 +126,12 @@ paths:
     - The page is `/.direwolf/headsets` on the library server (`library_headsets.go`); it
       confirms only a key pending in the signed-in User's own Sessions, as
       `headset-<sha256(user, key)>`.
+    - It has its own host and Authentik provider, told apart by its own proxy secret
+      (`--headsets-proxy-secret-file`), never by `Host` (XERK-2750). Never serve it on the Library
+      host: its nginx proxies `/devmode` and `/api` to ports the desktop's user (abc) can bind, so
+      desktop code serves same-origin pages there. Off without the flag.
+    - Its POST needs `Sec-Fetch-Site: same-origin`: the Library host is same-site, not cross-site.
+      Tests: `TestHeadsetsPageHasItsOwnHost`, `TestHeadsetsPageRefuses`.
     - A failure is logged, never ends the Session: it costs only a PIN next time.
     - vr-agent sends at most 32 keys, only CRD-valid ones, names cleaned (`CleanHeadsetName`), so
       its reply fits the operator's 64KiB read: past it the poll fails and the session ends.

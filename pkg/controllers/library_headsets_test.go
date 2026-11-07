@@ -38,8 +38,22 @@ func headsetsServer(t *testing.T, samPending ...v1alpha1types.PendingHeadset) (*
 	s.HeadsetConfirmation = &HeadsetConfirmation{
 		Sessions: generic.NewLister[*v1alpha1types.Session](idx).Namespaced(libraryTestNS),
 		Headsets: f.dw.DirewolfV1alpha1().Headsets(libraryTestNS),
+		Secret:   []byte(testHeadsetsSecret),
 	}
 	return f, s
+}
+
+// testHeadsetsSecret is what the headsets host's proxy sends.
+const testHeadsetsSecret = "headsets-0123456789abcdef0123456789"
+
+// headsetsRequest is a request through the headsets host's proxy.
+func headsetsRequest(s *LibraryServer, method, target string, header http.Header) *httptest.ResponseRecorder {
+	return serveLibraryRequest(s, method, target, "10.1.0.5:5555", merged(http.Header{LibraryProxySecretHeader: {testHeadsetsSecret}}, header))
+}
+
+func merged(a, b http.Header) http.Header {
+	maps.Copy(a, b)
+	return a
 }
 
 var pendingA = v1alpha1types.PendingHeadset{Key: testHeadsetKeyA, Name: `<b>Quest</b>`, FirstSeen: metav1.Now()}
@@ -49,7 +63,9 @@ func confirmRequest(s *LibraryServer, user, key string, header http.Header) *htt
 		strings.NewReader(url.Values{"key": {key}}.Encode()))
 	req.RemoteAddr = "10.1.0.5:5555"
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set(LibraryProxySecretHeader, testLibrarySecret)
+	req.Header.Set(LibraryProxySecretHeader, testHeadsetsSecret)
+	// What a browser sends for a form on the page itself.
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	if user != "" {
 		req.Header.Set(DefaultLibraryUserHeader, user)
 	}
@@ -72,7 +88,7 @@ func (f *libraryFixture) headsets(t *testing.T) []v1alpha1types.Headset {
 // a fingerprint; never another user's.
 func TestHeadsetsPageListsOwnPending(t *testing.T) {
 	_, s := headsetsServer(t, pendingA)
-	rec := serveLibraryRequest(s, http.MethodGet, libraryHeadsetsPath, "10.1.0.5:5555", http.Header{DefaultLibraryUserHeader: {"sam"}})
+	rec := headsetsRequest(s, http.MethodGet, libraryHeadsetsPath, http.Header{DefaultLibraryUserHeader: {"sam"}})
 	body := rec.Body.String()
 	if rec.Code != http.StatusOK || !strings.Contains(body, "&lt;b&gt;Quest&lt;/b&gt;") || strings.Contains(body, "<b>Quest") ||
 		!strings.Contains(body, headsetFingerprint(testHeadsetKeyA)) || strings.Contains(body, "alex&#39;s") || strings.Contains(body, testHeadsetKeyB) {
@@ -95,7 +111,7 @@ func TestHeadsetsPageHidesLeftoversAfterConfirming(t *testing.T) {
 	if rec := confirmRequest(s, "sam", testHeadsetKeyA, nil); rec.Code != http.StatusSeeOther {
 		t.Fatalf("HTTP %d", rec.Code)
 	}
-	rec := serveLibraryRequest(s, http.MethodGet, libraryHeadsetsPath, "10.1.0.5:5555", http.Header{DefaultLibraryUserHeader: {"sam"}})
+	rec := headsetsRequest(s, http.MethodGet, libraryHeadsetsPath, http.Header{DefaultLibraryUserHeader: {"sam"}})
 	if strings.Contains(rec.Body.String(), headsetFingerprint(gameKey.Key)) || !strings.Contains(rec.Body.String(), "No headset is waiting") {
 		t.Errorf("leftover offered:\n%s", rec.Body)
 	}
@@ -115,7 +131,7 @@ func TestHeadsetsPageHidesLeftoversAfterConfirming(t *testing.T) {
 		}
 	}
 	s.HeadsetConfirmation.Sessions = generic.NewLister[*v1alpha1types.Session](idx).Namespaced(libraryTestNS)
-	rec = serveLibraryRequest(s, http.MethodGet, libraryHeadsetsPath, "10.1.0.5:5555", http.Header{DefaultLibraryUserHeader: {"sam"}})
+	rec = headsetsRequest(s, http.MethodGet, libraryHeadsetsPath, http.Header{DefaultLibraryUserHeader: {"sam"}})
 	if n := strings.Count(rec.Body.String(), headsetFingerprint(testHeadsetKeyA)); n != 1 {
 		t.Errorf("key listed %d times", n)
 	}
@@ -124,7 +140,7 @@ func TestHeadsetsPageHidesLeftoversAfterConfirming(t *testing.T) {
 // Two pending keys: a PIN pairing adds one, so the page warns.
 func TestHeadsetsPageWarnsOfSeveral(t *testing.T) {
 	_, s := headsetsServer(t, pendingA, v1alpha1types.PendingHeadset{Key: "R09ORQ==", FirstSeen: metav1.NewTime(time.Now().Add(-time.Minute))})
-	rec := serveLibraryRequest(s, http.MethodGet, libraryHeadsetsPath, "10.1.0.5:5555", http.Header{DefaultLibraryUserHeader: {"sam"}})
+	rec := headsetsRequest(s, http.MethodGet, libraryHeadsetsPath, http.Header{DefaultLibraryUserHeader: {"sam"}})
 	if !strings.Contains(rec.Body.String(), "More than one headset is waiting") {
 		t.Errorf("no warning:\n%s", rec.Body)
 	}
@@ -148,8 +164,9 @@ func TestHeadsetsPageConfirms(t *testing.T) {
 }
 
 // Nothing else confirms: another user's pending key, a key pending nowhere,
-// a cross-site form, no or an unknown user, a GET, a server without
-// confirmation, or a request without the proxy secret.
+// a form from another origin (the Library's included), no or an unknown
+// user, a GET, a server without confirmation, a request without the page's
+// proxy secret, or one through the Library's proxy.
 func TestHeadsetsPageRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name, user, key string
@@ -160,10 +177,15 @@ func TestHeadsetsPageRefuses(t *testing.T) {
 		{"another user's key", "sam", testHeadsetKeyB, nil, http.StatusConflict, false},
 		{"a key pending nowhere", "sam", "R09ORQ==", nil, http.StatusConflict, false},
 		{"cross-site", "sam", testHeadsetKeyA, http.Header{"Sec-Fetch-Site": {"cross-site"}}, http.StatusForbidden, false},
+		// The Library host is a sibling: its desktop's form is same-site.
+		{"same-site", "sam", testHeadsetKeyA, http.Header{"Sec-Fetch-Site": {"same-site"}}, http.StatusForbidden, false},
+		{"no Sec-Fetch-Site", "sam", testHeadsetKeyA, http.Header{"Sec-Fetch-Site": {""}}, http.StatusForbidden, false},
+		// The Library's own secret: the page is never on its origin.
+		{"library secret", "sam", testHeadsetKeyA, http.Header{LibraryProxySecretHeader: {testLibrarySecret}}, http.StatusNotFound, false},
 		{"no user", "", testHeadsetKeyA, nil, http.StatusForbidden, false},
 		{"unknown user", "nobody", testHeadsetKeyA, nil, http.StatusForbidden, false},
 		{"no proxy secret", "sam", testHeadsetKeyA, http.Header{LibraryProxySecretHeader: {"wrong"}}, http.StatusForbidden, false},
-		{"confirmation off", "sam", testHeadsetKeyA, nil, http.StatusNotFound, true},
+		{"confirmation off", "sam", testHeadsetKeyA, nil, http.StatusForbidden, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, s := headsetsServer(t, pendingA)
@@ -181,7 +203,7 @@ func TestHeadsetsPageRefuses(t *testing.T) {
 	}
 	t.Run("GET", func(t *testing.T) {
 		f, s := headsetsServer(t, pendingA)
-		serveLibraryRequest(s, http.MethodGet, libraryHeadsetsPath+"?key="+url.QueryEscape(testHeadsetKeyA), "10.1.0.5:5555", http.Header{DefaultLibraryUserHeader: {"sam"}})
+		headsetsRequest(s, http.MethodGet, libraryHeadsetsPath+"?key="+url.QueryEscape(testHeadsetKeyA), http.Header{DefaultLibraryUserHeader: {"sam"}})
 		if hs := f.headsets(t); len(hs) != 0 {
 			t.Errorf("a GET created %+v", hs)
 		}
@@ -198,4 +220,26 @@ func TestHeadsetsPageRefuses(t *testing.T) {
 			t.Errorf("HTTP %d, want 500", rec.Code)
 		}
 	})
+}
+
+// The page and the Library never share an origin (XERK-2750): the Library's
+// proxy gets no page and never passes its path on to the desktop, and the
+// page's proxy gets nothing of the Library.
+func TestHeadsetsPageHasItsOwnHost(t *testing.T) {
+	_, s := headsetsServer(t, pendingA)
+	sam := http.Header{DefaultLibraryUserHeader: {"sam"}}
+	if rec := serveLibraryRequest(s, http.MethodGet, libraryHeadsetsPath, "10.1.0.5:5555", sam); rec.Code != http.StatusNotFound {
+		t.Errorf("Library host: HTTP %d, want 404", rec.Code)
+	}
+	if rec := headsetsRequest(s, http.MethodGet, "/", sam); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != libraryHeadsetsPath {
+		t.Errorf("headsets host /: HTTP %d to %q, want a redirect to the page", rec.Code, rec.Header().Get("Location"))
+	}
+	for _, path := range []string{"/devmode/", "/api", libraryStartPath} {
+		if rec := headsetsRequest(s, http.MethodGet, path, merged(sam, userVisit)); rec.Code != http.StatusNotFound {
+			t.Errorf("headsets host %s: HTTP %d, want 404", path, rec.Code)
+		}
+	}
+	if rec := headsetsRequest(s, http.MethodPost, libraryStartPath, sam); rec.Code != http.StatusNotFound {
+		t.Errorf("headsets host start: HTTP %d, want 404", rec.Code)
+	}
 }
