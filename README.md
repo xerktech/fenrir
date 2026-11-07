@@ -39,6 +39,20 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
   Users of that library. Other apps are `App` CRs in `games/direwolf/`.
 - Quit in Moonlight ends the session at once. Closing the client without quitting keeps the
   pod for 10 minutes (`--disconnect-grace-period`); reconnecting in that window resumes the game.
+- VR (Meta Quest 3, Assetto Corsa): the Quest runs the xerktech/WiVRn fork's APK (the store
+  client is refused). Design and rules: [docs/vr-native-session.md](docs/vr-native-session.md),
+  `.claude/rules/vr.md`.
+  - Start and stop it at `headsets.xerktech.com/.direwolf/vr` (Authentik). Once the pod is up the
+    page shows the address (`10.10.10.34:<port>`) to enter in WiVRn, and the PIN while no headset
+    is paired.
+  - After a PIN pairing, confirm the headset on `headsets.xerktech.com/.direwolf/headsets`; it
+    then connects without a PIN. Confirm only the key you just paired: a second waiting key is
+    the game's.
+  - Taking the headset off keeps the session for the grace period; putting it back on resumes.
+  - One VR session at a time (one GPU); it counts against `--max-concurrent-sessions`, and a
+    Moonlight launch by the same User replaces it.
+  - Assetto Corsa's one-time setup in the shared Steam home (acs.exe swap, CSP, prefix fonts) is
+    still done by hand (XERK-2726).
 
 ### Administer
 
@@ -48,6 +62,8 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
 - Revoke a client: `kubectl delete pairing -n games <fingerprint>` (`spec.userReference`
   names its owner). It is refused from then on, and the operator ends any session it has
   running (pod and stream included).
+- Revoke a VR headset: `kubectl delete headset -n games <name>` (`spec.userReference` names
+  its owner). Sessions seeded with it end; its next connect needs a new PIN pairing.
 - Steam home and library are backed up hourly/daily to NFS; the restore procedure is in the
   ArgoCD streaming rules (Steam backup).
 - RomM sync is off in this deployment (no `--romm-url`).
