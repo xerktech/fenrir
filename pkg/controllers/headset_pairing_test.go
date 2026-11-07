@@ -237,6 +237,7 @@ func TestRecordedHeadsetReachesPodAfterFailures(t *testing.T) {
 	// Poll 2: A is recorded, B's create fails (its placeholder is dropped).
 	// Poll 3: B is recorded.
 	for poll := 1; poll <= 3; poll++ {
+		f.sc.headsetBackoff.until = nil // B's failed create backs off
 		err := f.sc.recordPairedHeadsets(context.Background(), s, pod, known)
 		if (err != nil) != (poll < 3) {
 			t.Fatalf("poll %d: %v", poll, err)
@@ -384,8 +385,8 @@ func TestRevokeAfterLostUIDPatchHolds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := live.Annotations[vrHeadsetsAnnotation]; got != name+"/" {
-		t.Fatalf("annotation = %q, want the placeholder %s/", got, name)
+	if got := live.Annotations[vrHeadsetsAnnotation]; !strings.HasPrefix(got, name+"/"+placeholderPrefix) || strings.Contains(got, ",") {
+		t.Fatalf("annotation = %q, want only the placeholder for %s", got, name)
 	}
 	// The placeholder holds while its Headset lives.
 	if reason, err := f.sc.headsetRevokedReason(context.Background(), live); err != nil || reason != "" {
@@ -401,6 +402,8 @@ func TestRevokeAfterLostUIDPatchHolds(t *testing.T) {
 	if hs := f.headsets(t); len(hs) != 0 {
 		t.Errorf("revoke undone: %+v", hs)
 	}
+	// The Session ends once the placeholder is past pending.
+	live.Annotations[vrHeadsetsAnnotation] = placeholderEntry(name, time.Now().Add(-placeholderPending-time.Second))
 	if reason, err := f.sc.headsetRevokedReason(context.Background(), live); err != nil || reason == "" {
 		t.Errorf("headsetRevokedReason = %q, %v; want revoked", reason, err)
 	}
@@ -408,16 +411,17 @@ func TestRevokeAfterLostUIDPatchHolds(t *testing.T) {
 
 func TestSeededEntriesReplacePlaceholder(t *testing.T) {
 	for _, tc := range []struct{ value, entry, want string }{
-		{"", "a/", "a/"},
-		{"a/", "a/1", "a/1"},
-		{"x/9,a/", "a/1", "x/9,a/1"},
+		{"", "a/~5", "a/~5"},
+		{"a/~5", "a/1", "a/1"},
+		{"x/9,a/~5", "a/1", "x/9,a/1"},
 		{"a/1", "a/1", "a/1"},
+		{"ab/~5", "a/1", "ab/~5,a/1"},
 	} {
 		if got := withSeededEntries(tc.value, tc.entry); got != tc.want {
 			t.Errorf("withSeededEntries(%q, %q) = %q, want %q", tc.value, tc.entry, got, tc.want)
 		}
 	}
-	if got := withoutSeededEntry("x/9,a/", "a/"); got != "x/9" {
+	if got := withoutSeededEntry("x/9,a/~5", "a/~5"); got != "x/9" {
 		t.Errorf("withoutSeededEntry = %q", got)
 	}
 }
@@ -430,5 +434,73 @@ func TestIsWiVRnKey(t *testing.T) {
 		if got := IsWiVRnKey(key); got != want {
 			t.Errorf("IsWiVRnKey(%.20q) = %v, want %v", key, got, want)
 		}
+	}
+}
+
+// podWrites counts pod patches on f's fake clientset.
+func podWrites(t *testing.T, f *portsFixture) *int {
+	t.Helper()
+	k8s, ok := f.sc.K8sClient.(*k8sfake.Clientset)
+	if !ok {
+		t.Fatal("not a fake clientset")
+	}
+	n := new(int)
+	k8s.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		*n++
+		return false, nil, nil
+	})
+	return n
+}
+
+// A taken name, or a create that fails, costs no pod write on later polls:
+// each write re-queues the Session, which would poll in a loop (QA).
+func TestRecordPairedHeadsetsQuietOnTakenOrFailing(t *testing.T) {
+	f, s, pod := recordFixture(t, "[]")
+	writes := podWrites(t, f)
+	f.createHeadset(t, headsetObjectName(f.user, testHeadsetKeyB), "someone-else", testHeadsetKeyB, "")
+	f.dw.PrependReactor("create", "headsets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "headsets"}, "x", stderrors.New("no"))
+	})
+	known := []VRKnownKey{{Name: "taken", Key: testHeadsetKeyB}, {Name: "failing", Key: testHeadsetKeyA}}
+	_ = f.sc.recordPairedHeadsets(context.Background(), s, pod, known) // A: reserve, fail, drop
+	first := *writes
+	for range 3 {
+		if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, known); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if *writes != first || first > 2 {
+		t.Errorf("pod writes: %d on the first poll, %d after 3 more; want <= 2, then none", first, *writes)
+	}
+}
+
+// A placeholder holds while its create may be in flight (another worker can
+// read the pod before the Headset exists), then counts as revoked.
+func TestPlaceholderPendingThenRevoked(t *testing.T) {
+	f := newPortsFixture(t)
+	watchHeadsets(t, f)
+	name := headsetObjectName(f.user, testHeadsetKeyA)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: portsTestNS, Annotations: map[string]string{
+		vrHeadsetsAnnotation: placeholderEntry(name, time.Now()),
+	}}}
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || reason != "" {
+		t.Errorf("fresh placeholder: %q, %v; want held", reason, err)
+	}
+	pod.Annotations[vrHeadsetsAnnotation] = placeholderEntry(name, time.Now().Add(-2*placeholderPending))
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || reason == "" {
+		t.Errorf("stale placeholder: %q, %v; want revoked", reason, err)
+	}
+	// Held by its own Headset, whatever its age; not by another key's.
+	f.createHeadset(t, name, f.user, testHeadsetKeyA, "")
+	f.waitHeadsets(t, 1)
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || reason != "" {
+		t.Errorf("placeholder with its Headset: %q, %v; want held", reason, err)
+	}
+	other := headsetObjectName(f.user, testHeadsetKeyB)
+	f.createHeadset(t, other, f.user, testHeadsetKeyA, "")
+	f.waitHeadsets(t, 2)
+	pod.Annotations[vrHeadsetsAnnotation] = placeholderEntry(other, time.Now().Add(-2*placeholderPending))
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || reason == "" {
+		t.Errorf("placeholder under another key's Headset: %q, %v; want revoked", reason, err)
 	}
 }

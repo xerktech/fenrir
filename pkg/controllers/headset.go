@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -119,6 +122,30 @@ func withVRHeadsets(spec *corev1.PodSpec, headsets []*v1alpha1types.Headset) (st
 // seededHeadset is one entry of vrHeadsetsAnnotation.
 type seededHeadset struct{ name, uid string }
 
+// placeholderPrefix starts a placeholder's UID field: "~<unix seconds>",
+// written by recordPairedHeadsets before its create.
+const placeholderPrefix = "~"
+
+// placeholderPending is how long a placeholder with no Headset behind it
+// still holds: its create may be in flight (another worker can read the pod
+// between the two). Past it, the record counts as revoked.
+const placeholderPending = time.Minute
+
+func placeholderEntry(name string, now time.Time) string {
+	return name + "/" + placeholderPrefix + strconv.FormatInt(now.Unix(), 10)
+}
+
+// pendingPlaceholder is whether want is a placeholder younger than
+// placeholderPending at now.
+func pendingPlaceholder(want seededHeadset, now time.Time) bool {
+	ts, ok := strings.CutPrefix(want.uid, placeholderPrefix)
+	if !ok {
+		return false
+	}
+	sec, err := strconv.ParseInt(ts, 10, 64)
+	return err == nil && now.Sub(time.Unix(sec, 0)) < placeholderPending
+}
+
 // podHeadsets returns the Headsets pod was seeded with.
 func podHeadsets(pod *corev1.Pod) []seededHeadset {
 	v := pod.Annotations[vrHeadsetsAnnotation]
@@ -141,15 +168,16 @@ func isSeeded(pod *corev1.Pod, name string) bool {
 // stillSeeded is whether h is the live Headset seeded as want: not
 // re-created under its name, and not being deleted (held by a finalizer).
 //
-// An entry with no UID is recordPairedHeadsets' placeholder, written before
-// its create: it holds while the Headset of that name is the operator's
-// record of its own User and key (whose name it is). With none, the record
-// was revoked (or never made), so the Session ends.
+// A placeholder (UID field "~<time>", written by recordPairedHeadsets before
+// its create) holds while the Headset of that name is the operator's record
+// of its own User and key (whose name it is). With no Headset it holds only
+// while pending (headsetRevokedReason); then the record was revoked (or
+// never made), so the Session ends.
 func stillSeeded(h *v1alpha1types.Headset, want seededHeadset) bool {
 	if h.DeletionTimestamp != nil {
 		return false
 	}
-	if want.uid == "" {
+	if strings.HasPrefix(want.uid, placeholderPrefix) {
 		return h.Name == headsetObjectName(h.Spec.UserReference.Name, h.Spec.PublicKey)
 	}
 	return string(h.UID) == want.uid
@@ -174,6 +202,8 @@ func (c *SessionController) headsetRevokedReason(ctx context.Context, pod *corev
 		live, err := c.HeadsetClient.Get(ctx, want.name, metav1.GetOptions{})
 		switch {
 		case err == nil && stillSeeded(live, want):
+			continue
+		case errors.IsNotFound(err) && pendingPlaceholder(want, time.Now()):
 			continue
 		case err == nil || errors.IsNotFound(err):
 			return fmt.Sprintf("its headset %s was revoked", want.name), nil
@@ -355,7 +385,29 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 		// this pod (reconcileHeadset) and stop a later poll re-creating it,
 		// even if the operator dies or the UID's patch fails right after.
 		name := headsetObjectName(user, k.Key)
-		reserved, err := c.patchSeededHeadsets(ctx, live, withSeededEntries(live.Annotations[vrHeadsetsAnnotation], name+"/"))
+		// Writes only when the name is free and no create failed lately:
+		// each pod write re-queues the Session, which polls again.
+		if c.headsetBackoff.active(name) {
+			continue
+		}
+		if taken, err := c.HeadsetClient.Get(ctx, name, metav1.GetOptions{}); err == nil {
+			if taken.Spec.UserReference.Name == user && taken.Spec.PublicKey == k.Key && taken.DeletionTimestamp == nil {
+				// Ours, not yet in the cache.
+				entry := taken.Name + "/" + string(taken.UID)
+				byKey[k.Key] = taken
+				count++
+				recorded[entry] = true
+				add = append(add, entry)
+			} else {
+				klog.V(2).Infof("Session %s/%s: headset name %s is taken; not recording the key", session.Namespace, session.Name, name)
+			}
+			continue
+		} else if !errors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("failed to get headset %s: %w", name, err))
+			break
+		}
+		placeholder := placeholderEntry(name, time.Now())
+		reserved, err := c.patchSeededHeadsets(ctx, live, withSeededEntries(live.Annotations[vrHeadsetsAnnotation], placeholder))
 		if err != nil {
 			errs = append(errs, err)
 			break
@@ -364,9 +416,10 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 		recorded[name] = true
 		h, err := c.createHeadset(ctx, session, k)
 		if err != nil || h == nil {
+			c.headsetBackoff.set(name)
 			// No Headset: the placeholder would end the Session, so drop
 			// it. Failing that, the Session ends, which is safe.
-			if p, undoErr := c.patchSeededHeadsets(ctx, live, withoutSeededEntry(live.Annotations[vrHeadsetsAnnotation], name+"/")); undoErr != nil {
+			if p, undoErr := c.patchSeededHeadsets(ctx, live, withoutSeededEntry(live.Annotations[vrHeadsetsAnnotation], placeholder)); undoErr != nil {
 				errs = append(errs, undoErr)
 			} else {
 				live = p
@@ -437,8 +490,8 @@ func (c *SessionController) createHeadset(ctx context.Context, session *v1alpha1
 	return live, nil
 }
 
-// withSeededEntries adds entries to a vrHeadsetsAnnotation value; a
-// name/uid entry replaces that name's placeholder (name/).
+// withSeededEntries adds entries to a vrHeadsetsAnnotation value; an entry
+// replaces that name's placeholder.
 func withSeededEntries(value string, entries ...string) string {
 	var list []string
 	if value != "" {
@@ -446,7 +499,7 @@ func withSeededEntries(value string, entries ...string) string {
 	}
 	for _, e := range entries {
 		name, _, _ := strings.Cut(e, "/")
-		list = slices.DeleteFunc(list, func(x string) bool { return x == name+"/" })
+		list = slices.DeleteFunc(list, func(x string) bool { return strings.HasPrefix(x, name+"/"+placeholderPrefix) })
 		if !slices.Contains(list, e) {
 			list = append(list, e)
 		}
@@ -478,4 +531,35 @@ func (c *SessionController) patchSeededHeadsets(ctx context.Context, live *corev
 		return nil, fmt.Errorf("failed to record headsets on pod %s: %w", live.Name, err)
 	}
 	return patched, nil
+}
+
+// headsetBackoffPeriod is how long recordPairedHeadsets leaves a key whose
+// create failed: retried every poll, its placeholder's two pod writes would
+// re-queue the Session in a loop.
+const headsetBackoffPeriod = 5 * time.Minute
+
+// headsetBackoff remembers failed creates by Headset name.
+type headsetBackoff struct {
+	mu    sync.Mutex
+	until map[string]time.Time
+}
+
+func (b *headsetBackoff) active(name string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	t, ok := b.until[name]
+	if ok && time.Now().After(t) {
+		delete(b.until, name)
+		return false
+	}
+	return ok
+}
+
+func (b *headsetBackoff) set(name string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.until == nil {
+		b.until = map[string]time.Time{}
+	}
+	b.until[name] = time.Now().Add(headsetBackoffPeriod)
 }
