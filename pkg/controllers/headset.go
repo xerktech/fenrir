@@ -263,10 +263,11 @@ func seededKeys(pod *corev1.Pod) map[string]bool {
 // annotation is read live and patched each poll until it holds them all: a
 // failed patch or create is retried by the next poll.
 //
-// A key whose Headset this pod already records (seeded, or recorded this
-// session) but no longer exists is never recorded again: it was revoked
-// after the pod started or the poll began, and recording it would undo the
-// revoke. The Session ends on its own reconcile.
+// Nothing is recorded while any Headset the pod records is revoked (gone,
+// terminating or re-created): the revoke may have landed during this poll,
+// WiVRn still lists its key, and recording it under any name would undo the
+// revoke for the next session. The Session ends on its own reconcile. Nor
+// is a key the pod was seeded with, for the same reason.
 func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod, known []VRKnownKey) error {
 	if c.HeadsetClient == nil || len(known) == 0 {
 		return nil
@@ -274,6 +275,9 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 	live, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get pod %s: %w", pod.Name, err)
+	}
+	if reason, revokeErr := c.headsetRevokedReason(ctx, live); revokeErr != nil || reason != "" {
+		return revokeErr
 	}
 	recorded := map[string]bool{}
 	for _, h := range podHeadsets(live) {
@@ -301,7 +305,7 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 			}
 			continue
 		}
-		if seeded[k.Key] || recorded[headsetObjectName(user, k.Key)] || len(k.Key) > 1024 || len(k.Key) < 4 || !wivrnKeyPattern.MatchString(k.Key) {
+		if seeded[k.Key] || len(k.Key) > 1024 || len(k.Key) < 4 || !wivrnKeyPattern.MatchString(k.Key) {
 			continue
 		}
 		if count >= maxUserHeadsets {
@@ -335,7 +339,7 @@ func (c *SessionController) createHeadset(ctx context.Context, session *v1alpha1
 	user := session.Spec.UserReference.Name
 	// The headset names itself: no control or bidi characters.
 	display := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return -1
 		}
 		return r

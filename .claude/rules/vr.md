@@ -107,8 +107,13 @@ paths:
   - A native session records PIN pairings (`recordPairedHeadsets`): vr-agent reports WiVRn's
     `KnownKeys`; each key no Headset holds becomes `<user>-<sha256 prefix>` (owned by the User,
     capped at `maxUserHeadsets`) and joins the pod's annotation, so revoking it ends this session.
-    - Never a key the pod was seeded with: its Headset was revoked after the pod started.
-    - Failures only log: a poll error reads as a lost headset.
+    - Nothing while any Headset the pod records is revoked, whatever its name: WiVRn still lists
+      the key, and a Headset of it under any name undoes the revoke (QA). Nor a seeded key.
+    - The annotation is read live and topped up each poll with every Headset WiVRn admits, so a
+      failed create or patch (kubelet's writes conflict) retries; failures only log, since a
+      poll error reads as a lost headset.
+    - vr-agent sends at most 32 keys (1024-byte key, 128-byte name): past the operator's 64KiB
+      read the poll fails and the session ends.
     - Accepted: the game shares WiVRn's config dir as the same uid, so a key it plants becomes a
       Headset, as it persisted on the volume before. The cap bounds it.
   - Moonlight-mode VR pods run no vr-agent, so there every session pairs anew (XERK-2740).

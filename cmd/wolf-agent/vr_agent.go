@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"unicode/utf8"
 
 	"github.com/godbus/dbus/v5"
 	"k8s.io/klog/v2"
@@ -33,7 +34,8 @@ const (
 	// the App's VR services (vr-services restarts wivrn-server).
 	vrBusTimeout = 5 * time.Second
 	// maxReportedKeys bounds KnownKeys in a reply: well over the operator's
-	// per-User cap, well under its 64KiB read (a key and name are < 1.2KiB).
+	// per-User cap, well under its 64KiB read (each entry is cut to a
+	// 1024-byte key and a 128-byte name).
 	maxReportedKeys = 32
 )
 
@@ -76,8 +78,15 @@ func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, err
 		}
 		// Bounded, so a game flooding the keys file can't grow the reply
 		// past what the operator reads (it would read as a lost headset).
-		for _, k := range keys[:min(len(keys), maxReportedKeys)] {
-			st.KnownKeys = append(st.KnownKeys, controllers.VRKnownKey{Name: k.Name, Key: k.Key})
+		for _, k := range keys {
+			if len(st.KnownKeys) == maxReportedKeys {
+				break
+			}
+			// Longer than the CRD admits: never recorded, so not sent.
+			if len(k.Key) > 1024 {
+				continue
+			}
+			st.KnownKeys = append(st.KnownKeys, controllers.VRKnownKey{Name: truncateUTF8(k.Name, 128), Key: k.Key})
 		}
 	}
 	return st, nil
@@ -141,4 +150,13 @@ func runVRAgent(args []string) {
 		klog.Error("vr-agent: ", err)
 		os.Exit(1)
 	}
+}
+
+// truncateUTF8 cuts s to at most n bytes, on a rune boundary.
+func truncateUTF8(s string, n int) string {
+	for len(s) > n {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+	}
+	return s
 }

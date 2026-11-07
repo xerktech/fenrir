@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +20,9 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	generatedclient "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/fake"
+	generatedinformers "games-on-whales.github.io/direwolf/pkg/generated/informers/externalversions"
+	"games-on-whales.github.io/direwolf/pkg/generic"
 )
 
 // seededPod gives a VR pod the seed env and annotation buildPod would.
@@ -167,8 +171,12 @@ func TestRecordPairedHeadsetsLeavesTakenName(t *testing.T) {
 	if err != nil || len(hs) != 1 || hs[0].Spec.UserReference.Name != "someone-else" {
 		t.Errorf("headsets = %+v, %v; want only the other User's", hs, err)
 	}
-	if v := pod.Annotations[vrHeadsetsAnnotation]; v != "" {
-		t.Errorf("pod annotation = %q", v)
+	live, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := live.Annotations[vrHeadsetsAnnotation]; v != "" {
+		t.Errorf("pod annotation = %q; want the other User's Headset not adopted", v)
 	}
 }
 
@@ -248,7 +256,7 @@ func TestRecordedHeadsetReachesPodAfterFailures(t *testing.T) {
 // the name is cut to the CRD's 128 bytes on a rune boundary.
 func TestRecordedHeadsetDisplayName(t *testing.T) {
 	f, s, pod := recordFixture(t, "[]")
-	name := "Quest\u202e\n3\x00" + strings.Repeat("é", 100)
+	name := "Quest\u202e\u2028\n3\x00" + strings.Repeat("é", 100)
 	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Name: name, Key: testHeadsetKeyA}}); err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +265,86 @@ func TestRecordedHeadsetDisplayName(t *testing.T) {
 		t.Fatalf("headsets = %d", len(hs))
 	}
 	got := hs[0].Spec.DisplayName
-	if !strings.HasPrefix(got, "Quest3é") || len(got) > 128 || strings.ContainsAny(got, "\u202e\n\x00") || !utf8.ValidString(got) {
+	if !strings.HasPrefix(got, "Quest3é") || len(got) > 128 || strings.ContainsAny(got, "\u202e\u2028\n\x00") || !utf8.ValidString(got) {
 		t.Errorf("displayName = %q (%d bytes)", got, len(got))
 	}
+}
+
+// Nothing is recorded while a Headset the pod records is revoked, whatever
+// its name: WiVRn still lists the revoked key (an admin-named Headset
+// revoked during the poll), and any new Headset of it would undo the revoke.
+func TestNothingRecordedWhileARecordedHeadsetIsRevoked(t *testing.T) {
+	for _, entry := range []string{"mine/mine-uid", "mine/old-uid"} {
+		f, s, pod := recordFixture(t, "[]")
+		patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, vrHeadsetsAnnotation, entry)
+		if _, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Patch(context.Background(), pod.Name, "application/merge-patch+json", []byte(patch), metav1.PatchOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if entry == "mine/old-uid" { // re-created under its name
+			f.createHeadset(t, "mine", f.user, testHeadsetKeyB, "")
+			f.waitHeadsets(t, 1)
+		}
+		known := []VRKnownKey{{Name: "revoked", Key: testHeadsetKeyA}}
+		if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, known); err != nil {
+			t.Fatal(err)
+		}
+		for _, h := range f.headsets(t) {
+			if h.Spec.PublicKey == testHeadsetKeyA {
+				t.Errorf("%s: re-recorded the revoked key as %s", entry, h.Name)
+			}
+		}
+	}
+}
+
+// A terminating Headset under the operator's name is not adopted.
+func TestRecordPairedHeadsetsLeavesTerminatingName(t *testing.T) {
+	f, s, pod := recordFixture(t, "[]")
+	f.createHeadsetObj(t, headsetObjectName(f.user, testHeadsetKeyA), f.user, testHeadsetKeyA, "", func(h *v1alpha1types.Headset) {
+		h.DeletionTimestamp, h.Finalizers = &metav1.Time{Time: time.Now()}, []string{"test/hold"}
+	})
+	f.waitHeadsets(t, 1)
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Name: "q", Key: testHeadsetKeyA}}); err != nil {
+		t.Fatal(err)
+	}
+	live, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := live.Annotations[vrHeadsetsAnnotation]; v != "" {
+		t.Errorf("pod annotation = %q; want the terminating Headset not adopted", v)
+	}
+}
+
+// The owner User is read live when the cache lacks it; without it the
+// Headset is not created (it would outlive the User).
+func TestRecordedHeadsetOwnerReadLive(t *testing.T) {
+	f, s, pod := recordFixture(t, "[]")
+	f.sc.UserInformer = emptyUserInformer(t)
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Name: "q", Key: testHeadsetKeyA}}); err != nil {
+		t.Fatal(err)
+	}
+	hs := f.headsets(t)
+	if len(hs) != 1 || len(hs[0].OwnerReferences) != 1 || hs[0].OwnerReferences[0].Name != f.user {
+		t.Fatalf("headsets = %+v; want one owned by the User", hs)
+	}
+	if err := f.dw.DirewolfV1alpha1().Users(portsTestNS).Delete(context.Background(), f.user, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Name: "q", Key: testHeadsetKeyB}}); err == nil {
+		t.Error("recorded a headset for a missing User")
+	}
+	if hs := f.headsets(t); len(hs) != 1 {
+		t.Errorf("headsets = %d, want no ownerless one", len(hs))
+	}
+}
+
+func emptyUserInformer(t *testing.T) generic.Informer[*v1alpha1types.User] {
+	t.Helper()
+	factory := generatedinformers.NewSharedInformerFactory(generatedclient.NewSimpleClientset(), 0)
+	inf := factory.Direwolf().V1alpha1().Users().Informer()
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	factory.Start(stop)
+	factory.WaitForCacheSync(stop)
+	return generic.NewInformer[*v1alpha1types.User](inf)
 }

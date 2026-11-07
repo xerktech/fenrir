@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
@@ -140,17 +141,26 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 	}
 	props.SetMust(wivrnInterface, "KnownKeys", []knownKey{{"Quest 3", "MEIw", 1700000000}, {"Other", "AAAA", 0}})
 	want := []controllers.VRKnownKey{{Name: "Quest 3", Key: "MEIw"}, {Name: "Other", Key: "AAAA"}}
-	if st, err := wivrnStatus(ctx, addr); err != nil || !reflect.DeepEqual(st.KnownKeys, want) {
+	st, err = wivrnStatus(ctx, addr)
+	if err != nil || !reflect.DeepEqual(st.KnownKeys, want) {
 		t.Fatalf("KnownKeys: %+v, %v; want %+v", st.KnownKeys, err, want)
 	}
-	// A flood (the game shares WiVRn's keys file) is cut to maxReportedKeys.
-	flood := make([]knownKey, maxReportedKeys+10)
-	for i := range flood {
-		flood[i] = knownKey{"k", "AAAA", 0}
+	// A flood (the game shares WiVRn's keys file) is cut to maxReportedKeys;
+	// a key over 1024 bytes is dropped and a long name cut. One set, larger
+	// than the last: godbus's SetMust writes into a same-length old slice
+	// that its exporter may still be reading (a race in the test only).
+	flood := make([]knownKey, 0, maxReportedKeys+12)
+	flood = append(flood, knownKey{"big", strings.Repeat("A", 2000), 0}, knownKey{strings.Repeat("é", 10000), "AAAA", 0})
+	for range maxReportedKeys + 10 {
+		flood = append(flood, knownKey{"k", "AAAA", 0})
 	}
 	props.SetMust(wivrnInterface, "KnownKeys", flood)
-	if st, err := wivrnStatus(ctx, addr); err != nil || len(st.KnownKeys) != maxReportedKeys {
+	st, err = wivrnStatus(ctx, addr)
+	if err != nil || len(st.KnownKeys) != maxReportedKeys {
 		t.Fatalf("flooded KnownKeys: %d, %v; want %d", len(st.KnownKeys), err, maxReportedKeys)
+	}
+	if first := st.KnownKeys[0]; len(first.Name) > 128 || !utf8.ValidString(first.Name) || !strings.HasPrefix(first.Name, "é") {
+		t.Errorf("first reported key %.40q...: want the long name cut, the long key dropped", first.Name)
 	}
 	props.SetMust(wivrnInterface, "SessionRunning", true)
 	if st, err := wivrnStatus(ctx, addr); err != nil || !st.SessionRunning {
