@@ -275,7 +275,7 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 		"annotations":     map[string]string{vrHeadsetsAnnotation: value},
 	}})
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to encode pod patch: %w", err)
 	}
 	if _, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{
 		FieldManager: "direwolf-session-controller-pod",

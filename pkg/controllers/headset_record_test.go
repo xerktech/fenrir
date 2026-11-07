@@ -37,7 +37,7 @@ func (f *portsFixture) headsetNames(t *testing.T) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var names []string
+	names := make([]string, 0, len(list.Items))
 	for _, h := range list.Items {
 		names = append(names, h.Name)
 	}
@@ -162,9 +162,11 @@ func TestRecordPairedHeadsetsReuses(t *testing.T) {
 	f.createHeadset(t, name, f.user, testHeadsetKeyB, "")
 	pod = f.livePod(t, pod.Name)
 	pod.Annotations[vrHeadsetsAnnotation] = ""
-	if pod, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Update(context.Background(), pod, metav1.UpdateOptions{}); err != nil {
+	pod, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Update(context.Background(), pod, metav1.UpdateOptions{})
+	if err != nil {
 		t.Fatal(err)
-	} else if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Key: testHeadsetKeyB}}); err != nil {
+	}
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Key: testHeadsetKeyB}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.livePod(t, pod.Name).Annotations[vrHeadsetsAnnotation]; got != name+"/"+name+"-uid" {
@@ -189,7 +191,10 @@ func TestMoonlightVRRecordsPINPairing(t *testing.T) {
 	sess, objs := vrSessionPods("")
 	f, s := lifecycleFixture(t, sess, func(s *v1alpha1types.Session) []runtime.Object {
 		res := objs(s)
-		app := res[1].(*corev1.Pod)
+		app, ok := res[1].(*corev1.Pod)
+		if !ok {
+			t.Fatal("vrSessionPods changed shape")
+		}
 		app.Spec.Containers = []corev1.Container{{Name: "app"}, {Name: v1alpha1types.VRAgentContainerName}}
 		return append(res, tokenSecret(s))
 	})

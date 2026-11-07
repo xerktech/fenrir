@@ -139,7 +139,7 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 		Name, Key string
 		Last      int64
 	}
-	if _, err := prop.Export(server, wivrnPath, prop.Map{wivrnInterface: {
+	if _, err = prop.Export(server, wivrnPath, prop.Map{wivrnInterface: {
 		"HeadsetConnected": {Value: true, Emit: prop.EmitTrue},
 		"SessionRunning":   {Value: true, Emit: prop.EmitTrue},
 		"KnownKeys":        {Value: []knownKey{{"Quest 3", "QUJD", 1700000000}, {"Unknown headset", "REVG", 0}}, Emit: prop.EmitTrue},

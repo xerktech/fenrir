@@ -158,14 +158,14 @@ func vrBusVolumeSpec() corev1.Volume {
 // listens there) and vr-agent the Session's token Secret, as tokenVolume
 // declares it in the Wolf pod. Call it after the App pod's volumes are
 // pruned.
-func (c *SessionController) withVRAgent(spec *corev1.PodSpec, tokenVolume corev1.Volume) {
+func (c *SessionController) withVRAgent(spec *corev1.PodSpec, tokenVolume *corev1.Volume) {
 	for i := range spec.Containers {
 		if ctr := &spec.Containers[i]; ctr.Name != v1alpha1types.UdevRelayContainerName {
 			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: vrBusVolume, MountPath: VRBusDir})
 		}
 	}
 	spec.Containers = append(spec.Containers, c.vrAgentContainer(false))
-	spec.Volumes = append(spec.Volumes, vrBusVolumeSpec(), tokenVolume)
+	spec.Volumes = append(spec.Volumes, vrBusVolumeSpec(), *tokenVolume)
 }
 
 // vrAgentContainer reads WiVRn's state from the App's session bus. It runs as

@@ -227,7 +227,7 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 		if i < 0 {
 			return nil, nil, fmt.Errorf("session pod has no %s volume for vr-agent", vrAgentTokenVolume)
 		}
-		c.withVRAgent(&app.Spec, combined.Spec.Volumes[i])
+		c.withVRAgent(&app.Spec, &combined.Spec.Volumes[i])
 	}
 	app.Spec.HostUsers = new(false)
 	app.Spec.HostNetwork = false
