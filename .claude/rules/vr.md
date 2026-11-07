@@ -175,6 +175,8 @@ paths:
 - Page views read the Session and session-pod informers and reuse a vr-agent read for 3s: tabs
   reload every few seconds, and live reads spent the operator's shared client-go rate limit
   (QPS 5) until the session controller's calls timed out (QA). Only POSTs read live.
+  - The vr-agent read is single-flight per Session: concurrent views wait for one read (each is a
+    Secret GET). Without it a scripted flood of one's own page slowed others' starts to ~10s.
 - The PIN is read live from vr-agent (`ReadVRStatus`, which never ends a Session) and never
   written to the Session. The address is the pod's `status.hostIP` and `status.ports.vr`, shown
   only once the pod the Session controls is Ready.

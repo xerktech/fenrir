@@ -77,13 +77,15 @@ type VRLaunch struct {
 
 	statusMu sync.Mutex
 	// statuses is the last vr-agent read per Session UID.
-	statuses map[types.UID]cachedVRStatus
+	statuses map[types.UID]*cachedVRStatus
 }
 
+// cachedVRStatus is one vr-agent read; done is open while it runs.
 type cachedVRStatus struct {
 	at     time.Time
 	status VRStatus
 	err    error
+	done   chan struct{}
 }
 
 // Messages the page shows when it refuses to start a session.
@@ -352,6 +354,16 @@ func (v *VRLaunch) userPodRunning(ctx context.Context, user string) (bool, error
 	return false, nil
 }
 
+// cachedUserPodRunning is userPodRunning from the session pod informer, for
+// page views: it sees session pods, not a split session's App pod.
+func (v *VRLaunch) cachedUserPodRunning(user string) bool {
+	if v.SessionPods == nil {
+		return false
+	}
+	pods, err := v.SessionPods.List(labels.SelectorFromSet(labels.Set{vrUserLabel: user}))
+	return err == nil && len(pods) > 0
+}
+
 // stop ends user's VR Sessions; their Moonlight ones are Moonlight's to quit.
 func (v *VRLaunch) stop(ctx context.Context, user *v1alpha1types.User) error {
 	own, err := v.userSessions(ctx, user.Name)
@@ -427,31 +439,49 @@ func (v *VRLaunch) view(ctx context.Context, s *v1alpha1types.Session) vrView {
 	return view
 }
 
-// readStatus is s's vr-agent status, reused for libraryVRStatusTTL.
+// readStatus is s's vr-agent status, reused for libraryVRStatusTTL. One read
+// per Session at a time: concurrent views wait for it, so a flood of views
+// costs one Secret GET per TTL, not one each (QA, XERK-2670).
 func (v *VRLaunch) readStatus(ctx context.Context, s *v1alpha1types.Session, pod *corev1.Pod) (VRStatus, error) {
+	v.statusMu.Lock()
 	now := time.Now()
-	v.statusMu.Lock()
-	if c, ok := v.statuses[s.UID]; ok && now.Sub(c.at) < libraryVRStatusTTL {
+	c, ok := v.statuses[s.UID]
+	if !ok || (c.done == nil && now.Sub(c.at) >= libraryVRStatusTTL) {
+		if v.statuses == nil {
+			v.statuses = map[types.UID]*cachedVRStatus{}
+		}
+		// Drop stale entries (ended Sessions) as we go.
+		for uid, old := range v.statuses {
+			if old.done == nil && now.Sub(old.at) >= libraryVRStatusTTL {
+				delete(v.statuses, uid)
+			}
+		}
+		c = &cachedVRStatus{done: make(chan struct{})}
+		v.statuses[s.UID] = c
+		done := c.done
 		v.statusMu.Unlock()
-		return c.status, c.err
+		// Not the request's context: its waiters share the result.
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), libraryVRStatusTimeout)
+		st, err := v.Status(sctx, s, pod)
+		cancel()
+		v.statusMu.Lock()
+		c.at, c.status, c.err, c.done = time.Now(), st, err, nil
+		v.statusMu.Unlock()
+		close(done)
+		return st, err
 	}
+	done := c.done
 	v.statusMu.Unlock()
-	sctx, cancel := context.WithTimeout(ctx, libraryVRStatusTimeout)
-	defer cancel()
-	st, err := v.Status(sctx, s, pod)
-	v.statusMu.Lock()
-	defer v.statusMu.Unlock()
-	if v.statuses == nil {
-		v.statuses = map[types.UID]cachedVRStatus{}
-	}
-	// Drop stale entries (ended Sessions) as we go.
-	for uid, c := range v.statuses {
-		if now.Sub(c.at) >= libraryVRStatusTTL {
-			delete(v.statuses, uid)
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return VRStatus{}, fmt.Errorf("waiting for the VR server read: %w", ctx.Err())
 		}
 	}
-	v.statuses[s.UID] = cachedVRStatus{at: now, status: st, err: err}
-	return st, err
+	v.statusMu.Lock()
+	defer v.statusMu.Unlock()
+	return c.status, c.err
 }
 
 // showPage writes the page for user, with notice (a refusal) above it.
@@ -475,6 +505,10 @@ func (v *VRLaunch) showPage(ctx context.Context, w http.ResponseWriter, user *v1
 	case len(own) > 0:
 		b.WriteString(`<p>` + html.EscapeString(vrMoonlightMessage) + `</p>`)
 	default:
+		if v.cachedUserPodRunning(user.Name) {
+			b.WriteString(`<p class="notice">` + html.EscapeString(vrGameStoppingMessage) + `</p>`)
+			refresh = libraryVRRefresh
+		}
 		writeVRApps(&b, v.apps(user))
 	}
 	writeVRPage(w, status, b.String(), refresh)

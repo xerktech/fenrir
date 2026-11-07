@@ -453,6 +453,59 @@ func TestVRPageBoundsAgentReads(t *testing.T) {
 	}
 }
 
+// Concurrent views of one Session share one vr-agent read: each read is a
+// Secret GET on the operator's shared client, and a scripted flood of views
+// starved other users' starts (QA, XERK-2670).
+func TestVRPageSharesConcurrentAgentReads(t *testing.T) {
+	sess := pageVRSession("sam-ac-1", "sam")
+	sess.Status.Ports.VR = 21003
+	f := newVRFixture(t, sess)
+	f.addPod(t, readyVRPod(sess))
+	var reads atomic.Int32
+	release := make(chan struct{})
+	f.s.VRLaunch.Status = func(context.Context, *v1alpha1types.Session, *corev1.Pod) (VRStatus, error) {
+		reads.Add(1)
+		<-release
+		return VRStatus{Pin: "042137"}, nil
+	}
+	const views = 20
+	bodies := make(chan string, views)
+	for range views {
+		go func() { bodies <- f.get("sam").Body.String() }()
+	}
+	// Let every view reach the read before it finishes.
+	for f.s.VRLaunch.waiting() < 1 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	for range views {
+		if body := <-bodies; !strings.Contains(body, "042137") {
+			t.Fatalf("page:\n%s", body)
+		}
+	}
+	if n := reads.Load(); n != 1 {
+		t.Errorf("%d vr-agent reads for %d concurrent views, want 1", n, views)
+	}
+}
+
+// A User whose last game's pod still terminates is told so before clicking.
+func TestVRPageSaysLastGameIsStopping(t *testing.T) {
+	f := newVRFixture(t)
+	pods := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	if err := pods.Add(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "sam-old", Namespace: libraryTestNS,
+		Labels: map[string]string{vrUserLabel: "sam"}}}); err != nil {
+		t.Fatal(err)
+	}
+	f.s.VRLaunch.SessionPods = generic.NewLister[*corev1.Pod](pods).Namespaced(libraryTestNS)
+	if body := f.get("sam").Body.String(); !strings.Contains(body, "still shutting down") || !strings.Contains(body, `content="5"`) {
+		t.Errorf("sam:\n%s", body)
+	}
+	if body := f.get("alex").Body.String(); strings.Contains(body, "still shutting down") {
+		t.Errorf("alex:\n%s", body)
+	}
+}
+
 // Page views read the informers, never the API server: open tabs reload
 // every few seconds (QA, XERK-2670).
 func TestVRPageViewsReadTheCache(t *testing.T) {
@@ -533,4 +586,17 @@ func TestVRPageRefuses(t *testing.T) {
 	if rec := f.get("sam"); rec.Code != http.StatusNotFound {
 		t.Errorf("off: HTTP %d", rec.Code)
 	}
+}
+
+// waiting is how many vr-agent reads are in flight.
+func (v *VRLaunch) waiting() int {
+	v.statusMu.Lock()
+	defer v.statusMu.Unlock()
+	n := 0
+	for _, c := range v.statuses {
+		if c.done != nil {
+			n++
+		}
+	}
+	return n
 }
