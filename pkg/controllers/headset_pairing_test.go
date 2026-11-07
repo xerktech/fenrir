@@ -504,3 +504,81 @@ func TestPlaceholderPendingThenRevoked(t *testing.T) {
 		t.Errorf("placeholder under another key's Headset: %q, %v; want revoked", reason, err)
 	}
 }
+
+// A failed create backs off briefly at first, doubling on repeats up to the
+// cap: one transient error must not cost a short session its pairing.
+func TestHeadsetBackoffGrows(t *testing.T) {
+	var b headsetBackoff
+	got := make([]time.Duration, 0, 7)
+	for range 7 {
+		b.set("h")
+		got = append(got, b.backoff["h"])
+	}
+	want := []time.Duration{15 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("backoffs = %v, want %v", got, want)
+	}
+	if !b.active("h") || b.active("other") {
+		t.Error("active wrong")
+	}
+	b.clear("h")
+	if b.active("h") {
+		t.Error("cleared name still backed off")
+	}
+	b.set("h")
+	if b.backoff["h"] != headsetBackoffMin {
+		t.Errorf("after clear: %v, want the minimum", b.backoff["h"])
+	}
+}
+
+// Our Headset that exists but is not yet in the cache (created by an earlier
+// poll) is adopted: added to the pod, not created again.
+func TestRecordPairedHeadsetsAdoptsUncachedOwnHeadset(t *testing.T) {
+	f, s, pod := recordFixture(t, "[]")
+	f.sc.HeadsetInformer = emptyHeadsetInformer(t)
+	name := headsetObjectName(f.user, testHeadsetKeyA)
+	f.createHeadset(t, name, f.user, testHeadsetKeyA, "")
+	creates := 0
+	f.dw.PrependReactor("create", "headsets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		creates++
+		return false, nil, nil
+	})
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Name: "q", Key: testHeadsetKeyA}}); err != nil {
+		t.Fatal(err)
+	}
+	live, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if creates != 0 || live.Annotations[vrHeadsetsAnnotation] != name+"/"+name+"-uid" {
+		t.Errorf("creates %d, annotation %q; want adopted as %s/%s-uid", creates, live.Annotations[vrHeadsetsAnnotation], name, name)
+	}
+}
+
+// A placeholder whose Headset is being deleted does not hold.
+func TestPlaceholderOfTerminatingHeadsetIsRevoked(t *testing.T) {
+	f := newPortsFixture(t)
+	watchHeadsets(t, f)
+	name := headsetObjectName(f.user, testHeadsetKeyA)
+	f.createHeadsetObj(t, name, f.user, testHeadsetKeyA, "", func(h *v1alpha1types.Headset) {
+		h.DeletionTimestamp, h.Finalizers = &metav1.Time{Time: time.Now()}, []string{"test/hold"}
+	})
+	f.waitHeadsets(t, 1)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: portsTestNS, Annotations: map[string]string{
+		vrHeadsetsAnnotation: placeholderEntry(name, time.Now().Add(-2*placeholderPending)),
+	}}}
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || reason == "" {
+		t.Errorf("placeholder of a terminating Headset: %q, %v; want revoked", reason, err)
+	}
+}
+
+func emptyHeadsetInformer(t *testing.T) generic.Informer[*v1alpha1types.Headset] {
+	t.Helper()
+	factory := generatedinformers.NewSharedInformerFactory(generatedclient.NewSimpleClientset(), 0)
+	inf := factory.Direwolf().V1alpha1().Headsets().Informer()
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	factory.Start(stop)
+	factory.WaitForCacheSync(stop)
+	return generic.NewInformer[*v1alpha1types.Headset](inf)
+}

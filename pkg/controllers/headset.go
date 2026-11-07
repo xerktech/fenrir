@@ -430,6 +430,7 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 			}
 			continue
 		}
+		c.headsetBackoff.clear(name)
 		byKey[k.Key] = h
 		count++
 		klog.Infof("Session %s/%s: recorded headset %s for user %s", session.Namespace, session.Name, h.Name, user)
@@ -533,33 +534,47 @@ func (c *SessionController) patchSeededHeadsets(ctx context.Context, live *corev
 	return patched, nil
 }
 
-// headsetBackoffPeriod is how long recordPairedHeadsets leaves a key whose
-// create failed: retried every poll, its placeholder's two pod writes would
-// re-queue the Session in a loop.
-const headsetBackoffPeriod = 5 * time.Minute
+// headsetBackoffMin and headsetBackoffMax bound how long
+// recordPairedHeadsets leaves a key whose create failed, doubling on each
+// failure in a row: retried every poll, its placeholder's two pod writes
+// would re-queue the Session in a loop, while one transient error must not
+// cost a short session its pairing.
+const (
+	headsetBackoffMin = 15 * time.Second
+	headsetBackoffMax = 5 * time.Minute
+)
 
 // headsetBackoff remembers failed creates by Headset name.
 type headsetBackoff struct {
-	mu    sync.Mutex
-	until map[string]time.Time
+	mu      sync.Mutex
+	until   map[string]time.Time
+	backoff map[string]time.Duration
 }
 
 func (b *headsetBackoff) active(name string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	t, ok := b.until[name]
-	if ok && time.Now().After(t) {
-		delete(b.until, name)
-		return false
-	}
-	return ok
+	return ok && time.Now().Before(t)
 }
 
+// set backs name off after a failed create: headsetBackoffMin, doubled for
+// each failure since its last success, up to headsetBackoffMax.
 func (b *headsetBackoff) set(name string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.until == nil {
-		b.until = map[string]time.Time{}
+		b.until, b.backoff = map[string]time.Time{}, map[string]time.Duration{}
 	}
-	b.until[name] = time.Now().Add(headsetBackoffPeriod)
+	d := min(max(2*b.backoff[name], headsetBackoffMin), headsetBackoffMax)
+	b.backoff[name] = d
+	b.until[name] = time.Now().Add(d)
+}
+
+// clear forgets name's failures once it is recorded.
+func (b *headsetBackoff) clear(name string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.until, name)
+	delete(b.backoff, name)
 }

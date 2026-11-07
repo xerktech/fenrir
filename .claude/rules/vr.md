@@ -119,7 +119,7 @@ paths:
       `placeholderPending`) and is never re-created. It holds while its Headset is the
       operator's own record, or for that minute with none (a create in flight).
     - Every pod write re-queues the Session, which polls again: a taken name is checked live
-      before any write, and a failed create backs off (`headsetBackoff`), or it loops (QA).
+      before any write, and a failed create backs off (`headsetBackoff`, 15s doubling to 5m), or it loops (QA).
     - vr-agent sends at most 32 keys, only CRD-valid ones, names cleaned (`CleanHeadsetName`),
       HTML escaping off: past the operator's 64KiB read the poll fails and the session ends.
       JSON escapes grow `<` or control runes sixfold. `TestVRAgentWorstReplyFitsOperatorRead`.
