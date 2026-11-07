@@ -140,8 +140,19 @@ func isSeeded(pod *corev1.Pod, name string) bool {
 
 // stillSeeded is whether h is the live Headset seeded as want: not
 // re-created under its name, and not being deleted (held by a finalizer).
+//
+// An entry with no UID is recordPairedHeadsets' placeholder, written before
+// its create: it holds while the Headset of that name is the operator's
+// record of its own User and key (whose name it is). With none, the record
+// was revoked (or never made), so the Session ends.
 func stillSeeded(h *v1alpha1types.Headset, want seededHeadset) bool {
-	return string(h.UID) == want.uid && h.DeletionTimestamp == nil
+	if h.DeletionTimestamp != nil {
+		return false
+	}
+	if want.uid == "" {
+		return h.Name == headsetObjectName(h.Spec.UserReference.Name, h.Spec.PublicKey)
+	}
+	return string(h.UID) == want.uid
 }
 
 // headsetRevokedReason says why pod's Session must end because a Headset its
@@ -340,12 +351,30 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 			klog.V(2).Infof("Session %s/%s: user %s has %d headsets; not recording another", session.Namespace, session.Name, user, count)
 			break
 		}
-		h, err := c.createHeadset(ctx, session, k)
+		// A placeholder first: once the Headset exists, a revoke must find
+		// this pod (reconcileHeadset) and stop a later poll re-creating it,
+		// even if the operator dies or the UID's patch fails right after.
+		name := headsetObjectName(user, k.Key)
+		reserved, err := c.patchSeededHeadsets(ctx, live, withSeededEntries(live.Annotations[vrHeadsetsAnnotation], name+"/"))
 		if err != nil {
 			errs = append(errs, err)
 			break
 		}
-		if h == nil {
+		live = reserved
+		recorded[name] = true
+		h, err := c.createHeadset(ctx, session, k)
+		if err != nil || h == nil {
+			// No Headset: the placeholder would end the Session, so drop
+			// it. Failing that, the Session ends, which is safe.
+			if p, undoErr := c.patchSeededHeadsets(ctx, live, withoutSeededEntry(live.Annotations[vrHeadsetsAnnotation], name+"/")); undoErr != nil {
+				errs = append(errs, undoErr)
+			} else {
+				live = p
+			}
+			if err != nil {
+				errs = append(errs, err)
+				break
+			}
 			continue
 		}
 		byKey[k.Key] = h
@@ -356,7 +385,9 @@ func (c *SessionController) recordPairedHeadsets(ctx context.Context, session *v
 		add = append(add, entry)
 	}
 	if len(add) > 0 {
-		errs = append(errs, c.addSeededHeadsets(ctx, live, add))
+		if _, err := c.patchSeededHeadsets(ctx, live, withSeededEntries(live.Annotations[vrHeadsetsAnnotation], add...)); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return stderrors.Join(errs...)
 }
@@ -406,25 +437,45 @@ func (c *SessionController) createHeadset(ctx context.Context, session *v1alpha1
 	return live, nil
 }
 
-// addSeededHeadsets appends entries to live's vrHeadsetsAnnotation, guarded
-// by its resourceVersion so a concurrent change is not lost (a conflict is
-// retried by the next poll).
-func (c *SessionController) addSeededHeadsets(ctx context.Context, live *corev1.Pod, entries []string) error {
-	value := live.Annotations[vrHeadsetsAnnotation]
+// withSeededEntries adds entries to a vrHeadsetsAnnotation value; a
+// name/uid entry replaces that name's placeholder (name/).
+func withSeededEntries(value string, entries ...string) string {
+	var list []string
+	if value != "" {
+		list = strings.Split(value, ",")
+	}
 	for _, e := range entries {
-		if !slices.Contains(strings.Split(value, ","), e) {
-			value = strings.TrimPrefix(value+","+e, ",")
+		name, _, _ := strings.Cut(e, "/")
+		list = slices.DeleteFunc(list, func(x string) bool { return x == name+"/" })
+		if !slices.Contains(list, e) {
+			list = append(list, e)
 		}
 	}
+	return strings.Join(list, ",")
+}
+
+// withoutSeededEntry removes entry from a vrHeadsetsAnnotation value.
+func withoutSeededEntry(value, entry string) string {
+	if value == "" {
+		return ""
+	}
+	return strings.Join(slices.DeleteFunc(strings.Split(value, ","), func(x string) bool { return x == entry }), ",")
+}
+
+// patchSeededHeadsets sets live's vrHeadsetsAnnotation to value, guarded by
+// its resourceVersion so a concurrent change is not lost (a conflict is
+// retried by the next poll), and returns the patched pod.
+func (c *SessionController) patchSeededHeadsets(ctx context.Context, live *corev1.Pod, value string) (*corev1.Pod, error) {
 	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
 		"resourceVersion": live.ResourceVersion,
 		"annotations":     map[string]string{vrHeadsetsAnnotation: value},
 	}})
 	if err != nil {
-		return fmt.Errorf("failed to encode pod patch: %w", err)
+		return nil, fmt.Errorf("failed to encode pod patch: %w", err)
 	}
-	if _, err := c.K8sClient.CoreV1().Pods(live.Namespace).Patch(ctx, live.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
-		return fmt.Errorf("failed to record headsets on pod %s: %w", live.Name, err)
+	patched, err := c.K8sClient.CoreV1().Pods(live.Namespace).Patch(ctx, live.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to record headsets on pod %s: %w", live.Name, err)
 	}
-	return nil
+	return patched, nil
 }

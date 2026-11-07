@@ -233,12 +233,19 @@ func TestRecordedHeadsetReachesPodAfterFailures(t *testing.T) {
 		return false, nil, nil
 	})
 	known := []VRKnownKey{{Name: "a", Key: testHeadsetKeyA}, {Name: "b", Key: testHeadsetKeyB}}
-	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, known); err == nil {
-		t.Fatal("first poll: no error, want the failed create and patch")
-	}
-	f.waitHeadsets(t, 1)
-	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, known); err != nil {
-		t.Fatal(err)
+	// Poll 1: the placeholder's patch conflicts, so nothing is created.
+	// Poll 2: A is recorded, B's create fails (its placeholder is dropped).
+	// Poll 3: B is recorded.
+	for poll := 1; poll <= 3; poll++ {
+		err := f.sc.recordPairedHeadsets(context.Background(), s, pod, known)
+		if (err != nil) != (poll < 3) {
+			t.Fatalf("poll %d: %v", poll, err)
+		}
+		if poll == 1 {
+			if hs := f.headsets(t); len(hs) != 0 {
+				t.Fatalf("poll 1 created %d headsets with no placeholder on the pod", len(hs))
+			}
+		}
 	}
 	f.waitHeadsets(t, 2)
 	live, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Get(context.Background(), pod.Name, metav1.GetOptions{})
@@ -347,4 +354,81 @@ func emptyUserInformer(t *testing.T) generic.Informer[*v1alpha1types.User] {
 	factory.Start(stop)
 	factory.WaitForCacheSync(stop)
 	return generic.NewInformer[*v1alpha1types.User](inf)
+}
+
+// The placeholder is on the pod before the Headset exists, so a Headset
+// created but never given its UID on the pod (the operator died, or the
+// patch failed) is still revoked: deleting it ends the Session, and no
+// later poll re-creates it (QA, XERK-2669).
+func TestRevokeAfterLostUIDPatchHolds(t *testing.T) {
+	f, s, pod := recordFixture(t, "[]")
+	k8s, ok := f.sc.K8sClient.(*k8sfake.Clientset)
+	if !ok {
+		t.Fatal("not a fake clientset")
+	}
+	patches := 0
+	k8s.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		patches++
+		if patches == 2 { // the UID's patch, after the placeholder's
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, stderrors.New("modified"))
+		}
+		return false, nil, nil
+	})
+	known := []VRKnownKey{{Name: "q", Key: testHeadsetKeyA}}
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, known); err == nil {
+		t.Fatal("want the UID patch's conflict")
+	}
+	name := headsetObjectName(f.user, testHeadsetKeyA)
+	f.waitHeadsets(t, 1)
+	live, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := live.Annotations[vrHeadsetsAnnotation]; got != name+"/" {
+		t.Fatalf("annotation = %q, want the placeholder %s/", got, name)
+	}
+	// The placeholder holds while its Headset lives.
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), live); err != nil || reason != "" {
+		t.Fatalf("headsetRevokedReason = %q, %v; want kept", reason, err)
+	}
+	if err := f.dw.DirewolfV1alpha1().Headsets(portsTestNS).Delete(context.Background(), name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	f.waitHeadsets(t, 0)
+	if err := f.sc.recordPairedHeadsets(context.Background(), s, pod, known); err != nil {
+		t.Fatal(err)
+	}
+	if hs := f.headsets(t); len(hs) != 0 {
+		t.Errorf("revoke undone: %+v", hs)
+	}
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), live); err != nil || reason == "" {
+		t.Errorf("headsetRevokedReason = %q, %v; want revoked", reason, err)
+	}
+}
+
+func TestSeededEntriesReplacePlaceholder(t *testing.T) {
+	for _, tc := range []struct{ value, entry, want string }{
+		{"", "a/", "a/"},
+		{"a/", "a/1", "a/1"},
+		{"x/9,a/", "a/1", "x/9,a/1"},
+		{"a/1", "a/1", "a/1"},
+	} {
+		if got := withSeededEntries(tc.value, tc.entry); got != tc.want {
+			t.Errorf("withSeededEntries(%q, %q) = %q, want %q", tc.value, tc.entry, got, tc.want)
+		}
+	}
+	if got := withoutSeededEntry("x/9,a/", "a/"); got != "x/9" {
+		t.Errorf("withoutSeededEntry = %q", got)
+	}
+}
+
+func TestIsWiVRnKey(t *testing.T) {
+	for key, want := range map[string]bool{
+		testHeadsetKeyA: true, "MEIw": true, "MEI=": true, "": false, "AAA": false, "AAAAA": false,
+		strings.Repeat("A", 1024): true, strings.Repeat("A", 1028): false, "AA=A": false,
+	} {
+		if got := IsWiVRnKey(key); got != want {
+			t.Errorf("IsWiVRnKey(%.20q) = %v, want %v", key, got, want)
+		}
+	}
 }

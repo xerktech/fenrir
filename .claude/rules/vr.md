@@ -114,6 +114,9 @@ paths:
       poll error reads as a lost headset.
     - List the User's Headsets before the revoke check, never after: a delete between them would
       drop the key from the snapshot and re-create it (QA).
+    - A placeholder `name/` goes on the pod before the create, the UID after: a revoke of a
+      Headset whose UID never reached the pod (crash, conflict) still ends the Session and is
+      never re-created. A placeholder holds only while its Headset is the operator's own record.
     - vr-agent sends at most 32 keys, only CRD-valid ones, names cleaned (`CleanHeadsetName`),
       HTML escaping off: past the operator's 64KiB read the poll fails and the session ends.
       JSON escapes grow `<` or control runes sixfold. `TestVRAgentWorstReplyFitsOperatorRead`.
