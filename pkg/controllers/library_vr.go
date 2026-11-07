@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"net"
@@ -79,6 +80,9 @@ type VRLaunch struct {
 	// statuses is the last vr-agent read per Session UID.
 	statuses map[types.UID]*cachedVRStatus
 }
+
+// errVRReadPanicked is what waiters get when the read they waited on panicked.
+var errVRReadPanicked = errors.New("reading the VR server failed")
 
 // cachedVRStatus is one vr-agent read; done is open while it runs.
 type cachedVRStatus struct {
@@ -460,14 +464,20 @@ func (v *VRLaunch) readStatus(ctx context.Context, s *v1alpha1types.Session, pod
 		v.statuses[s.UID] = c
 		done := c.done
 		v.statusMu.Unlock()
+		var st VRStatus
+		// Until the read returns, a panic: waiters are released however it
+		// ends.
+		err := errVRReadPanicked
+		defer func() {
+			v.statusMu.Lock()
+			c.at, c.status, c.err, c.done = time.Now(), st, err, nil
+			v.statusMu.Unlock()
+			close(done)
+		}()
 		// Not the request's context: its waiters share the result.
 		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), libraryVRStatusTimeout)
-		st, err := v.Status(sctx, s, pod)
-		cancel()
-		v.statusMu.Lock()
-		c.at, c.status, c.err, c.done = time.Now(), st, err, nil
-		v.statusMu.Unlock()
-		close(done)
+		defer cancel()
+		st, err = v.Status(sctx, s, pod)
 		return st, err
 	}
 	done := c.done

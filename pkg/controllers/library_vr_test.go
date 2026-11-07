@@ -489,6 +489,48 @@ func TestVRPageSharesConcurrentAgentReads(t *testing.T) {
 	}
 }
 
+// The shared read outlives the request that started it: a closed tab must
+// not hand its waiters a cancelled read. A read that panics still releases
+// them.
+func TestVRAgentReadOutlivesFirstRequest(t *testing.T) {
+	sess := pageVRSession("sam-ac-1", "sam")
+	pod := readyVRPod(sess)
+	started, release := make(chan struct{}), make(chan struct{})
+	v := &VRLaunch{Status: func(ctx context.Context, _ *v1alpha1types.Session, _ *corev1.Pod) (VRStatus, error) {
+		close(started)
+		<-release
+		if err := ctx.Err(); err != nil {
+			return VRStatus{}, fmt.Errorf("read: %w", err)
+		}
+		return VRStatus{Pin: "042137"}, nil
+	}}
+	first, cancelFirst := context.WithCancel(t.Context())
+	go func() { _, _ = v.readStatus(first, sess, pod) }()
+	<-started
+	waiter := make(chan VRStatus, 1)
+	go func() {
+		st, _ := v.readStatus(t.Context(), sess, pod)
+		waiter <- st
+	}()
+	cancelFirst()
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	if st := <-waiter; st.Pin != "042137" {
+		t.Errorf("waiter got %+v, want the read's PIN", st)
+	}
+
+	panicky := &VRLaunch{Status: func(context.Context, *v1alpha1types.Session, *corev1.Pod) (VRStatus, error) {
+		panic("boom")
+	}}
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = panicky.readStatus(t.Context(), sess, pod)
+	}()
+	if _, err := panicky.readStatus(t.Context(), sess, pod); !errors.Is(err, errVRReadPanicked) {
+		t.Errorf("after a panicked read: %v, want errVRReadPanicked at once", err)
+	}
+}
+
 // A User whose last game's pod still terminates is told so before clicking.
 func TestVRPageSaysLastGameIsStopping(t *testing.T) {
 	f := newVRFixture(t)
