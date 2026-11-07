@@ -217,7 +217,7 @@ func (c *SessionController) reconcileHeadset(namespace, name string, _ *v1alpha1
 	return stderrors.Join(errs...)
 }
 
-// endSessionsOfUnrecordedHeadset ends the VR Sessions whose pending key the
+// endSessionsOfUnrecordedHeadset ends the Sessions whose pending key the
 // User confirmed as Headset name, if that Headset is gone again before a poll
 // named it in the pod (XERK-2747): WiVRn trusts the key in that Session, so
 // the revoke must end it, as for a recorded one. A confirmed Headset's name
@@ -229,7 +229,9 @@ func (c *SessionController) endSessionsOfUnrecordedHeadset(ctx context.Context, 
 		return fmt.Errorf("failed to list sessions: %w", err)
 	}
 	sessions = slices.DeleteFunc(slices.Clone(sessions), func(s *v1alpha1types.Session) bool {
-		return !s.Spec.IsVR() || s.DeletionTimestamp != nil || !slices.ContainsFunc(s.Status.PendingHeadsets, func(p v1alpha1types.PendingHeadset) bool {
+		// Either mode: a Moonlight Session's split App pod pairs by PIN too
+		// (XERK-2740, trackAppPodPairing).
+		return s.DeletionTimestamp != nil || !slices.ContainsFunc(s.Status.PendingHeadsets, func(p v1alpha1types.PendingHeadset) bool {
 			return recordedHeadsetName(s.Spec.UserReference.Name, p.Key) == name
 		})
 	})

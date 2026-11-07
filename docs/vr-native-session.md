@@ -106,13 +106,16 @@ This works as it does for Moonlight sessions.
 - Revoking a headset is deleting its Headset. That ends the User's Sessions seeded with it, the way
   deleting a Pairing ends a Moonlight client's. `RevokeKey` isn't used: it only works while a
   session runs, and the next start would bring the key back.
-- A new PIN pairing never becomes a Headset by itself (XERK-2742, XERK-2747): the game runs as
-  WiVRn's uid and owns its bus, so it can plant or pair a key of its own. While a pod seeded with no
-  Headsets runs, the agent reports WiVRn's `KnownKeys` and the operator keeps each key no Headset
-  holds in the Session's `status.pendingHeadsets` (never seeded; gone with the Session).
-- The User confirms one on the library page, `/.direwolf/headsets` (Authentik, POST only). It shows
-  each key's fingerprint, headset name and time seen, and warns when more than one waits. Confirming
-  creates the Headset; the pod then records it, so revoking it ends that Session too.
+- A new PIN pairing does not become a Headset by itself (XERK-2742, XERK-2747). The game runs as
+  WiVRn's uid and owns its bus, so it can plant or pair a key of its own; nothing the agent reads
+  proves a human paired. The operator keeps keys no Headset holds as pending in the Session's
+  `status.pendingHeadsets` (never seeded; gone with the Session), and the page lists them
+  (fingerprint, headset name, time seen) for the user to confirm, warning when more than one
+  waits. Confirming creates the Headset; the pod then records it, so revoking it ends that Session
+  too. An unconfirmed key works for that Session only. The page is `/.direwolf/headsets`
+  (XERK-2740), in both modes, on a host of its own behind Authentik
+  (`--headsets-proxy-secret-file`, XERK-2750): never the Library's host, whose desktop runs user
+  code that can serve pages on that origin.
 
 ## Moonlight interplay
 

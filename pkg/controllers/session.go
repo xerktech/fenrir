@@ -552,6 +552,10 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 		})
 	}
 
+	if podError == nil {
+		c.trackAppPodPairing(ctx, newObj, pod)
+	}
+
 	// Set the new status, if it is changed
 	if !reflect.DeepEqual(&newObj.Status, oldStatus) {
 		err := c.writeStatus(ctx, newObj, oldStatus)
