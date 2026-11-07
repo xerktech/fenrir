@@ -71,6 +71,9 @@ func main() {
 		"Header the trusted proxy names the signed-in user in; a User of that name with spec.library gets their own Library")
 	libraryImage := flag.String("library-image", cmp.Or(os.Getenv("LIBRARY_IMAGE"), "ghcr.io/games-on-whales/fenrir/library:main"),
 		"Library (Steam + Heroic desktop) image")
+	headsetsProxySecretFile := flag.String("headsets-proxy-secret-file", "",
+		"File holding the secret the headset confirmation page's own proxy sends in "+controllers.LibraryProxySecretHeader+
+			". It serves that page on its own host, never the Library's (the desktop runs user code there). Empty: no page; needs --library-port")
 	libraryHomePVC := flag.String("library-home-pvc", "", "PVC holding the shared Steam home. Required with --library-port")
 	libraryGamesPVC := flag.String("library-games-pvc", "", "PVC holding the shared game library. Required with --library-port")
 	libraryGamesPath := flag.String("library-games-path", "/games", "Where the Library mounts the game library")
@@ -160,6 +163,10 @@ func main() {
 		if libraryProxySecret, err = readProxySecret(*libraryProxySecretFile); err != nil {
 			klog.Fatalf("--library-proxy-secret-file: %v", err)
 		}
+	}
+	headsetsProxySecret, err := readHeadsetsProxySecret(*headsetsProxySecretFile, *libraryPort, libraryProxySecret)
+	if err != nil {
+		klog.Fatalf("--headsets-proxy-secret-file: %v", err)
 	}
 	// An invalid name ("X Bad:") never arrives, so every visitor would get
 	// the shared Library.
@@ -361,6 +368,13 @@ func main() {
 			libraryTrusted,
 			libraryProxySecret,
 		)
+		if headsetsProxySecret != nil {
+			libraryServer.HeadsetConfirmation = &controllers.HeadsetConfirmation{
+				Sessions: generic.NewLister[*direwolfv1alpha1.Session](sessionInformer.GetIndexer()).Namespaced(*namespace),
+				Headsets: direwolfClient.DirewolfV1alpha1().Headsets(*namespace),
+				Secret:   headsetsProxySecret,
+			}
+		}
 		if provisionOpts.Enabled() {
 			libraryServer.Provisioner = controllers.NewProvisioner(
 				*namespace,
@@ -451,6 +465,26 @@ func readProxySecret(path string) ([]byte, error) {
 	secret := bytes.TrimSpace(raw)
 	if len(secret) < controllers.MinLibraryProxySecretLen {
 		return nil, fmt.Errorf("secret is %d bytes, want at least %d", len(secret), controllers.MinLibraryProxySecretLen)
+	}
+	return secret, nil
+}
+
+// readHeadsetsProxySecret reads the headset page's proxy secret; nil for no
+// page (no file).
+func readHeadsetsProxySecret(path string, libraryPort int, librarySecret []byte) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if libraryPort == 0 {
+		return nil, errors.New("needs --library-port: the library server serves the page")
+	}
+	secret, err := readProxySecret(path)
+	if err != nil {
+		return nil, err
+	}
+	// The secret is what tells the two hosts apart.
+	if bytes.Equal(secret, librarySecret) {
+		return nil, errors.New("must differ from --library-proxy-secret-file")
 	}
 	return secret, nil
 }

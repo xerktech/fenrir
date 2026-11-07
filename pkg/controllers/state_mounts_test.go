@@ -58,7 +58,7 @@ func TestVRExampleBuildsWithStateMounts(t *testing.T) {
 		t.Fatalf("App pod wolf-data = %+v, want the per-User PVC %s", v, f.sc.pvcName(sess))
 	}
 	for _, c := range appPod.Spec.Containers {
-		if isWolfPodContainer(c.Name) || c.Name == v1alpha1types.UdevRelayContainerName {
+		if isWolfPodContainer(c.Name) || c.Name == v1alpha1types.UdevRelayContainerName || c.Name == v1alpha1types.VRAgentContainerName {
 			continue
 		}
 		for _, m := range app.Spec.StateMounts {

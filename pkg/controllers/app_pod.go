@@ -222,6 +222,9 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 	app.Spec.Volumes = append(app.Spec.Volumes, corev1.Volume{Name: udevEventsVolume, VolumeSource: corev1.VolumeSource{
 		HostPath: &corev1.HostPathVolumeSource{Path: c.sessionHostDir(session, "events"), Type: new(corev1.HostPathDirectoryOrCreate)},
 	}})
+	if _, vr := app.Annotations[vrPortAnnotation]; vr {
+		c.withVRAgent(session, &app.Spec)
+	}
 	app.Spec.HostUsers = new(false)
 	app.Spec.HostNetwork = false
 	app.Spec.HostIPC = false
@@ -458,6 +461,12 @@ func (c *SessionController) reconcileAppPod(ctx context.Context, session *v1alph
 		// AppPodHostDir was cleared (or the naming changed) since the
 		// Wolf pod was made; this operator can no longer build its App pod.
 		return c.endSessionErr(ctx, session, "its app pod can no longer be built (--app-pod-host-dir unset)")
+	}
+	if podUsesVolume(&pod.Spec, vrAgentOwnTokenVolume) {
+		// Before the pod, which mounts it.
+		if tokenErr := c.reconcileTokenSecret(ctx, session, vrAgentTokenSecretName(session.Name)); tokenErr != nil {
+			return tokenErr
+		}
 	}
 	_, err = c.K8sClient.CoreV1().Pods(session.Namespace).Create(ctx, pod, metav1.CreateOptions{
 		FieldManager: "direwolf-session-controller-pod",

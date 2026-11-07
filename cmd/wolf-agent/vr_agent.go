@@ -19,7 +19,7 @@ import (
 )
 
 // vrAgentCommand runs the vr-agent sidecar of a native VR Session's pod
-// (XERK-2668): it reads WiVRn's state from the App's session bus and serves it
+// (XERK-2668) and of a Moonlight-mode VR Session's App pod (XERK-2740): it reads WiVRn's state from the App's session bus and serves it
 // to the operator, behind the Session's bearer token and pinned cert. The pod
 // is off the host network, so only the pod network reaches it.
 const vrAgentCommand = "vr-agent"
@@ -33,14 +33,14 @@ const (
 	// the App's VR services (vr-services restarts wivrn-server).
 	vrBusTimeout = 5 * time.Second
 	// maxReportedKeys bounds KnownKeys in a reply: well over the operator's
-	// per-User cap, well under its 64KiB read: an entry is at most a
+	// pending cap, well under its 64KiB read: an entry is at most a
 	// 1024-byte base64 key and a 128-byte name that JSON escapes to <= 256
 	// (only " and \ escape: no control runes, HTML escaping off).
 	maxReportedKeys = 32
 )
 
-// wivrnStatus reads WiVRn's HeadsetConnected and SessionRunning from the bus
-// at address.
+// wivrnStatus reads WiVRn's HeadsetConnected, SessionRunning and KnownKeys
+// from the bus at address.
 func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, vrBusTimeout)
 	defer cancel()
@@ -67,7 +67,7 @@ func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, err
 		}
 	}
 	// The keys WiVRn admits, a(ssx): name, key, last connection. The
-	// operator records a newly paired one as a Headset (XERK-2669).
+	// operator lists a newly paired one for the User to confirm (XERK-2742).
 	if v, ok := props["KnownKeys"]; ok {
 		var keys []struct {
 			Name, Key      string

@@ -52,6 +52,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apiv1alpha1.PairingReferenceApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("PairingSpec"):
 		return &apiv1alpha1.PairingSpecApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("PendingHeadset"):
+		return &apiv1alpha1.PendingHeadsetApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("RuntimeWolfVariables"):
 		return &apiv1alpha1.RuntimeWolfVariablesApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("Session"):

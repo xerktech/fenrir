@@ -90,6 +90,10 @@ type LibraryServer struct {
 	// provisioning is off (--provision-group).
 	Provisioner *Provisioner
 
+	// HeadsetConfirmation serves libraryHeadsetsPath to requests with its
+	// own proxy secret; nil serves none.
+	HeadsetConfirmation *HeadsetConfirmation
+
 	// states is each library's *libraryState, by owner ("" the shared one).
 	states sync.Map
 }
@@ -286,9 +290,29 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// The headsets page has its own host, so its own origin (XERK-2750): the
+	// Library host proxies the desktop, whose code can serve pages there
+	// (nginx proxies paths to ports abc can bind) that would drive it. Its
+	// proxy sends its own secret, so the host is never taken from a header.
+	if h := s.HeadsetConfirmation; h != nil && h.hasProxySecret(r) {
+		switch r.URL.Path {
+		case libraryHeadsetsPath:
+			s.serveHeadsets(w, r)
+		case "/":
+			http.Redirect(w, r, libraryHeadsetsPath, http.StatusSeeOther)
+		default:
+			http.NotFound(w, r)
+		}
+		return
+	}
 	if !s.hasProxySecret(r) {
 		klog.Warningf("Library page: refusing request from %s without the proxy secret", r.RemoteAddr)
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// Never on the Library's origin, nor passed on to the pod.
+	if r.URL.Path == libraryHeadsetsPath {
+		http.NotFound(w, r)
 		return
 	}
 

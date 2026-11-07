@@ -214,8 +214,6 @@ type SessionController struct {
 	podController     generic.Controller[*corev1.Pod]
 	pairingController generic.Controller[*v1alpha1types.Pairing]
 	headsetController generic.Controller[*v1alpha1types.Headset]
-	// headsetBackoff skips keys whose Headset create failed (headset.go).
-	headsetBackoff headsetBackoff
 	SessionControllerOptions
 }
 
@@ -552,6 +550,10 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 			Status: metav1.ConditionTrue,
 			Reason: "WaitForPing", //!TOOD: use actual current stream status?
 		})
+	}
+
+	if podError == nil {
+		c.trackAppPodPairing(ctx, newObj, pod)
 	}
 
 	// Set the new status, if it is changed
@@ -2295,6 +2297,7 @@ var operatorVolumes = []string{
 	appPodSessionsVolume,
 	udevEventsVolume,
 	vrBusVolume,
+	vrAgentOwnTokenVolume,
 }
 
 // validateNoOperatorVolumeMounts rejects App template containers (init too)
