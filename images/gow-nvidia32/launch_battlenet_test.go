@@ -236,7 +236,10 @@ done <"$decoys"
 # short on a CI runner (XERK-2709).
 for i in "${!pids[@]}"; do
   for _ in $(seq 100); do
-    IFS= read -r -d '' first <"/proc/${pids[$i]}/cmdline" && [ "$first" = "${names[$i]}" ] && break
+    # Its argv0, or (a script's) its name.
+    IFS= read -r -d '' first <"/proc/${pids[$i]}/cmdline"
+    IFS= read -r comm <"/proc/${pids[$i]}/comm"
+    [ "$first" = "${names[$i]}" ] || [ "$comm" = "${names[$i]:0:15}" ] && break
     sleep 0.05
   done # waiting for this one
 done

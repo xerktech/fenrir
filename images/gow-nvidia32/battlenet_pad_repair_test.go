@@ -176,13 +176,11 @@ func TestLaunchBattlenetRepairsHalfInstalledPad(t *testing.T) {
 // A running wineserver of the user rewrites system.reg from memory, so the
 // repair is skipped while one runs.
 func TestLaunchBattlenetSkipsPadRepairBesideWineserver(t *testing.T) {
-	sleep, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A process whose name is wineserver: a link to sleep.
+	// A process whose name is wineserver: a script of that name (the kernel
+	// names a script's process after it). Not a link to sleep: a multi-call
+	// coreutils, as on the CI runner, reads the name as a tool it lacks.
 	ws := filepath.Join(t.TempDir(), "wineserver")
-	if err := os.Symlink(sleep, ws); err != nil {
+	if err := os.WriteFile(ws, []byte("#!/bin/sh\nsleep \"$1\"\n"), 0o755); err != nil { //nolint:gosec // an executable
 		t.Fatal(err)
 	}
 	var reg string
