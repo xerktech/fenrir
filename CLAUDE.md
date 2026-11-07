@@ -77,12 +77,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     (XERK-2713): its ServerSideDiff fails on the live object's managedFields ("field not declared
     in schema") and syncs nothing. Plan the deploy: strip that field from `argocd-controller`'s
     managedFields entry right after the chart lands, or deprecate the field instead.
-  - CEL rules must compile on 1.28, the chart floor: no `quantity()` (1.29+, XERK-1521). The
-    vendored libraries back-date it to 1.28, so only an envtest 1.28 kube-apiserver catches it.
+  - CEL rules must compile on the chart floor (1.36). The vendored libraries back-date newer CEL
+    functions, so only a real floor kube-apiserver catches them (XERK-1521).
     `hack/check-crds-on-floor.sh` (CI `crd-floor.yml`) creates every CRD on one; bump its
     version with the chart's `kubeVersion` (XERK-1678).
+- The floor is 1.36 because older apiservers silently drop fields the operator sends (XERK-2755):
+  - <1.36: a GPU claim's `capacity.requests.memory` (DRAConsumableCapacity off), so it takes a card.
+  - <1.34: `resource.k8s.io/v1` and pod `resourceClaims`; <1.33: `hostUsers: false` / `procMount`,
+    so the split App pod and native VR pods run in the host user namespace. Never lower it.
+  - CI envtest (`test.yml`) runs the same floor version. Tests: `TestFloorKeepsSentFieldsEnvtest`.
 - Chart: `charts/direwolf-operator` has no `crds/` dir in git; CI copies `crds/*.yaml` in before
-  `helm lint --strict` / `helm template --kube-version 1.36.0` (kubeVersion floor is >=1.28).
+  `helm lint --strict` / `helm template --kube-version 1.36.0` (kubeVersion floor is >=1.36).
 
 ## Architecture
 

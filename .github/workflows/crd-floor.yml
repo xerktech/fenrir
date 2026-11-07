@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   crd-floor:
-    name: CRDs install on kube-apiserver 1.28
+    name: CRDs install on kube-apiserver 1.36
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -26,4 +26,4 @@ jobs:
 
       # Keep in step with kubeVersion in charts/direwolf-operator/Chart.yaml.
       - name: Create every CRD on the floor apiserver
-        run: hack/check-crds-on-floor.sh 1.28.3
+        run: hack/check-crds-on-floor.sh 1.36.2

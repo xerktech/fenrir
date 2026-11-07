@@ -125,8 +125,8 @@ type StateMount struct {
 }
 
 // Positive means a nonzero digit before any suffix or exponent (the schema
-// already checks quantity syntax). Not quantity(): CEL's quantity library
-// needs Kubernetes 1.29, and the chart supports 1.28 (XERK-1521).
+// already checks quantity syntax). A regex, not CEL's quantity library
+// (XERK-1521); both compile on the chart's 1.36 floor.
 
 // +kubebuilder:validation:XValidation:rule="!has(self.memory) || string(self.memory).matches('^[+]?[0-9.]*[1-9]')",message="memory must be positive"
 

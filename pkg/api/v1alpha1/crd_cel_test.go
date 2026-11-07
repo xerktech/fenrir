@@ -196,8 +196,8 @@ func crdValidator(t *testing.T, plural string) func(obj map[string]any, old ...m
 	}
 }
 
-// spec.gpu.memory must be positive, checked without CEL's quantity library,
-// which a 1.28 API server (the chart's floor) lacks (XERK-1521).
+// spec.gpu.memory must be positive, checked by regex rather than CEL's
+// quantity library (XERK-1521).
 func TestAppCRDValidatesGPUMemory(t *testing.T) {
 	validate := crdValidator(t, "apps")
 	for _, tc := range []struct {
