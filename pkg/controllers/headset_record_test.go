@@ -359,3 +359,49 @@ func TestRevokeBeforePollEdgeCases(t *testing.T) {
 		}
 	})
 }
+
+// Every VR Session holding the revoked key pending ends, and a failed end of
+// one is returned for retry without sparing the others (QA, XERK-2747).
+func TestRevokeBeforePollEndsEverySession(t *testing.T) {
+	f, s, agent := vrLifecycle(t, seededWith(""))
+	watchHeadsets(t, f)
+	agent.set(VRStatus{HeadsetConnected: true, KnownKeys: []VRKnownKey{{Key: testHeadsetKeyA}}}, false)
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	other := s.DeepCopy()
+	other.Name, other.UID, other.ResourceVersion = s.Name+"-2", "", ""
+	if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Create(ctx, other, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for range 500 {
+		a, errA := f.sc.SessionInformer.Namespaced(portsTestNS).Get(s.Name)
+		b, errB := f.sc.SessionInformer.Namespaced(portsTestNS).Get(other.Name)
+		if errA == nil && errB == nil && len(a.Status.PendingHeadsets) == 1 && len(b.Status.PendingHeadsets) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Whichever Session is ended first fails once.
+	failed := ""
+	f.dw.PrependReactor("delete", "sessions", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if failed == "" {
+			failed = a.(k8stesting.DeleteAction).GetName() //nolint:forcetypeassert // a delete action
+			return true, nil, stderrors.New("apiserver unavailable")
+		}
+		return false, nil, nil
+	})
+	name := recordedHeadsetName(f.user, testHeadsetKeyA)
+	if err := f.sc.reconcileHeadset(portsTestNS, name, nil); err == nil {
+		t.Error("a failed end returned no error to retry")
+	}
+	if failed == "" {
+		t.Fatal("no Session was ended")
+	}
+	for _, n := range []string{s.Name, other.Name} {
+		if want := n == failed; f.sessionExists(t, n) != want {
+			t.Errorf("session %s exists %v, want %v (failed delete: %s)", n, !want, want, failed)
+		}
+	}
+}
