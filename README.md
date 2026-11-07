@@ -63,7 +63,8 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
   names its owner). It is refused from then on, and the operator ends any session it has
   running (pod and stream included).
 - Revoke a VR headset: `kubectl delete headset -n games <name>` (`spec.userReference` names
-  its owner). Sessions seeded with it end; its next connect needs a new PIN pairing.
+  its owner). Sessions seeded with it end. It can't connect again while the User has another
+  Headset: WiVRn offers a PIN only when no key is seeded.
 - Steam home and library are backed up hourly/daily to NFS; the restore procedure is in the
   ArgoCD streaming rules (Steam backup).
 - RomM sync is off in this deployment (no `--romm-url`).
