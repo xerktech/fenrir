@@ -99,8 +99,8 @@ func TestHeadsetsPageHidesLeftoversAfterConfirming(t *testing.T) {
 	if strings.Contains(rec.Body.String(), headsetFingerprint(gameKey.Key)) || !strings.Contains(rec.Body.String(), "No headset is waiting") {
 		t.Errorf("leftover offered:\n%s", rec.Body)
 	}
-	if rec := confirmRequest(s, "sam", gameKey.Key, nil); rec.Code != http.StatusConflict || len(f.headsets(t)) != 1 {
-		t.Errorf("leftover confirmable: HTTP %d, headsets %d", rec.Code, len(f.headsets(t)))
+	if again := confirmRequest(s, "sam", gameKey.Key, nil); again.Code != http.StatusConflict || len(f.headsets(t)) != 1 {
+		t.Errorf("leftover confirmable: HTTP %d, headsets %d", again.Code, len(f.headsets(t)))
 	}
 
 	_, s = headsetsServer(t, pendingA)
