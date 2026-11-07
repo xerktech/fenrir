@@ -2,19 +2,21 @@
 # Creates every CRD in crds/ on a real kube-apiserver at the chart's floor version
 # (charts/direwolf-operator/Chart.yaml kubeVersion). The in-process CEL check in
 # pkg/api/v1alpha1 uses vendored libraries that back-date newer CEL functions
-# (quantity() is 1.29+, listed as 1.28), so only a real old apiserver rejects them (XERK-1678).
+# (e.g. listing a 1.29 function as 1.28), so only a real floor apiserver rejects them (XERK-1678).
 #
 # Usage: hack/check-crds-on-floor.sh [k8s-version]   (needs go, openssl)
 set -euo pipefail
 
-K8S_VERSION="${1:-1.28.3}"
+K8S_VERSION="${1:-1.36.2}"
 SETUP_ENVTEST="sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.0"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 BIN="$(go run "$SETUP_ENVTEST" use -p path "$K8S_VERSION")"
 WORK="$(mktemp -d)"
 cleanup() {
-  jobs -p | xargs -r kill 2>/dev/null || true
+  # SIGKILL: these servers are throwaway, and kube-apiserver 1.36 ignores SIGTERM
+  # once etcd is gone, so a plain kill hangs the wait below.
+  jobs -p | xargs -r kill -9 2>/dev/null || true
   wait 2>/dev/null || true
   rm -rf "$WORK"
 }

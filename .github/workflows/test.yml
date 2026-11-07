@@ -39,7 +39,7 @@ jobs:
       # without it): the fake clientset ignores preconditions. The chart's
       # floor, as hack/check-crds-on-floor.sh uses.
       - name: Fetch envtest binaries
-        run: echo "KUBEBUILDER_ASSETS=$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.0 use -p path 1.28.3)" >> "$GITHUB_ENV"
+        run: echo "KUBEBUILDER_ASSETS=$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.0 use -p path 1.36.2)" >> "$GITHUB_ENV"
 
       - name: Run tests
         run: go test -race -shuffle=on -timeout 5m ./...
