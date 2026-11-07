@@ -228,21 +228,24 @@ func (c *SessionController) endSessionsOfUnrecordedHeadset(ctx context.Context, 
 	if err != nil {
 		return fmt.Errorf("failed to list sessions: %w", err)
 	}
+	sessions = slices.DeleteFunc(slices.Clone(sessions), func(s *v1alpha1types.Session) bool {
+		return !s.Spec.IsVR() || s.DeletionTimestamp != nil || !slices.ContainsFunc(s.Status.PendingHeadsets, func(p v1alpha1types.PendingHeadset) bool {
+			return recordedHeadsetName(s.Spec.UserReference.Name, p.Key) == name
+		})
+	})
+	if len(sessions) == 0 {
+		return nil
+	}
+	// The watch can lag: a Headset just created (the confirm itself) is
+	// not revoked. Any other error is retried, never read as gone.
+	h, err := c.HeadsetClient.Get(ctx, name, metav1.GetOptions{})
+	if err == nil && h.DeletionTimestamp == nil {
+		return nil
+	} else if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to get headset %s/%s: %w", namespace, name, err)
+	}
 	var errs []error
 	for _, s := range sessions {
-		if !s.Spec.IsVR() || s.DeletionTimestamp != nil || !slices.ContainsFunc(s.Status.PendingHeadsets, func(p v1alpha1types.PendingHeadset) bool {
-			return recordedHeadsetName(s.Spec.UserReference.Name, p.Key) == name
-		}) {
-			continue
-		}
-		// The watch can lag: a Headset just created (the confirm itself)
-		// is not revoked.
-		h, err := c.HeadsetClient.Get(ctx, name, metav1.GetOptions{})
-		if err == nil && h.DeletionTimestamp == nil {
-			return nil
-		} else if err != nil && !errors.IsNotFound(err) {
-			return fmt.Errorf("failed to get headset %s/%s: %w", namespace, name, err)
-		}
 		errs = append(errs, c.endSession(ctx, s, fmt.Sprintf("its headset %s was revoked", name)))
 	}
 	return stderrors.Join(errs...)

@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"slices"
 	"strings"
 	"testing"
@@ -284,4 +285,77 @@ func TestOldHeadsetKeyKeepsPairingPending(t *testing.T) {
 	if got := f.livePod(t, pod.Name).Annotations[vrHeadsetsAnnotation]; got != "older/older-uid" {
 		t.Errorf("pod %s = %q, want the older Headset WiVRn admits", vrHeadsetsAnnotation, got)
 	}
+}
+
+// The revoke-before-poll path: a terminating Headset counts as revoked; a
+// failed GET is retried, never read as gone; a Moonlight Session is left
+// alone (QA, XERK-2747).
+func TestRevokeBeforePollEdgeCases(t *testing.T) {
+	setup := func(t *testing.T) (*portsFixture, *v1alpha1types.Session, string) {
+		t.Helper()
+		f, s, agent := vrLifecycle(t, seededWith(""))
+		watchHeadsets(t, f)
+		agent.set(VRStatus{HeadsetConnected: true, KnownKeys: []VRKnownKey{{Key: testHeadsetKeyA}}}, false)
+		if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+			t.Fatal(err)
+		}
+		for range 500 {
+			if c, err := f.sc.SessionInformer.Namespaced(portsTestNS).Get(s.Name); err == nil && len(c.Status.PendingHeadsets) == 1 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return f, s, recordedHeadsetName(f.user, testHeadsetKeyA)
+	}
+
+	t.Run("terminating", func(t *testing.T) {
+		f, s, name := setup(t)
+		f.createHeadsetObj(t, name, f.user, testHeadsetKeyA, "", func(h *v1alpha1types.Headset) {
+			h.Finalizers = []string{"example.com/hold"}
+			h.DeletionTimestamp = new(metav1.Now())
+		})
+		if err := f.sc.reconcileHeadset(portsTestNS, name, nil); err != nil {
+			t.Fatal(err)
+		}
+		if f.sessionExists(t, s.Name) {
+			t.Error("session outlived its terminating headset")
+		}
+	})
+
+	t.Run("GET fails", func(t *testing.T) {
+		f, s, name := setup(t)
+		f.dw.PrependReactor("get", "headsets", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, stderrors.New("apiserver unavailable")
+		})
+		if err := f.sc.reconcileHeadset(portsTestNS, name, nil); err == nil {
+			t.Error("no error to retry on a failed GET")
+		}
+		if !f.sessionExists(t, s.Name) {
+			t.Error("a failed GET ended the session")
+		}
+	})
+
+	t.Run("Moonlight session", func(t *testing.T) {
+		f, s, name := setup(t)
+		live, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Get(context.Background(), s.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		live.Spec.Mode = v1alpha1types.SessionModeMoonlight
+		if _, err := f.dw.DirewolfV1alpha1().Sessions(portsTestNS).Update(context.Background(), live, metav1.UpdateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		for range 500 {
+			if c, err := f.sc.SessionInformer.Namespaced(portsTestNS).Get(s.Name); err == nil && !c.Spec.IsVR() {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err := f.sc.reconcileHeadset(portsTestNS, name, nil); err != nil {
+			t.Fatal(err)
+		}
+		if !f.sessionExists(t, s.Name) {
+			t.Error("a Moonlight Session was ended by the VR pending-key path")
+		}
+	})
 }
