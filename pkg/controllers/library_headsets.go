@@ -146,10 +146,13 @@ func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeHeadsetsPage(w, pending)
 	case http.MethodPost:
-		// Same-origin only: the Library is on a sibling host, so "same-site"
-		// is the desktop's code (XERK-2750). Browsers that send no
-		// Sec-Fetch-Site are refused too.
-		if r.Header.Get("Sec-Fetch-Site") != "same-origin" {
+		// This page's own form, submitted by the user: same-origin (the
+		// Library is on a sibling host, so "same-site" is the desktop's
+		// code, XERK-2750), a navigation (never a script's fetch),
+		// user-activated (QA, XERK-2747). Browsers set these headers; a
+		// script cannot. Browsers that send none are refused too.
+		if r.Header.Get("Sec-Fetch-Site") != "same-origin" || r.Header.Get("Sec-Fetch-Mode") != "navigate" ||
+			r.Header.Get("Sec-Fetch-User") != "?1" {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -173,7 +176,7 @@ func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
 			writeLibraryPage(w, http.StatusConflict, "That headset is no longer waiting. Pair it again in a VR session.", false, false)
 			return
 		}
-		if err := s.confirmHeadset(r, user.Name, pending[i]); err != nil {
+		if err := s.confirmHeadset(r, user, pending[i]); err != nil {
 			klog.Errorf("Headsets page: %v", err)
 			writeLibraryPage(w, http.StatusInternalServerError, "The headset could not be saved. Try again in a minute.", false, false)
 			return
@@ -185,12 +188,20 @@ func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// confirmHeadset creates user's Headset for p. Confirming again finds the
-// one made before; one of that name for another user or key is refused.
-func (s *LibraryServer) confirmHeadset(r *http.Request, user string, p v1alpha1types.PendingHeadset) error {
+// confirmHeadset creates u's Headset for p. Confirming again finds the one
+// made before; one of that name for another user or key is refused.
+func (s *LibraryServer) confirmHeadset(r *http.Request, u *v1alpha1types.User, p v1alpha1types.PendingHeadset) error {
+	user := u.Name
 	name := recordedHeadsetName(user, p.Key)
 	_, err := s.HeadsetConfirmation.Headsets.Create(r.Context(), &v1alpha1types.Headset{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			// Garbage collected with its User: without an owner it would
+			// outlive the User and pass to a new one of its name.
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1alpha1types.GroupVersion.String(), Kind: "User", Name: u.Name, UID: u.UID,
+			}},
+		},
 		Spec: v1alpha1types.HeadsetSpec{
 			UserReference: v1alpha1types.UserReference{Name: user},
 			PublicKey:     p.Key,

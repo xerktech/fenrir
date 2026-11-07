@@ -44,10 +44,9 @@ func agentTokenSecretName(sessionName string) string {
 	return sessionName + "-wolf-agent-token"
 }
 
-// vrAgentTokenSecretName is the token Secret of the vr-agent in a Moonlight
-// Session's split App pod (XERK-2740): its own, as the wolf-agent token also
-// drives Wolf, and that pod is the game's. A native VR pod has no Wolf, so
-// its vr-agent uses the wolf-agent Secret.
+// vrAgentTokenSecretName is vr-agent's token Secret, in a native VR pod
+// (XERK-2747) and a Moonlight Session's split App pod (XERK-2740): its own,
+// never wolf-agent's, which also drives Wolf.
 func vrAgentTokenSecretName(sessionName string) string {
 	return sessionName + "-vr-agent-token"
 }

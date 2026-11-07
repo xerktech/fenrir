@@ -160,9 +160,10 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 	if err != nil || len(st.KnownKeys) != maxReportedKeys {
 		t.Fatalf("flooded KnownKeys: %d, %v; want %d", len(st.KnownKeys), err, maxReportedKeys)
 	}
-	// The odd-byte prefix makes a byte cut land mid-rune.
-	if first := st.KnownKeys[0]; len(first.Name) > 128 || !utf8.ValidString(first.Name) || !strings.HasPrefix(first.Name, "aé") {
-		t.Errorf("first reported key %.40q...: want the long name cut on a rune, the bad keys dropped", first.Name)
+	// Cut to the CRD's 128 characters, not bytes (XERK-2747).
+	if first := st.KnownKeys[0]; utf8.RuneCountInString(first.Name) != 128 || !utf8.ValidString(first.Name) || !strings.HasPrefix(first.Name, "aé") {
+		t.Errorf("first reported key %.40q... (%d characters): want the long name cut to 128 characters, the bad keys dropped",
+			first.Name, utf8.RuneCountInString(first.Name))
 	}
 	props.SetMust(wivrnInterface, "SessionRunning", true)
 	if st, err := wivrnStatus(ctx, addr); err != nil || !st.SessionRunning {
@@ -171,13 +172,17 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 }
 
 // The worst reply vr-agent can send (maxReportedKeys entries of the longest
-// key and the most-escaped name it keeps) fits the operator's 64KiB read:
-// past it the poll fails, which reads as a lost headset (QA, XERK-2669).
+// key and the longest name it keeps: 128 four-byte runes, or 128 escaped
+// ones) fits the operator's 64KiB read: past it the poll fails, which reads
+// as a lost headset (QA, XERK-2669).
 func TestVRAgentWorstReplyFitsOperatorRead(t *testing.T) {
 	key := strings.Repeat("A", 1024)
-	name := controllers.CleanHeadsetName(strings.Repeat(`"\<>&`, 100))
 	st := controllers.VRStatus{HeadsetConnected: true}
-	for range maxReportedKeys {
+	for i := range maxReportedKeys {
+		name := controllers.CleanHeadsetName(strings.Repeat(`"\<>&`, 100))
+		if i%2 == 0 {
+			name = controllers.CleanHeadsetName(strings.Repeat("\U0001F600", 200))
+		}
 		st.KnownKeys = append(st.KnownKeys, controllers.VRKnownKey{Name: name, Key: key})
 	}
 	h := vrAgentHandler(func() string { return "secret" }, func(context.Context) (controllers.VRStatus, error) { return st, nil })

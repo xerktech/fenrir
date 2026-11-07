@@ -110,41 +110,56 @@ paths:
     reaches WiVRn on loopback). Nothing on the bus proves a human paired a headset.
   - So a key the vr-agent reports that no Headset holds is only pending: the operator keeps it
     in the Session's status, where it dies with the Session, and never seeds it.
-  - It becomes a Headset only when the User confirms it on the Authentik-protected library page
+  - It becomes a Headset only when the User confirms it on the Authentik-protected page
     (user from the trusted header, never from a request field; POST only). The page shows each
     pending key's fingerprint, headset-supplied name and first-seen time, and warns when more
     than one is pending: a key the user didn't pair right then is the game's.
   - Until confirmed the headset works for that Session only, as WiVRn already allows.
-  - Implementation (XERK-2740): vr-agent reports `KnownKeys`; `trackPairedHeadsets` fills
-    `status.pendingHeadsets` (at most `maxPendingHeadsets`) only while the pod's annotation is
-    present and empty: WiVRn pairs only on an empty list.
-    - A reported key a Headset of the User holds (just confirmed) is added to the pod's
-      annotation, so revoking it ends the Session; the pod then stops being followed.
-    - Once one of a Session's keys is confirmed its other pending keys are never offered (the
-      page skips the Session, the operator drops them): a pairing adds one key, the rest are the
-      game's. QA found the leftover offered as "the headset you just paired".
+  - Implementation (XERK-2740, XERK-2747): vr-agent reports `KnownKeys`; `trackPairedHeadsets`
+    fills `status.pendingHeadsets` (at most `maxPendingHeadsets`, first-seen kept) only while the
+    pod's annotation is present and empty: WiVRn pairs only on an empty list.
+    - A reported key a Headset of the User holds is added to the pod's annotation
+      (resourceVersion-guarded patch, retried next poll), so revoking it ends the Session; the pod
+      then stops being followed.
+    - Once the Session's own pending key is confirmed its other pending keys are never offered
+      (the page skips the Session, the operator drops them): a pairing adds one key, the rest are
+      the game's. QA found the leftover offered as "the headset you just paired".
+      An older Headset's key (the game reads them from the seed env) drops none (QA, XERK-2747).
+    - A revoke before that poll is caught by the Headset event: a Session with a pending key
+      whose `recordedHeadsetName` is the event's, gone live, ends
+      (`endSessionsOfUnrecordedHeadset`, either mode).
+      Residual: an operator down for that whole window misses it; the key is then pending again.
     - The page is `/.direwolf/headsets` on the library server (`library_headsets.go`); it
       confirms only a key pending in the signed-in User's own Sessions, as
-      `headset-<sha256(user, key)>`.
+      `headset-<sha256(user, key)>`, owned by the User (GC'd with it).
     - It has its own host and Authentik provider, told apart by its own proxy secret
       (`--headsets-proxy-secret-file`), never by `Host` (XERK-2750). Never serve it on the Library
       host: its nginx proxies `/devmode` and `/api` to ports the desktop's user (abc) can bind, so
       desktop code serves same-origin pages there. Off without the flag.
-    - Its POST needs `Sec-Fetch-Site: same-origin`: the Library host is same-site, not cross-site.
-      Tests: `TestHeadsetsPageHasItsOwnHost`, `TestHeadsetsPageRefuses`.
+    - Its POST must be the page's own clicked form: `Sec-Fetch-Site: same-origin` (the Library
+      host is same-site, not cross-site), `-Mode: navigate`, `-User: ?1` (never a script's fetch;
+      QA, XERK-2747). Tests: `TestHeadsetsPageHasItsOwnHost`, `TestHeadsetsPageRefuses`.
+    - Nothing on the headset shows a fingerprint yet, so a game's lookalike key can still be
+      confirmed by mistake (XERK-2743).
     - A failure is logged, never ends the Session: it costs only a PIN next time.
-    - vr-agent sends at most 32 keys, only CRD-valid ones, names cleaned (`CleanHeadsetName`), so
-      its reply fits the operator's 64KiB read: past it the poll fails and the session ends.
-      `TestVRAgentWorstReplyFitsOperatorRead`.
+    - vr-agent sends at most 32 keys, only CRD-valid ones, names cleaned (`CleanHeadsetName`, 128
+      characters, as the CRD counts), so its reply fits the operator's 64KiB read: past it the
+      poll fails and the session ends. `TestVRAgentWorstReplyFitsOperatorRead`.
     - The operator cleans each pending name again: an older vr-agent sends them raw, and a name
-      over the CRD's 128 bytes fails the status write. `TestTrackPairedHeadsetsCleansNames`.
+      over the CRD's 128 characters fails the status write. `TestTrackPairedHeadsetsCleansNames`.
+  - vr-agent has its own token Secret `<session>-vr-agent-token` in both modes, never
+    wolf-agent's (that one drives Wolf). A native pod from before XERK-2747 mounts wolf-agent's
+    and is polled with it.
   - Moonlight mode: a vrPort App's split App pod runs vr-agent too (`withVRAgent`), with the bus
-    dir and its own token Secret `<session>-vr-agent-token`, never wolf-agent's (that one drives
-    Wolf, and the pod is the game's). Polled from the Moonlight reconcile while it pairs by PIN.
+    dir and that Secret (the pod is the game's). Polled from the Moonlight reconcile while it
+    pairs by PIN.
     - No readiness probe there: the stream waits for the App pod to be Ready, and the App waits
       for the stream's display before it starts WiVRn. A deadlock otherwise.
     - An App pod from before has no vr-agent and is never polled.
-  - Tests: `headset_record_test.go`, `library_headsets_test.go`, `headset_test.go`, `TestHeadsetCRDValidatesKeyAndImmutability`,
+  - The fake clientset ignores preconditions; `*Envtest` tests run a real apiserver from
+    `KUBEBUILDER_ASSETS` (CI `test.yml`), e.g. `TestAnnotateHeadsetsConflictsOnStalePodEnvtest`.
+  - Tests: `headset_record_test.go`, `library_headsets_test.go`, `headset_test.go`,
+    `TestHeadsetCRDValidatesKeyAndImmutability`,
     `TestVRStartSeedsKnownKeysFromHeadsets`, `TestVRStartRefusesBadHeadsetSeed`.
 
 ## Operator port (XERK-2664)
@@ -178,7 +193,8 @@ paths:
   - No GAMESCOPE_* env: with no client mode GoW would set sway's output to 0x0.
 - Liveness: the `vr-agent` sidecar (wolf-agent image) reads WiVRn's `HeadsetConnected` /
   `SessionRunning` over the App's bus and serves them behind the Session's token and pinned cert
-  (the wolf-agent Secret), polled every `streamPollInterval` on the pod IP, port `VRAgentPort`.
+  (its own Secret, `<session>-vr-agent-token`), polled every `streamPollInterval` on the pod IP,
+  port `VRAgentPort`.
   - A sidecar, not an agent in the App: the token stays out of the game's reach, and the agent
     ships with the chart, not the hand-pinned App digest.
   - It runs as uid 1000: the bus's EXTERNAL auth admits only its owner (GoW's PUID).

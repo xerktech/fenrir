@@ -1035,7 +1035,11 @@ func (c *SessionController) reconcileSessionPod(ctx context.Context, session *v1
 		return nil, err
 	}
 	// Before the pod, which mounts it.
-	if tokenErr := c.reconcileAgentToken(ctx, session); tokenErr != nil {
+	tokenSecret := agentTokenSecretName(session.Name)
+	if session.Spec.IsVR() {
+		tokenSecret = vrAgentTokenSecretName(session.Name)
+	}
+	if tokenErr := c.reconcileTokenSecret(ctx, session, tokenSecret); tokenErr != nil {
 		return nil, tokenErr
 	}
 	// Before the pod, which references it by name.

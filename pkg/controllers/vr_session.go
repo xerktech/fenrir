@@ -66,12 +66,14 @@ const (
 	vrHeadsetGone       = "Disconnected"
 	vrAgentLost         = "AgentUnreachable"
 	vrConditionSuccess  = "Success"
-	// vrStatusMaxBytes caps vr-agent's reply: room for a few dozen keys.
+	// vrStatusMaxBytes caps vr-agent's reply (TestVRAgentWorstReplyFitsOperatorRead):
+	// an overlong list is cut, and fails to decode, rather than read whole.
 	vrStatusMaxBytes = 64 << 10
-	// vrAgentTokenVolume is the Session's token Secret, as buildPod mounts it.
+	// vrAgentTokenVolume is wolf-agent's token Secret, as buildPod mounts
+	// it: vr-agent's in native pods from before XERK-2747.
 	vrAgentTokenVolume = "wolf-agent-token"
-	// vrAgentOwnTokenVolume is a split App pod's vr-agent token Secret
-	// (vrAgentTokenSecretName).
+	// vrAgentOwnTokenVolume is vr-agent's own token Secret
+	// (vrAgentTokenSecretName), in native and split App pods.
 	vrAgentOwnTokenVolume = "vr-agent-token"
 )
 
@@ -123,7 +125,11 @@ func (c *SessionController) buildVRPod(session *v1alpha1types.Session) (*corev1.
 		ctr.Env = append(slices.DeleteFunc(ctr.Env, func(e corev1.EnvVar) bool { return e.Name == vrModeEnv }),
 			corev1.EnvVar{Name: vrModeEnv, Value: vrModeNative})
 	}
-	spec.Containers = append(spec.Containers, c.vrAgentContainer(true, vrAgentTokenVolume))
+	spec.Containers = append(spec.Containers, c.vrAgentContainer(true, vrAgentOwnTokenVolume))
+	// Created by reconcileSessionPod before the pod (XERK-2747).
+	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: vrAgentOwnTokenVolume, VolumeSource: corev1.VolumeSource{
+		Secret: &corev1.SecretVolumeSource{SecretName: vrAgentTokenSecretName(session.Name)},
+	}})
 	spec.Volumes = slices.DeleteFunc(spec.Volumes, func(v corev1.Volume) bool { return !podUsesVolume(spec, v.Name) })
 	for i := range spec.Volumes {
 		if spec.Volumes[i].Name == wolfRuntimeVolume {
@@ -176,7 +182,8 @@ func (c *SessionController) withVRAgent(session *v1alpha1types.Session, spec *co
 
 // vrAgentContainer reads WiVRn's state from the App's session bus. It runs as
 // the desktop user (the bus refuses other uids) with nothing else: the token
-// and key are its alone, and the App never mounts them.
+// and key are its alone (its own Secret, never wolf-agent's), and the App
+// never mounts them.
 //
 // gateReady makes it the pod's readiness (native mode: the headset wait
 // starts once WiVRn answers). Never in a split App pod: the stream waits for
@@ -304,7 +311,12 @@ func (c *SessionController) reconcileVRHeadset(ctx context.Context, session *v1a
 		}
 	}
 
-	vr, err := c.pollVRAgent(ctx, session, pod.Status.PodIP, agentTokenSecretName(session.Name))
+	// A native pod from before XERK-2747 mounts wolf-agent's Secret.
+	secret := vrAgentTokenSecretName(session.Name)
+	if !podUsesVolume(&pod.Spec, vrAgentOwnTokenVolume) {
+		secret = agentTokenSecretName(session.Name)
+	}
+	vr, err := c.pollVRAgent(ctx, session, pod.Status.PodIP, secret)
 	if err != nil {
 		return err
 	}

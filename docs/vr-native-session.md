@@ -75,7 +75,8 @@ How the operator reads the properties:
   listens on a file in an emptyDir only the App and vr-agent mount (`/run/direwolf-vr-bus/bus`).
   It serves HTTPS on the pod IP.
 - The operator polls it every `streamPollInterval`, with a per-Session bearer token and a pinned
-  serving cert, the same scheme as wolf-agent's (`agent_token.go`).
+  serving cert, the same scheme as wolf-agent's (`agent_token.go`), in vr-agent's own Secret
+  (`<session>-vr-agent-token`, XERK-2747): wolf-agent's token also drives Wolf.
 - The game never sees the token, but it shares the bus and could report false values. That only
   keeps its own Session alive or ends it, which the App can already do.
 - An agent the operator can't reach counts as a disconnect: the grace period runs, and an answer
@@ -105,12 +106,14 @@ This works as it does for Moonlight sessions.
 - Revoking a headset is deleting its Headset. That ends the User's Sessions seeded with it, the way
   deleting a Pairing ends a Moonlight client's. `RevokeKey` isn't used: it only works while a
   session runs, and the next start would bring the key back.
-- A new PIN pairing does not become a Headset by itself (XERK-2742). The game runs as WiVRn's uid
-  and owns its bus, so it can plant or pair a key of its own; nothing the agent reads proves a
-  human paired. The operator keeps keys no Headset holds as pending in the Session's status, and
-  the library page lists them (fingerprint, headset name, time seen) for the user to confirm.
-  Confirming creates the Headset; an unconfirmed key works for that Session only. The page is
-  `/.direwolf/headsets` (XERK-2740), in both modes, on a host of its own behind Authentik
+- A new PIN pairing does not become a Headset by itself (XERK-2742, XERK-2747). The game runs as
+  WiVRn's uid and owns its bus, so it can plant or pair a key of its own; nothing the agent reads
+  proves a human paired. The operator keeps keys no Headset holds as pending in the Session's
+  `status.pendingHeadsets` (never seeded; gone with the Session), and the page lists them
+  (fingerprint, headset name, time seen) for the user to confirm, warning when more than one
+  waits. Confirming creates the Headset; the pod then records it, so revoking it ends that Session
+  too. An unconfirmed key works for that Session only. The page is `/.direwolf/headsets`
+  (XERK-2740), in both modes, on a host of its own behind Authentik
   (`--headsets-proxy-secret-file`, XERK-2750): never the Library's host, whose desktop runs user
   code that can serve pages on that origin.
 

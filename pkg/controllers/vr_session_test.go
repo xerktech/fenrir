@@ -117,9 +117,12 @@ func TestVRSessionBuildsWolflessPod(t *testing.T) {
 		if mounts[vrBusVolume] != VRBusDir {
 			t.Errorf("%s mounts the bus at %q, want %s", c.Name, mounts[vrBusVolume], VRBusDir)
 		}
-		_, token := mounts["wolf-agent-token"]
+		_, token := mounts[vrAgentOwnTokenVolume]
 		if agent := c.Name == v1alpha1types.VRAgentContainerName; token != agent {
 			t.Errorf("%s mounts the token: %v", c.Name, token)
+		}
+		if _, ok := mounts["wolf-agent-token"]; ok {
+			t.Errorf("%s mounts wolf-agent's token", c.Name)
 		}
 		var mode string
 		for _, e := range c.Env {
@@ -138,8 +141,14 @@ func TestVRSessionBuildsWolflessPod(t *testing.T) {
 		len(sc.Capabilities.Add) != 0 || agent.Image != f.sc.WolfAgentImage {
 		t.Errorf("vr-agent = %+v", agent)
 	}
-	if _, err := f.sc.K8sClient.CoreV1().Secrets(portsTestNS).Get(t.Context(), agentTokenSecretName(s.Name), metav1.GetOptions{}); err != nil {
+	if _, err := f.sc.K8sClient.CoreV1().Secrets(portsTestNS).Get(t.Context(), vrAgentTokenSecretName(s.Name), metav1.GetOptions{}); err != nil {
 		t.Errorf("token Secret: %v", err)
+	}
+	if v := vols[vrAgentOwnTokenVolume].Secret; v == nil || v.SecretName != vrAgentTokenSecretName(s.Name) {
+		t.Errorf("vr-agent token volume %+v, want Secret %s", vols[vrAgentOwnTokenVolume], vrAgentTokenSecretName(s.Name))
+	}
+	if _, ok := vols["wolf-agent-token"]; ok {
+		t.Error("native VR pod keeps wolf-agent's token volume")
 	}
 }
 
@@ -254,7 +263,9 @@ func vrLifecycle(t *testing.T, mutate func(*corev1.Pod) *corev1.Pod) (*portsFixt
 		}
 		return s
 	}, func(s *v1alpha1types.Session) []runtime.Object {
-		objs := []runtime.Object{tokenSecret(s)}
+		// Both: a test pod (readyPod) mounts neither Secret, so it reads as
+		// a pod from before XERK-2747, polled with wolf-agent's.
+		objs := []runtime.Object{tokenSecret(s), vrTokenSecret(s)}
 		if mutate != nil {
 			p := readyPod(s)
 			delete(p.Annotations, portBlockAnnotation)
@@ -479,5 +490,30 @@ func TestVRSessionEndsWhenAgentStaysUnreachable(t *testing.T) {
 	}
 	if f.sessionExists(t, s.Name) {
 		t.Error("a VR Session nobody can read was kept past the grace period")
+	}
+}
+
+// A pod mounting vr-agent's own Secret is polled with that Secret's token,
+// never wolf-agent's (XERK-2747); one from before mounts and gets wolf-agent's.
+func TestVRAgentPolledWithItsOwnToken(t *testing.T) {
+	f, s, agent := vrLifecycle(t, func(p *corev1.Pod) *corev1.Pod {
+		p.Spec.Volumes = append(p.Spec.Volumes, corev1.Volume{Name: vrAgentOwnTokenVolume, VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: vrAgentTokenSecretName(p.Name)},
+		}})
+		p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: v1alpha1types.VRAgentContainerName,
+			VolumeMounts: []corev1.VolumeMount{{Name: vrAgentOwnTokenVolume, MountPath: wolfAgentTokenMountPath}}})
+		return p
+	})
+	if err := f.sc.K8sClient.CoreV1().Secrets(portsTestNS).Delete(t.Context(), agentTokenSecretName(s.Name), metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatal(err)
+	}
+	if got := agent.tokens; len(got) == 0 || got[0] != "Bearer token" {
+		t.Errorf("agent saw Authorization %v, want vr-agent's token", got)
+	}
+	if c := headset(s); c == nil || c.Reason == vrAgentLost {
+		t.Errorf("HeadsetConnected %+v: polled without its own Secret", c)
 	}
 }

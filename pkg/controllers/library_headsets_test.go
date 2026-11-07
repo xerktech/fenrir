@@ -64,8 +64,10 @@ func confirmRequest(s *LibraryServer, user, key string, header http.Header) *htt
 	req.RemoteAddr = "10.1.0.5:5555"
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set(LibraryProxySecretHeader, testHeadsetsSecret)
-	// What a browser sends for a form on the page itself.
+	// What a browser sends for the page's own form, clicked.
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-User", "?1")
 	if user != "" {
 		req.Header.Set(DefaultLibraryUserHeader, user)
 	}
@@ -159,7 +161,11 @@ func TestHeadsetsPageConfirms(t *testing.T) {
 	hs := f.headsets(t)
 	if len(hs) != 1 || hs[0].Name != recordedHeadsetName("sam", testHeadsetKeyA) || hs[0].Spec.UserReference.Name != "sam" ||
 		hs[0].Spec.PublicKey != testHeadsetKeyA || hs[0].Spec.DisplayName != pendingA.Name {
-		t.Errorf("headsets %+v", hs)
+		t.Fatalf("headsets %+v", hs)
+	}
+	// Garbage collected with its User.
+	if o := hs[0].OwnerReferences; len(o) != 1 || o[0].Kind != "User" || o[0].Name != "sam" || o[0].APIVersion != v1alpha1types.GroupVersion.String() {
+		t.Errorf("owner references %+v, want the User sam", o)
 	}
 }
 
@@ -180,6 +186,8 @@ func TestHeadsetsPageRefuses(t *testing.T) {
 		// The Library host is a sibling: its desktop's form is same-site.
 		{"same-site", "sam", testHeadsetKeyA, http.Header{"Sec-Fetch-Site": {"same-site"}}, http.StatusForbidden, false},
 		{"no Sec-Fetch-Site", "sam", testHeadsetKeyA, http.Header{"Sec-Fetch-Site": {""}}, http.StatusForbidden, false},
+		{"a script's fetch", "sam", testHeadsetKeyA, http.Header{"Sec-Fetch-Mode": {"cors"}, "Sec-Fetch-User": nil}, http.StatusForbidden, false},
+		{"not user-activated", "sam", testHeadsetKeyA, http.Header{"Sec-Fetch-User": nil}, http.StatusForbidden, false},
 		// The Library's own secret: the page is never on its origin.
 		{"library secret", "sam", testHeadsetKeyA, http.Header{LibraryProxySecretHeader: {testLibrarySecret}}, http.StatusNotFound, false},
 		{"no user", "", testHeadsetKeyA, nil, http.StatusForbidden, false},
