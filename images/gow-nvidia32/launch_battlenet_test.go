@@ -226,12 +226,20 @@ const decoyEnv = "DIREWOLF_TEST_DECOY="
 // the script ($2 on) and stops them.
 const withDecoys = `decoys=$1; shift
 pids=()
+names=()
 while IFS=$'\x1f' read -r prog argv0 seconds; do
   bash -c 'exec -a "$0" "$1" "$2"' "$argv0" "$prog" "$seconds" &
   pids+=($!)
+  names+=("$argv0")
 done <"$decoys"
-# Each must be its own program before the script looks.
-[ ${#pids[@]} -eq 0 ] || sleep 0.3
+# Each must be its own program before the script looks: a fixed wait was too
+# short on a CI runner (XERK-2709).
+for i in "${!pids[@]}"; do
+  for _ in $(seq 100); do
+    IFS= read -r -d '' first <"/proc/${pids[$i]}/cmdline" && [ "$first" = "${names[$i]}" ] && break
+    sleep 0.05
+  done
+done
 bash "$@"
 status=$?
 [ ${#pids[@]} -eq 0 ] || kill "${pids[@]}" 2>/dev/null
