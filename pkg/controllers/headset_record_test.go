@@ -174,6 +174,22 @@ func TestTrackPairedHeadsets(t *testing.T) {
 	}
 }
 
+// The operator cleans a reported name itself: an older vr-agent sends it raw,
+// and one over the CRD's 128 bytes would fail the status write.
+func TestTrackPairedHeadsetsCleansNames(t *testing.T) {
+	f := newPortsFixture(t)
+	watchHeadsets(t, f)
+	s := f.session("alex-1", f.user)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: portsTestNS, Annotations: map[string]string{vrHeadsetsAnnotation: ""}}}
+	raw := "Quest\u202e\n" + strings.Repeat("é", 100)
+	if err := f.sc.trackPairedHeadsets(context.Background(), s, pod, []VRKnownKey{{Name: raw, Key: testHeadsetKeyA}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Status.PendingHeadsets) != 1 || s.Status.PendingHeadsets[0].Name != CleanHeadsetName(raw) {
+		t.Errorf("pending %+v, want the name cleaned", s.Status.PendingHeadsets)
+	}
+}
+
 // A pending key's name is cleaned as vr-agent cleans it: no control or
 // bidi runes, at most the CRD's 128 bytes, cut on a rune.
 func TestCleanHeadsetName(t *testing.T) {

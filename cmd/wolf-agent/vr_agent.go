@@ -19,7 +19,7 @@ import (
 )
 
 // vrAgentCommand runs the vr-agent sidecar of a native VR Session's pod
-// (XERK-2668): it reads WiVRn's state from the App's session bus and serves it
+// (XERK-2668) and of a Moonlight-mode VR Session's App pod (XERK-2740): it reads WiVRn's state from the App's session bus and serves it
 // to the operator, behind the Session's bearer token and pinned cert. The pod
 // is off the host network, so only the pod network reaches it.
 const vrAgentCommand = "vr-agent"
@@ -39,8 +39,8 @@ const (
 	maxReportedKeys = 32
 )
 
-// wivrnStatus reads WiVRn's HeadsetConnected and SessionRunning from the bus
-// at address.
+// wivrnStatus reads WiVRn's HeadsetConnected, SessionRunning and KnownKeys
+// from the bus at address.
 func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, vrBusTimeout)
 	defer cancel()

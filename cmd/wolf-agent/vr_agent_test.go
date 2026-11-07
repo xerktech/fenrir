@@ -168,7 +168,6 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 	if st, err := wivrnStatus(ctx, addr); err != nil || !st.SessionRunning {
 		t.Fatalf("after SessionRunning: %+v, %v", st, err)
 	}
-
 }
 
 // The worst reply vr-agent can send (maxReportedKeys entries of the longest
