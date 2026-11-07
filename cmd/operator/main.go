@@ -164,18 +164,9 @@ func main() {
 			klog.Fatalf("--library-proxy-secret-file: %v", err)
 		}
 	}
-	var headsetsProxySecret []byte
-	if *headsetsProxySecretFile != "" {
-		if *libraryPort == 0 {
-			klog.Fatal("--headsets-proxy-secret-file needs --library-port: the library server serves the page")
-		}
-		if headsetsProxySecret, err = readProxySecret(*headsetsProxySecretFile); err != nil {
-			klog.Fatalf("--headsets-proxy-secret-file: %v", err)
-		}
-		// The secret is what tells the two hosts apart.
-		if bytes.Equal(headsetsProxySecret, libraryProxySecret) {
-			klog.Fatal("--headsets-proxy-secret-file must differ from --library-proxy-secret-file")
-		}
+	headsetsProxySecret, err := readHeadsetsProxySecret(*headsetsProxySecretFile, *libraryPort, libraryProxySecret)
+	if err != nil {
+		klog.Fatalf("--headsets-proxy-secret-file: %v", err)
 	}
 	// An invalid name ("X Bad:") never arrives, so every visitor would get
 	// the shared Library.
@@ -474,6 +465,26 @@ func readProxySecret(path string) ([]byte, error) {
 	secret := bytes.TrimSpace(raw)
 	if len(secret) < controllers.MinLibraryProxySecretLen {
 		return nil, fmt.Errorf("secret is %d bytes, want at least %d", len(secret), controllers.MinLibraryProxySecretLen)
+	}
+	return secret, nil
+}
+
+// readHeadsetsProxySecret reads the headset page's proxy secret; nil for no
+// page (no file).
+func readHeadsetsProxySecret(path string, libraryPort int, librarySecret []byte) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if libraryPort == 0 {
+		return nil, errors.New("needs --library-port: the library server serves the page")
+	}
+	secret, err := readProxySecret(path)
+	if err != nil {
+		return nil, err
+	}
+	// The secret is what tells the two hosts apart.
+	if bytes.Equal(secret, librarySecret) {
+		return nil, errors.New("must differ from --library-proxy-secret-file")
 	}
 	return secret, nil
 }

@@ -186,11 +186,15 @@ func TestHeadsetsPageRefuses(t *testing.T) {
 		{"unknown user", "nobody", testHeadsetKeyA, nil, http.StatusForbidden, false},
 		{"no proxy secret", "sam", testHeadsetKeyA, http.Header{LibraryProxySecretHeader: {"wrong"}}, http.StatusForbidden, false},
 		{"confirmation off", "sam", testHeadsetKeyA, nil, http.StatusForbidden, true},
+		{"no secret, page has none", "sam", testHeadsetKeyA, http.Header{LibraryProxySecretHeader: {""}}, http.StatusForbidden, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, s := headsetsServer(t, pendingA)
 			if tc.noConfirm {
 				s.HeadsetConfirmation = nil
+			}
+			if tc.name == "no secret, page has none" {
+				s.HeadsetConfirmation.Secret = nil
 			}
 			rec := confirmRequest(s, tc.user, tc.key, tc.header)
 			if rec.Code != tc.want {

@@ -45,6 +45,36 @@ func TestReadProxySecret(t *testing.T) {
 	})
 }
 
+// The headsets page's secret is optional, needs the library server and
+// must differ from the Library's: it is what tells their hosts apart.
+func TestReadHeadsetsProxySecret(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	lib := []byte("0123456789abcdef0123456789abcdef")
+	other := write("other", "headsets-0123456789abcdef0123456789\n")
+	same := write("same", string(lib)+"\n\n")
+	if got, err := readHeadsetsProxySecret("", 8080, lib); got != nil || err != nil {
+		t.Errorf("no file: %q, %v; want none", got, err)
+	}
+	if got, err := readHeadsetsProxySecret(other, 8080, lib); err != nil || string(got) != "headsets-0123456789abcdef0123456789" {
+		t.Errorf("valid: %q, %v", got, err)
+	}
+	for name, path := range map[string]string{"same as library": same, "short": write("short", "abc"), "absent": filepath.Join(dir, "absent")} {
+		if got, err := readHeadsetsProxySecret(path, 8080, lib); err == nil {
+			t.Errorf("%s: %q, want an error", name, got)
+		}
+	}
+	if got, err := readHeadsetsProxySecret(other, 0, nil); err == nil {
+		t.Errorf("no --library-port: %q, want an error", got)
+	}
+}
+
 func TestProvisionerOptions(t *testing.T) {
 	opts, err := provisionerOptions("k8x-games", "", "X-Authentik-Groups", "|", `{"resources":{"limits":{"cpu":"8"}}}`,
 		"local-path", "100Gi", "", "1Ti")
