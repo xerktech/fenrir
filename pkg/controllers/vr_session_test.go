@@ -14,9 +14,12 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/record"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
@@ -591,5 +594,78 @@ func TestVRSessionWithUnusablePUIDEnds(t *testing.T) {
 	_ = f.sc.Reconcile(portsTestNS, s.Name, s)
 	if f.sessionExists(t, s.Name) {
 		t.Error("VR Session with PUID=0 kept")
+	}
+}
+
+// The VR reaper records why on the App: the VR page can't show a deleted
+// Session, so without it the Session just vanished (XERK-2758). Sessions
+// ended for anything else get no VRPodNeverReady.
+func TestVRSessionUnstartedReaperWarnsApp(t *testing.T) {
+	old := metav1.NewTime(time.Now().Add(-vrUnstartedTTL - time.Minute))
+	for _, tc := range []struct {
+		name string
+		vr   bool
+		// disconnected sets disconnectedAt past the grace period.
+		disconnected bool
+		wantEvent    bool
+	}{
+		{name: "VR pod never ready", vr: true, wantEvent: true},
+		{name: "VR grace period over", vr: true, disconnected: true},
+		{name: "Moonlight unstarted"},
+		{name: "Moonlight grace period over", disconnected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, s := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := f.session("alex-1", f.user)
+				if tc.vr {
+					s = vrSession(f)
+				}
+				s.CreationTimestamp = old
+				if tc.disconnected {
+					s.Status.DisconnectedAt = &old
+				}
+				return s
+			}, nil)
+			withNativeVR(t, f)
+			recorder := record.NewFakeRecorder(10)
+			f.sc.Recorder = recorder
+			if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+				t.Fatalf("Reconcile = %v, want the Session ended", err)
+			}
+			if f.sessionExists(t, s.Name) {
+				t.Fatal("Session kept, want it ended")
+			}
+			var events []string
+			for len(recorder.Events) > 0 {
+				events = append(events, <-recorder.Events)
+			}
+			want := "Warning VRPodNeverReady Session " + s.Name + " "
+			got := slices.ContainsFunc(events, func(e string) bool { return strings.HasPrefix(e, want) })
+			if got != tc.wantEvent {
+				t.Errorf("events %q: VRPodNeverReady recorded = %v, want %v", events, got, tc.wantEvent)
+			}
+		})
+	}
+}
+
+// A delete that conflicts (the pod may have gone ready meanwhile) records
+// nothing: the requeue decides again, and the Session may live on.
+func TestVRSessionUnstartedReaperFailedDeleteWarnsNothing(t *testing.T) {
+	f, s := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+		s := vrSession(f)
+		s.CreationTimestamp = metav1.NewTime(time.Now().Add(-vrUnstartedTTL - time.Minute))
+		return s
+	}, nil)
+	withNativeVR(t, f)
+	f.dw.PrependReactor("delete", "sessions", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewConflict(v1alpha1types.Resource("sessions"), s.Name, nil)
+	})
+	recorder := record.NewFakeRecorder(10)
+	f.sc.Recorder = recorder
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err == nil {
+		t.Fatal("a conflicting delete was not returned for retry")
+	}
+	if len(recorder.Events) != 0 {
+		t.Errorf("Event %q recorded for a Session not yet ended", <-recorder.Events)
 	}
 }

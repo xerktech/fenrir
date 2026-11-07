@@ -238,7 +238,8 @@ paths:
     a disconnect sets it. A zero `--disconnect-grace-period` ends a VR Session once it is ready.
   - An unreachable agent counts as a disconnect (`AgentUnreachable`), and a started pod is polled
     even NotReady: else a hung bus or WiVRn (the game can move the bus) held the GPU forever (QA).
-  - The Moonlight reaper skips VR Sessions; one whose pod is never ready goes after `vrUnstartedTTL`.
+  - The Moonlight reaper skips VR Sessions; one whose pod is never ready goes after `vrUnstartedTTL`,
+    with a `VRPodNeverReady` Warning Event on the App (the VR page cannot show a deleted Session).
   - Tests: `vr_session_test.go`, `cmd/wolf-agent/vr_agent_test.go`.
 - moonlight-proxy's `/resume` never picks a VR Session. Tests: `TestResumeSkipsVRSession`.
 - Moonlight never sees one: `/cancel` skips VR Sessions and serverinfo and the cancel wait skip
