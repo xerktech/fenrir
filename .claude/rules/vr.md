@@ -104,8 +104,17 @@ paths:
     ends the Session on reconcile, and at once on any Headset event (`reconcileHeadset`, found by
     annotation: a deleted object no longer names its User).
   - The spec is immutable (CEL): a changed key would admit a headset without ending Sessions.
-  - Nothing yet turns a PIN pairing into a Headset: each session pairs anew until the vr-agent
-    (XERK-2668) reports WiVRn's `KnownKeys` and the operator records them (rest of XERK-2669).
+  - Never create a Headset from what the App's bus reports alone (XERK-2742): every App process
+    is uid 1000, WiVRn's uid and the bus owner, so a game can plant a key in `known_keys.json`
+    and make WiVRn republish `KnownKeys` (`RevokeKey`), or PIN-pair itself (it reads `Pin` and
+    reaches WiVRn on loopback). Nothing on the bus proves a human paired a headset.
+  - So a key the vr-agent reports that no Headset holds is only pending: the operator keeps it
+    in the Session's status, where it dies with the Session, and never seeds it.
+  - It becomes a Headset only when the User confirms it on the Authentik-protected library page
+    (user from the trusted header, never from a request field; POST only). The page shows each
+    pending key's fingerprint, headset-supplied name and first-seen time, and warns when more
+    than one is pending: a key the user didn't pair right then is the game's.
+  - Until confirmed the headset works for that Session only, as WiVRn already allows.
   - Tests: `headset_test.go`, `TestHeadsetCRDValidatesKeyAndImmutability`,
     `TestVRStartSeedsKnownKeysFromHeadsets`, `TestVRStartRefusesBadHeadsetSeed`.
 

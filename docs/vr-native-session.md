@@ -105,7 +105,11 @@ This works as it does for Moonlight sessions.
 - Revoking a headset is deleting its Headset. That ends the User's Sessions seeded with it, the way
   deleting a Pairing ends a Moonlight client's. `RevokeKey` isn't used: it only works while a
   session runs, and the next start would bring the key back.
-- A new PIN pairing becomes a Headset once the agent reports WiVRn's `KnownKeys` (XERK-2669 part 2).
+- A new PIN pairing does not become a Headset by itself (XERK-2742). The game runs as WiVRn's uid
+  and owns its bus, so it can plant or pair a key of its own; nothing the agent reads proves a
+  human paired. The operator keeps keys no Headset holds as pending in the Session's status, and
+  the library page lists them (fingerprint, headset name, time seen) for the user to confirm.
+  Confirming creates the Headset; an unconfirmed key works for that Session only.
 
 ## Moonlight interplay
 
