@@ -127,6 +127,9 @@ paths:
       confirms only a key pending in the signed-in User's own Sessions, as
       `headset-<sha256(user, key)>`.
     - A failure is logged, never ends the Session: it costs only a PIN next time.
+    - vr-agent sends at most 32 keys, only CRD-valid ones, names cleaned (`CleanHeadsetName`),
+      HTML escaping off: past the operator's 64KiB read the poll fails and the session ends.
+      JSON escapes grow `<` or control runes sixfold. `TestVRAgentWorstReplyFitsOperatorRead`.
   - Moonlight mode: a vrPort App's split App pod runs vr-agent too (`withVRAgent`), with the bus
     dir and its own token Secret `<session>-vr-agent-token`, never wolf-agent's (that one drives
     Wolf, and the pod is the game's). Polled from the Moonlight reconcile while it pairs by PIN.

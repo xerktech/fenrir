@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -173,13 +174,23 @@ func TestTrackPairedHeadsets(t *testing.T) {
 	}
 }
 
-// A pending key's name is cut to the CRD's 128 characters, not bytes.
-func TestHeadsetDisplayNameCountsCharacters(t *testing.T) {
-	if got := headsetDisplayName(strings.Repeat("é", 200)); len([]rune(got)) != headsetNameMaxLen {
-		t.Errorf("%d characters, want %d", len([]rune(got)), headsetNameMaxLen)
+// A pending key's name is cleaned as vr-agent cleans it: no control or
+// bidi runes, at most the CRD's 128 bytes, cut on a rune.
+func TestCleanHeadsetName(t *testing.T) {
+	got := CleanHeadsetName("Quest\u202e\u2028\n3\x00\xff" + strings.Repeat("é", 100))
+	if !strings.HasPrefix(got, "Quest3é") || len(got) > 128 || !utf8.ValidString(got) {
+		t.Errorf("CleanHeadsetName = %q (%d bytes)", got, len(got))
 	}
-	if got := headsetDisplayName("ok\xffname"); got != "okname" {
-		t.Errorf("%q", got)
+}
+
+func TestIsWiVRnKey(t *testing.T) {
+	for key, want := range map[string]bool{
+		testHeadsetKeyA: true, "MEIw": true, "MEI=": true, "": false, "AAA": false, "AAAAA": false,
+		strings.Repeat("A", 1024): true, strings.Repeat("A", 1028): false, "AA=A": false,
+	} {
+		if got := IsWiVRnKey(key); got != want {
+			t.Errorf("IsWiVRnKey(%.20q) = %v, want %v", key, got, want)
+		}
 	}
 }
 

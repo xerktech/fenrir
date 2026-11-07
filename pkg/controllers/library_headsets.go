@@ -181,7 +181,7 @@ func (s *LibraryServer) confirmHeadset(r *http.Request, user string, p v1alpha1t
 		Spec: v1alpha1types.HeadsetSpec{
 			UserReference: v1alpha1types.UserReference{Name: user},
 			PublicKey:     p.Key,
-			DisplayName:   headsetDisplayName(p.Name),
+			DisplayName:   CleanHeadsetName(p.Name),
 		},
 	}, metav1.CreateOptions{FieldManager: "direwolf-library"})
 	if apierrors.IsAlreadyExists(err) {

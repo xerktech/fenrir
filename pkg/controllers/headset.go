@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -215,31 +217,31 @@ func (c *SessionController) reconcileHeadset(namespace, name string, _ *v1alpha1
 	return stderrors.Join(errs...)
 }
 
-// headsetKeyPattern is HeadsetSpec.PublicKey's CRD pattern: a key that fails
-// it would be refused on create anyway.
-var headsetKeyPattern = regexp.MustCompile(`^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`)
+// maxPendingHeadsets bounds a Session's pendingHeadsets: a PIN pairing adds
+// one key, so more are the game's.
+const maxPendingHeadsets = 4
 
-const (
-	headsetKeyMaxLen = 1024
-	// headsetNameMaxLen is the CRDs' limit on a headset's name, in
-	// characters.
-	headsetNameMaxLen = 128
-	// maxPendingHeadsets bounds a Session's pendingHeadsets: a PIN pairing
-	// adds one key, so more are the game's.
-	maxPendingHeadsets = 4
-)
+// wivrnKeyPattern is the CRD's publicKey pattern: WiVRn's stored form.
+var wivrnKeyPattern = regexp.MustCompile(`^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`)
 
-// validHeadsetKey is whether key is in WiVRn's stored form.
-func validHeadsetKey(key string) bool {
-	return len(key) >= 4 && len(key) <= headsetKeyMaxLen && headsetKeyPattern.MatchString(key)
+// IsWiVRnKey is whether key is in WiVRn's stored form, as the CRD admits it.
+func IsWiVRnKey(key string) bool {
+	return len(key) >= 4 && len(key) <= 1024 && wivrnKeyPattern.MatchString(key)
 }
 
-// headsetDisplayName is name made valid for a Headset: UTF-8, at most
-// headsetNameMaxLen characters.
-func headsetDisplayName(name string) string {
-	name = strings.ToValidUTF8(name, "")
-	if r := []rune(name); len(r) > headsetNameMaxLen {
-		name = string(r[:headsetNameMaxLen])
+// CleanHeadsetName is a headset's own name as a Headset's displayName: valid
+// UTF-8 with no control, format (bidi) or line/paragraph-separator runes, cut
+// to the CRD's 128 bytes on a rune boundary.
+func CleanHeadsetName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(name, ""))
+	for len(name) > 128 {
+		_, size := utf8.DecodeLastRuneInString(name)
+		name = name[:len(name)-size]
 	}
 	return name
 }
@@ -289,7 +291,7 @@ func (c *SessionController) trackPairedHeadsets(ctx context.Context, session *v1
 		errs      []error
 	)
 	for _, k := range known {
-		if !validHeadsetKey(k.Key) {
+		if !IsWiVRnKey(k.Key) {
 			errs = append(errs, stderrors.New("WiVRn reports a key not in its stored form; ignoring it"))
 			continue
 		}
@@ -308,7 +310,7 @@ func (c *SessionController) trackPairedHeadsets(ctx context.Context, session *v1
 		if !ok {
 			first = metav1.Now()
 		}
-		pending = append(pending, v1alpha1types.PendingHeadset{Key: k.Key, Name: headsetDisplayName(k.Name), FirstSeen: first})
+		pending = append(pending, v1alpha1types.PendingHeadset{Key: k.Key, Name: CleanHeadsetName(k.Name), FirstSeen: first})
 	}
 	if len(confirmed) > 0 {
 		// A PIN pairing adds one key and the User confirmed it: any other
