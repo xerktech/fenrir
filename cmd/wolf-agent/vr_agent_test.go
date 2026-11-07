@@ -131,8 +131,15 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 		t.Fatalf("RequestName: %v %v", reply, nameErr)
 	}
 	st, err := wivrnStatus(ctx, addr)
-	if err != nil || !reflect.DeepEqual(st, controllers.VRStatus{HeadsetConnected: true}) {
+	if err != nil || !reflect.DeepEqual(st, controllers.VRStatus{HeadsetConnected: true, Pin: "123456"}) {
 		t.Fatalf("wivrnStatus = %+v, %v", st, err)
+	}
+	// Only six digits reach the VR page (XERK-2670): the game owns the bus.
+	for _, bad := range []string{"", "12345", "1234567", "12345a", "<b>12"} {
+		props.SetMust(wivrnInterface, "Pin", bad)
+		if got, readErr := wivrnStatus(ctx, addr); readErr != nil || got.Pin != "" {
+			t.Fatalf("Pin %q: reported %q, %v", bad, got.Pin, readErr)
+		}
 	}
 	// WiVRn's KnownKeys, a(ssx) name, key, last connection, reach the operator.
 	type knownKey struct {

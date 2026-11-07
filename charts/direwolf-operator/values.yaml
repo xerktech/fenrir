@@ -130,6 +130,10 @@ controllers:
           # The VR headset confirmation page needs a host of its own (never
           # the Library's) whose proxy sends a different secret:
           #   --headsets-proxy-secret-file=<file; that proxy's X-Direwolf-Proxy-Secret>
+          # With it and --vr-port-range, that host also serves the VR page
+          # (/.direwolf/vr): start and stop a native VR session, see its
+          # address and pairing PIN. It caps players at --max-concurrent-sessions
+          # (default 1); keep it equal to moonlight_proxy's.
           # The catalogue (one App per installed game, read from the Library)
           # is off unless a base App is named; each is copied per game and its
           # pod template must run $DIREWOLF_LAUNCH_COMMAND:

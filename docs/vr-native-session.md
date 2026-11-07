@@ -5,8 +5,8 @@ without Moonlight. Phase 2 (XERK-2665) already streams VR from an App in the spl
 is launched from Moonlight, and Moonlight's flat mirror shows the pairing PIN and carries the
 recenter key. Phase 3 removes Moonlight from that path.
 
-Status: the API (XERK-2667) and the operator's pod and liveness (XERK-2668) are in place. Nothing
-creates VR Sessions yet: the library page is XERK-2670.
+Status: the API (XERK-2667), the operator's pod and liveness (XERK-2668), headsets (XERK-2669) and
+the VR page that starts sessions (XERK-2670) are in place.
 
 ## API
 
@@ -30,15 +30,26 @@ creates VR Sessions yet: the library page is XERK-2670.
 
 ### Launch trigger
 
-The library page (XERK-2670) creates the Session.
+The VR page (XERK-2670, `/.direwolf/vr`, `library_vr.go`) creates the Session.
 
+- It is on the headsets page's host, not the Library's: the Library host proxies the desktop,
+  whose code can serve same-origin pages there (XERK-2750) that would read the PIN or start and
+  stop sessions. Its POSTs are the page's own clicked form, as the headsets page requires.
 - It sits behind Authentik and maps the username header to a User (`LookupUser`), as the Library
   already does. It's the authenticated place that replaces Moonlight's pairing.
 - The Session it creates has mode `VR`, the User, and an App with `vrPort`. Moonlight's `/launch`
   never creates VR Sessions.
 - The page shows the address to dial (node IP and `status.ports.vr`) and, while pairing, WiVRn's
   PIN (see Pairing).
-- It counts against the Library's Steam lock like any Session: VR Apps run in the shared Steam home.
+- It refuses while the User's Library pod exists (running or stopping), checking again after the
+  create and deleting its Session if the Library started meanwhile, as moonlight-proxy's `/launch`
+  does. The Library counts the VR Session like any other: VR Apps run in the shared Steam home.
+- It never replaces a running session (a Moonlight `/launch` does): ending a Moonlight game the
+  user didn't quit loses unsaved play. It refuses instead, and caps players at the operator's
+  `--max-concurrent-sessions`, which must equal moonlight-proxy's.
+- The PIN is read live from vr-agent per page view (`ReadVRStatus`), never stored in the Session:
+  more can read a Session than the page. vr-agent reports it only as six digits.
+- Stop deletes only the User's VR Sessions; Moonlight ones are Moonlight's to quit.
 - Plan for one VR Session per GPU: one used about 50% of the RTX 3090's NVENC (XERK-2662).
 
 ### Pod (XERK-2668)

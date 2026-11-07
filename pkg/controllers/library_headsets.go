@@ -127,18 +127,8 @@ func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	name := r.Header.Get(s.userHeader)
-	if name == "" || s.users == nil {
-		writeLibraryPage(w, http.StatusForbidden, "Sign in to confirm a headset.", false, false)
-		return
-	}
-	user, err := v1alpha1types.LookupUser(s.users.Get, name)
-	if apierrors.IsNotFound(err) {
-		writeLibraryPage(w, http.StatusForbidden, "You have no streaming account here. Ask the admin to add one.", false, false)
-		return
-	} else if err != nil {
-		klog.Errorf("Headsets page: getting user %s: %v", name, err)
-		writeLibraryPage(w, http.StatusInternalServerError, "Try again in a minute.", false, false)
+	user, ok := s.headsetsHostUser(w, r, "Sign in to confirm a headset.")
+	if !ok {
 		return
 	}
 	pending, err := s.HeadsetConfirmation.pendingFor(r.Context(), user.Name)
@@ -152,13 +142,8 @@ func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeHeadsetsPage(w, pending)
 	case http.MethodPost:
-		// This page's own form, submitted by the user: same-origin (the
-		// Library is on a sibling host, so "same-site" is the desktop's
-		// code, XERK-2750), a navigation (never a script's fetch),
-		// user-activated (QA, XERK-2747). Browsers set these headers; a
-		// script cannot. Browsers that send none are refused too.
-		if r.Header.Get("Sec-Fetch-Site") != "same-origin" || r.Header.Get("Sec-Fetch-Mode") != "navigate" ||
-			r.Header.Get("Sec-Fetch-User") != "?1" {
+		// This page's own form, submitted by the user.
+		if !userSubmittedForm(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -265,7 +250,7 @@ func writeHeadsetsPage(w http.ResponseWriter, pending []v1alpha1types.PendingHea
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 	_, _ = fmt.Fprintf(w, `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Headsets</title>
-<style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0;padding:0 16px}p{max-width:32em;text-align:center;font-size:1.2em}button{font-size:1.1em;padding:.6em 1.4em}main{display:grid;justify-items:center;gap:1em}small{color:#aaa}</style>
-</head><body><main><h1>VR headsets</h1>%s</main></body></html>
-`, b.String())
+<style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0;padding:0 16px}p{max-width:32em;text-align:center;font-size:1.2em}button{font-size:1.1em;padding:.6em 1.4em}main{display:grid;justify-items:center;gap:1em}small{color:#aaa}a{color:#9cf}</style>
+</head><body><main><h1>VR headsets</h1>%s<p><small><a href="%s">Play in VR</a></small></p></main></body></html>
+`, b.String(), libraryVRPath)
 }
