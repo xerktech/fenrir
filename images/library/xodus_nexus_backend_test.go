@@ -612,7 +612,12 @@ func TestXodusNexusBackendReinstallsCorruptedBinary(t *testing.T) {
 	h.publish(backendRelease{version: "0.2.13", contract: "linux-run-v25"})
 	h.run()
 	cli := h.current()["binaryPath"]
-	if err := os.WriteFile(cli, nil, 0o755); err != nil { //nolint:gosec // an executable, as installed
+	// Emptied by a rename over it, not a write into it: under load a write
+	// into a binary just run failed with "text file busy" (XERK-2709).
+	if err := os.WriteFile(cli+".empty", nil, 0o755); err != nil { //nolint:gosec // an executable, as installed
+		t.Fatal(err)
+	}
+	if err := os.Rename(cli+".empty", cli); err != nil {
 		t.Fatal(err)
 	}
 	if calls := h.run(); !strings.Contains(calls, "replacing the damaged") || !strings.Contains(calls, "reinstalled the damaged backend 0.2.13") {

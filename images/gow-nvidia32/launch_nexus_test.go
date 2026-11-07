@@ -81,8 +81,7 @@ func TestLaunchNexusEndsTheSessionWhenTheLaunchFails(t *testing.T) {
 			"DIREWOLF_LAUNCH_COMMAND=" + tc.launch, "SWAY_STOP_ON_APP_EXIT=" + tc.sway}
 		err := cmd.Run()
 		code := 0
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			code = exitErr.ExitCode()
 		} else if err != nil {
 			t.Fatal(err)
