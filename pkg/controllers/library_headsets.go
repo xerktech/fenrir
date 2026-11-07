@@ -1,0 +1,193 @@
+package controllers
+
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
+	"html"
+	"net/http"
+	"slices"
+	"strings"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/klog/v2"
+
+	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
+	"games-on-whales.github.io/direwolf/pkg/generic"
+)
+
+// The library page's headset confirmation (XERK-2742). A VR session seeded
+// with no Headsets pairs by PIN, and the keys its WiVRn then knows wait in
+// the Session's pendingHeadsets: the game can plant one, so none is trusted
+// past that Session until its User, signed in through Authentik, confirms
+// the headset they paired here. Confirming creates the Headset.
+const (
+	libraryHeadsetsPath = "/.direwolf/headsets"
+	// libraryHeadsetsFormMax bounds the confirm form: one key.
+	libraryHeadsetsFormMax = 4096
+)
+
+// HeadsetConfirmation turns on the library page's headset confirmation.
+type HeadsetConfirmation struct {
+	Sessions generic.NamespacedLister[*v1alpha1types.Session]
+	Headsets v1alpha1client.HeadsetInterface
+}
+
+// pendingFor is the keys awaiting user's confirmation across their Sessions,
+// one per key, oldest first.
+func (h *HeadsetConfirmation) pendingFor(user string) ([]v1alpha1types.PendingHeadset, error) {
+	sessions, err := h.Sessions.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("listing sessions: %w", err)
+	}
+	var res []v1alpha1types.PendingHeadset
+	for _, s := range sessions {
+		if s.Spec.UserReference.Name != user || s.DeletionTimestamp != nil {
+			continue
+		}
+		for _, p := range s.Status.PendingHeadsets {
+			if !slices.ContainsFunc(res, func(q v1alpha1types.PendingHeadset) bool { return q.Key == p.Key }) {
+				res = append(res, p)
+			}
+		}
+	}
+	slices.SortFunc(res, func(a, b v1alpha1types.PendingHeadset) int { return a.FirstSeen.Compare(b.FirstSeen.Time) })
+	return res, nil
+}
+
+// headsetFingerprint is a short digest of key the user can compare with the
+// one their headset shows.
+func headsetFingerprint(key string) string {
+	der, err := base64.StdEncoding.DecodeString(key)
+	if err != nil {
+		der = []byte(key)
+	}
+	sum := sha256.Sum256(der)
+	hexed := hex.EncodeToString(sum[:8])
+	var parts []string
+	for i := 0; i < len(hexed); i += 4 {
+		parts = append(parts, hexed[i:i+4])
+	}
+	return strings.Join(parts, " ")
+}
+
+// serveHeadsets lists the signed-in User's pending headsets (GET) or
+// confirms one (POST). ServeHTTP has checked the peer and the proxy secret,
+// so userHeader is the proxy's. Only a named User may confirm, and only a
+// key pending in one of their own Sessions.
+func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
+	if s.HeadsetConfirmation == nil {
+		http.NotFound(w, r)
+		return
+	}
+	name := r.Header.Get(s.userHeader)
+	if name == "" || s.users == nil {
+		writeLibraryPage(w, http.StatusForbidden, "Sign in to confirm a headset.", false, false)
+		return
+	}
+	user, err := v1alpha1types.LookupUser(s.users.Get, name)
+	if apierrors.IsNotFound(err) {
+		writeLibraryPage(w, http.StatusForbidden, "You have no streaming account here. Ask the admin to add one.", false, false)
+		return
+	} else if err != nil {
+		klog.Errorf("Headsets page: getting user %s: %v", name, err)
+		writeLibraryPage(w, http.StatusInternalServerError, "Try again in a minute.", false, false)
+		return
+	}
+	pending, err := s.HeadsetConfirmation.pendingFor(user.Name)
+	if err != nil {
+		klog.Errorf("Headsets page: %v", err)
+		writeLibraryPage(w, http.StatusInternalServerError, "Try again in a minute.", false, false)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeHeadsetsPage(w, pending)
+	case http.MethodPost:
+		// Same-site only: a cross-site form must not confirm a key for the
+		// signed-in user.
+		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, libraryHeadsetsFormMax)
+		key := r.PostFormValue("key")
+		i := slices.IndexFunc(pending, func(p v1alpha1types.PendingHeadset) bool { return p.Key == key })
+		if key == "" || i < 0 {
+			writeLibraryPage(w, http.StatusConflict, "That headset is no longer waiting. Pair it again in a VR session.", false, false)
+			return
+		}
+		if err := s.confirmHeadset(r, user.Name, pending[i]); err != nil {
+			klog.Errorf("Headsets page: %v", err)
+			writeLibraryPage(w, http.StatusInternalServerError, "The headset could not be saved. Try again in a minute.", false, false)
+			return
+		}
+		http.Redirect(w, r, libraryHeadsetsPath, http.StatusSeeOther)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// confirmHeadset creates user's Headset for p. Confirming again finds the
+// one made before; one of that name for another user or key is refused.
+func (s *LibraryServer) confirmHeadset(r *http.Request, user string, p v1alpha1types.PendingHeadset) error {
+	name := recordedHeadsetName(user, p.Key)
+	_, err := s.HeadsetConfirmation.Headsets.Create(r.Context(), &v1alpha1types.Headset{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: v1alpha1types.HeadsetSpec{
+			UserReference: v1alpha1types.UserReference{Name: user},
+			PublicKey:     p.Key,
+			DisplayName:   headsetDisplayName(p.Name),
+		},
+	}, metav1.CreateOptions{FieldManager: "direwolf-library"})
+	if apierrors.IsAlreadyExists(err) {
+		h, getErr := s.HeadsetConfirmation.Headsets.Get(r.Context(), name, metav1.GetOptions{})
+		switch {
+		case getErr != nil:
+			return fmt.Errorf("getting headset %s: %w", name, getErr)
+		case h.Spec.UserReference.Name != user || h.Spec.PublicKey != p.Key:
+			return fmt.Errorf("headset %s exists for another user or key", name)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("creating headset %s: %w", name, err)
+	}
+	klog.Infof("Headsets page: user %s confirmed headset %s", user, name)
+	return nil
+}
+
+func writeHeadsetsPage(w http.ResponseWriter, pending []v1alpha1types.PendingHeadset) {
+	var b strings.Builder
+	switch len(pending) {
+	case 0:
+		b.WriteString(`<p>No headset is waiting. Pair one by PIN in a VR session, then reload this page.</p>`)
+	case 1:
+		b.WriteString(`<p>Confirm the headset you just paired, so it connects without a PIN next time.</p>`)
+	default:
+		b.WriteString(`<p><strong>More than one headset is waiting.</strong> A PIN pairing adds one: confirm only the one you paired just now. Any other was added by the game; leave it.</p>`)
+	}
+	for _, p := range pending {
+		name := p.Name
+		if name == "" {
+			name = "Unnamed headset"
+		}
+		fmt.Fprintf(&b, `<form method="post" action="%s"><p>%s<br><small>fingerprint %s · seen %s</small></p><input type="hidden" name="key" value="%s"><button type="submit">This is my headset</button></form>`,
+			libraryHeadsetsPath, html.EscapeString(name), headsetFingerprint(p.Key),
+			html.EscapeString(p.FirstSeen.UTC().Format("2006-01-02 15:04 MST")), html.EscapeString(p.Key))
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+	_, _ = fmt.Fprintf(w, `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Headsets</title>
+<style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0;padding:0 16px}p{max-width:32em;text-align:center;font-size:1.2em}button{font-size:1.1em;padding:.6em 1.4em}main{display:grid;justify-items:center;gap:1em}small{color:#aaa}</style>
+</head><body><main><h1>VR headsets</h1>%s</main></body></html>
+`, b.String())
+}

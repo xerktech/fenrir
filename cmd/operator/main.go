@@ -361,6 +361,10 @@ func main() {
 			libraryTrusted,
 			libraryProxySecret,
 		)
+		libraryServer.HeadsetConfirmation = &controllers.HeadsetConfirmation{
+			Sessions: generic.NewLister[*direwolfv1alpha1.Session](sessionInformer.GetIndexer()).Namespaced(*namespace),
+			Headsets: direwolfClient.DirewolfV1alpha1().Headsets(*namespace),
+		}
 		if provisionOpts.Enabled() {
 			libraryServer.Provisioner = controllers.NewProvisioner(
 				*namespace,

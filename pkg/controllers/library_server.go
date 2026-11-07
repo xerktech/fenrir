@@ -90,6 +90,9 @@ type LibraryServer struct {
 	// provisioning is off (--provision-group).
 	Provisioner *Provisioner
 
+	// HeadsetConfirmation serves libraryHeadsetsPath; nil serves none.
+	HeadsetConfirmation *HeadsetConfirmation
+
 	// states is each library's *libraryState, by owner ("" the shared one).
 	states sync.Map
 }
@@ -289,6 +292,11 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.hasProxySecret(r) {
 		klog.Warningf("Library page: refusing request from %s without the proxy secret", r.RemoteAddr)
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	if r.URL.Path == libraryHeadsetsPath {
+		s.serveHeadsets(w, r)
 		return
 	}
 

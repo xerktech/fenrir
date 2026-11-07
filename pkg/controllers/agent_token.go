@@ -44,6 +44,14 @@ func agentTokenSecretName(sessionName string) string {
 	return sessionName + "-wolf-agent-token"
 }
 
+// vrAgentTokenSecretName is the token Secret of the vr-agent in a Moonlight
+// Session's split App pod (XERK-2740): its own, as the wolf-agent token also
+// drives Wolf, and that pod is the game's. A native VR pod has no Wolf, so
+// its vr-agent uses the wolf-agent Secret.
+func vrAgentTokenSecretName(sessionName string) string {
+	return sessionName + "-vr-agent-token"
+}
+
 // reconcileAgentToken ensures the wolf-agent token Secret exists for session
 // and is controlled by it, so it is garbage-collected with it.
 //
@@ -51,8 +59,12 @@ func agentTokenSecretName(sessionName string) string {
 // run) is replaced: otherwise the new pod could mount the old token just before
 // GC deletes it, and the operator would read a fresh token that never matches.
 func (c *SessionController) reconcileAgentToken(ctx context.Context, session *v1alpha1types.Session) error {
+	return c.reconcileTokenSecret(ctx, session, agentTokenSecretName(session.Name))
+}
+
+// reconcileTokenSecret is reconcileAgentToken for the token Secret name.
+func (c *SessionController) reconcileTokenSecret(ctx context.Context, session *v1alpha1types.Session, name string) error {
 	secrets := c.K8sClient.CoreV1().Secrets(session.Namespace)
-	name := agentTokenSecretName(session.Name)
 
 	existing, err := secrets.Get(ctx, name, metav1.GetOptions{})
 	switch {
@@ -155,7 +167,11 @@ var errAgentCertMissing = stderrors.New("wolf-agent token secret has no serving 
 // agentCredentials reads the bearer token wolf-agent in session's pod expects
 // and the TLS config that pins the cert it serves.
 func (c *SessionController) agentCredentials(ctx context.Context, session *v1alpha1types.Session) (string, *tls.Config, error) {
-	name := agentTokenSecretName(session.Name)
+	return c.tokenCredentials(ctx, session, agentTokenSecretName(session.Name))
+}
+
+// tokenCredentials is agentCredentials from the token Secret name.
+func (c *SessionController) tokenCredentials(ctx context.Context, session *v1alpha1types.Session, name string) (string, *tls.Config, error) {
 	secret, err := c.K8sClient.CoreV1().Secrets(session.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to get wolf-agent token secret %s/%s: %w", session.Namespace, name, err)

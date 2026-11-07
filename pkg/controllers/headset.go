@@ -2,9 +2,12 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -12,6 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 	v1alpha1client "games-on-whales.github.io/direwolf/pkg/generated/clientset/versioned/typed/api/v1alpha1"
@@ -208,4 +213,126 @@ func (c *SessionController) reconcileHeadset(namespace, name string, _ *v1alpha1
 		errs = append(errs, err)
 	}
 	return stderrors.Join(errs...)
+}
+
+// headsetKeyPattern is HeadsetSpec.PublicKey's CRD pattern: a key that fails
+// it would be refused on create anyway.
+var headsetKeyPattern = regexp.MustCompile(`^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`)
+
+const (
+	headsetKeyMaxLen = 1024
+	// headsetNameMaxLen is the CRDs' limit on a headset's name, in
+	// characters.
+	headsetNameMaxLen = 128
+	// maxPendingHeadsets bounds a Session's pendingHeadsets: a PIN pairing
+	// adds one key, so more are the game's.
+	maxPendingHeadsets = 4
+)
+
+// validHeadsetKey is whether key is in WiVRn's stored form.
+func validHeadsetKey(key string) bool {
+	return len(key) >= 4 && len(key) <= headsetKeyMaxLen && headsetKeyPattern.MatchString(key)
+}
+
+// headsetDisplayName is name made valid for a Headset: UTF-8, at most
+// headsetNameMaxLen characters.
+func headsetDisplayName(name string) string {
+	name = strings.ToValidUTF8(name, "")
+	if r := []rune(name); len(r) > headsetNameMaxLen {
+		name = string(r[:headsetNameMaxLen])
+	}
+	return name
+}
+
+// pairingWasOpen is whether pod's WiVRn was seeded with no Headsets, so it
+// paired by PIN: only there can a headset have paired.
+func pairingWasOpen(pod *corev1.Pod) bool {
+	v, ok := pod.Annotations[vrHeadsetsAnnotation]
+	return ok && v == ""
+}
+
+// recordedHeadsetName names the Headset confirmed for user's key: the same
+// on every confirm, so a repeat finds the one it made.
+func recordedHeadsetName(user, key string) string {
+	sum := sha256.Sum256([]byte(user + "\x00" + key))
+	return "headset-" + hex.EncodeToString(sum[:10])
+}
+
+// trackPairedHeadsets follows the keys pod's WiVRn knows, as its vr-agent
+// reported them, while the pod paired by PIN (XERK-2742).
+//
+// A key no Headset of the User holds goes to the Session's pendingHeadsets,
+// never into a Headset: the game runs as WiVRn's uid and owns its bus, so it
+// can plant a key or pair one itself, and nothing here tells that from the
+// User's headset. The User confirms on the library page (confirmHeadset).
+//
+// A key a Headset of the User does hold (one just confirmed) is named in the
+// pod's vrHeadsetsAnnotation: WiVRn trusts it in this Session, so revoking
+// it must end it, as for a seeded Headset. The pod then no longer paired by
+// PIN, and its keys stop being followed.
+func (c *SessionController) trackPairedHeadsets(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod, known []VRKnownKey) error {
+	if c.HeadsetClient == nil || !pairingWasOpen(pod) {
+		return nil
+	}
+	held, err := c.userHeadsets(session.Namespace, session.Spec.UserReference.Name)
+	if err != nil {
+		return err
+	}
+	seen := map[string]metav1.Time{}
+	for _, p := range session.Status.PendingHeadsets {
+		seen[p.Key] = p.FirstSeen
+	}
+	var (
+		pending   []v1alpha1types.PendingHeadset
+		confirmed []string
+		errs      []error
+	)
+	for _, k := range known {
+		if !validHeadsetKey(k.Key) {
+			errs = append(errs, stderrors.New("WiVRn reports a key not in its stored form; ignoring it"))
+			continue
+		}
+		if i := slices.IndexFunc(held, func(h *v1alpha1types.Headset) bool { return h.Spec.PublicKey == k.Key }); i >= 0 {
+			confirmed = append(confirmed, held[i].Name+"/"+string(held[i].UID))
+			continue
+		}
+		if slices.ContainsFunc(pending, func(p v1alpha1types.PendingHeadset) bool { return p.Key == k.Key }) {
+			continue
+		}
+		if len(pending) == maxPendingHeadsets {
+			errs = append(errs, fmt.Errorf("WiVRn knows more than %d unconfirmed keys; listing only the first", maxPendingHeadsets))
+			break
+		}
+		first, ok := seen[k.Key]
+		if !ok {
+			first = metav1.Now()
+		}
+		pending = append(pending, v1alpha1types.PendingHeadset{Key: k.Key, Name: headsetDisplayName(k.Name), FirstSeen: first})
+	}
+	session.Status.PendingHeadsets = pending
+	if len(confirmed) > 0 {
+		slices.Sort(confirmed)
+		errs = append(errs, c.annotateHeadsets(ctx, pod, strings.Join(confirmed, ",")))
+	}
+	return stderrors.Join(errs...)
+}
+
+// annotateHeadsets records value as the Headsets pod's WiVRn trusts.
+func (c *SessionController) annotateHeadsets(ctx context.Context, pod *corev1.Pod, value string) error {
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
+		// Fails the patch if the pod changed since it was read: another
+		// poll may have recorded first.
+		"resourceVersion": pod.ResourceVersion,
+		"annotations":     map[string]string{vrHeadsetsAnnotation: value},
+	}})
+	if err != nil {
+		return fmt.Errorf("failed to encode pod patch: %w", err)
+	}
+	if _, err := c.K8sClient.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{
+		FieldManager: "direwolf-session-controller-pod",
+	}); err != nil {
+		return fmt.Errorf("failed to record headsets %s on pod %s/%s: %w", value, pod.Namespace, pod.Name, err)
+	}
+	klog.Infof("Pod %s/%s: WiVRn trusts confirmed headsets %s", pod.Namespace, pod.Name, value)
+	return nil
 }

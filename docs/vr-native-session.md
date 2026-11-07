@@ -109,7 +109,8 @@ This works as it does for Moonlight sessions.
   and owns its bus, so it can plant or pair a key of its own; nothing the agent reads proves a
   human paired. The operator keeps keys no Headset holds as pending in the Session's status, and
   the library page lists them (fingerprint, headset name, time seen) for the user to confirm.
-  Confirming creates the Headset; an unconfirmed key works for that Session only.
+  Confirming creates the Headset; an unconfirmed key works for that Session only. The page is
+  `/.direwolf/headsets` on the library host (XERK-2740), in both modes.
 
 ## Moonlight interplay
 

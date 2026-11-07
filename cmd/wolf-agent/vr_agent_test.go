@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -125,11 +126,29 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 		t.Fatalf("RequestName: %v %v", reply, nameErr)
 	}
 	st, err := wivrnStatus(ctx, addr)
-	if err != nil || st != (controllers.VRStatus{HeadsetConnected: true}) {
+	if err != nil || !reflect.DeepEqual(st, controllers.VRStatus{HeadsetConnected: true}) {
 		t.Fatalf("wivrnStatus = %+v, %v", st, err)
 	}
 	props.SetMust(wivrnInterface, "SessionRunning", true)
 	if st, err := wivrnStatus(ctx, addr); err != nil || !st.SessionRunning {
 		t.Fatalf("after SessionRunning: %+v, %v", st, err)
+	}
+
+	// KnownKeys is a(ssx): name, key, last connection.
+	type knownKey struct {
+		Name, Key string
+		Last      int64
+	}
+	if _, err = prop.Export(server, wivrnPath, prop.Map{wivrnInterface: {
+		"HeadsetConnected": {Value: true, Emit: prop.EmitTrue},
+		"SessionRunning":   {Value: true, Emit: prop.EmitTrue},
+		"KnownKeys":        {Value: []knownKey{{"Quest 3", "QUJD", 1700000000}, {"Unknown headset", "REVG", 0}}, Emit: prop.EmitTrue},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	st, err = wivrnStatus(ctx, addr)
+	want := []controllers.VRKnownKey{{Name: "Quest 3", Key: "QUJD"}, {Name: "Unknown headset", Key: "REVG"}}
+	if err != nil || !reflect.DeepEqual(st.KnownKeys, want) {
+		t.Fatalf("KnownKeys = %+v, %v; want %+v", st.KnownKeys, err, want)
 	}
 }
