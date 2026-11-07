@@ -110,7 +110,9 @@ This works as it does for Moonlight sessions.
   human paired. The operator keeps keys no Headset holds as pending in the Session's status, and
   the library page lists them (fingerprint, headset name, time seen) for the user to confirm.
   Confirming creates the Headset; an unconfirmed key works for that Session only. The page is
-  `/.direwolf/headsets` on the library host (XERK-2740), in both modes.
+  `/.direwolf/headsets` (XERK-2740), in both modes, on a host of its own behind Authentik
+  (`--headsets-proxy-secret-file`, XERK-2750): never the Library's host, whose desktop runs user
+  code that can serve pages on that origin.
 
 ## Moonlight interplay
 

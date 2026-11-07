@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -21,7 +22,7 @@ import (
 	"games-on-whales.github.io/direwolf/pkg/generic"
 )
 
-// The library page's headset confirmation (XERK-2742). A VR session seeded
+// The headset confirmation page (XERK-2742), on a host of its own (XERK-2750). A VR session seeded
 // with no Headsets pairs by PIN, and the keys its WiVRn then knows wait in
 // the Session's pendingHeadsets: the game can plant one, so none is trusted
 // past that Session until its User, signed in through Authentik, confirms
@@ -32,10 +33,21 @@ const (
 	libraryHeadsetsFormMax = 4096
 )
 
-// HeadsetConfirmation turns on the library page's headset confirmation.
+// HeadsetConfirmation turns on the headset confirmation page.
 type HeadsetConfirmation struct {
 	Sessions generic.NamespacedLister[*v1alpha1types.Session]
 	Headsets v1alpha1client.HeadsetInterface
+	// Secret is what the page's own proxy (its own host) sends in
+	// LibraryProxySecretHeader. It must differ from the Library's: a
+	// request with it is served the page and never the Library.
+	Secret []byte
+}
+
+func (h *HeadsetConfirmation) hasProxySecret(r *http.Request) bool {
+	if len(h.Secret) == 0 {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(r.Header.Get(LibraryProxySecretHeader)), h.Secret) == 1
 }
 
 // pendingFor is the keys awaiting user's confirmation across their Sessions,
@@ -101,7 +113,7 @@ func headsetFingerprint(key string) string {
 }
 
 // serveHeadsets lists the signed-in User's pending headsets (GET) or
-// confirms one (POST). ServeHTTP has checked the peer and the proxy secret,
+// confirms one (POST). ServeHTTP has checked the peer and the page's secret,
 // so userHeader is the proxy's. Only a named User may confirm, and only a
 // key pending in one of their own Sessions.
 func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
@@ -134,9 +146,10 @@ func (s *LibraryServer) serveHeadsets(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeHeadsetsPage(w, pending)
 	case http.MethodPost:
-		// Same-site only: a cross-site form must not confirm a key for the
-		// signed-in user.
-		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		// Same-origin only: the Library is on a sibling host, so "same-site"
+		// is the desktop's code (XERK-2750). Browsers that send no
+		// Sec-Fetch-Site are refused too.
+		if r.Header.Get("Sec-Fetch-Site") != "same-origin" {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
