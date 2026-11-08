@@ -346,8 +346,8 @@ func TestVRExampleLinksACDocumentsToState(t *testing.T) {
 	if got, _ := os.Readlink(docs); got != target {
 		t.Errorf("planted link not replaced: -> %q", got)
 	}
-	// Never launched flat: no Documents folder, no link.
-	if out, err := runLink(t, script, filepath.Join(dir, "missing", "Assetto Corsa")); err == nil || !strings.Contains(out, "launch Assetto Corsa flat once") {
+	// No prefix (ac-setup makes it first): no Documents folder, no link.
+	if out, err := runLink(t, script, filepath.Join(dir, "missing", "Assetto Corsa")); err == nil || !strings.Contains(out, "in Assetto Corsa's prefix") {
 		t.Errorf("missing prefix: err %v, output %q; want a refusal", err, out)
 	}
 	// A folder and a flat copy both: neither is the script's to drop.
@@ -416,5 +416,36 @@ func TestVRExampleACPathsAgreeWithSteamImage(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "ln -s '"+docs+".flat' \\\n      /srv/direwolf/ac-documents") {
 		t.Errorf("the steam image's /srv/direwolf/ac-documents link does not lead to %s.flat", docs)
+	}
+}
+
+// The example runs the image's Assetto Corsa setup (XERK-2726) as PUID, after
+// the stateMount checks and before the Documents link and the entrypoint, at
+// a CSP version the image pins.
+func TestVRExampleRunsACSetup(t *testing.T) {
+	_, app := vrExampleFixture(t)
+	c := app.Spec.Template.Spec.Containers[0]
+	cmd := strings.Join(c.Command, "\n")
+	setup := strings.Index(cmd, `gosu "$PUID:$PGID" /opt/direwolf/vr/ac-setup`+"\n")
+	if setup < 0 || setup < strings.Index(cmd, "mountpoint -q") ||
+		setup > strings.Index(cmd, "<<'LINK'") || setup > strings.Index(cmd, "exec /entrypoint.sh") {
+		t.Errorf("the command does not run ac-setup as PUID between the stateMount checks and the Documents link")
+	}
+	b, err := os.ReadFile("../../images/gow-nvidia32/vr/ac-csp-versions.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pins map[string]any
+	if err := sigsyaml.Unmarshal(b, &pins); err != nil {
+		t.Fatal(err)
+	}
+	var csp string
+	for _, e := range c.Env {
+		if e.Name == "DIREWOLF_AC_CSP" {
+			csp = e.Value
+		}
+	}
+	if _, ok := pins[csp]; !ok {
+		t.Errorf("DIREWOLF_AC_CSP=%q is not a version the image pins", csp)
 	}
 }

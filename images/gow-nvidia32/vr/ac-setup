@@ -1,0 +1,475 @@
+#!/usr/bin/python3 -I
+"""Assetto Corsa's one-time setup in the shared Steam install (XERK-2726).
+
+The vr image's Assetto Corsa App (examples/vr.yaml) runs it as PUID before
+GoW's entrypoint, on every launch; .claude/rules/vr.md has the why. Each step
+is skipped once a marker says it is done, so a set-up install costs about a
+second:
+
+  - prefix: compatdata/244210 is made with Steam's Proton 9.0 if missing, then
+    winetricks corefonts and d3dcompiler_47 (without it Wine's compiler fails
+    CSP's weather shaders: a black scene) and Selawik (OFL) as the segoeui*.ttf
+    CSP wants. Marker: compatdata/244210/direwolf-ac-setup.json.
+  - flat config: the shared (flat) cfg gets [VIDEO] FULLSCREEN=1 (else sway
+    tiles a window beside Big Picture) and [HEADER] INPUT_METHOD=X360 (else the
+    Moonlight pad does nothing), once. Same marker.
+  - exe: AssettoCorsa.exe becomes a copy of acs.exe, the launcher kept as
+    AssettoCorsa_original.exe (Content Manager can't run under Proton and the
+    Kunos launcher has no VR mode). Checked on every launch: a Steam update or
+    verify puts the launcher back.
+  - CSP: $DIREWOLF_AC_CSP, a version ac-csp-versions.json pins by sha256, is
+    downloaded and unpacked into the game folder. Unset or empty: left alone.
+    Marker: common/assettocorsa/direwolf-ac-setup.json, so a version bump
+    reruns only this step.
+
+The shared home is writable by every game of every User. Every file this
+script writes or reads there is reached one folder at a time, never through a
+link (a planted one is refused, or replaced when it sits where a file is
+written). Proton, Wine and winetricks do follow links in the prefix, as the
+game does: they run as the same user in the same container.
+
+DIREWOLF_AC_HOME and DIREWOLF_AC_UID_MAP are for tests only.
+"""
+
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import zipfile
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+HOME = os.environ.get("DIREWOLF_AC_HOME", "/home/retro")
+STEAM = ".steam/debian-installation"
+APPID = "244210"
+# Steam's Proton 9.0 (CompatToolMapping name proton_9): the version the VR
+# setup was verified on (XERK-2660). Steam installs it into the default library.
+PROTON_APPID = "2805730"
+PROTON_TOOL = "proton_9"
+MARKER = "direwolf-ac-setup.json"
+# Bump one to rerun its step on every install.
+PREFIX_REV = 1
+FLAT_CFG_REV = 1
+# Selawik's files (fonts/, baked into the image) under the names CSP looks for.
+SEGOE = {
+    "segoeui.ttf": "selawk.ttf",
+    "segoeuib.ttf": "selawkb.ttf",
+    "segoeuil.ttf": "selawkl.ttf",
+    "segoeuisl.ttf": "selawksl.ttf",
+    "seguisb.ttf": "selawksb.ttf",
+}
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+class Refused(Exception):
+    pass
+
+
+def log(msg):
+    print(f"ac-setup: {msg}", file=sys.stderr, flush=True)
+
+
+def opendir(base, rel, create=False):
+    """Opens the folder rel below the folder fd base, one name at a time,
+    never through a link. create makes missing folders."""
+    fd = os.dup(base)
+    try:
+        for part in rel.split("/"):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                raise Refused(f"{rel}: '..'")
+            if create:
+                try:
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                except FileExistsError:
+                    pass
+            try:
+                nfd = os.open(part, DIR_FLAGS, dir_fd=fd)
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise Refused(f"{rel}: {part} is a link or not a folder") from None
+                raise
+            os.close(fd)
+            fd = nfd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def kind(d, name):
+    """The file type of name in folder fd d, never following it; None if absent."""
+    try:
+        return stat.S_IFMT(os.lstat(name, dir_fd=d).st_mode)
+    except FileNotFoundError:
+        return None
+
+
+def read(d, name):
+    """A regular file's bytes, or None if it is absent, a link or not a file."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=d)
+    except OSError as e:
+        if e.errno in (errno.ENOENT, errno.ELOOP):
+            return None
+        raise
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            return None
+        return f.read()
+
+
+def sha256(d, name):
+    b = read(d, name)
+    return None if b is None else hashlib.sha256(b).hexdigest()
+
+
+def write(d, name, chunks, mode=0o644):
+    """Writes name in folder fd d whole: a temporary file renamed over it, so a
+    link there is replaced, never followed."""
+    tmp = f".{name}.direwolf-tmp"
+    try:
+        os.unlink(tmp, dir_fd=d)
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=d)
+    with os.fdopen(fd, "wb") as f:
+        for c in [chunks] if isinstance(chunks, bytes) else chunks:
+            f.write(c)
+    os.replace(tmp, name, src_dir_fd=d, dst_dir_fd=d)
+
+
+def load_marker(d):
+    try:
+        m = json.loads(read(d, MARKER) or b"{}")
+    except ValueError:
+        m = {}
+    return m if isinstance(m, dict) else {}
+
+
+def save_marker(d, m):
+    write(d, MARKER, (json.dumps(m, sort_keys=True) + "\n").encode())
+
+
+def set_ini(d, name, want):
+    """Sets want's {section: {key: value}} in the ini file name, keeping every
+    other line (as the App command's video.ini edit does)."""
+    lines = (read(d, name) or b"").decode("utf-8-sig", errors="surrogateescape").splitlines()
+    out, section, done = [], None, set()
+
+    def finish(sec):
+        for k, v in want.get(sec, {}).items():
+            if (sec, k) not in done:
+                out.append(f"{k}={v}")
+                done.add((sec, k))
+
+    for line in lines:
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            finish(section)
+            section = s[1:-1].strip().upper()
+        elif "=" in s and section in want:
+            k = s.split("=", 1)[0].strip().upper()
+            if k in want[section]:
+                if (section, k) in done:
+                    continue
+                line = f"{k}={want[section][k]}"
+                done.add((section, k))
+        out.append(line)
+    finish(section)
+    for sec in want:
+        if any((sec, k) not in done for k in want[sec]):
+            out.append(f"[{sec}]")
+            finish(sec)
+    write(d, name, ("\r\n".join(out) + "\r\n").encode("utf-8", errors="surrogateescape"))
+
+
+def run(argv, env, timeout):
+    log("running " + " ".join(os.path.basename(a) if i == 0 else a for i, a in enumerate(argv)))
+    r = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, timeout=timeout, check=False)
+    if r.returncode != 0:
+        raise Refused(f"{os.path.basename(argv[0])} exited {r.returncode}")
+
+
+def acf_value(text, key):
+    m = re.search(r'"' + re.escape(key) + r'"\s+"([^"]*)"', text)
+    return m.group(1) if m else None
+
+
+def check_proton_pin(steam):
+    """Warns, never fails: the pin is Steam's (Properties > Compatibility)."""
+    try:
+        cfg = opendir(steam, "config")
+    except (Refused, FileNotFoundError):
+        cfg = None
+    text = "" if cfg is None else (read(cfg, "config.vdf") or b"").decode("utf-8", "replace")
+    if cfg is not None:
+        os.close(cfg)
+    # Its entries are flat {key value} blocks: skip the other apps' to ours.
+    entry = re.search(r'"CompatToolMapping"\s*\{\s*(?:"[^"]*"\s*\{[^{}]*\}\s*)*?"' + APPID + r'"\s*\{([^{}]*)\}', text)
+    name = acf_value(entry.group(1), "name") if entry else None
+    if name != PROTON_TOOL:
+        log(f"warning: Steam runs Assetto Corsa with {name or 'its default tool'}, not {PROTON_TOOL}; "
+            "the VR setup was verified on Proton 9.0 (Properties > Compatibility)")
+
+
+def proton_dir(apps, apps_path):
+    acf = read(apps, f"appmanifest_{PROTON_APPID}.acf")
+    installdir = acf_value(acf.decode("utf-8", "replace"), "installdir") if acf else None
+    if not installdir or "/" in installdir or installdir in (".", ".."):
+        raise Refused(f"Proton 9.0 is not installed in Steam's library ({apps_path}); install it in Steam")
+    tool = f"{apps_path}/common/{installdir}"
+    for sub, names in (("", ("proton",)), ("files/bin", ("wine", "wineserver"))):
+        d = opendir(apps, f"common/{installdir}/{sub}")
+        try:
+            for n in names:
+                if kind(d, n) != stat.S_IFREG:
+                    raise Refused(f"{tool}/{sub and sub + '/'}{n} is not a file")
+        finally:
+            os.close(d)
+    return tool
+
+
+def prepare_prefix(apps, apps_path, compat, steam_path):
+    """Makes the prefix if missing, then winetricks and the fonts."""
+    compat_path = f"{apps_path}/compatdata/{APPID}"
+    tool = proton_dir(apps, apps_path)
+    env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY", "WINEDLLOVERRIDES")}
+    env.update({
+        "HOME": HOME,
+        "WINEDEBUG": "-all",
+        "STEAM_COMPAT_DATA_PATH": compat_path,
+        "STEAM_COMPAT_CLIENT_INSTALL_PATH": steam_path,
+        "SteamAppId": APPID,
+        "SteamGameId": APPID,
+        "STEAM_COMPAT_APP_ID": APPID,
+    })
+    wineserver = f"{tool}/files/bin/wineserver"
+    if not has_prefix(compat):
+        log(f"making Assetto Corsa's Proton prefix ({compat_path})")
+        # Steam's own prefix setup without steam.exe: every proton verb but
+        # runinprefix builds the prefix first, and getcompatpath then only
+        # runs winepath.
+        run([f"{tool}/proton", "getcompatpath", "/"], env, 600)
+        run([wineserver, "-w"], env | {"WINEPREFIX": f"{compat_path}/pfx"}, 600)
+        if not has_prefix(compat):
+            raise Refused(f"Proton made no prefix in {compat_path}")
+    wine_env = env | {
+        "WINEPREFIX": f"{compat_path}/pfx",
+        "WINE": f"{tool}/files/bin/wine",
+        "WINESERVER": wineserver,
+        "WINETRICKS_LATEST_VERSION_CHECK": "disabled",
+        # As Proton's own init_wine sets them for its wine.
+        "LD_LIBRARY_PATH": ":".join(p for p in (f"{tool}/files/lib64", f"{tool}/files/lib", os.environ.get("LD_LIBRARY_PATH")) if p),
+        "WINEDLLPATH": f"{tool}/files/lib64/wine:{tool}/files/lib/wine",
+    }
+    with tempfile.TemporaryDirectory(prefix="ac-setup-") as cache:
+        # Its download cache stays out of the shared home.
+        wine_env["XDG_CACHE_HOME"] = cache
+        run([f"{HERE}/winetricks", "--unattended", "corefonts", "d3dcompiler_47"], wine_env, 1800)
+    fonts = opendir(compat, "pfx/drive_c/windows/Fonts", create=True)
+    try:
+        src = os.open(f"{HERE}/fonts", DIR_FLAGS)
+        try:
+            for name, selawik in SEGOE.items():
+                b = read(src, selawik)
+                if b is None:
+                    raise Refused(f"the image has no {HERE}/fonts/{selawik}")
+                write(fonts, name, b)
+        finally:
+            os.close(src)
+    finally:
+        os.close(fonts)
+    # Code asking for the family by name gets Selawik too.
+    run([wine_env["WINE"], "reg", "add", r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes",
+         "/v", "Segoe UI", "/d", "Selawik", "/f"], wine_env, 300)
+    run([wineserver, "-w"], wine_env, 600)
+
+
+def has_prefix(compat):
+    """A prefix Proton made: it writes compatdata's version file once the
+    prefix is copied and registered, so one killed before that is made again
+    (Steam's next launch finishes the rest)."""
+    if kind(compat, "version") != stat.S_IFREG:
+        return False
+    try:
+        pfx = opendir(compat, "pfx")
+    except (Refused, FileNotFoundError):
+        return False
+    try:
+        return kind(pfx, "system.reg") == stat.S_IFREG
+    finally:
+        os.close(pfx)
+
+
+def flat_cfg(compat):
+    """The flat config: Documents/Assetto Corsa, or its .flat copy once the App
+    command has made that folder a link to the per-User one."""
+    docs = opendir(compat, "pfx/drive_c/users/steamuser/Documents", create=True)
+    try:
+        name = "Assetto Corsa.flat" if kind(docs, "Assetto Corsa") == stat.S_IFLNK else "Assetto Corsa"
+        cfg = opendir(docs, f"{name}/cfg", create=True)
+        try:
+            set_ini(cfg, "video.ini", {"VIDEO": {"FULLSCREEN": "1"}})
+            set_ini(cfg, "controls.ini", {"HEADER": {"INPUT_METHOD": "X360"}})
+        finally:
+            os.close(cfg)
+    finally:
+        os.close(docs)
+
+
+def swap_exe(game, marker):
+    """AssettoCorsa.exe = acs.exe, the launcher kept beside it."""
+    acs = read(game, "acs.exe")
+    if acs is None:
+        raise Refused("the game folder has no acs.exe")
+    want = hashlib.sha256(acs).hexdigest()
+    have = sha256(game, "AssettoCorsa.exe")
+    if have == want:
+        # Swapped already (by hand, or before an acs.exe update): recorded,
+        # so this copy is never taken for Steam's launcher later.
+        if marker.get("exe") == want:
+            return False
+        marker["exe"] = want
+        return True
+    k = kind(game, "AssettoCorsa.exe")
+    if k == stat.S_IFREG and have != marker.get("exe"):
+        # Steam's launcher (an update or verify put it back), not an older
+        # acs.exe copied here: keep the newest one.
+        log("keeping Steam's AssettoCorsa.exe as AssettoCorsa_original.exe")
+        os.replace("AssettoCorsa.exe", "AssettoCorsa_original.exe", src_dir_fd=game, dst_dir_fd=game)
+    elif k not in (None, stat.S_IFREG, stat.S_IFLNK):
+        raise Refused("AssettoCorsa.exe is neither a file nor a link")
+    log("copying acs.exe over AssettoCorsa.exe")
+    write(game, "AssettoCorsa.exe", acs, 0o755)
+    marker["exe"] = want
+    return True
+
+
+def csp_pin(version):
+    with open(f"{HERE}/ac-csp-versions.json", encoding="utf-8") as f:
+        pins = json.load(f)
+    pin = pins.get(version)
+    if not isinstance(pin, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(pin.get("sha256"))):
+        raise Refused(f"DIREWOLF_AC_CSP={version!r} is not a CSP version this image pins ({', '.join(sorted(pins))})")
+    return pin
+
+
+def csp_member(name):
+    """A zip entry's path, if it is one CSP's archive may hold: dwrite.dll or
+    something in extension/."""
+    parts = name.split("/")
+    if "\\" in name or name.startswith("/") or any(p in ("", ".", "..") for p in parts[:-1]) or parts[-1] in (".", ".."):
+        return None
+    if parts == ["dwrite.dll"] or (parts[0] == "extension" and len(parts) > 1):
+        return parts
+    return None
+
+
+def install_csp(game, version, pin):
+    with tempfile.TemporaryDirectory(prefix="ac-setup-") as tmp:
+        path = os.path.join(tmp, "csp.zip")
+        log(f"downloading CSP {version}")
+        # curl, not urllib: acstuff.club refuses Python's client (403).
+        run(["curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "900",
+             "-o", path, pin["url"]], dict(os.environ), 960)
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
+        if h.hexdigest() != pin["sha256"]:
+            raise Refused(f"CSP {version}'s download has sha256 {h.hexdigest()}, not the pinned {pin['sha256']}")
+        with zipfile.ZipFile(path) as z:
+            infos = z.infolist()
+            bad = [i.filename for i in infos if csp_member(i.filename) is None
+                   or stat.S_ISLNK(i.external_attr >> 16)]
+            if bad or not any(i.filename == "dwrite.dll" for i in infos):
+                raise Refused(f"CSP {version}'s archive is not dwrite.dll and extension/ ({bad[:3]})")
+            log(f"installing CSP {version} into the game folder")
+            # dwrite.dll last: until then the game runs without CSP, not with
+            # half of it.
+            for i in sorted(infos, key=lambda i: i.filename == "dwrite.dll"):
+                parts = csp_member(i.filename)
+                if i.is_dir():
+                    os.close(opendir(game, "/".join(parts), create=True))
+                    continue
+                d = opendir(game, "/".join(parts[:-1]), create=True)
+                try:
+                    if kind(d, parts[-1]) == stat.S_IFDIR:
+                        raise Refused(f"{i.filename} is a folder in the game folder")
+                    with z.open(i) as src:
+                        write(d, parts[-1], iter(lambda: src.read(1 << 20), b""))
+                finally:
+                    os.close(d)
+
+
+def refuse_root():
+    """Wine refuses a prefix it doesn't own, and root's files in the shared
+    home break the Library: run as PUID. Root is fine only where its user
+    namespace maps one id (a test's unshare -r)."""
+    if os.geteuid() != 0:
+        return
+    uid_map = os.environ.get("DIREWOLF_AC_UID_MAP")
+    if uid_map is None:
+        with open("/proc/self/uid_map", encoding="ascii") as f:
+            uid_map = f.read()
+    rows = [r.split() for r in uid_map.strip().splitlines()]
+    if len(rows) != 1 or len(rows[0]) != 3 or rows[0][2] != "1":
+        raise Refused("run as PUID, not root")
+
+
+def main():
+    refuse_root()
+    version = os.environ.get("DIREWOLF_AC_CSP", "")
+    pin = csp_pin(version) if version else None
+    home = os.open(HOME, DIR_FLAGS)
+    steam = opendir(home, STEAM)
+    apps = opendir(steam, "steamapps")
+    apps_path = f"{HOME}/{STEAM}/steamapps"
+    if kind(apps, f"appmanifest_{APPID}.acf") != stat.S_IFREG:
+        raise Refused(f"Assetto Corsa is not installed in Steam's library ({apps_path})")
+    game = opendir(apps, "common/assettocorsa")
+    compat = opendir(apps, f"compatdata/{APPID}", create=True)
+    # Two VR launches at once must not both run winetricks in one prefix.
+    lock = os.open("direwolf-ac-setup.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=compat)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log("waiting for another session's ac-setup to finish")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+
+    check_proton_pin(steam)
+    pm = load_marker(compat)
+    if pm.get("prefix") != PREFIX_REV or not has_prefix(compat):
+        prepare_prefix(apps, apps_path, compat, f"{HOME}/{STEAM}")
+        pm = {"prefix": PREFIX_REV}
+        save_marker(compat, pm)
+    if pm.get("flat-cfg") != FLAT_CFG_REV:
+        log("setting the flat config: FULLSCREEN=1, INPUT_METHOD=X360")
+        flat_cfg(compat)
+        pm["flat-cfg"] = FLAT_CFG_REV
+        save_marker(compat, pm)
+
+    gm = load_marker(game)
+    if swap_exe(game, gm):
+        save_marker(game, gm)
+    if pin is None:
+        log("DIREWOLF_AC_CSP is unset: CSP left as it is")
+    elif gm.get("csp") != version or kind(game, "dwrite.dll") != stat.S_IFREG or kind(game, "extension") != stat.S_IFDIR:
+        install_csp(game, version, pin)
+        gm["csp"] = version
+        save_marker(game, gm)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (Refused, OSError, subprocess.TimeoutExpired, ValueError, zipfile.BadZipFile) as e:
+        log(f"{e}; ending the session")
+        sys.exit(1)

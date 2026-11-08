@@ -296,6 +296,20 @@ RUN set -eu; \
   chmod -R u=rwX,go=rX "/tmp/xrizer/xrizer-${XRIZER_VERSION}"; \
   mkdir -p /out/opt; mv "/tmp/xrizer/xrizer-${XRIZER_VERSION}" /out/opt/xrizer
 
+# Selawik (OFL), Assetto Corsa's segoeui*.ttf stand-in (vr/ac-setup), from
+# its release zip, checked against its SHA256 (update both together).
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS vr-fonts
+ARG SELAWIK_VERSION=1.01
+ARG SELAWIK_SHA256=3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423
+ADD --checksum=sha256:${SELAWIK_SHA256} \
+  https://github.com/microsoft/Selawik/releases/download/${SELAWIK_VERSION}/Selawik_Release.zip /tmp/selawik.zip
+RUN set -eu; \
+  apt-get update; apt-get install -y --no-install-recommends unzip; \
+  mkdir -p /out/opt/direwolf/vr/fonts; \
+  unzip -q -j /tmp/selawik.zip 'selawk*.ttf' -d /out/opt/direwolf/vr/fonts; \
+  test "$(ls /out/opt/direwolf/vr/fonts | wc -l)" = 5; \
+  chmod 0644 /out/opt/direwolf/vr/fonts/*
+
 FROM steam AS vr
 # PipeWire, its pulse server and WirePlumber run per session (vr-services):
 # WiVRn 26.9 segfaults on every headset connect without PipeWire's config and
@@ -307,11 +321,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libavahi-client3 libavahi-glib1 libavfilter10 libswscale8 libbsd0 libcap2 libcjson1 \
       libnotify4 libpipewire-0.3-0t64 libsystemd0 libudev1 libva2 libvulkan1 libx264-164 \
       libxxf86vm1 libusb-1.0-0 librsvg2-2 libarchive13t64 libpng16-16t64 \
-      libopengl0 \
+      libopengl0 cabextract \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=vr-wivrn /out/ /
 COPY --from=vr-opencomposite /out/ /
 COPY --from=vr-xrizer /out/ /
+COPY --from=vr-fonts /out/ /
+# Assetto Corsa's setup (vr/ac-setup, XERK-2726): winetricks at a release,
+# checked against its SHA256 (update both together); cabextract is its
+# corefonts unpacker.
+ARG WINETRICKS_VERSION=20260125
+ARG WINETRICKS_SHA256=431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b
+ADD --chmod=755 --checksum=sha256:${WINETRICKS_SHA256} \
+  https://raw.githubusercontent.com/Winetricks/winetricks/${WINETRICKS_VERSION}/src/winetricks /opt/direwolf/vr/winetricks
 # AC's shared Documents link leads to this User's stateMount. Nothing of the
 # image's sits under the stateMounts root: the runtime follows links at a
 # mount point (XERK-2713).
@@ -320,8 +342,8 @@ RUN ln -sfnT /srv/direwolf/state/ac-documents /srv/direwolf/ac-documents \
 # The session starts the VR services, then Steam as before: GoW's startup-app
 # moves beside the vr scripts (startup-app.sh finds its siblings by its own
 # path) and ours takes its place.
-COPY --chmod=644 vr/dbus-session.conf vr/dbus-session-agent.conf /opt/direwolf/vr/
-COPY --chmod=755 vr/startup-app.sh vr/vr-services vr/vr-notice /opt/direwolf/vr/
+COPY --chmod=644 vr/dbus-session.conf vr/dbus-session-agent.conf vr/ac-csp-versions.json /opt/direwolf/vr/
+COPY --chmod=755 vr/startup-app.sh vr/vr-services vr/vr-notice vr/ac-setup /opt/direwolf/vr/
 # GoW's Steam startup sets WINEDLLOVERRIDES outright, so an App's own (CSP's
 # dwrite=n,b for Assetto Corsa) never reached the game: it now appends
 # DIREWOLF_WINEDLLOVERRIDES. The grep fails the build if a GoW bump moves it.
@@ -338,7 +360,7 @@ RUN ldconfig \
     ldd "$f" >/tmp/ldd || exit 1; ! grep 'not found' /tmp/ldd || { echo "$f: missing libraries" >&2; exit 1; }; \
   done && rm /tmp/ldd \
  && python3 -I -c 'import os,sys; bad=[os.path.join(d,f) for r in ("/usr/local","/opt") for d,_,fs in os.walk(r) for f in fs if not os.path.islink(os.path.join(d,f)) and "security.capability" in os.listxattr(os.path.join(d,f))]; bad and sys.exit("file capabilities on %s" % bad)' \
- && for c in pipewire pipewire-pulse wireplumber dbus-run-session ss mountpoint setsid swaymsg swaynag pkill; do \
+ && for c in pipewire pipewire-pulse wireplumber dbus-run-session ss mountpoint setsid swaymsg swaynag pkill cabextract curl; do \
     command -v "$c" >/dev/null || { echo "no $c" >&2; exit 1; }; \
   done \
  && test -d /usr/share/pipewire && test -f /usr/share/pipewire/client.conf \

@@ -27,20 +27,22 @@
 #     OOM-killed at Steam + AC start; XERK-2660).
 # One VR Session per GPU: a VR stream used ~50% of an RTX 3090's NVENC.
 #
-# Assetto Corsa itself, set up once in the shared Steam install (XERK-2660):
+# Assetto Corsa itself, in the shared Steam install:
 #   - installed in Steam's default library in the shared home, where every
 #     Steam game goes (the per-User config link below sits in its Proton
-#     prefix there), and launched flat once so the prefix exists;
+#     prefix there), with Proton 9.0 installed and AC pinned to it (Steam >
+#     Properties > Compatibility; the image warns if it isn't);
 #   - flat sessions on the steam image (it links them to the flat config):
 #     after the first VR launch, flat AC from any other image (the Library)
-#     finds no Documents folder;
-#   - pinned to Proton 9.0 (Steam > Properties > Compatibility);
-#   - AssettoCorsa.exe replaced by a copy of acs.exe: Content Manager can't run
-#     (.NET won't install under Proton, XERK-2690) and the Kunos launcher has no
-#     VR mode. A flat launch then starts acs.exe flat;
-#   - CSP 0.3.x, with winetricks corefonts and d3dcompiler_47 and a segoeui*.ttf
-#     substitute in the prefix (CSP 0.2.11 crashes in VR). This App sets the
-#     dwrite=n,b override CSP needs.
+#     finds no Documents folder.
+# The image's ac-setup does the rest before Steam starts, on every launch
+# (XERK-2726; a set-up install costs about a second): the Proton prefix,
+# winetricks corefonts and d3dcompiler_47 and a segoeui*.ttf substitute in it,
+# AssettoCorsa.exe replaced by a copy of acs.exe (Content Manager can't run
+# under Proton and the Kunos launcher has no VR mode; redone when a Steam
+# update or verify puts the launcher back), CSP at DIREWOLF_AC_CSP (CSP 0.2.11
+# crashes in VR), and the flat config's fullscreen and pad input, once. The
+# first launch takes a few minutes longer (downloads), with the mirror black.
 # Steam's first launch may ask for AC's EULA and run "Processing Vulkan
 # shaders" (10+ minutes, skippable): answer both on the Moonlight mirror.
 apiVersion: direwolf.games-on-whales.github.io/v1alpha1
@@ -152,6 +154,11 @@ spec:
         # CSP's dwrite.dll (Steam passes it to Proton with GoW's own).
         - name: DIREWOLF_WINEDLLOVERRIDES
           value: dwrite=n,b
+        # The CSP version ac-setup installs, one the image pins by sha256
+        # (images/gow-nvidia32/vr/ac-csp-versions.json). Changing it reinstalls
+        # only CSP; empty leaves the installed CSP alone.
+        - name: DIREWOLF_AC_CSP
+          value: "0.3.1"
         # The address the headset dials, shown on the mirror: the node's, as the
         # VR port is a hostPort there.
         - name: DIREWOLF_VR_HOST
@@ -199,7 +206,7 @@ spec:
           docs=$apps/compatdata/244210/pfx/drive_c/users/steamuser/Documents/Assetto\ Corsa
           state=/srv/direwolf/state
           if [ ! -f "$apps/appmanifest_244210.acf" ]; then
-            echo "assetto-corsa-vr: Assetto Corsa is not installed in Steam's library in the home ($apps); install it there and launch it flat once" >&2
+            echo "assetto-corsa-vr: Assetto Corsa is not installed in Steam's library in the home ($apps); install it there" >&2
             exit 1
           fi
           # The operator mounts the stateMounts under $state, outside every
@@ -214,6 +221,9 @@ spec:
             # point: everything below it is the User's own.
             chown -h "$PUID:$PGID" -- "$d"
           done
+          # As PUID: the prefix, the acs.exe swap, CSP and the flat config,
+          # each skipped once done (images/gow-nvidia32/vr/ac-setup).
+          gosu "$PUID:$PGID" /opt/direwolf/vr/ac-setup
           # As PUID: AC's Documents folder in the shared prefix becomes a link
           # to /srv/direwolf/ac-documents, which the vr image links to this
           # User's mount and the steam image to the flat copy, moved beside
@@ -224,7 +234,7 @@ spec:
           docs, target = sys.argv[1], sys.argv[2]
           flat = docs + ".flat"
           if not os.path.isdir(os.path.dirname(docs)):
-              sys.exit(f"assetto-corsa-vr: no {os.path.dirname(docs)}; launch Assetto Corsa flat once")
+              sys.exit(f"assetto-corsa-vr: no {os.path.dirname(docs)} in Assetto Corsa's prefix")
           if os.path.islink(docs):
               if os.readlink(docs) == target:
                   sys.exit(0)

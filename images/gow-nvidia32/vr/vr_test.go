@@ -571,6 +571,16 @@ func TestVRImageIsPinnedAndBuilt(t *testing.T) {
 		`\nARG XRIZER_SHA256=[0-9a-f]{64}\n`,
 		`ADD --checksum=sha256:\$\{XRIZER_SHA256\}`,
 		`ln -s /opt/direwolf/vr/startup-app.sh /opt/gow/startup-app.sh`,
+		// Assetto Corsa's setup (ac-setup, XERK-2726).
+		`\nARG WINETRICKS_VERSION=[0-9]{8}\n`,
+		`\nARG WINETRICKS_SHA256=[0-9a-f]{64}\n`,
+		`ADD --chmod=755 --checksum=sha256:\$\{WINETRICKS_SHA256\} \\\n  https://raw\.githubusercontent\.com/Winetricks/winetricks/\$\{WINETRICKS_VERSION\}/src/winetricks /opt/direwolf/vr/winetricks\n`,
+		`\nARG SELAWIK_SHA256=[0-9a-f]{64}\n`,
+		`ADD --checksum=sha256:\$\{SELAWIK_SHA256\}`,
+		`COPY --from=vr-fonts /out/ /\n`,
+		`libopengl0 cabextract`,
+		`vr/ac-csp-versions\.json /opt/direwolf/vr/\n`,
+		`vr/ac-setup /opt/direwolf/vr/\n`,
 	} {
 		if !regexp.MustCompile(re).MatchString(dockerfile) {
 			t.Errorf("Dockerfile lacks %s", re)
@@ -713,7 +723,7 @@ func TestVRImageAppendsAppDLLOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"COPY --chmod=755 vr/startup-app.sh vr/vr-services vr/vr-notice /opt/direwolf/vr/",
+		"COPY --chmod=755 vr/startup-app.sh vr/vr-services vr/vr-notice vr/ac-setup /opt/direwolf/vr/",
 		"grep -qx 'export WINEDLLOVERRIDES=dxgi=n' /opt/direwolf/vr/steam-startup-app.sh",
 		`export WINEDLLOVERRIDES="dxgi=n${DIREWOLF_WINEDLLOVERRIDES:+;$DIREWOLF_WINEDLLOVERRIDES}"`,
 	} {
