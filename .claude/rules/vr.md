@@ -323,6 +323,14 @@ paths:
   - The prefix is made with `proton getcompatpath /`: every verb but `runinprefix` builds the
     prefix, and this one then only runs winepath (no steam.exe, which `run` starts).
   - It refuses root (Wine refuses a prefix it doesn't own; root files break the Library).
+  - A prefix counts as made only with compatdata's `version` file, which Proton writes last.
+  - The exe marker records acs.exe's hash even when AssettoCorsa.exe already matched (a hand
+    swap): else an acs.exe update took the old copy for the launcher and dropped it (QA).
+  - Two runs serialize on `compatdata/244210/direwolf-ac-setup.lock`, the second logging that it
+    waits.
+  - A CSP bump unpacks over the old one, so files the new archive dropped stay.
+  - Do the first launch from Moonlight: a native VR Session's pod is reaped after
+    `vrUnstartedTTL` (15m) never ready, and the first setup's downloads count against it.
   - Tests: `images/gow-nvidia32/vr/ac_setup_test.go` (stub Proton, Wine, winetricks, curl),
     `TestVRExampleRunsACSetup`.
   - Recenter: Ctrl+Space from the Moonlight keyboard, on track. A pad/wheel binding is untested.

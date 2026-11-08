@@ -265,6 +265,9 @@ def prepare_prefix(apps, apps_path, compat, steam_path):
         "WINE": f"{tool}/files/bin/wine",
         "WINESERVER": wineserver,
         "WINETRICKS_LATEST_VERSION_CHECK": "disabled",
+        # As Proton's own init_wine sets them for its wine.
+        "LD_LIBRARY_PATH": ":".join(p for p in (f"{tool}/files/lib64", f"{tool}/files/lib", os.environ.get("LD_LIBRARY_PATH")) if p),
+        "WINEDLLPATH": f"{tool}/files/lib64/wine:{tool}/files/lib/wine",
     }
     with tempfile.TemporaryDirectory(prefix="ac-setup-") as cache:
         # Its download cache stays out of the shared home.
@@ -290,6 +293,10 @@ def prepare_prefix(apps, apps_path, compat, steam_path):
 
 
 def has_prefix(compat):
+    """A prefix Proton finished: it writes compatdata's version file last, so
+    one killed while making it is made again."""
+    if kind(compat, "version") != stat.S_IFREG:
+        return False
     try:
         pfx = opendir(compat, "pfx")
     except (Refused, FileNotFoundError):
@@ -324,7 +331,12 @@ def swap_exe(game, marker):
     want = hashlib.sha256(acs).hexdigest()
     have = sha256(game, "AssettoCorsa.exe")
     if have == want:
-        return False
+        # Swapped already (by hand, or before an acs.exe update): recorded,
+        # so this copy is never taken for Steam's launcher later.
+        if marker.get("exe") == want:
+            return False
+        marker["exe"] = want
+        return True
     k = kind(game, "AssettoCorsa.exe")
     if k == stat.S_IFREG and have != marker.get("exe"):
         # Steam's launcher (an update or verify put it back), not an older
@@ -425,7 +437,11 @@ def main():
     compat = opendir(apps, f"compatdata/{APPID}", create=True)
     # Two VR launches at once must not both run winetricks in one prefix.
     lock = os.open("direwolf-ac-setup.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=compat)
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log("waiting for another session's ac-setup to finish")
+        fcntl.flock(lock, fcntl.LOCK_EX)
 
     check_proton_pin(steam)
     pm = load_marker(compat)

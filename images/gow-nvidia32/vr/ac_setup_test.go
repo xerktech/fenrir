@@ -13,7 +13,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // acSetup is a shared home with Assetto Corsa and Proton 9.0 in Steam's
@@ -56,6 +58,7 @@ func newACSetup(t *testing.T) *acSetup {
 	writeExec(t, filepath.Join(proton, "proton"), `echo "proton $*" >>"$CALLS"
 mkdir -p "$STEAM_COMPAT_DATA_PATH/pfx/drive_c/users/steamuser/Documents"
 echo reg >"$STEAM_COMPAT_DATA_PATH/pfx/system.reg"
+echo 9.0-4 >"$STEAM_COMPAT_DATA_PATH/version"
 `)
 	writeExec(t, filepath.Join(proton, "files", "bin", "wine"), `echo "wine $*" >>"$CALLS"`+"\n")
 	writeExec(t, filepath.Join(proton, "files", "bin", "wineserver"), `echo "wineserver $*" >>"$CALLS"`+"\n")
@@ -154,6 +157,13 @@ func readString(t *testing.T, path string) string {
 	return string(b)
 }
 
+// madePrefix is a prefix Proton finished making, as Steam leaves it.
+func (s *acSetup) madePrefix(t *testing.T) {
+	t.Helper()
+	mustWrite(t, filepath.Join(s.compat, "pfx", "system.reg"), "reg")
+	mustWrite(t, filepath.Join(s.compat, "version"), "9.0-4\n")
+}
+
 func (s *acSetup) flatCfg(name string) string {
 	return filepath.Join(s.compat, "pfx", "drive_c", "users", "steamuser", "Documents", name, "cfg")
 }
@@ -210,7 +220,7 @@ func TestACSetupPreparesFreshInstallOnce(t *testing.T) {
 // the per-User copy, the flat config is its .flat folder.
 func TestACSetupKeepsExistingPrefixAndConfig(t *testing.T) {
 	s := newACSetup(t)
-	mustWrite(t, filepath.Join(s.compat, "pfx", "system.reg"), "reg")
+	s.madePrefix(t)
 	mustWrite(t, filepath.Join(s.flatCfg("Assetto Corsa.flat"), "video.ini"), "[VIDEO]\r\nWIDTH=1920\r\nFULLSCREEN=0\r\n[CAMERA]\r\nMODE=DEFAULT\r\n")
 	perUser := t.TempDir()
 	if err := os.Symlink(perUser, filepath.Dir(s.flatCfg("Assetto Corsa"))); err != nil {
@@ -337,7 +347,7 @@ func TestACSetupRefusesPlantedLinks(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := newACSetup(t)
 			// A prefix so that its folders can be planted before the run.
-			mustWrite(t, filepath.Join(s.compat, "pfx", "system.reg"), "reg")
+			s.madePrefix(t)
 			path := p.path(s)
 			outside := t.TempDir()
 			target := outside
@@ -447,5 +457,137 @@ func TestACCSPVersionsArePinned(t *testing.T) {
 		if !strings.HasPrefix(p.URL, "https://") || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(p.SHA256) {
 			t.Errorf("%s: %+v", v, p)
 		}
+	}
+}
+
+// The deployed install was swapped by hand (XERK-2666), so no marker names
+// its copy of acs.exe. An acs.exe update must not take that copy for Steam's
+// launcher and drop the real one (QA, XERK-2726).
+func TestACSetupKeepsLauncherOfHandSwappedInstall(t *testing.T) {
+	s := newACSetup(t)
+	mustWrite(t, filepath.Join(s.game, "AssettoCorsa.exe"), "ACS")
+	mustWrite(t, filepath.Join(s.game, "AssettoCorsa_original.exe"), "LAUNCHER")
+	s.mustRun(t)
+	mustWrite(t, filepath.Join(s.game, "acs.exe"), "ACS 2")
+	s.mustRun(t)
+	for path, want := range map[string]string{
+		filepath.Join(s.game, "AssettoCorsa.exe"):          "ACS 2",
+		filepath.Join(s.game, "AssettoCorsa_original.exe"): "LAUNCHER",
+	} {
+		if got := readString(t, path); got != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// A prefix whose making was cut short (no version file, which Proton writes
+// last) is made again.
+func TestACSetupRemakesUnfinishedPrefix(t *testing.T) {
+	s := newACSetup(t)
+	mustWrite(t, filepath.Join(s.compat, "pfx", "system.reg"), "reg")
+	s.mustRun(t)
+	if calls := s.callLog(t); !strings.Contains(calls, "proton getcompatpath /") {
+		t.Errorf("an unfinished prefix was kept:\n%s", calls)
+	}
+}
+
+// Reads never follow a link either: a planted marker claiming every step
+// done is ignored, and a link at acs.exe is no acs.exe.
+func TestACSetupReadsNoPlantedLinks(t *testing.T) {
+	s := newACSetup(t)
+	s.madePrefix(t)
+	done := filepath.Join(t.TempDir(), "done.json")
+	mustWrite(t, done, `{"prefix": 1, "flat-cfg": 1}`)
+	if err := os.Symlink(done, filepath.Join(s.compat, "direwolf-ac-setup.json")); err != nil {
+		t.Fatal(err)
+	}
+	s.mustRun(t)
+	if calls := s.callLog(t); !strings.Contains(calls, "winetricks") {
+		t.Errorf("a planted marker was read:\n%s", calls)
+	}
+	s = newACSetup(t)
+	acs := filepath.Join(t.TempDir(), "acs.exe")
+	mustWrite(t, acs, "EVIL")
+	if err := os.Remove(filepath.Join(s.game, "acs.exe")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(acs, filepath.Join(s.game, "acs.exe")); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := s.run(t); err == nil || !strings.Contains(out, "the game folder has no acs.exe") {
+		t.Errorf("err %v\n%s", err, out)
+	}
+}
+
+// A link inside CSP's archive is refused: unpacked, it would point anywhere.
+func TestACSetupRefusesLinkInCSPArchive(t *testing.T) {
+	s := newACSetup(t)
+	var buf bytes.Buffer
+	z := zip.NewWriter(&buf)
+	for name, mode := range map[string]os.FileMode{"dwrite.dll": 0o644, "extension/evil": os.ModeSymlink | 0o777} {
+		h := &zip.FileHeader{Name: name}
+		h.SetMode(mode)
+		w, err := z.CreateHeader(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte("/etc")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := z.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.bin, "csp-link.zip")
+	mustWrite(t, path, buf.String())
+	sum := sha256.Sum256(buf.Bytes())
+	s.pins["0.3.1"] = map[string]string{"url": path, "sha256": hex.EncodeToString(sum[:])}
+	b, err := json.Marshal(s.pins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(s.dir, "ac-csp-versions.json"), string(b))
+	if out, err := s.run(t); err == nil || !strings.Contains(out, "is not dwrite.dll and extension/") {
+		t.Errorf("err %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(filepath.Join(s.game, "extension", "evil")); !os.IsNotExist(err) {
+		t.Errorf("the archive's link was unpacked: %v", err)
+	}
+}
+
+// Two VR launches at once: the second waits for the first's lock, saying so,
+// before touching anything.
+func TestACSetupWaitsForAnotherRun(t *testing.T) {
+	s := newACSetup(t)
+	if err := os.MkdirAll(s.compat, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(s.compat, "direwolf-ac-setup.lock"), os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Close() }()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		out string
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := s.run(t)
+		done <- result{out, err}
+	}()
+	time.Sleep(time.Second)
+	if calls := s.callLog(t); calls != "" {
+		t.Errorf("ran beside another run:\n%s", calls)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	r := <-done
+	if r.err != nil || !strings.Contains(r.out, "waiting for another session's ac-setup") {
+		t.Errorf("err %v\n%s", r.err, r.out)
 	}
 }
