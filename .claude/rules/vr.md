@@ -301,10 +301,29 @@ paths:
   - Its command seeds that cfg from `Assetto Corsa.flat` (a second, read-only `steam-home` mount)
     once, skipping links, then forces `[VIDEO] FULLSCREEN=0`, `[CAMERA] MODE=OPENVR`.
   - Assumes AC in Steam's default library in the shared home
-    (`~/.steam/debian-installation/steamapps`), launched flat once, or the command ends the
-    session. The steam image's flat link and the example name that path: change them together
+    (`~/.steam/debian-installation/steamapps`), or the command ends the session. The steam image's flat link and the example name that path: change them together
     (`TestVRExampleACPathsAgreeWithSteamImage`).
   - The shared install keeps AssettoCorsa.exe = acs.exe (CM and the Kunos launcher can't run),
     and the Proton 9 pin; `steam -applaunch 244210` then starts acs.exe in either mode.
+- `vr/ac-setup` (XERK-2726) does the one-time setup before the entrypoint, as PUID, on every VR
+  launch: prefix (Proton 9 + winetricks + Selawik as segoeui*.ttf), flat cfg `FULLSCREEN=1` and
+  `INPUT_METHOD=X360` (once), acs.exe swap (every launch: Steam updates restore the launcher),
+  CSP at `DIREWOLF_AC_CSP` (App env, not an operator flag).
+  - Not a Library feature: it wouldn't repair a Steam update before the next Library visit, and
+    the Library image has no Proton 9 for winetricks. Flat sessions benefit after one VR launch.
+  - Markers: `compatdata/244210/direwolf-ac-setup.json` (prefix, flat cfg) and the game folder's
+    (exe, CSP), so a CSP bump reruns only CSP. Bump `PREFIX_REV`/`FLAT_CFG_REV` to rerun a step.
+  - CSP versions are pinned by sha256 in `ac-csp-versions.json`; a version not listed ends the
+    session. Downloaded on first use (redistribution unclear), with curl: acstuff.club returns
+    403 to Python's urllib.
+  - Every file it reads or writes in the shared home is reached by fd, one folder at a time with
+    `O_NOFOLLOW`; a link at a folder is refused, a link at a file is replaced by rename.
+    Proton, Wine and winetricks do follow links in the prefix: as the game does, same uid and
+    container, so nothing beyond what the game can reach. Their cache stays out of the home.
+  - The prefix is made with `proton getcompatpath /`: every verb but `runinprefix` builds the
+    prefix, and this one then only runs winepath (no steam.exe, which `run` starts).
+  - It refuses root (Wine refuses a prefix it doesn't own; root files break the Library).
+  - Tests: `images/gow-nvidia32/vr/ac_setup_test.go` (stub Proton, Wine, winetricks, curl),
+    `TestVRExampleRunsACSetup`.
   - Recenter: Ctrl+Space from the Moonlight keyboard, on track. A pad/wheel binding is untested.
   - Its memory limit (24Gi) needs a User ceiling to match. Tests: `state_mounts_test.go`.
