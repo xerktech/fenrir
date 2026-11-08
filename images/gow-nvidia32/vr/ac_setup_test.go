@@ -44,7 +44,9 @@ func newACSetup(t *testing.T) *acSetup {
 	for _, f := range []string{"selawk", "selawkb", "selawkl", "selawksl", "selawksb"} {
 		mustWrite(t, filepath.Join(s.dir, "fonts", f+".ttf"), "font "+f)
 	}
-	writeExec(t, filepath.Join(s.dir, "winetricks"), `echo "winetricks $*" >>"$CALLS"`+"\n")
+	writeExec(t, filepath.Join(s.dir, "winetricks"), `echo "winetricks $*" >>"$CALLS"
+echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH WINEDLLPATH=$WINEDLLPATH" >>"$CALLS.env"
+`)
 	mustWrite(t, filepath.Join(steam, "config", "config.vdf"), vdfWithTool("proton_9"))
 	mustWrite(t, filepath.Join(s.apps, "appmanifest_244210.acf"), "\"AppState\"\n{\n\t\"appid\"\t\t\"244210\"\n}\n")
 	mustWrite(t, filepath.Join(s.apps, "appmanifest_2805730.acf"),
@@ -184,6 +186,11 @@ func TestACSetupPreparesFreshInstallOnce(t *testing.T) {
 		if !strings.Contains(calls, want) {
 			t.Errorf("no %q in calls:\n%s", want, calls)
 		}
+	}
+	// Proton's wine with the library paths Proton's own init_wine sets.
+	tool := filepath.Join(s.apps, "common", "Proton 9.0 (Beta)", "files")
+	if got, want := readString(t, s.calls+".env"), "LD_LIBRARY_PATH="+tool+"/lib64:"+tool+"/lib WINEDLLPATH="+tool+"/lib64/wine:"+tool+"/lib/wine\n"; got != want {
+		t.Errorf("winetricks env = %q, want %q", got, want)
 	}
 	fonts := filepath.Join(s.compat, "pfx", "drive_c", "windows", "Fonts")
 	for name, selawik := range map[string]string{"segoeui.ttf": "selawk", "segoeuib.ttf": "selawkb", "seguisb.ttf": "selawksb"} {

@@ -293,8 +293,9 @@ def prepare_prefix(apps, apps_path, compat, steam_path):
 
 
 def has_prefix(compat):
-    """A prefix Proton finished: it writes compatdata's version file last, so
-    one killed while making it is made again."""
+    """A prefix Proton made: it writes compatdata's version file once the
+    prefix is copied and registered, so one killed before that is made again
+    (Steam's next launch finishes the rest)."""
     if kind(compat, "version") != stat.S_IFREG:
         return False
     try:

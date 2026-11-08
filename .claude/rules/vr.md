@@ -323,7 +323,8 @@ paths:
   - The prefix is made with `proton getcompatpath /`: every verb but `runinprefix` builds the
     prefix, and this one then only runs winepath (no steam.exe, which `run` starts).
   - It refuses root (Wine refuses a prefix it doesn't own; root files break the Library).
-  - A prefix counts as made only with compatdata's `version` file, which Proton writes last.
+  - A prefix counts as made only with compatdata's `version` file, which Proton writes once the
+    prefix is copied and registered (Steam's next launch finishes the rest).
   - The exe marker records acs.exe's hash even when AssettoCorsa.exe already matched (a hand
     swap): else an acs.exe update took the old copy for the launcher and dropped it (QA).
   - Two runs serialize on `compatdata/244210/direwolf-ac-setup.lock`, the second logging that it
