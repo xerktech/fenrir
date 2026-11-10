@@ -57,8 +57,8 @@ while IFS= read -r line || [[ -n $line ]]; do
     fi
     ;;
   *)
-    # WiVRn prints the PIN again in "Cannot enable pairing while session is
-    # active.<PIN>" (main.cpp, on_handle_enable_pairing).
+    # Older WiVRn printed the PIN again in "Cannot enable pairing while
+    # session is active.<PIN>"; masking any echo of it stays as a guard.
     [[ -z $pin ]] || line=${line//"$pin"/"(PIN)"}
     printf '%s\n' "$line" >&2
     ;;
