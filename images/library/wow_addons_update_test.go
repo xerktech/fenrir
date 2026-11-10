@@ -729,6 +729,25 @@ func TestWoWAddonsInstallsForeverFiles(t *testing.T) {
 		t.Errorf("retail = %q, forever = %q; want retail updated and Forever kept", toc(p.retail), toc(foreverAddOns))
 	}
 
+	// A refused Forever file leaves retail's update alone, whether the API
+	// refuses it or its download fails (Forever's group goes first).
+	for _, refuse := range []string{`"isAvailable":true`, `"fileLength":`} {
+		index(9004100, 9004090)
+		files(map[int][2]string{9004100: {"Bag-4.zip", "retail 4"}, 9004090: {"Bag-4f.zip", "forever 4"}})
+		f := filepath.Join(p.dir, "cf-file.9004090")
+		bad := map[string]string{`"isAvailable":true`: `"isAvailable":false`, `"fileLength":`: `"fileLength":1,"was":`}[refuse]
+		p.write(f, strings.Replace(p.read(f), refuse, bad, 1))
+		if _, out := p.run(new(list), key); !strings.Contains(out, "cannot update Baganator for forever") {
+			t.Errorf("%s: want the Forever file refused, output:\n%s", refuse, out)
+		}
+		if toc(p.retail) != "retail 4" || toc(foreverAddOns) != "both 2" {
+			t.Errorf("%s: retail = %q, forever = %q; want retail updated and Forever kept", refuse, toc(p.retail), toc(foreverAddOns))
+		}
+		index(9003000, 0)
+		files(map[int][2]string{9003000: {"Bag-3.zip", "retail 3"}})
+		p.run(new(list), key)
+	}
+
 	// Dropping forever from the list uninstalls it there only.
 	p.run(new(cfList), key)
 	if p.exists(filepath.Join(foreverAddOns, "Baganator")) || toc(p.retail) != "retail 3" {

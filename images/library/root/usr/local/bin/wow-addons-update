@@ -122,9 +122,15 @@ def valid_source(src):
     return False
 
 
+# What a failed lookup or download may raise; it keeps what is installed.
+FETCH_ERRORS = (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError,
+                AttributeError, RecursionError, Refused)
+
+
 def source_assets(source, flavors):
     """Maps each of flavors to what to install there: (version, url, size or
-    None, digest). A flavor without a release is left out, and logged."""
+    None, digest), or the exception refusing that flavor's file. A flavor
+    without a release is left out."""
     if source["type"] == "curseforge":
         return curseforge_assets(source, flavors)
     if source["type"] == "url":
@@ -194,7 +200,11 @@ def curseforge_assets(source, flavors):
             continue
         file_id = max(ids)
         if file_id not in files:
-            files[file_id] = curseforge_file(project, file_id, key)
+            try:
+                files[file_id] = curseforge_file(project, file_id, key)
+            except FETCH_ERRORS as e:
+                # Refuses this file only: another flavor's may be fine.
+                files[file_id] = e
         assets[flavor] = files[file_id]
     return assets
 
@@ -470,8 +480,7 @@ def main():
                 continue
             try:
                 assets = source_assets(a["source"], sorted(targets))
-            except (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError,
-                    AttributeError, RecursionError, Refused) as e:
+            except FETCH_ERRORS as e:
                 log(f"cannot update {name}: {e}; keeping what is installed")
                 continue
             for f in sorted(targets.keys() - assets.keys()):
@@ -479,7 +488,9 @@ def main():
             # Flavors sharing a file share one download.
             stale = {}
             for f, asset in sorted(assets.items()):
-                if targets[f].current(name, asset[3]):
+                if isinstance(asset, Exception):
+                    log(f"cannot update {name} for {f}: {asset}; keeping what is installed")
+                elif targets[f].current(name, asset[3]):
                     log(f"{name} {asset[0]} is up to date for {f}")
                 else:
                     stale.setdefault(asset, []).append(targets[f])
@@ -488,7 +499,8 @@ def main():
                 try:
                     download(url, size, sha, archive)
                 except (subprocess.CalledProcessError, OSError, ValueError, Refused) as e:
-                    log(f"cannot update {name}: {e}; keeping what is installed")
+                    where = ", ".join(sorted(f for f, fl in targets.items() if fl in fls))
+                    log(f"cannot update {name} for {where}: {e}; keeping what is installed")
                     continue
                 for fl in fls:
                     try:
