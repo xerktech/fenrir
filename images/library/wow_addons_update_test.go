@@ -27,7 +27,8 @@ const consolePortList = `[{"name":"ConsolePort","source":{"type":"github","repo"
 // wowCurlStub serves $FAKE_RELEASE as every repo's latest release,
 // $FAKE_CF_MOD and $FAKE_CF_FILE as CurseForge's API (logging each call with
 // its argv, its stdin to $CF_STDIN) and $FAKE_ASSET for every download,
-// logging each download. FAKE_OFFLINE fails them all.
+// logging each download; $FAKE_CF_FILE.<file id> and $FAKE_ASSET.<file name>,
+// if present, answer for that file instead. FAKE_OFFLINE fails them all.
 // Like real curl, a download fails without a numeric --max-filesize; it also
 // fails unless held to https through redirects with URL globbing off.
 const wowCurlStub = `[ -n "$FAKE_OFFLINE" ] && exit 6
@@ -36,14 +37,16 @@ for a; do [ "$prev" = -o ] && out=$a; [ "$prev" = --max-filesize ] && max=$a
   [ "$a" = --globoff ] && globoff=1; prev=$a; done
 case $a in https://api.curseforge.com/*)
   echo "api $*" >>"$LOG"; cat >"$CF_STDIN"
-  case $a in */files/*) exec cat "$FAKE_CF_FILE";; *) exec cat "$FAKE_CF_MOD";; esac
+  case $a in */files/*) [ -f "$FAKE_CF_FILE.${a##*/}" ] && exec cat "$FAKE_CF_FILE.${a##*/}"
+    exec cat "$FAKE_CF_FILE";; *) exec cat "$FAKE_CF_MOD";; esac
 esac
 [ -z "$out" ] && exec cat "$FAKE_RELEASE"
 case "$max" in ''|*[!0-9]*) echo "curl: option --max-filesize: is badly used here" >&2; exit 2;; esac
 [ -n "$proto$redir$globoff" ] && [ "$proto$redir$globoff" = 111 ] || { echo "curl stub: download not held to https / globoff" >&2; exit 2; }
 echo "download $a" >>"$LOG"
-[ "$(wc -c <"$FAKE_ASSET")" -gt "$max" ] && exit 63
-cp "$FAKE_ASSET" "$out"`
+asset=$FAKE_ASSET; [ -f "$FAKE_ASSET.${a##*/}" ] && asset=$FAKE_ASSET.${a##*/}
+[ "$(wc -c <"$asset")" -gt "$max" ] && exit 63
+cp "$asset" "$out"`
 
 // wowPod is a Library pod's games volume with WoW installed, kept across runs.
 type wowPod struct {
@@ -639,6 +642,101 @@ func TestWoWAddonsRefusesOddCurseForgeAnswers(t *testing.T) {
 	}
 }
 
+// cfFile is CurseForge's answer for file id of project 914482, named name.
+func cfFile(t *testing.T, id int, name string, asset []byte) []byte {
+	t.Helper()
+	sum := sha1Sum(asset)
+	b, err := json.Marshal(map[string]any{"data": map[string]any{
+		"id": id, "modId": 914482, "isAvailable": true, "fileName": name, "fileLength": len(asset),
+		"hashes": []map[string]any{{"value": hex.EncodeToString(sum[:]), "algo": 1}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// WoW Forever gets each curseforge addon's Forever file, which may differ
+// from retail's (XERK-2771): CurseForge version type 88568, not retail's 517.
+func TestWoWAddonsInstallsForeverFiles(t *testing.T) {
+	const key = "CURSEFORGE_API_KEY=k"
+	p := newWoWPod(t)
+	forever := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(p.retail))), "_forever_")
+	p.write(filepath.Join(forever, "Wow.exe"), "forever")
+	foreverAddOns := filepath.Join(forever, "Interface", "AddOns")
+	index := func(retail, forever int) {
+		idx := []map[string]any{
+			{"fileId": retail, "gameVersionTypeId": 517, "releaseType": 1},
+			// Newer, but beta: passed over.
+			{"fileId": forever + 50, "gameVersionTypeId": 88568, "releaseType": 2},
+		}
+		if forever != 0 {
+			idx = append(idx, map[string]any{"fileId": forever, "gameVersionTypeId": 88568, "releaseType": 1})
+		}
+		b, err := json.Marshal(map[string]any{"data": map[string]any{"id": 914482, "gameId": 1, "latestFilesIndexes": idx}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.cfMod = b
+	}
+	files := func(byID map[int][2]string) {
+		for id, f := range byID {
+			zip := makeZip(t, zipEntry{name: "Baganator/Baganator.toc", body: f[1]})
+			p.write(filepath.Join(p.dir, "cf-file."+strconv.Itoa(id)), string(cfFile(t, id, f[0], zip)))
+			p.write(filepath.Join(p.dir, "asset."+f[0]), string(zip))
+		}
+	}
+	list := strings.Replace(cfList, `["retail"]`, `["retail","forever"]`, 1)
+	toc := func(addons string) string { return p.read(filepath.Join(addons, "Baganator", "Baganator.toc")) }
+
+	// Separate files: each flavor gets its own.
+	index(9001100, 9001090)
+	files(map[int][2]string{9001100: {"Bag-retail.zip", "retail 1"}, 9001090: {"Bag-forever.zip", "forever 1"}})
+	calls, _ := p.run(new(list), key)
+	if toc(p.retail) != "retail 1" || toc(foreverAddOns) != "forever 1" {
+		t.Fatalf("retail = %q, forever = %q; want each flavor's own file, calls:\n%s", toc(p.retail), toc(foreverAddOns), calls)
+	}
+	if !strings.Contains(calls, "download https://mediafilez.forgecdn.net/files/9001/90/Bag-forever.zip") {
+		t.Errorf("want the Forever file downloaded, calls:\n%s", calls)
+	}
+	// Classic is installed but not listed: left alone.
+	if p.exists(filepath.Join(p.classic, "Baganator")) {
+		t.Error("Baganator installed into classic, which is not listed")
+	}
+	// Current in both: looked up, not downloaded.
+	if calls, _ = p.run(new(list), key); strings.Contains(calls, "download") {
+		t.Errorf("current files must not be downloaded again, calls:\n%s", calls)
+	}
+
+	// One file for both: downloaded once, installed into both.
+	index(9002000, 9002000)
+	files(map[int][2]string{9002000: {"Bag-2.zip", "both 2"}})
+	calls, _ = p.run(new(list), key)
+	if toc(p.retail) != "both 2" || toc(foreverAddOns) != "both 2" {
+		t.Errorf("retail = %q, forever = %q; want the shared file in both", toc(p.retail), toc(foreverAddOns))
+	}
+	if n := strings.Count(calls, "download "); n != 1 {
+		t.Errorf("a file both flavors share was downloaded %d times, calls:\n%s", n, calls)
+	}
+
+	// No Forever release: retail still updates, Forever keeps what it has.
+	index(9003000, 0)
+	files(map[int][2]string{9003000: {"Bag-3.zip", "retail 3"}})
+	if _, out := p.run(new(list), key); !strings.Contains(out, "cannot update Baganator for forever") {
+		t.Errorf("want the missing Forever release logged, output:\n%s", out)
+	}
+	if toc(p.retail) != "retail 3" || toc(foreverAddOns) != "both 2" {
+		t.Errorf("retail = %q, forever = %q; want retail updated and Forever kept", toc(p.retail), toc(foreverAddOns))
+	}
+
+	// Dropping forever from the list uninstalls it there only.
+	p.run(new(cfList), key)
+	if p.exists(filepath.Join(foreverAddOns, "Baganator")) || toc(p.retail) != "retail 3" {
+		t.Error("want Baganator removed from Forever only")
+	}
+	p.assertHandInstalledKept()
+}
+
 func sha1Sum(b []byte) [20]byte {
 	return sha1.Sum(b) //nolint:gosec // CurseForge publishes SHA1
 }
@@ -655,6 +753,7 @@ func TestWoWAddonsKeepsAddonsWithoutValidList(t *testing.T) {
 		"other source": new(strings.Replace(consolePortList, `"github"`, `"other"`, 1)),
 		"cf and repo":  new(strings.Replace(consolePortList, `"github"`, `"curseforge"`, 1)),
 		"cf classic":   new(strings.Replace(cfList, `["retail"]`, `["retail","classic"]`, 1)),
+		"cf era":       new(strings.Replace(cfList, `["retail"]`, `["forever","classic_era"]`, 1)),
 		"cf str id":    new(strings.Replace(cfList, `914482`, `"914482"`, 1)),
 		"cf bool id":   new(strings.Replace(cfList, `914482`, `true`, 1)),
 		"cf zero id":   new(strings.Replace(cfList, `914482`, `0`, 1)),

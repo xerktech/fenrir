@@ -28,8 +28,9 @@ type WoWAddon struct {
 //     addons published only where an API key is needed to look them up
 //     (CurseForge, whose CDN file URLs never change). It moves only when the
 //     list does.
-//   - curseforge: the latest retail release of CurseForge project Project,
-//     checked against the SHA1 and size the CurseForge API publishes. The
+//   - curseforge: each listed flavor's latest release of CurseForge project
+//     Project (retail and forever only; their files may differ), checked
+//     against the SHA1 and size the CurseForge API publishes. The
 //     Library calls the API with the key in Secret wowAddonsCurseForgeSecret
 //     (XERK-2489); without it these addons keep what is installed.
 type WoWAddonSource struct {
@@ -55,7 +56,12 @@ const wowAddonCurseForge = "curseforge"
 
 // WoWAddonFlavors are the flavors an addon may list; wow-addons-update maps
 // each to its folder under World of Warcraft.
-var WoWAddonFlavors = []string{"retail", "classic", "classic_era"}
+var WoWAddonFlavors = []string{"retail", "classic", "classic_era", "forever"}
+
+// wowAddonCurseForgeFlavors are the flavors a curseforge source may list:
+// wow-addons-update maps each to its CurseForge version type. Classic flavors
+// are split over several version types there.
+var wowAddonCurseForgeFlavors = []string{"retail", "forever"}
 
 var (
 	wowAddonName  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
@@ -91,9 +97,10 @@ func ParseWoWAddons(s string) ([]WoWAddon, error) {
 			return nil, fmt.Errorf("addon %q is listed twice", a.Name)
 		case len(a.Flavors) == 0:
 			return nil, fmt.Errorf("addon %q lists no flavors", a.Name)
-		// Only retail's file is picked; another flavor may need another.
-		case a.Source.Type == wowAddonCurseForge && !slices.Equal(a.Flavors, []string{"retail"}):
-			return nil, fmt.Errorf("addon %q: a curseforge source is retail only", a.Name)
+		case a.Source.Type == wowAddonCurseForge && slices.ContainsFunc(a.Flavors, func(f string) bool {
+			return !slices.Contains(wowAddonCurseForgeFlavors, f)
+		}):
+			return nil, fmt.Errorf("addon %q: a curseforge source takes only flavors %v", a.Name, wowAddonCurseForgeFlavors)
 		}
 		if err := checkWoWAddonSource(&a.Source); err != nil {
 			return nil, fmt.Errorf("addon %q: %w", a.Name, err)
