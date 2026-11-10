@@ -49,6 +49,13 @@ func TestParseWoWAddons(t *testing.T) {
 	if got := wowAddonsEnv(addons); got != "["+bag+"]" {
 		t.Errorf("wowAddonsEnv = %s", got)
 	}
+	// WoW Forever takes managed addons too, curseforge ones included (XERK-2771).
+	for _, flavors := range []string{`["forever"]`, `["retail","forever"]`} {
+		l := "[" + strings.Replace(bag, `["retail"]`, flavors, 1) + "," + strings.Replace(consolePortAddon, `["retail"]`, flavors, 1) + "]"
+		if _, err := ParseWoWAddons(l); err != nil {
+			t.Errorf("ParseWoWAddons(%s): %v", l, err)
+		}
+	}
 	for _, empty := range []string{"", "[]"} {
 		if addons, err := ParseWoWAddons(empty); err != nil || len(addons) != 0 {
 			t.Errorf("ParseWoWAddons(%q) = %v, %v; want none", empty, addons, err)
@@ -81,6 +88,7 @@ func TestParseWoWAddonsRejects(t *testing.T) {
 		"float project":    strings.Replace(bag, `914482`, `914482.5`, 1),
 		"cf classic":       strings.Replace(bag, `["retail"]`, `["retail","classic"]`, 1),
 		"cf only classic":  strings.Replace(bag, `["retail"]`, `["classic"]`, 1),
+		"cf classic_era":   strings.Replace(bag, `["retail"]`, `["forever","classic_era"]`, 1),
 		"url repo":         strings.Replace(consolePortAddon, `seblindfors/ConsolePort`, `https://evil.example/x`, 1),
 		"dot repo":         strings.Replace(consolePortAddon, `seblindfors/ConsolePort`, `seblindfors/..`, 1),
 		"deep repo":        strings.Replace(consolePortAddon, `seblindfors/ConsolePort`, `a/b/c`, 1),

@@ -15,9 +15,10 @@ record are the user's, and are never replaced or removed.
 Sources: a GitHub repo's latest release asset, installed only if it matches
 the SHA256 GitHub publishes for it; a fixed https URL, installed only if it
 matches the SHA256 the list pins (nothing is fetched while it is current); or
-a CurseForge project's latest retail release, found with the API key in
-$CURSEFORGE_API_KEY and installed only if it matches the SHA1 and size the API
-publishes (XERK-2489). A zip is treated as hostile: absolute paths, "..", links, files
+a CurseForge project's latest release for each flavor (retail or forever,
+which may be different files), found with the API key in $CURSEFORGE_API_KEY
+and installed only if it matches the SHA1 and size the API publishes
+(XERK-2489, XERK-2771). A zip is treated as hostile: absolute paths, "..", links, files
 outside a folder, and oversized or overlong archives are refused. It is
 unpacked into a staging folder beside AddOns, then each folder is swapped in
 by rename; a failure puts the old folders back.
@@ -38,7 +39,10 @@ import tempfile
 import urllib.parse
 import zipfile
 
-FLAVORS = {"retail": "_retail_", "classic": "_classic_", "classic_era": "_classic_era_"}
+FLAVORS = {
+    "retail": "_retail_", "classic": "_classic_", "classic_era": "_classic_era_",
+    "forever": "_forever_",  # WoW Forever (XERK-2771)
+}
 MANIFEST = ".direwolf-addons.json"
 STAGING_PREFIX = ".direwolf-addons-"
 MAX_DOWNLOAD = 200 << 20
@@ -56,7 +60,9 @@ SHA1 = re.compile(r"[0-9a-f]{40}")
 CF_FILE = re.compile(r"[A-Za-z0-9_.+() -]{1,128}[.]zip")
 CF_API = "https://api.curseforge.com/v1"
 CF_WOW = 1  # CurseForge's gameId for World of Warcraft
-CF_RETAIL = 517  # its gameVersionTypeId for retail
+# Its gameVersionTypeId per flavor (GET /v1/games/1/version-types). The classic
+# flavors are left out: CurseForge splits them across several version types.
+CF_VERSION_TYPES = {"retail": 517, "forever": 88568}
 CF_RELEASE = 1  # releaseType: not beta or alpha
 # The operator's wowAddonURL: no query, credentials or curl glob characters.
 URL = re.compile(r"https://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?/[A-Za-z0-9._~%+-][A-Za-z0-9._~%/+-]{0,999}")
@@ -83,10 +89,10 @@ def parse_addons(raw):
         if not (
             isinstance(a["name"], str) and NAME.fullmatch(a["name"])
             and valid_source(a["source"])
-            # Only retail's file is picked; another flavor may need another.
-            and (a["source"]["type"] != "curseforge" or a["flavors"] == ["retail"])
             and isinstance(a["flavors"], list) and a["flavors"]
             and all(f in FLAVORS for f in a["flavors"])
+            # A curseforge file is picked by its flavor's version type.
+            and (a["source"]["type"] != "curseforge" or all(f in CF_VERSION_TYPES for f in a["flavors"]))
         ):
             raise ValueError(f"invalid entry {a!r}")
     if len({a["name"] for a in addons}) != len(addons):
@@ -116,15 +122,25 @@ def valid_source(src):
     return False
 
 
-def source_asset(source):
-    """What to install for a source: (version, url, size or None, digest)."""
+# What a failed lookup or download may raise; it keeps what is installed.
+FETCH_ERRORS = (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError,
+                AttributeError, RecursionError, Refused)
+
+
+def source_assets(source, flavors):
+    """Maps each of flavors to what to install there: (version, url, size or
+    None, digest), or the exception refusing that flavor's file. A flavor
+    without a release is left out."""
     if source["type"] == "curseforge":
-        return curseforge_asset(source)
+        return curseforge_assets(source, flavors)
     if source["type"] == "url":
         # The file name is the only version a fixed URL has.
-        return source["url"].rsplit("/", 1)[1], source["url"], None, source["sha256"]
-    tag, _, url, size, sha = latest_asset(source)
-    return tag, url, size, sha
+        asset = source["url"].rsplit("/", 1)[1], source["url"], None, source["sha256"]
+    else:
+        tag, _, url, size, sha = latest_asset(source)
+        asset = tag, url, size, sha
+    # One zip serves every flavor (multi-interface TOCs).
+    return dict.fromkeys(flavors, asset)
 
 
 def latest_asset(source):
@@ -160,9 +176,10 @@ def curseforge_get(path, key):
     return json.loads(out)["data"]
 
 
-def curseforge_asset(source):
-    """The project's latest retail release, as source_asset returns one; its
-    digest is sha1:<hex>, the hash CurseForge publishes."""
+def curseforge_assets(source, flavors):
+    """Each flavor's latest release of the project, as source_assets returns
+    them; a digest is sha1:<hex>, the hash CurseForge publishes. Flavors may
+    share a file or each have their own."""
     key = os.environ.get("CURSEFORGE_API_KEY", "")
     if not key or not key.isprintable() or len(key) > 200:
         raise Refused("CURSEFORGE_API_KEY is not set")
@@ -170,14 +187,30 @@ def curseforge_asset(source):
     mod = curseforge_get(f"/mods/{project}", key)
     if mod["id"] != project or mod["gameId"] != CF_WOW:
         raise Refused(f"CurseForge project {project} is not a WoW addon")
-    ids = [
-        f["fileId"] for f in mod["latestFilesIndexes"]
-        if isinstance(f, dict) and f.get("gameVersionTypeId") == CF_RETAIL and f.get("releaseType") == CF_RELEASE
-        and type(f.get("fileId")) is int and f["fileId"] > 0
-    ]
-    if not ids:
-        raise Refused(f"CurseForge project {project} has no retail release")
-    file_id = max(ids)
+    files = {}  # file id -> asset, each looked up once
+    assets = {}
+    for flavor in flavors:
+        ids = [
+            f["fileId"] for f in mod["latestFilesIndexes"]
+            if isinstance(f, dict) and f.get("gameVersionTypeId") == CF_VERSION_TYPES[flavor]
+            and f.get("releaseType") == CF_RELEASE and type(f.get("fileId")) is int and f["fileId"] > 0
+        ]
+        if not ids:
+            # Left out: the other flavors still update (see main).
+            continue
+        file_id = max(ids)
+        if file_id not in files:
+            try:
+                files[file_id] = curseforge_file(project, file_id, key)
+            except FETCH_ERRORS as e:
+                # Refuses this file only: another flavor's may be fine.
+                files[file_id] = e
+        assets[flavor] = files[file_id]
+    return assets
+
+
+def curseforge_file(project, file_id, key):
+    """File file_id of the project, as source_assets returns one."""
     f = curseforge_get(f"/mods/{project}/files/{file_id}", key)
     name, size = f["fileName"], f["fileLength"]
     sha1 = [h["value"] for h in f["hashes"] if isinstance(h, dict) and h.get("algo") == 1]
@@ -446,22 +479,34 @@ def main():
             if not targets:
                 continue
             try:
-                tag, url, size, sha = source_asset(a["source"])
-                stale = [fl for fl in targets.values() if not fl.current(name, sha)]
-                if not stale:
-                    log(f"{name} {tag} is up to date")
-                    continue
-                archive = os.path.join(downloads, f"{name}.zip")
-                download(url, size, sha, archive)
-            except (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError,
-                    AttributeError, RecursionError, Refused) as e:
+                assets = source_assets(a["source"], sorted(targets))
+            except FETCH_ERRORS as e:
                 log(f"cannot update {name}: {e}; keeping what is installed")
                 continue
-            for fl in stale:
+            for f in sorted(targets.keys() - assets.keys()):
+                log(f"cannot update {name} for {f}: its source has no {f} release; keeping what is installed")
+            # Flavors sharing a file share one download.
+            stale = {}
+            for f, asset in sorted(assets.items()):
+                if isinstance(asset, Exception):
+                    log(f"cannot update {name} for {f}: {asset}; keeping what is installed")
+                elif targets[f].current(name, asset[3]):
+                    log(f"{name} {asset[0]} is up to date for {f}")
+                else:
+                    stale.setdefault(asset, []).append(targets[f])
+            for (tag, url, size, sha), fls in stale.items():
+                archive = os.path.join(downloads, f"{name}.zip")
                 try:
-                    fl.install(name, archive, tag, sha)
-                except (OSError, zipfile.BadZipFile, RuntimeError, ValueError, Refused, RollbackIncomplete) as e:
-                    log(f"cannot install {name} {tag} into {fl.addons}: {e}; keeping what is installed")
+                    download(url, size, sha, archive)
+                except (subprocess.CalledProcessError, OSError, ValueError, Refused) as e:
+                    where = ", ".join(sorted(f for f, fl in targets.items() if fl in fls))
+                    log(f"cannot update {name} for {where}: {e}; keeping what is installed")
+                    continue
+                for fl in fls:
+                    try:
+                        fl.install(name, archive, tag, sha)
+                    except (OSError, zipfile.BadZipFile, RuntimeError, ValueError, Refused, RollbackIncomplete) as e:
+                        log(f"cannot install {name} {tag} into {fl.addons}: {e}; keeping what is installed")
 
 
 if __name__ == "__main__":

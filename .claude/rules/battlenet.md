@@ -121,11 +121,14 @@ paths:
     characters, in both parsers (keep `wowAddonURL` and the script's `URL` equal).
   - Each source carries only its own keys (both parsers refuse others). A Library image older
     than XERK-2486 reads a `url` entry as an invalid list and leaves every addon alone.
-- `curseforge` (XERK-2489): `project` ID; the latest `releaseType` 1 file of `gameVersionTypeId`
-  517 (retail) in `api.curseforge.com/v1/mods/<id>`'s `latestFilesIndexes`, checked against
+- `curseforge` (XERK-2489): `project` ID; per flavor, the latest `releaseType` 1 file of its
+  `gameVersionTypeId` in `api.curseforge.com/v1/mods/<id>`'s `latestFilesIndexes`, checked against
   that file's published SHA1 and size, downloaded from
   `mediafilez.forgecdn.net/files/<id/1000>/<id%1000>/<quoted name>`.
-  - Retail only: other flavors are other version types, and one zip serves all flavors per addon.
+  - Version types (`/v1/games/1/version-types`): retail 517, forever 88568 (XERK-2771). Classic
+    flavors are refused: CurseForge splits them over several types (Classic, Cata, MoP...).
+  - A flavor's file may differ from retail's (CanIMogIt, Pawn ship `-forever` zips); flavors
+    sharing a file download it once. A flavor with no release is logged; the others update.
   - Key: Secret `direwolf-curseforge` (`apiKey`, optional) → Library env `CURSEFORGE_API_KEY`,
     set only when a curseforge addon is listed, read at pod start.
   - curl reads the key header from stdin, never argv, and the API calls take no `-L`: curl
@@ -137,6 +140,9 @@ paths:
   - The manifest claims old + new folders (no SHA256) before the swap: a run killed mid-swap
     must not leave folders that look hand-installed, which would block every later update.
 - Only installed flavors are touched: `_retail_` etc. are never created (`Interface/AddOns` is).
+- Flavor `forever` is WoW Forever's `_forever_` (XERK-2771). github/url zips serve it only if
+  their TOCs list its interface (16001); check before listing one for Forever.
+  Tests: `TestWoWAddonsInstallsForeverFiles`.
 - An unreadable `--library-wow-addons` is logged, not fatal (it must not stop game sessions),
   and the Library pod gets no `WOW_ADDONS`. `null` reads as none (helm renders an empty value so).
 - ConsolePort: `seblindfors/ConsolePort`, asset `ConsolePort-<version>.zip`, one zip for every
