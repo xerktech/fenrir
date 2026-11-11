@@ -296,3 +296,35 @@ func (c *slowFirstCreate) Create(ctx context.Context, h *v1alpha1types.Headset, 
 	c.once.Do(func() { time.Sleep(300 * time.Millisecond) })
 	return c.HeadsetInterface.Create(ctx, h, opts) //nolint:wrapcheck // a pass-through
 }
+
+// TestHeadsetFingerprintMatchesWiVRn pins headsetFingerprint to the value the
+// xerktech/WiVRn Quest app shows for the same key (its
+// test_public_key_fingerprint uses this key and expects the same string): the
+// user compares the two by eye.
+func TestHeadsetFingerprintMatchesWiVRn(t *testing.T) {
+	const key = "MEIwBQYDK2VvAzkAZKjZa0UJsTolyGPneaMxuwriK/FGJCq5rxeuJ14hq3LkELZKrg1AX2vFs8HZOdljZfTR2fU6jww="
+	if got, want := headsetFingerprint(key), "9b0c 4b20 a4ef 1a4a"; got != want {
+		t.Fatalf("headsetFingerprint = %q, want %q", got, want)
+	}
+}
+
+// TestHeadsetsPageTellsUserToCompare: a waiting headset comes with the hint to
+// compare against the headset; an empty page has nothing to compare.
+func TestHeadsetsPageTellsUserToCompare(t *testing.T) {
+	const hint = "This headset's key"
+	for _, pending := range [][]v1alpha1types.PendingHeadset{
+		{{Key: "AAAA", Name: "Quest 3"}},
+		{{Key: "AAAA", Name: "Quest 3"}, {Key: "BBBB", Name: "Quest 3"}},
+	} {
+		rec := httptest.NewRecorder()
+		writeHeadsetsPage(rec, pending)
+		if body := rec.Body.String(); !strings.Contains(body, hint) {
+			t.Fatalf("page with %d waiting headsets lacks the compare hint: %s", len(pending), body)
+		}
+	}
+	rec := httptest.NewRecorder()
+	writeHeadsetsPage(rec, nil)
+	if strings.Contains(rec.Body.String(), hint) {
+		t.Fatalf("empty page shows the compare hint: %s", rec.Body.String())
+	}
+}
