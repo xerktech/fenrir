@@ -102,8 +102,10 @@ func (h *HeadsetConfirmation) anyConfirmed(ctx context.Context, user string, pen
 	return false, nil
 }
 
-// headsetFingerprint is a short digest of key, to tell entries apart. WiVRn
-// shows none on the headset to compare it with.
+// headsetFingerprint is a short digest of key, to tell entries apart. The
+// xerktech/WiVRn Quest app shows the same value for its own key ("This
+// headset's key", under the PIN keypad and on its About tab, from
+// crypto::key::public_key_fingerprint): keep the two in step.
 func headsetFingerprint(key string) string {
 	der, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
@@ -235,6 +237,9 @@ func writeHeadsetsPage(w http.ResponseWriter, pending []v1alpha1types.PendingHea
 		b.WriteString(`<p>A headset is waiting. Confirm it only if you paired it by PIN just now: the game can add a key of its own. Confirmed, it connects without a PIN next time.</p>`)
 	default:
 		b.WriteString(`<p><strong>More than one headset is waiting.</strong> A PIN pairing adds one: confirm only the one you paired just now. Any other was added by the game; leave it.</p>`)
+	}
+	if len(pending) > 0 {
+		b.WriteString(`<p>Your headset shows its fingerprint as "This headset's key", under the PIN keypad and on its About tab. Confirm only a headset whose fingerprint matches it exactly.</p>`)
 	}
 	for _, p := range pending {
 		name := p.Name
