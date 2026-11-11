@@ -123,8 +123,8 @@ This works as it does for Moonlight sessions.
   `status.pendingHeadsets` (never seeded; gone with the Session), and the page lists them
   (fingerprint, headset name, time seen) for the user to confirm, warning when more than one
   waits. The fork's Quest app shows the same fingerprint for its own key (XERK-2743), and the page
-  tells the user to confirm only an exact match. Confirming creates the Headset; the pod then records it, so revoking it ends that Session
-  too. An unconfirmed key works for that Session only. The page is `/.direwolf/headsets`
+  tells the user to confirm only an exact match. Confirming creates the Headset; the pod then
+  records it, so revoking it ends that Session too. An unconfirmed key works for that Session only. The page is `/.direwolf/headsets`
   (XERK-2740), in both modes, on a host of its own behind Authentik
   (`--headsets-proxy-secret-file`, XERK-2750): never the Library's host, whose desktop runs user
   code that can serve pages on that origin.
