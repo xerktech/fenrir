@@ -20,7 +20,13 @@ second:
   - CSP: $DIREWOLF_AC_CSP, a version ac-csp-versions.json pins by sha256, is
     downloaded and unpacked into the game folder. Unset or empty: left alone.
     Marker: common/assettocorsa/direwolf-ac-setup.json, so a version bump
-    reruns only this step.
+    reruns only this step. It lists the files the archive installed, and a
+    bump removes those the new archive no longer has (never other files in
+    extension/: Content Manager installs apps and weather there too).
+  - recenter: CSP's "Reset camera in VR" (__CM_RESET_CAMERA_VR) on the pad's
+    right-stick click, in the flat cfg and the User's VR cfg, on every launch
+    unless that section already names a pad button (the User's choice) or
+    another control holds the button. Ctrl+Space keeps working: it is fixed.
 
 The shared home is writable by every game of every User. Every file this
 script writes or reads there is reached one folder at a time, never through a
@@ -28,7 +34,7 @@ link (a planted one is refused, or replaced when it sits where a file is
 written). Proton, Wine and winetricks do follow links in the prefix, as the
 game does: they run as the same user in the same container.
 
-DIREWOLF_AC_HOME and DIREWOLF_AC_UID_MAP are for tests only.
+DIREWOLF_AC_HOME, DIREWOLF_AC_STATE and DIREWOLF_AC_UID_MAP are for tests only.
 """
 
 import errno
@@ -45,6 +51,8 @@ import zipfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 HOME = os.environ.get("DIREWOLF_AC_HOME", "/home/retro")
+# The User's AC Documents (the App's ac-documents stateMount).
+STATE = os.environ.get("DIREWOLF_AC_STATE", "/srv/direwolf/state/ac-documents")
 STEAM = ".steam/debian-installation"
 APPID = "244210"
 # Steam's Proton 9.0 (CompatToolMapping name proton_9): the version the VR
@@ -63,6 +71,10 @@ SEGOE = {
     "segoeuisl.ttf": "selawksl.ttf",
     "seguisb.ttf": "selawksb.ttf",
 }
+# CSP's VR recenter hotkey and the XInput button it gets (Content Manager's
+# XBOXBUTTON names). The right-stick click: AC's pad layout leaves it free.
+RECENTER = "__CM_RESET_CAMERA_VR"
+RECENTER_BUTTON = "RTHUMB_PRESS"
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
@@ -119,9 +131,11 @@ def read(d, name):
         if e.errno in (errno.ENOENT, errno.ELOOP):
             return None
         raise
+    # Checked before fdopen, which refuses a folder (EISDIR).
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
     with os.fdopen(fd, "rb") as f:
-        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-            return None
         return f.read()
 
 
@@ -157,10 +171,14 @@ def save_marker(d, m):
     write(d, MARKER, (json.dumps(m, sort_keys=True) + "\n").encode())
 
 
+def ini_lines(d, name):
+    return (read(d, name) or b"").decode("utf-8-sig", errors="surrogateescape").splitlines()
+
+
 def set_ini(d, name, want):
     """Sets want's {section: {key: value}} in the ini file name, keeping every
     other line (as the App command's video.ini edit does)."""
-    lines = (read(d, name) or b"").decode("utf-8-sig", errors="surrogateescape").splitlines()
+    lines = ini_lines(d, name)
     out, section, done = [], None, set()
 
     def finish(sec):
@@ -324,6 +342,67 @@ def flat_cfg(compat):
         os.close(docs)
 
 
+def bind_recenter(cfg):
+    """CSP's VR recenter on the pad, in the cfg folder fd cfg's controls.ini,
+    unless the User bound it already or another control has the button."""
+    section, taken = None, None
+    for line in ini_lines(cfg, "controls.ini"):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            section = s[1:-1].strip().upper()
+        elif "=" in s:
+            k, v = s.split("=", 1)
+            k, v = k.strip().upper(), v.split(";", 1)[0].strip().upper()
+            if k != "XBOXBUTTON":
+                continue
+            if section == RECENTER:
+                # Bound (or unbound, empty) by the User: in any copy of the
+                # section, as set_ini would drop a second copy's key.
+                return
+            if v == RECENTER_BUTTON:
+                taken = section
+    if taken is not None:
+        log(f"not binding VR recenter to {RECENTER_BUTTON}: [{taken}] has it")
+        return
+    set_ini(cfg, "controls.ini", {RECENTER: {"XBOXBUTTON": RECENTER_BUTTON}})
+
+
+def bind_recenters(compat):
+    """The flat cfg, which a new User's VR cfg is seeded from, and this User's
+    VR cfg once seeded (the App command seeds it after this script). Any
+    failure (a folder, socket, link or mode planted where a game can write)
+    is logged: a convenience isn't worth ending every launch over."""
+    def flat():
+        docs = opendir(compat, "pfx/drive_c/users/steamuser/Documents", create=True)
+        try:
+            name = "Assetto Corsa.flat" if kind(docs, "Assetto Corsa") == stat.S_IFLNK else "Assetto Corsa"
+            return opendir(docs, f"{name}/cfg", create=True)
+        finally:
+            os.close(docs)
+
+    def vr():
+        try:
+            state = os.open(STATE, DIR_FLAGS)
+        except FileNotFoundError:
+            return None
+        try:
+            return opendir(state, "cfg") if kind(state, "cfg") == stat.S_IFDIR else None
+        finally:
+            os.close(state)
+
+    for which, find in (("flat", flat), ("VR", vr)):
+        try:
+            cfg = find()
+            if cfg is None:
+                continue
+            try:
+                bind_recenter(cfg)
+            finally:
+                os.close(cfg)
+        except (OSError, Refused) as e:
+            log(f"not binding VR recenter in the {which} cfg: {e}")
+
+
 def swap_exe(game, marker):
     """AssettoCorsa.exe = acs.exe, the launcher kept beside it."""
     acs = read(game, "acs.exe")
@@ -372,7 +451,35 @@ def csp_member(name):
     return None
 
 
-def install_csp(game, version, pin):
+def remove_dropped(game, old, new):
+    """Removes the files a previous CSP installed that this one doesn't have.
+    The list comes from the marker, which any game can write: each entry must
+    be a path CSP's archive may hold, and only files or links are removed."""
+    for name in old if isinstance(old, list) else []:
+        parts = csp_member(name) if isinstance(name, str) else None
+        if parts is None or name in new:
+            continue
+        try:
+            # A NUL or lone surrogate can't name a file: skipped, never fatal,
+            # or every launch would fail before saving the new list.
+            name.encode("utf-8")
+            if "\0" in name:
+                raise ValueError
+        except (ValueError, UnicodeError):
+            continue
+        try:
+            d = opendir(game, "/".join(parts[:-1]))
+        except (Refused, FileNotFoundError):
+            continue
+        try:
+            if kind(d, parts[-1]) in (stat.S_IFREG, stat.S_IFLNK):
+                os.unlink(parts[-1], dir_fd=d)
+                log(f"removed {name}, which this CSP no longer ships")
+        finally:
+            os.close(d)
+
+
+def install_csp(game, version, pin, marker):
     with tempfile.TemporaryDirectory(prefix="ac-setup-") as tmp:
         path = os.path.join(tmp, "csp.zip")
         log(f"downloading CSP {version}")
@@ -407,6 +514,11 @@ def install_csp(game, version, pin):
                         write(d, parts[-1], iter(lambda: src.read(1 << 20), b""))
                 finally:
                     os.close(d)
+            new = sorted(i.filename for i in infos if not i.is_dir())
+            # Only after the new files are in, so a run killed before this
+            # leaves the old list to retry from.
+            remove_dropped(game, marker.get("csp-files"), set(new))
+            marker["csp-files"] = new
 
 
 def refuse_root():
@@ -452,9 +564,14 @@ def main():
         save_marker(compat, pm)
     if pm.get("flat-cfg") != FLAT_CFG_REV:
         log("setting the flat config: FULLSCREEN=1, INPUT_METHOD=X360")
-        flat_cfg(compat)
-        pm["flat-cfg"] = FLAT_CFG_REV
-        save_marker(compat, pm)
+        try:
+            flat_cfg(compat)
+            pm["flat-cfg"] = FLAT_CFG_REV
+            save_marker(compat, pm)
+        except OSError as e:
+            # As bind_recenter: retried next launch, never the session's end.
+            log(f"could not set the flat config: {e}")
+    bind_recenters(compat)
 
     gm = load_marker(game)
     if swap_exe(game, gm):
@@ -462,7 +579,7 @@ def main():
     if pin is None:
         log("DIREWOLF_AC_CSP is unset: CSP left as it is")
     elif gm.get("csp") != version or kind(game, "dwrite.dll") != stat.S_IFREG or kind(game, "extension") != stat.S_IFDIR:
-        install_csp(game, version, pin)
+        install_csp(game, version, pin, gm)
         gm["csp"] = version
         save_marker(game, gm)
 

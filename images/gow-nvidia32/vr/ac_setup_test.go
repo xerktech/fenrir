@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,12 +25,14 @@ import (
 // their arguments to calls.
 type acSetup struct {
 	dir, bin, home, apps, game, compat, calls string
-	pins                                      map[string]map[string]string
+	// state is the User's AC Documents (the ac-documents stateMount).
+	state string
+	pins  map[string]map[string]string
 }
 
 func newACSetup(t *testing.T) *acSetup {
 	t.Helper()
-	s := &acSetup{dir: t.TempDir(), bin: t.TempDir(), home: t.TempDir(), pins: map[string]map[string]string{}}
+	s := &acSetup{dir: t.TempDir(), bin: t.TempDir(), home: t.TempDir(), state: t.TempDir(), pins: map[string]map[string]string{}}
 	s.calls = filepath.Join(s.bin, "calls.log")
 	steam := filepath.Join(s.home, ".steam", "debian-installation")
 	s.apps = filepath.Join(steam, "steamapps")
@@ -124,6 +127,7 @@ func (s *acSetup) run(t *testing.T, env ...string) (string, error) {
 		"PATH=" + s.bin + ":" + os.Getenv("PATH"),
 		"CALLS=" + s.calls,
 		"DIREWOLF_AC_HOME=" + s.home,
+		"DIREWOLF_AC_STATE=" + s.state,
 		// A test run as root counts as one in its own user namespace.
 		"DIREWOLF_AC_UID_MAP=0 1000 1",
 		"DIREWOLF_AC_CSP=0.3.1",
@@ -204,7 +208,7 @@ func TestACSetupPreparesFreshInstallOnce(t *testing.T) {
 		filepath.Join(s.game, "dwrite.dll"):                           "CSP 0.3.1",
 		filepath.Join(s.game, "extension", "config", "vr_tweaks.ini"): "[A]\r\n",
 		filepath.Join(s.flatCfg("Assetto Corsa"), "video.ini"):        "[VIDEO]\r\nFULLSCREEN=1\r\n",
-		filepath.Join(s.flatCfg("Assetto Corsa"), "controls.ini"):     "[HEADER]\r\nINPUT_METHOD=X360\r\n",
+		filepath.Join(s.flatCfg("Assetto Corsa"), "controls.ini"):     "[HEADER]\r\nINPUT_METHOD=X360\r\n" + recenterIni,
 	} {
 		if got := readString(t, path); got != want {
 			t.Errorf("%s = %q, want %q", path, got, want)
@@ -596,5 +600,231 @@ func TestACSetupWaitsForAnotherRun(t *testing.T) {
 	r := <-done
 	if r.err != nil || !strings.Contains(r.out, "waiting for another session's ac-setup") {
 		t.Errorf("err %v\n%s", r.err, r.out)
+	}
+}
+
+const recenterIni = "[__CM_RESET_CAMERA_VR]\r\nXBOXBUTTON=RTHUMB_PRESS\r\n"
+
+// VR recenter goes on the pad's right-stick click in the flat cfg and in the
+// User's seeded VR cfg, every launch, keeping what the User bound and every
+// other line; a button another control holds is left alone.
+func TestACSetupBindsVRRecenterToPad(t *testing.T) {
+	s := newACSetup(t)
+	vr := filepath.Join(s.state, "cfg", "controls.ini")
+	mustWrite(t, vr, "[HEADER]\r\nINPUT_METHOD=X360\r\n[GEARUP]\r\nXBOXBUTTON=A\r\n")
+	s.mustRun(t)
+	if got, want := readString(t, vr), "[HEADER]\r\nINPUT_METHOD=X360\r\n[GEARUP]\r\nXBOXBUTTON=A\r\n"+recenterIni; got != want {
+		t.Errorf("VR controls.ini = %q, want %q", got, want)
+	}
+	// The User's own binding (or an unbound one) is theirs.
+	for _, own := range []string{"XBOXBUTTON=Y", "XBOXBUTTON="} {
+		body := "[__CM_RESET_CAMERA_VR]\r\n" + own + "\r\nJOY=0\r\n"
+		mustWrite(t, vr, body)
+		if out := s.mustRun(t); strings.Contains(out, "recenter") {
+			t.Errorf("%s: %s", own, out)
+		}
+		if got := readString(t, vr); got != body {
+			t.Errorf("%s: VR controls.ini = %q", own, got)
+		}
+	}
+	// A second copy of the section keeps the User's binding too.
+	twice := "[__CM_RESET_CAMERA_VR]\r\nJOY=0\r\n[__CM_RESET_CAMERA_VR]\r\nXBOXBUTTON=Y\r\n"
+	mustWrite(t, vr, twice)
+	s.mustRun(t)
+	if got := readString(t, vr); got != twice {
+		t.Errorf("twice: VR controls.ini = %q", got)
+	}
+	// A set-up file is not rewritten on later launches.
+	mustWrite(t, vr, recenterIni)
+	before, err := os.Stat(vr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mustRun(t)
+	if after, err := os.Stat(vr); err != nil || !os.SameFile(before, after) {
+		t.Errorf("a bound controls.ini was rewritten: %v", err)
+	}
+	taken := "[ACTION_CHANGE_CAMERA]\r\nXBOXBUTTON=rthumb_press ; camera\r\n"
+	mustWrite(t, vr, taken)
+	if out := s.mustRun(t); !strings.Contains(out, "[ACTION_CHANGE_CAMERA] has it") {
+		t.Errorf("no log of the taken button:\n%s", out)
+	}
+	if got := readString(t, vr); got != taken {
+		t.Errorf("a taken button was bound again: %q", got)
+	}
+	// No VR cfg yet (the App command seeds it after ac-setup): none is made.
+	s = newACSetup(t)
+	s.mustRun(t)
+	if _, err := os.Lstat(filepath.Join(s.state, "cfg")); !os.IsNotExist(err) {
+		t.Errorf("ac-setup made the VR cfg, so the App command won't seed it: %v", err)
+	}
+	// A link at the VR cfg folder is skipped, never written through.
+	s = newACSetup(t)
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(s.state, "cfg")); err != nil {
+		t.Fatal(err)
+	}
+	s.mustRun(t)
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Errorf("written through the link: %v", entries)
+	}
+	// A folder planted at controls.ini or at its temporary name, in the VR
+	// or the flat cfg (before its first setup too), is logged and skipped,
+	// not the end of every launch.
+	for _, plant := range []func(s *acSetup) string{
+		func(s *acSetup) string { return filepath.Join(s.state, "cfg", "controls.ini") },
+		func(s *acSetup) string { return filepath.Join(s.state, "cfg", ".controls.ini.direwolf-tmp") },
+		func(s *acSetup) string { return filepath.Join(s.flatCfg("Assetto Corsa"), "controls.ini") },
+	} {
+		s = newACSetup(t)
+		mustWrite(t, filepath.Join(plant(s), "x"), "planted")
+		for range 2 {
+			if out := s.mustRun(t); !strings.Contains(out, "Is a directory") {
+				t.Errorf("%s: no log of the planted folder:\n%s", plant(s), out)
+			}
+		}
+		// A failed flat step stays unrecorded, so the next launch retries it.
+		flat := strings.HasPrefix(plant(s), s.compat)
+		if m := readString(t, filepath.Join(s.compat, "direwolf-ac-setup.json")); strings.Contains(m, `"flat-cfg"`) == flat {
+			t.Errorf("%s: compat marker %s", plant(s), m)
+		}
+	}
+	// So is a cfg folder made unreadable or unwritable (a non-root run: root
+	// ignores modes), and a link planted at the flat cfg once it is set up.
+	t.Run("modes", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores file modes")
+		}
+		for _, mode := range []os.FileMode{0, 0o300, 0o500} {
+			ms := newACSetup(t)
+			ms.mustRun(t)
+			for _, d := range []string{filepath.Join(ms.state, "cfg"), ms.flatCfg("Assetto Corsa")} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(d, mode); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(d, 0o755) })
+			}
+			for range 2 {
+				if out := ms.mustRun(t); !strings.Contains(out, "not binding VR recenter") {
+					t.Errorf("mode %o: no log:\n%s", mode, out)
+				}
+			}
+		}
+	})
+	// The VR cfg is still bound when the flat one fails.
+	s = newACSetup(t)
+	s.mustRun(t)
+	vr = filepath.Join(s.state, "cfg", "controls.ini")
+	mustWrite(t, vr, "")
+	elsewhere = t.TempDir()
+	if err := os.RemoveAll(s.flatCfg("Assetto Corsa")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, s.flatCfg("Assetto Corsa")); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if out := s.mustRun(t); !strings.Contains(out, "not binding VR recenter in the flat cfg") {
+			t.Errorf("flat cfg link: no log:\n%s", out)
+		}
+	}
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Errorf("written through the flat cfg link: %v", entries)
+	}
+	if got := readString(t, vr); got != recenterIni {
+		t.Errorf("VR controls.ini after a flat failure = %q", got)
+	}
+	// So is a socket, which open() refuses (ENXIO) rather than reading as no
+	// file. Bound from inside the folder: a socket path has a length limit.
+	for name, cfg := range map[string]func(s *acSetup) string{
+		"VR":   func(s *acSetup) string { return filepath.Join(s.state, "cfg") },
+		"flat": func(s *acSetup) string { return s.flatCfg("Assetto Corsa") },
+	} {
+		t.Run("socket in "+name+" cfg", func(t *testing.T) {
+			s := newACSetup(t)
+			if err := os.MkdirAll(cfg(s), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// Restored when the subtest ends.
+			t.Chdir(cfg(s))
+			l, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", "controls.ini")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+			for range 2 {
+				if out := s.mustRun(t); !strings.Contains(out, "No such device or address") {
+					t.Errorf("no log of the planted socket:\n%s", out)
+				}
+			}
+		})
+	}
+}
+
+// A CSP bump removes the files the old archive installed and the new one
+// lacks, and nothing else: not files others put in extension/, nor anything a
+// planted marker names outside what a CSP archive may hold.
+func TestACSetupCSPBumpRemovesDroppedFiles(t *testing.T) {
+	s := newACSetup(t)
+	s.pin(t, "0.3.1", map[string]string{
+		"dwrite.dll": "CSP 0.3.1", "extension/config/vr_tweaks.ini": "[A]\r\n",
+		"extension/config/old.ini": "old", "extension/old/gone.lua": "gone",
+	})
+	s.mustRun(t)
+	mine := filepath.Join(s.game, "extension", "lua", "apps", "mine.lua")
+	mustWrite(t, mine, "the User's app")
+	mustWrite(t, filepath.Join(s.game, "keep.txt"), "not CSP's")
+	marker := filepath.Join(s.game, "direwolf-ac-setup.json")
+	var m map[string]any
+	if err := json.Unmarshal([]byte(readString(t, marker)), &m); err != nil {
+		t.Fatal(err)
+	}
+	// Planted: names outside CSP's, a folder, and names no file can have.
+	mustWrite(t, filepath.Join(s.game, "extension", "mine", "x"), "the User's")
+	files, ok := m["csp-files"].([]any)
+	if !ok {
+		t.Fatalf("csp-files = %v", m["csp-files"])
+	}
+	m["csp-files"] = append(files, "keep.txt", "../acs.exe", "extension/../acs.exe", 7,
+		"extension/mine", "extension/a\x00b")
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A lone surrogate, which Go's encoder would replace.
+	mustWrite(t, marker, strings.Replace(string(b), `"keep.txt"`, `"extension/\ud800","keep.txt"`, 1))
+	s.pin(t, "0.3.2", map[string]string{"dwrite.dll": "CSP 0.3.2", "extension/config/vr_tweaks.ini": "[B]\r\n"})
+	s.mustRun(t, "DIREWOLF_AC_CSP=0.3.2")
+	for _, gone := range []string{"extension/config/old.ini", "extension/old/gone.lua"} {
+		if _, err := os.Lstat(filepath.Join(s.game, gone)); !os.IsNotExist(err) {
+			t.Errorf("%s stayed: %v", gone, err)
+		}
+	}
+	for path, want := range map[string]string{
+		mine: "the User's app",
+		filepath.Join(s.game, "extension", "mine", "x"): "the User's",
+		filepath.Join(s.game, "keep.txt"):               "not CSP's",
+		filepath.Join(s.apps, "common", "acs.exe"):      "",
+		filepath.Join(s.game, "acs.exe"):                "ACS",
+		filepath.Join(s.game, "dwrite.dll"):             "CSP 0.3.2",
+	} {
+		if want == "" {
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Errorf("%s exists: %v", path, err)
+			}
+			continue
+		}
+		if got := readString(t, path); got != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+	}
+	if err := json.Unmarshal([]byte(readString(t, marker)), &m); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := m["csp-files"].([]any); !ok || len(got) != 2 {
+		t.Errorf("csp-files = %v, want the new archive's two files", m["csp-files"])
 	}
 }
