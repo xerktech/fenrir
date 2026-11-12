@@ -258,6 +258,8 @@ func (s *RESTServer) Run(ctx context.Context) error {
 			Handler:           loggingMiddleware(vr.handler()),
 			TLSConfig:         vrTLSConfig(&s.Cert),
 			ReadHeaderTimeout: 10 * time.Second,
+			// No ReadTimeout: it would cancel a held confirm's context.
+			IdleTimeout: 2 * time.Minute,
 		}
 	}
 

@@ -209,6 +209,9 @@ paths:
 - The pairing code needs the commitment step: a code over the certificates alone can be ground by
   a LAN relay. Keep the derivation equal to the Quest app's (XERK-2809);
   `TestVRPairingCodeBindsEverything` pins a vector.
+- Never lift `/pair`'s server-wide rate limit (`vrFrontDoor.draws`): each answer is a server nonce a
+  relay can test against the headset's code before confirming; unlimited, QA paired its own key
+  in under a second. Tests: `TestVRFrontDoorLimitsDraws`.
 - Launch, stop and the app list are `VRLaunch`'s, with moonlight-proxy's clients: one set of
   checks for both doors. moonlight-proxy's `/launch` and the front door share no lock, as the
   operator's VR page doesn't.

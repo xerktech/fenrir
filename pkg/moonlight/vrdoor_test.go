@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -123,6 +124,8 @@ func newVRDoorFixture(t *testing.T, users ...string) *vrDoorFixture {
 		t.Fatal(err)
 	}
 	f.door = door
+	// Tests pair many times over; TestVRFrontDoorLimitsDraws covers the limit.
+	door.draws = rate.NewLimiter(rate.Inf, 0)
 	f.server = httptest.NewUnstartedServer(door.handler())
 	f.server.TLS = vrTLSConfig(&cert)
 	f.server.StartTLS()
@@ -223,8 +226,7 @@ func (h *headset) startPairing(t *testing.T, f *vrDoorFixture) (confirm map[stri
 }
 
 // confirmAsync starts step 2 and returns its status.
-func (h *headset) confirmAsync(t *testing.T, f *vrDoorFixture, body map[string]string) <-chan int {
-	t.Helper()
+func (h *headset) confirmAsync(ctx context.Context, f *vrDoorFixture, body map[string]string) <-chan int {
 	done := make(chan int, 1)
 	go func() {
 		b, err := json.Marshal(body)
@@ -232,7 +234,7 @@ func (h *headset) confirmAsync(t *testing.T, f *vrDoorFixture, body map[string]s
 			done <- -1
 			return
 		}
-		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, f.server.URL+VRPairConfirmPath, bytes.NewReader(b))
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, f.server.URL+VRPairConfirmPath, bytes.NewReader(b))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := h.client.Do(req)
 		if err != nil {
@@ -279,7 +281,7 @@ func (f *vrDoorFixture) enterCode(user, code string) *httptest.ResponseRecorder 
 func (f *vrDoorFixture) pair(t *testing.T, h *headset, user string) {
 	t.Helper()
 	body, code := h.startPairing(t, f)
-	done := h.confirmAsync(t, f, body)
+	done := h.confirmAsync(t.Context(), f, body)
 	f.waitForCode(t)
 	if rec := f.enterCode(user, code[:4]+" "+code[4:]); rec.Code != http.StatusOK {
 		t.Fatalf("entering the code: %d %s", rec.Code, rec.Body)
@@ -418,7 +420,7 @@ func TestVRFrontDoorRefusesBadPairing(t *testing.T) {
 	// Wrong codes lock the user out after vrCodeFailures, and a right one
 	// is then refused too.
 	body, code := h.startPairing(t, f)
-	done := h.confirmAsync(t, f, body)
+	done := h.confirmAsync(t.Context(), f, body)
 	f.waitForCode(t)
 	wrong := "00000000"
 	if wrong == code {
@@ -560,5 +562,113 @@ func TestRunServesVRFrontDoorOnItsAddress(t *testing.T) {
 	srv = NewRESTServer(nil, nil, nil, nil, nil, nil, nil, RESTServerOptions{Cert: testCert(t), VRFrontDoor: VRFrontDoorOptions{Port: 4, Address: "10.1.2.3"}})
 	if err := srv.Run(t.Context()); err == nil {
 		t.Error("ran a VR front door with no pairing page")
+	}
+}
+
+// Server nonces are handed out at a bounded rate, server-wide: each is a
+// draw a relay can match against the code the headset shows.
+func TestVRFrontDoorLimitsDraws(t *testing.T) {
+	f := newVRDoorFixture(t, "alice")
+	f.door.draws = rate.NewLimiter(rate.Every(vrPairDrawEvery), vrPairDrawBurst)
+	var nonce [32]byte
+	commit := sha256.Sum256(nonce[:])
+	req := map[string]string{"publicKey": testWiVRnKey, "commitment": hex.EncodeToString(commit[:])}
+	for i := range vrPairDrawBurst {
+		if r := f.newHeadset(t).do(t, f, http.MethodPost, VRPairPath, req); r.status != http.StatusOK {
+			t.Fatalf("draw %d: %d", i, r.status)
+		}
+	}
+	// From any client: the limit is not per key or source.
+	if r := f.newHeadset(t).do(t, f, http.MethodPost, VRPairPath, req); r.status != http.StatusTooManyRequests {
+		t.Errorf("draw past the burst: %d", r.status)
+	}
+}
+
+// A key two Headsets hold, or a terminating Headset's, admits nobody.
+func TestVRFrontDoorRefusesAmbiguousOrTerminatingHeadset(t *testing.T) {
+	f := newVRDoorFixture(t, "alice", "bob")
+	h := f.newHeadset(t)
+	f.pair(t, h, "bob")
+	key := hex.EncodeToString(h.key[:])
+	other := &v1alpha1types.Headset{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: testNamespace},
+		Spec: v1alpha1types.HeadsetSpec{UserReference: v1alpha1types.UserReference{Name: "alice"}, PublicKey: testWiVRnKey, ClientKeySHA256: key}}
+	if err := f.headsets.Add(other); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.do(t, f, http.MethodGet, VRAppsPath, nil); r.status != http.StatusUnauthorized {
+		t.Errorf("key on two headsets: %d", r.status)
+	}
+	_ = f.headsets.Delete(other)
+	if r := h.do(t, f, http.MethodGet, VRAppsPath, nil); r.status != http.StatusOK {
+		t.Fatalf("one headset again: %d", r.status)
+	}
+	objs := f.headsets.List()
+	hs, ok := objs[0].(*v1alpha1types.Headset)
+	if !ok || len(objs) != 1 {
+		t.Fatalf("headsets %v", objs)
+	}
+	hs = hs.DeepCopy()
+	hs.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	_ = f.headsets.Update(hs)
+	if r := h.do(t, f, http.MethodGet, VRAppsPath, nil); r.status != http.StatusUnauthorized {
+		t.Errorf("terminating headset: %d", r.status)
+	}
+}
+
+// A nonce is revealed once: a second reveal drops the pairing.
+func TestVRFrontDoorRefusesSecondReveal(t *testing.T) {
+	f := newVRDoorFixture(t, "alice")
+	h := f.newHeadset(t)
+	body, code := h.startPairing(t, f)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	_ = h.confirmAsync(ctx, f, body)
+	f.waitForCode(t)
+	if r := h.do(t, f, http.MethodPost, VRPairConfirmPath, body); r.status != http.StatusConflict {
+		t.Errorf("second reveal: %d", r.status)
+	}
+	if rec := f.enterCode("alice", code); rec.Code != http.StatusNotFound {
+		t.Errorf("code after a second reveal: %d", rec.Code)
+	}
+}
+
+// Re-pairing a key whose Headset is still being deleted fails rather than
+// reporting a pairing that is about to vanish.
+func TestVRFrontDoorRefusesRepairOverTerminatingHeadset(t *testing.T) {
+	f := newVRDoorFixture(t, "alice")
+	h := f.newHeadset(t)
+	key := hex.EncodeToString(h.key[:])
+	ts := metav1.Now()
+	if _, err := f.client.DirewolfV1alpha1().Headsets(testNamespace).Create(t.Context(), &v1alpha1types.Headset{
+		ObjectMeta: metav1.ObjectMeta{Name: frontDoorHeadsetName("alice", key), DeletionTimestamp: &ts, Finalizers: []string{"x"}},
+		Spec:       v1alpha1types.HeadsetSpec{UserReference: v1alpha1types.UserReference{Name: "alice"}, PublicKey: testWiVRnKey, ClientKeySHA256: key},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	body, code := h.startPairing(t, f)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	_ = h.confirmAsync(ctx, f, body)
+	f.waitForCode(t)
+	if rec := f.enterCode("alice", code); rec.Code != http.StatusInternalServerError {
+		t.Errorf("re-pair over a terminating headset: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A launch whose Session the informer hasn't seen yet reports starting, and
+// a missing cover is a JSON error like every other front door reply.
+func TestVRFrontDoorLaunchReplyAndCoverErrors(t *testing.T) {
+	f := newVRDoorFixture(t, "alice")
+	h := f.newHeadset(t)
+	f.pair(t, h, "alice")
+	f.sessions.state = VRSessionInfo{State: "none"}
+	if r := h.do(t, f, http.MethodPost, VRLaunchPath, map[string]string{"app": "assetto-corsa-vr"}); r.status != http.StatusAccepted || r.str("state") != "starting" {
+		t.Errorf("launch with a lagging informer: %d %v", r.status, r.body)
+	}
+	if r := h.do(t, f, http.MethodGet, VRSessionPath, nil); r.str("state") != "none" {
+		t.Errorf("session read: %v", r.body)
+	}
+	if r := h.do(t, f, http.MethodGet, VRAppsPath+"/assetto-corsa-vr/cover", nil); r.status != http.StatusNotFound || r.str("error") == "" {
+		t.Errorf("missing cover: %d %v", r.status, r.body)
 	}
 }

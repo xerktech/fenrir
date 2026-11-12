@@ -16,10 +16,12 @@ import (
 	"mime"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -49,11 +51,14 @@ import (
 //     code, or VRPairWait passes.
 //
 // Both sides compute the code (vrPairingCode) from both TLS keys, the WiVRn
-// key and both nonces. An attacker relaying between the two must fix its own
-// server nonce before the headset reveals its nonce, and commit to its own
-// headset nonce before it sees the server's, so its two codes match by chance
-// only (1 in 10^8). Deriving the code from the certificates alone would let it
-// grind certificates until they matched.
+// key and both nonces. An attacker relaying between the two must fix the
+// server nonce it shows the headset before the headset reveals its nonce, so
+// it can't steer the headset's code. It can still draw server-side codes: each
+// POST VRPairPath hands it a new server nonce, and it knows every other input.
+// So server nonces are handed out at most one per vrPairDrawEvery, server-wide
+// (d.draws): in the minutes the user takes to type the code, a relay gets a
+// few dozen draws at 1 in 10^8 each. Deriving the code from the certificates
+// alone would let it grind certificates offline, at any rate.
 const (
 	VRPairPath        = "/vr/v1/pair"
 	VRPairConfirmPath = "/vr/v1/pair/confirm"
@@ -68,6 +73,11 @@ const (
 	// vrMaxPending bounds pairings in progress: pairing needs no
 	// credentials, so anyone reaching the port can start one.
 	vrMaxPending = 16
+	// vrPairDrawEvery and vrPairDrawBurst bound how fast server nonces are
+	// handed out, server-wide (see above). A user re-trying a pairing waits a
+	// few seconds at most.
+	vrPairDrawEvery = 5 * time.Second
+	vrPairDrawBurst = 3
 	// vrCodeFailures wrong codes per vrCodeFailureWindow lock a User out of
 	// entering more, so an account can't guess another's waiting code.
 	vrCodeFailures      = 5
@@ -132,6 +142,9 @@ type vrFrontDoor struct {
 	// SubjectPublicKeyInfo, as the headset sees it.
 	serverKey [32]byte
 
+	// draws bounds server nonces handed out (vrPairDrawEvery).
+	draws *rate.Limiter
+
 	mu       sync.Mutex
 	pending  map[string]*vrPendingPair
 	failures map[string][]time.Time
@@ -165,6 +178,7 @@ func newVRFrontDoor(opts *VRFrontDoorOptions, users generic.NamespacedLister[*v1
 	return &vrFrontDoor{
 		opts: *opts, users: users, serverKey: sha256.Sum256(leaf.RawSubjectPublicKeyInfo),
 		pending: map[string]*vrPendingPair{}, failures: map[string][]time.Time{},
+		draws: rate.NewLimiter(rate.Every(vrPairDrawEvery), vrPairDrawBurst),
 	}, nil
 }
 
@@ -318,7 +332,7 @@ func (d *vrFrontDoor) vrAppFor(user *v1alpha1types.User, name string) *v1alpha1t
 func (d *vrFrontDoor) cover(w http.ResponseWriter, r *http.Request) {
 	app := d.vrAppFor(vrUser(r), r.PathValue("app"))
 	if app == nil || len(app.Spec.AppAssetWebP) == 0 {
-		writeAssetError(w, http.StatusNotFound, errors.New("no such VR app cover"))
+		writeVRError(w, http.StatusNotFound, "no such VR app cover")
 		return
 	}
 	writeBoxArt(w, app)
@@ -342,8 +356,11 @@ func (d *vrFrontDoor) launch(w http.ResponseWriter, r *http.Request) {
 		writeVRError(w, http.StatusConflict, refusal)
 		return
 	}
-	d.writeSession(w, r, http.StatusAccepted)
+	d.writeSession(w, r.WithContext(context.WithValue(r.Context(), vrLaunchedKey{}, true)), http.StatusAccepted)
 }
+
+// vrLaunchedKey marks a request whose launch just succeeded.
+type vrLaunchedKey struct{}
 
 func (d *vrFrontDoor) session(w http.ResponseWriter, r *http.Request) {
 	d.writeSession(w, r, http.StatusOK)
@@ -356,6 +373,11 @@ func (d *vrFrontDoor) writeSession(w http.ResponseWriter, r *http.Request, statu
 		klog.Errorf("VR front door: user %s: %v", user.Name, err)
 		writeVRError(w, http.StatusInternalServerError, "Try again in a minute.")
 		return
+	}
+	// The state is read from the informer, which may not have seen the
+	// Session the launch just created.
+	if launched, _ := r.Context().Value(vrLaunchedKey{}).(bool); launched && st.State == "none" {
+		st = VRSessionInfo{State: "starting", Message: st.Message}
 	}
 	writeVRJSON(w, status, st)
 }
@@ -418,6 +440,13 @@ func (d *vrFrontDoor) pair(w http.ResponseWriter, r *http.Request) {
 			klog.Errorf("VR front door: %v", err)
 		}
 		writeVRError(w, http.StatusConflict, "this headset is already paired")
+		return
+	}
+	// Each answer is a draw a relay could match against the code the headset
+	// shows (see the top of this file): never more than vrPairDrawEvery.
+	if !d.draws.Allow() {
+		w.Header().Set("Retry-After", strconv.Itoa(int(vrPairDrawEvery/time.Second)))
+		writeVRError(w, http.StatusTooManyRequests, "pairing is busy; try again in a few seconds")
 		return
 	}
 	p := &vrPendingPair{
@@ -654,6 +683,11 @@ func (d *vrFrontDoor) createHeadset(ctx context.Context, user *v1alpha1types.Use
 		}
 		if h.Spec.UserReference.Name != user.Name || h.Spec.ClientKeySHA256 != p.clientKey || h.Spec.PublicKey != p.publicKey {
 			return "", fmt.Errorf("headset %s exists for another key", name)
+		}
+		// Still being revoked: it would be gone in a moment, and the headset
+		// with it. Pair again once it is.
+		if h.DeletionTimestamp != nil {
+			return "", fmt.Errorf("headset %s is being deleted", name)
 		}
 		err = nil
 	}

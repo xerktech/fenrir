@@ -167,10 +167,17 @@ running a Quest app that speaks it (XERK-2809); the VR page and PIN path stay as
    the page). A match creates the Headset, owned by the User.
 
 Why a commitment: a code derived from the two certificates alone lets a LAN relay grind
-certificate serials until its two connections' codes collide, in seconds for 8 digits. With the
-commitment the relay must fix its server nonce before the headset reveals its nonce, and commit to
-its own before it sees the real server's, so the codes match by chance only (1 in 10^8). A
-wrong code counts against the entering User: 5 per 10 minutes. At most 16 pairings wait at once.
+certificate serials offline until its two connections' codes collide, in seconds for 8 digits.
+With the commitment the relay must fix the server nonce it shows the headset before the headset
+reveals its nonce, so it can't steer the headset's code.
+
+Why a rate limit: the relay can still draw server-side codes, since each `/pair` hands it a new
+server nonce and it knows every other input before it confirms (QA matched a chosen code in under a
+second). So `/pair` answers at most one per 5 seconds server-wide, burst 3, else 429: in the
+minutes the user takes to type the code a relay gets a few dozen draws at 1 in 10^8 each.
+
+A wrong code counts against the entering User: 5 per 10 minutes, in memory (a restart resets it).
+At most 16 pairings wait at once; both limits let anyone delay pairing, never complete one.
 
 ### Authenticated API (paired client certificate)
 
