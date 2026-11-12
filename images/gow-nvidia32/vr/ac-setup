@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -52,6 +53,7 @@ APPID = "244210"
 PROTON_APPID = "2805730"
 PROTON_TOOL = "proton_9"
 MARKER = "direwolf-ac-setup.json"
+LOCK = "direwolf-ac-setup.lock"
 # Bump one to rerun its step on every install.
 PREFIX_REV = 1
 FLAT_CFG_REV = 1
@@ -119,9 +121,10 @@ def read(d, name):
         if e.errno in (errno.ENOENT, errno.ELOOP):
             return None
         raise
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
     with os.fdopen(fd, "rb") as f:
-        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-            return None
         return f.read()
 
 
@@ -145,6 +148,45 @@ def write(d, name, chunks, mode=0o644):
     os.replace(tmp, name, src_dir_fd=d, dst_dir_fd=d)
 
 
+def clear(d, name):
+    """Removes what a game planted where only this script's own file belongs
+    (a marker, the lock): a folder or anything else that is not a file. It is
+    in every User's way, not only the planting game's (XERK-2819). A folder is
+    removed without following links in it."""
+    k = kind(d, name)
+    if k in (None, stat.S_IFREG):
+        return
+    log(f"removing the {'folder' if k == stat.S_IFDIR else 'non-file'} a game left at {name}")
+    if k == stat.S_IFDIR:
+        shutil.rmtree(name, dir_fd=d)
+    else:
+        os.unlink(name, dir_fd=d)
+
+
+def lock_setup(compat):
+    """Locks compatdata's lock file, replacing whatever a game put there."""
+    for _ in range(3):
+        clear(compat, LOCK)
+        try:
+            fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o644, dir_fd=compat)
+        except OSError as e:
+            # Planted again since the check: clear it once more.
+            if e.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO):
+                continue
+            raise
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            break
+        os.close(fd)
+    else:
+        raise Refused(f"{LOCK} keeps being replaced")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log("waiting for another session's ac-setup to finish")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
 def load_marker(d):
     try:
         m = json.loads(read(d, MARKER) or b"{}")
@@ -154,6 +196,7 @@ def load_marker(d):
 
 
 def save_marker(d, m):
+    clear(d, MARKER)
     write(d, MARKER, (json.dumps(m, sort_keys=True) + "\n").encode())
 
 
@@ -437,12 +480,7 @@ def main():
     game = opendir(apps, "common/assettocorsa")
     compat = opendir(apps, f"compatdata/{APPID}", create=True)
     # Two VR launches at once must not both run winetricks in one prefix.
-    lock = os.open("direwolf-ac-setup.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=compat)
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        log("waiting for another session's ac-setup to finish")
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    lock_setup(compat)  # held until exit
 
     check_proton_pin(steam)
     pm = load_marker(compat)
@@ -452,9 +490,15 @@ def main():
         save_marker(compat, pm)
     if pm.get("flat-cfg") != FLAT_CFG_REV:
         log("setting the flat config: FULLSCREEN=1, INPUT_METHOD=X360")
-        flat_cfg(compat)
-        pm["flat-cfg"] = FLAT_CFG_REV
-        save_marker(compat, pm)
+        try:
+            flat_cfg(compat)
+        except (Refused, OSError) as e:
+            # Flat sessions' convenience only, in a folder every game can
+            # plant in: never worth every User's VR. Tried again next launch.
+            log(f"{e}; skipping the flat config")
+        else:
+            pm["flat-cfg"] = FLAT_CFG_REV
+            save_marker(compat, pm)
 
     gm = load_marker(game)
     if swap_exe(game, gm):

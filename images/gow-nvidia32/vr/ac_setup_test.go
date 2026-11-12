@@ -333,23 +333,24 @@ func TestACSetupRefusesPlantedLinks(t *testing.T) {
 		path    func(s *acSetup) string
 		target  string // "dir" or "file"
 		refused bool
+		skipped bool // the flat config is skipped, the launch goes on (XERK-2819)
 	}
 	for name, p := range map[string]plant{
-		"game folder":             {func(s *acSetup) string { return s.game }, "dir", true},
-		"CSP extension folder":    {func(s *acSetup) string { return filepath.Join(s.game, "extension") }, "dir", true},
-		"CSP extension subfolder": {func(s *acSetup) string { return filepath.Join(s.game, "extension", "config") }, "dir", true},
-		"prefix Fonts":            {func(s *acSetup) string { return filepath.Join(s.compat, "pfx", "drive_c", "windows", "Fonts") }, "dir", true},
-		"flat Documents":          {func(s *acSetup) string { return filepath.Dir(s.flatCfg("Assetto Corsa")) }, "dir+flat", true},
-		"flat cfg":                {func(s *acSetup) string { return s.flatCfg("Assetto Corsa") }, "dir", true},
-		"steamapps":               {func(s *acSetup) string { return s.apps }, "dir", true},
-		"dwrite.dll":              {func(s *acSetup) string { return filepath.Join(s.game, "dwrite.dll") }, "file", false},
-		"AssettoCorsa.exe":        {func(s *acSetup) string { return filepath.Join(s.game, "AssettoCorsa.exe") }, "file", false},
-		"game marker":             {func(s *acSetup) string { return filepath.Join(s.game, "direwolf-ac-setup.json") }, "file", false},
-		"prefix marker":           {func(s *acSetup) string { return filepath.Join(s.compat, "direwolf-ac-setup.json") }, "file", false},
-		"flat video.ini":          {func(s *acSetup) string { return filepath.Join(s.flatCfg("Assetto Corsa"), "video.ini") }, "file", false},
+		"game folder":             {func(s *acSetup) string { return s.game }, "dir", true, false},
+		"CSP extension folder":    {func(s *acSetup) string { return filepath.Join(s.game, "extension") }, "dir", true, false},
+		"CSP extension subfolder": {func(s *acSetup) string { return filepath.Join(s.game, "extension", "config") }, "dir", true, false},
+		"prefix Fonts":            {func(s *acSetup) string { return filepath.Join(s.compat, "pfx", "drive_c", "windows", "Fonts") }, "dir", true, false},
+		"flat Documents":          {func(s *acSetup) string { return filepath.Dir(s.flatCfg("Assetto Corsa")) }, "dir+flat", false, true},
+		"flat cfg":                {func(s *acSetup) string { return s.flatCfg("Assetto Corsa") }, "dir", false, true},
+		"steamapps":               {func(s *acSetup) string { return s.apps }, "dir", true, false},
+		"dwrite.dll":              {func(s *acSetup) string { return filepath.Join(s.game, "dwrite.dll") }, "file", false, false},
+		"AssettoCorsa.exe":        {func(s *acSetup) string { return filepath.Join(s.game, "AssettoCorsa.exe") }, "file", false, false},
+		"game marker":             {func(s *acSetup) string { return filepath.Join(s.game, "direwolf-ac-setup.json") }, "file", false, false},
+		"prefix marker":           {func(s *acSetup) string { return filepath.Join(s.compat, "direwolf-ac-setup.json") }, "file", false, false},
+		"flat video.ini":          {func(s *acSetup) string { return filepath.Join(s.flatCfg("Assetto Corsa"), "video.ini") }, "file", false, false},
 		"segoeui.ttf": {func(s *acSetup) string {
 			return filepath.Join(s.compat, "pfx", "drive_c", "windows", "Fonts", "segoeui.ttf")
-		}, "file", false},
+		}, "file", false, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := newACSetup(t)
@@ -390,11 +391,16 @@ func TestACSetupRefusesPlantedLinks(t *testing.T) {
 				t.Fatal(err)
 			}
 			out, err := s.run(t)
-			if p.refused {
+			switch {
+			case p.skipped:
+				if err != nil || !strings.Contains(out, "is a link or not a folder; skipping the flat config") {
+					t.Errorf("err %v; want the flat config skipped:\n%s", err, out)
+				}
+			case p.refused:
 				if err == nil || !regexp.MustCompile(`is a link or not a folder; ending the session`).MatchString(out) {
 					t.Errorf("err %v; want a refusal:\n%s", err, out)
 				}
-			} else {
+			default:
 				if err != nil {
 					t.Fatalf("%v\n%s", err, out)
 				}
@@ -596,5 +602,83 @@ func TestACSetupWaitsForAnotherRun(t *testing.T) {
 	r := <-done
 	if r.err != nil || !strings.Contains(r.out, "waiting for another session's ac-setup") {
 		t.Errorf("err %v\n%s", r.err, r.out)
+	}
+}
+
+// Every game of every User writes the shared home, so a game's plant at a
+// marker, the lock or the flat cfg must not end every User's VR launches
+// (XERK-2819): a planted marker or lock is replaced, the flat config skipped.
+func TestACSetupRecoversFromPlantsOfEveryUsersPaths(t *testing.T) {
+	for name, plant := range map[string]func(t *testing.T, s *acSetup, outside string){
+		"prefix marker folder": func(t *testing.T, s *acSetup, _ string) {
+			t.Helper()
+			mustWrite(t, filepath.Join(s.compat, "direwolf-ac-setup.json", "x"), "x")
+		},
+		"game marker folder": func(t *testing.T, s *acSetup, _ string) {
+			t.Helper()
+			mustWrite(t, filepath.Join(s.game, "direwolf-ac-setup.json", "x"), "x")
+		},
+		"lock folder": func(t *testing.T, s *acSetup, _ string) {
+			t.Helper()
+			mustWrite(t, filepath.Join(s.compat, "direwolf-ac-setup.lock", "x"), "x")
+		},
+		"lock link": func(t *testing.T, s *acSetup, outside string) {
+			t.Helper()
+			if err := os.Symlink(filepath.Join(outside, "victim"), filepath.Join(s.compat, "direwolf-ac-setup.lock")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"flat video.ini folder": func(t *testing.T, s *acSetup, _ string) {
+			t.Helper()
+			mustWrite(t, filepath.Join(s.flatCfg("Assetto Corsa"), "video.ini", "x"), "x")
+		},
+		"flat cfg link": func(t *testing.T, s *acSetup, outside string) {
+			t.Helper()
+			if err := os.MkdirAll(filepath.Dir(s.flatCfg("Assetto Corsa")), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, s.flatCfg("Assetto Corsa")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newACSetup(t)
+			s.madePrefix(t)
+			outside := t.TempDir()
+			mustWrite(t, filepath.Join(outside, "victim"), "victim")
+			plant(t, s, outside)
+			out, err := s.run(t)
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			if got := readString(t, filepath.Join(s.game, "dwrite.dll")); got != "CSP 0.3.1" {
+				t.Errorf("CSP not installed past the plant: %q\n%s", got, out)
+			}
+			if got := readString(t, filepath.Join(outside, "victim")); got != "victim" {
+				t.Errorf("written through the link: %q", got)
+			}
+			if entries, _ := os.ReadDir(outside); len(entries) != 1 {
+				t.Errorf("written through the link: %v", entries)
+			}
+			for _, p := range []string{
+				filepath.Join(s.compat, "direwolf-ac-setup.json"),
+				filepath.Join(s.game, "direwolf-ac-setup.json"),
+				filepath.Join(s.compat, "direwolf-ac-setup.lock"),
+			} {
+				if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() {
+					t.Errorf("%s is not a file now: %v %v", p, fi, err)
+				}
+			}
+			if strings.HasPrefix(name, "flat ") {
+				if !strings.Contains(out, "skipping the flat config") {
+					t.Errorf("no skip logged:\n%s", out)
+				}
+				// Not recorded: the next launch tries again.
+				if m := readString(t, filepath.Join(s.compat, "direwolf-ac-setup.json")); strings.Contains(m, "flat-cfg") {
+					t.Errorf("a skipped flat config was recorded: %s", m)
+				}
+			}
+		})
 	}
 }
