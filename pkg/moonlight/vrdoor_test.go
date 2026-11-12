@@ -694,7 +694,8 @@ func TestVRPairingPageShowsServerKey(t *testing.T) {
 	rec := httptest.NewRecorder()
 	f.pinPage.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) || !strings.Contains(rec.Body.String(), ">127.0.0.1:1<") ||
-		!strings.Contains(rec.Body.String(), vrKeyMismatchAdvice) {
+		!strings.Contains(rec.Body.String(), vrKeyMismatchAdvice) ||
+		strings.Contains(rec.Body.String(), "Accept") {
 		t.Errorf("page %d lacks key %q or address:\n%s", rec.Code, want, rec.Body)
 	}
 
