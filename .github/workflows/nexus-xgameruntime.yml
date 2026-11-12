@@ -61,8 +61,10 @@ jobs:
             | sort_by(.published_at) | reverse | .[0:2] | .[].tag_name')"
           mapfile -t runtimes <<<"$list"
           tags=()
+          newest=
           for t in "${runtimes[@]}"; do
             [[ "$t" =~ ^[A-Za-z0-9._-]+$ ]] || continue
+            newest="${newest:-$t}"
             if [[ "$EVENT" == pull_request ]]; then
               # A PR proves the patches still build against the newest runtime.
               tags+=("$t"); break
@@ -70,7 +72,7 @@ jobs:
             gh release view "nexus-xgameruntime-$t-$pid" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || tags+=("$t")
           done
           printf 'patch id %s; to build: %s\n' "$pid" "${tags[*]:-none}"
-          echo "newest=${runtimes[0]:-}" >>"$GITHUB_OUTPUT"
+          echo "newest=${newest}" >>"$GITHUB_OUTPUT"
           echo "tags=$(printf '%s\n' "${tags[@]}" | jq -R . | jq -cs 'map(select(length > 0))')" >>"$GITHUB_OUTPUT"
 
   build:
