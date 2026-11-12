@@ -213,6 +213,10 @@ paths:
   pairing page shows the front door's key fingerprint (`vrKeyFingerprint`), which the Quest app
   must show for the key it pins, and pin only once the user confirms a match. Keep the format
   equal to the app's. Tests: `TestVRPairingPageShowsServerKey`, `TestVRKeyFingerprint`.
+- The pairing page's QR code (`vrPairingLink`, `vrQRCode`, XERK-2812) carries the full key hash; the
+  app pins it before `/pair`. Keep the link format equal to the app's `parse_pairing_link`; its
+  `qr_ut` decodes a PGM of `vrQRCode` (regenerate it there if the rendering changes). Inline SVG,
+  as the page's CSP allows no images. Tests: `TestVRPairingLink`, `TestVRPairingPageShowsQR`.
 - Never lift `/pair`'s server-wide rate limit (`vrFrontDoor.draws`): each answer is a server nonce a
   relay can test against the headset's code before confirming; unlimited, QA paired its own key
   in under a second. Tests: `TestVRFrontDoorLimitsDraws`.
