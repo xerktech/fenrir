@@ -372,6 +372,10 @@ func sameOriginJSON(w http.ResponseWriter, r *http.Request) bool {
 // front door (XERK-2808).
 const pinVRPath = "/pin/vr"
 
+// vrKeyMismatchAdvice tells the user what a key other than the page's means;
+// pin.html says the same.
+const vrKeyMismatchAdvice = "If it shows any other key, it is not paired with this server: remove that server on the headset."
+
 // submitVR pairs the headset showing the code with the signed-in User.
 func (h *pinPageHandler) submitVR(w http.ResponseWriter, r *http.Request) {
 	user := h.authenticate(w, r)
@@ -402,6 +406,6 @@ func (h *pinPageHandler) submitVR(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Pairing failed. Try the same code again in a minute; if it still fails, start pairing again on the headset.", http.StatusInternalServerError)
 	default:
 		_, _ = w.Write([]byte("Code accepted. The headset must show this server key: " +
-			vrKeyFingerprint(h.vr.serverKey) + ". If it shows any other key, it is not paired with this server: remove that server on the headset."))
+			vrKeyFingerprint(h.vr.serverKey) + ". " + vrKeyMismatchAdvice))
 	}
 }

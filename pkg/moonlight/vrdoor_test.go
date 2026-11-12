@@ -693,14 +693,16 @@ func TestVRPairingPageShowsServerKey(t *testing.T) {
 	req.Header.Set(DefaultPinUserHeader, "alice")
 	rec := httptest.NewRecorder()
 	f.pinPage.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) || !strings.Contains(rec.Body.String(), ">127.0.0.1:1<") {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) || !strings.Contains(rec.Body.String(), ">127.0.0.1:1<") ||
+		!strings.Contains(rec.Body.String(), vrKeyMismatchAdvice) {
 		t.Errorf("page %d lacks key %q or address:\n%s", rec.Code, want, rec.Body)
 	}
 
 	body, code := h.startPairing(t, f)
 	done := h.confirmAsync(t.Context(), f, body)
 	f.waitForCode(t)
-	if rec := f.enterCode("alice", code); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) {
+	if rec := f.enterCode("alice", code); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) ||
+		!strings.Contains(rec.Body.String(), vrKeyMismatchAdvice) {
 		t.Errorf("code entry %d does not name the key %q: %s", rec.Code, want, rec.Body)
 	}
 	<-done
