@@ -84,7 +84,7 @@ func skipBesideOtherWineserver(t *testing.T) {
 	if pidNamespaceWorks() {
 		return
 	}
-	if exec.Command("pgrep", "-u", strconv.Itoa(os.Geteuid()), "-x", "wineserver").Run() == nil {
+	if exec.CommandContext(t.Context(), "pgrep", "-u", strconv.Itoa(os.Geteuid()), "-x", "wineserver").Run() == nil { //nolint:gosec // our own uid
 		t.Skip("a wineserver of this uid runs outside the test, and unshare cannot hide it")
 	}
 }
