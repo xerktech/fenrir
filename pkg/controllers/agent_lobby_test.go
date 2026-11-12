@@ -465,8 +465,18 @@ func TestAgentStaleJoinResultDoesNotClobberNextStream(t *testing.T) {
 // the ended stream's join returned meanwhile.
 func TestAgentStaleJoinDoesNotStealHeldUnplugs(t *testing.T) {
 	_, entry := overlap(t)
-	if _, err := os.Stat(entry); !os.IsNotExist(err) {
-		t.Errorf("B's held unplug was never handled after B's join failed: %v", err)
+	// Polled: under -race the agent can take longer than overlap's 50 ms
+	// to handle B's failed join (XERK-2843).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(entry)
+		if os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B's held unplug was never handled after B's join failed: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
