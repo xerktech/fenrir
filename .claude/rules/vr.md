@@ -255,7 +255,8 @@ paths:
     `AppFramesDelivered`) stops changing for `vrFrameStallTimeout` while `HeadsetFocused` ends
     the Session. A crashed OpenVR layer otherwise hangs the game behind a dialog nobody sees
     (OpenComposite's MessageBox, xrizer's X11 panic window) or an infinite fence wait, and WiVRn
-    keeps streaming black. Armed only once a frame was delivered (loading); unfocused time never
+    keeps streaming black. Armed only once a frame was delivered (loading); unfocused, disconnected
+    or unreadable (vr-agent poll failed) time never
     counts; any change is progress (the count restarts with WiVRn's server). Off when the image's
     WiVRn lacks the properties. Tests: `TestVRFrameStallEndsSession`.
   - Tests: `vr_session_test.go`, `cmd/wolf-agent/vr_agent_test.go`.

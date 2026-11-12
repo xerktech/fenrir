@@ -387,6 +387,7 @@ func (c *SessionController) finishVRReconcile(ctx context.Context, session *v1al
 			// Session whose bus or WiVRn hung (the game can move the bus).
 			klog.Warningf("Session %s/%s: %v", session.Namespace, session.Name, pollErr)
 			lostVRAgent(session, pollErr)
+			c.vrFrameProgress.unseen(session, time.Now())
 		}
 	}
 

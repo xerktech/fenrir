@@ -72,6 +72,18 @@ func (p *vrFrameProgress) stalledFor(session *v1alpha1types.Session, vr VRStatus
 	return now.Sub(prev.since)
 }
 
+// unseen restarts session's stall timer at now: vr-agent could not be read,
+// so whether the headset was focused then is unknown and never counts.
+func (p *vrFrameProgress) unseen(session *v1alpha1types.Session, now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := session.Namespace + "/" + session.Name
+	if prev, ok := p.m[key]; ok && prev.uid == session.UID {
+		prev.since = now
+		p.m[key] = prev
+	}
+}
+
 // forget drops a deleted Session's progress.
 func (p *vrFrameProgress) forget(namespace, name string) {
 	p.mu.Lock()

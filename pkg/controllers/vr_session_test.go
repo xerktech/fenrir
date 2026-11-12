@@ -785,6 +785,18 @@ func TestVRFrameStallEndsSession(t *testing.T) {
 	if !f.sessionExists(t, s.Name) {
 		t.Fatal("ended while the headset was unfocused")
 	}
+	// Disconnected (WiVRn may still say focused) and vr-agent unreadable:
+	// neither counts.
+	age(long)
+	reconcile(VRStatus{HeadsetFocused: true, AppFramesDelivered: frames(900)})
+	if !f.sessionExists(t, s.Name) {
+		t.Fatal("ended while the headset was disconnected")
+	}
+	age(long)
+	agent.set(VRStatus{}, true)
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatal(err)
+	}
 	// Focused again, frozen for less than the timeout.
 	age(vrFrameStallTimeout / 2)
 	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(900)})
