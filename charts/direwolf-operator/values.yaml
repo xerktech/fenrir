@@ -483,10 +483,13 @@ rawResources:
         # Clients pin this certificate, so a renewal unpairs them (XERK-2818):
         # Moonlight pins the whole certificate from pairing (any reissue breaks
         # it); VR headsets pin its public key (a new key breaks them). Hence a
-        # ~100y lifetime, so it is never renewed, and a kept key, so a forced
-        # reissue (spec change, lost Secret) still spares the headsets.
+        # 50y lifetime, so it is never renewed, and a kept key, so a reissue
+        # forced by a spec change spares the headsets. A deleted Secret still
+        # gets a new key: never delete it. Any spec change here reissues at
+        # once (cert-manager compares it with the last CertificateRequest).
+        # Expiry stays before 2106 for clients with a 32-bit unsigned time_t.
         # Nothing checks it against the CA, so the CA's renewal is harmless.
-        duration: 876000h # ~100y
+        duration: 438000h # 50y
         privateKey:
           rotationPolicy: Never
         issuerRef:
