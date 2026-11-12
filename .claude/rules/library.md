@@ -146,6 +146,11 @@ paths:
       release `nexus-xgameruntime-<runtime tag>-<patch id>` here. Exit 3: patches no longer apply.
     - Publish runs per runtime even when another runtime's build failed (`!cancelled()`): one
       runtime the patches don't fit must not leave the newest unpublished.
+    - Exit 3 fails the run only for the newest runtime; an older one is skipped with a warning
+      (XERK-2836). A series rebased onto the newest rarely fits the one before, and without the
+      skip every scheduled run stayed red until upstream shipped another runtime.
+    - Before rebasing a patch that stopped applying, check upstream's log for the same fix: 0001
+      (XAsync reused block) was dropped once nexus-xgameruntime 68935f5 shipped it (XERK-2836).
     - `init-xodus-nexus-game-patches` (before the desktop) installs that exact DLL, else the runtime's
       builtin, in each listed game's prefix (`<runtimeRoot>/../compatdata/<id>/pfx`) System32, and
       sets `"xgameruntime"="native,builtin"` in that exe's DllOverrides key (adding or fixing it).

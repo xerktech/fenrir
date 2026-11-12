@@ -8,7 +8,8 @@ name: Nexus XGameRuntime patch builds
 #
 # A run that fails because the patches no longer apply (build.sh exit 3) means
 # upstream changed that code: check whether it fixed the games, then drop or
-# rebase the patch. Release tags never start with v, so the chart's version
+# rebase the patch. Only the newest runtime fails the run that way: a rebased
+# series rarely fits the runtime it replaced, which is skipped instead. Release tags never start with v, so the chart's version
 # tags (hack/release/next-chart-version.sh) are untouched.
 on:
   schedule:
@@ -40,6 +41,7 @@ jobs:
       contents: read
     outputs:
       tags: ${{ steps.plan.outputs.tags }}
+      newest: ${{ steps.plan.outputs.newest }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - id: plan
@@ -51,13 +53,18 @@ jobs:
           pid="$(hack/nexus-xgameruntime/patch-id.sh images/library/root/usr/share/xodus-nexus/xgameruntime/patches)"
           # The newest two published x86_64 runtimes: the Library installs the
           # newest, and a pod may still run the one it replaced.
-          mapfile -t runtimes < <(gh api 'repos/domsvoboda/nexus-runtime/releases?per_page=30' --jq '
+          # Captured first: a failed gh api inside < <(...) would escape set -e
+          # and leave a green run that built nothing.
+          list="$(gh api 'repos/domsvoboda/nexus-runtime/releases?per_page=30' --jq '
             [.[] | select((.draft or .prerelease) | not)
                  | select(any(.assets[]; .name | test("^nexus-runtime-[A-Za-z0-9._-]+-x86_64\\.tar\\.xz$")))]
-            | sort_by(.published_at) | reverse | .[0:2] | .[].tag_name')
+            | sort_by(.published_at) | reverse | .[0:2] | .[].tag_name')"
+          mapfile -t runtimes <<<"$list"
           tags=()
+          newest=
           for t in "${runtimes[@]}"; do
             [[ "$t" =~ ^[A-Za-z0-9._-]+$ ]] || continue
+            newest="${newest:-$t}"
             if [[ "$EVENT" == pull_request ]]; then
               # A PR proves the patches still build against the newest runtime.
               tags+=("$t"); break
@@ -65,6 +72,7 @@ jobs:
             gh release view "nexus-xgameruntime-$t-$pid" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || tags+=("$t")
           done
           printf 'patch id %s; to build: %s\n' "$pid" "${tags[*]:-none}"
+          echo "newest=${newest}" >>"$GITHUB_OUTPUT"
           echo "tags=$(printf '%s\n' "${tags[@]}" | jq -R . | jq -cs 'map(select(length > 0))')" >>"$GITHUB_OUTPUT"
 
   build:
@@ -94,7 +102,19 @@ jobs:
       - name: Build
         env:
           TAG: ${{ matrix.tag }}
-        run: hack/nexus-xgameruntime/build.sh "$TAG" out
+          NEWEST: ${{ needs.plan.outputs.newest }}
+        run: |
+          rc=0
+          hack/nexus-xgameruntime/build.sh "$TAG" out || rc=$?
+          # Exit 3 (patches don't apply) fails the run only for the newest
+          # runtime, the one the Library installs. An older one keeps its
+          # builtin DLL, so it uploads nothing and publish skips it.
+          if [[ "$rc" == 3 && "$TAG" != "$NEWEST" ]]; then
+            echo "::warning::the patch series does not apply to the older runtime $TAG; skipped"
+            rm -rf out
+            exit 0
+          fi
+          exit "$rc"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xgameruntime-${{ matrix.tag }}

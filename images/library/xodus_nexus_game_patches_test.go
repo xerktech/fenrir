@@ -52,7 +52,7 @@ func newPatchHost(t *testing.T, exes ...string) *patchHost {
 		}
 	}
 	// The real patch series and game list, so the test uses the image's id.
-	for _, f := range []string{"games", "patches/0001-xasync-late-completion-reused-block.patch", "patches/0002-xuser-catch-all-endpoint.patch"} {
+	for _, f := range []string{"games", "patches/0002-xuser-catch-all-endpoint.patch"} {
 		b, err := os.ReadFile(filepath.Join(patchesShare, f))
 		if err != nil {
 			t.Fatal(err)
@@ -351,7 +351,7 @@ func TestXodusNexusGamePatchesRestoresDelistedGames(t *testing.T) {
 			if test == "game delisted" {
 				h.write(filepath.Join(h.share, "games"), []byte("# none\n"))
 			} else {
-				for _, p := range []string{"0001-xasync-late-completion-reused-block.patch", "0002-xuser-catch-all-endpoint.patch"} {
+				for _, p := range []string{"0002-xuser-catch-all-endpoint.patch"} {
 					if err := os.Remove(filepath.Join(h.share, "patches", p)); err != nil {
 						t.Fatal(err)
 					}
@@ -488,7 +488,6 @@ func TestXodusNexusGamePatchesKeepsTheRecordUntilRestored(t *testing.T) {
 // the session image ships the same script, game list and patch series.
 func TestXodusNexusGamePatchesMatchSessionImage(t *testing.T) {
 	for _, f := range []string{"root/usr/local/bin/xodus-nexus-game-patches", patchesShare + "/games",
-		patchesShare + "/patches/0001-xasync-late-completion-reused-block.patch",
 		patchesShare + "/patches/0002-xuser-catch-all-endpoint.patch"} {
 		library, err := os.ReadFile(f)
 		if err != nil {
