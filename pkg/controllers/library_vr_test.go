@@ -773,12 +773,40 @@ func TestVRFrontDoorJoinsMoonlightVRSession(t *testing.T) {
 	if st.State != VRStateReady || st.Host != "10.10.10.34" || st.Port != 21003 || st.ServerKey != key {
 		t.Errorf("ready: %+v", st)
 	}
+	// Only a Ready App pod the Session controls is served, never one that
+	// is not ready or is another Session's.
+	for name, edit := range map[string]func(*corev1.Pod){
+		"not ready":       func(p *corev1.Pod) { p.Status.Conditions[0].Status = corev1.ConditionFalse },
+		"no host IP":      func(p *corev1.Pod) { p.Status.HostIP = "" },
+		"another session": func(p *corev1.Pod) { p.OwnerReferences[0].UID = "other" },
+		"being deleted":   func(p *corev1.Pod) { p.DeletionTimestamp = &metav1.Time{Time: time.Now()} },
+	} {
+		bad := app.DeepCopy()
+		edit(bad)
+		if _, err := f.k8s.CoreV1().Pods(libraryTestNS).Update(t.Context(), bad, metav1.UpdateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := f.s.VRLaunch.SessionState(t.Context(), sam); st.State != VRStateStarting || st.Host != "" || st.ServerKey != "" {
+			t.Errorf("%s: %+v, want starting with no address", name, st)
+		}
+	}
+	if _, err := f.k8s.CoreV1().Pods(libraryTestNS).Update(t.Context(), app, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := f.s.VRLaunch.Stop(t.Context(), sam); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(f.sessions(t)); n != 1 {
 		t.Errorf("headset stop ended the Moonlight session")
+	}
+	// Being quit in Moonlight: stopping.
+	sess.DeletionTimestamp, sess.Finalizers = &metav1.Time{Time: time.Now()}, []string{"test/hold"}
+	if _, err := f.dw.DirewolfV1alpha1().Sessions(libraryTestNS).Update(t.Context(), sess, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := f.s.VRLaunch.SessionState(t.Context(), sam); st.State != VRStateStopping || st.Host != "" {
+		t.Errorf("deleting: %+v, want stopping", st)
 	}
 }
 

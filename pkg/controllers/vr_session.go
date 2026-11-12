@@ -551,6 +551,9 @@ func recordVRServerKey(session *v1alpha1types.Session, key string) {
 	}
 }
 
+// appPodKeyPollTimeout bounds recordAppPodServerKey's vr-agent read.
+const appPodKeyPollTimeout = 3 * time.Second
+
 // recordAppPodServerKey records the VR server key of a Moonlight Session's
 // split App pod (XERK-2811), so the front door can hand it to the User's
 // headset to pin: headsets pair only through the front door, and the Quest
@@ -566,7 +569,16 @@ func (c *SessionController) recordAppPodServerKey(ctx context.Context, session *
 		!slices.ContainsFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == v1alpha1types.VRAgentContainerName }) {
 		return // not up yet, or an App pod from before XERK-2740 (no vr-agent)
 	}
-	vr, err := c.pollVRAgent(ctx, session, pod.Status.PodIP, vrAgentTokenSecretName(session.Name))
+	// Never pollVRAgent: it ends the Session on a Secret with no cert, and
+	// this side channel must never end a game. Bounded tighter than a
+	// native poll: it holds one of the session workers while it waits.
+	ctx, cancel := context.WithTimeout(ctx, appPodKeyPollTimeout)
+	defer cancel()
+	token, tlsConfig, err := c.tokenCredentials(ctx, session, vrAgentTokenSecretName(session.Name))
+	var vr VRStatus
+	if err == nil {
+		vr, err = c.fetchVRStatus(ctx, token, tlsConfig, pod.Status.PodIP)
+	}
 	if err != nil {
 		klog.V(2).Infof("Session %s/%s: reading the VR server key: %v", session.Namespace, session.Name, err)
 		return

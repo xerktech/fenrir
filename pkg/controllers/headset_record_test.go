@@ -255,3 +255,31 @@ func TestMoonlightVRRecordsServerKey(t *testing.T) {
 		t.Errorf("agent saw %v, want two polls with vr-agent's token, none after recording", got)
 	}
 }
+
+// The key poll never ends the Moonlight Session, even on a vr-agent token
+// Secret with no cert, which ends a native one (QA, XERK-2811).
+func TestMoonlightVRKeyPollNeverEndsSession(t *testing.T) {
+	sess, objs := vrSessionPods("quest/quest-uid")
+	f, s := lifecycleFixture(t, sess, func(s *v1alpha1types.Session) []runtime.Object {
+		res := objs(s)
+		app, ok := res[1].(*corev1.Pod)
+		if !ok {
+			t.Fatal("vrSessionPods changed shape")
+		}
+		app.Spec.Containers = []corev1.Container{{Name: "app"}, {Name: v1alpha1types.VRAgentContainerName}}
+		secret := vrTokenSecret(s)
+		delete(secret.Data, corev1.TLSCertKey)
+		return append(res, secret)
+	})
+	f.sc.AppPodHostDir = testAppPodHostDir
+	waitPod(t, f, s.Name)
+	waitPod(t, f, s.Name+"-app")
+	wolf, err := f.sc.podController.Informer().Namespaced(portsTestNS).Get(s.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.sc.recordAppPodServerKey(context.Background(), s, wolf)
+	if !f.sessionExists(t, s.Name) {
+		t.Fatal("the key poll ended the Moonlight Session")
+	}
+}
