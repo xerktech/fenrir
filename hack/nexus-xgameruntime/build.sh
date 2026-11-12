@@ -54,6 +54,11 @@ if ! git -C "${work}/src" -c user.name=ci -c user.email=ci@invalid am -q --3way 
   exit 3
 fi
 
+# googletest is a submodule (at the commit upstream pins); only the tests need it.
+if [[ -n "${tests}" ]]; then
+  git -C "${work}/src" submodule -q update --init --depth 1 external/googletest
+fi
+
 git init -q "${work}/wine"
 git -C "${work}/wine" sparse-checkout set --no-cone /include/ /libs/xml2/
 git -C "${work}/wine" fetch -q --depth 1 --filter=blob:none https://github.com/domsvoboda/nexus-wine.git "${wine}"
