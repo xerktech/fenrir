@@ -44,6 +44,13 @@
             letter-spacing: 0.25rem;
         }
 
+        .vrqr {
+            display: block;
+            width: 22rem; /* the headset camera needs about 2 pixels per module */
+            max-width: 100%;
+            margin: 0 auto 1rem;
+        }
+
         .vrkey {
             font-family: monospace;
             overflow-wrap: anywhere;
@@ -92,6 +99,10 @@
     <hr>
     <form id="vr">
         <p>Pairing a VR headset? Add the server <strong class="vrkey">{{.VRAddress}}</strong> on it, then enter the 8-digit code it shows.</p>
+        {{if .VRQRPath}}
+        <p>On a Quest 3 or 3S, scan this code instead of typing the address: the headset then needs no key check.</p>
+        <svg class="vrqr" role="img" aria-label="QR code of this server's address and key" viewBox="0 0 {{.VRQRSize}} {{.VRQRSize}}" shape-rendering="crispEdges"><rect width="{{.VRQRSize}}" height="{{.VRQRSize}}" fill="#fff"/><path fill="#000" d="{{.VRQRPath}}"/></svg>
+        {{end}}
         <p>The headset must show this server key:<br><strong class="vrkey">{{.VRKey}}</strong><br>If it shows any other key, it is not paired with this server: remove that server on the headset.</p>
         <input class="vrcode" name="code" inputmode="numeric" autocomplete="off" pattern="[0-9 \-]{8,11}" maxlength="11" required>
         <br>

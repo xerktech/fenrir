@@ -190,8 +190,10 @@ the user which key is fenrir's. So:
   pins), in lowercase hex, groups of 4 separated by spaces. `TestVRKeyFingerprint` holds a vector.
 - On a first pairing with no key given up front, the headset shows the fingerprint of the key it
   is about to pin, and pins it only once the user confirms it matches the page.
-- A QR code or link carrying the full key hash (XERK-2812) pins the key before the first `/pair`,
-  so no comparison is needed.
+- The page also draws a QR code (XERK-2812) of `fenrir-vr://<address>:<port>?key=<SHA-256 of the
+  SPKI, 64 hex>` (an IPv6 address in brackets). A Quest 3/3S reads it with its passthrough camera
+  and pins the key before the first `/pair`, so no comparison is needed. `TestVRPairingLink`
+  holds the vectors the app's parser tests.
 
 A wrong code counts against the entering User: 5 per 10 minutes, in memory (a restart resets it).
 At most 16 pairings wait at once. Both limits let anyone who reaches the port hold pairing up

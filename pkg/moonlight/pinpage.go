@@ -305,10 +305,21 @@ func (h *pinPageHandler) page(w http.ResponseWriter, r *http.Request) {
 		// pairing (XERK-2813).
 		VRAddress string
 		VRKey     string
+		// VRQRSize and VRQRPath draw the QR code of vrPairingLink, which
+		// a Quest 3 reads instead of the address and the key check
+		// (XERK-2812). Empty if it cannot be encoded.
+		VRQRSize int
+		VRQRPath string
 	}{User: user.Name, Pending: pending, VR: h.vr != nil}
 	if h.vr != nil {
 		view.VRAddress = net.JoinHostPort(h.vr.opts.Address, strconv.Itoa(h.vr.opts.Port))
 		view.VRKey = vrKeyFingerprint(h.vr.serverKey)
+		size, path, err := vrQRCode(vrPairingLink(h.vr.opts.Address, h.vr.opts.Port, h.vr.serverKey))
+		if err != nil {
+			klog.Errorf("Pairing page: QR code: %s", err)
+		} else {
+			view.VRQRSize, view.VRQRPath = size, path
+		}
 	}
 	setPinPageHeaders(w)
 	if err := pinTemplate.Execute(w, view); err != nil {
