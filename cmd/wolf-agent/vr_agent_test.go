@@ -142,6 +142,21 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 	if st, err := wivrnStatus(ctx, addr); err != nil || !st.SessionRunning {
 		t.Fatalf("after SessionRunning: %+v, %v", st, err)
 	}
+
+	// The fork's frame count and focus (XERK-2844), which an older WiVRn
+	// lacks (AppFramesDelivered nil above: the watchdog stays off).
+	if _, err = prop.Export(server, wivrnPath, prop.Map{wivrnInterface: {
+		"HeadsetConnected":   {Value: true, Emit: prop.EmitTrue},
+		"SessionRunning":     {Value: true, Emit: prop.EmitTrue},
+		"AppFramesDelivered": {Value: uint64(4242), Emit: prop.EmitTrue},
+		"HeadsetFocused":     {Value: true, Emit: prop.EmitTrue},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	st, err = wivrnStatus(ctx, addr)
+	if err != nil || st.AppFramesDelivered == nil || *st.AppFramesDelivered != 4242 || !st.HeadsetFocused {
+		t.Fatalf("with frame count: %+v, %v", st, err)
+	}
 }
 
 // vr-agent reports the server key the App published, and nothing for a file

@@ -204,6 +204,8 @@ type SessionController struct {
 
 	// videoProgress spots attached streams that stopped sending video.
 	videoProgress videoProgress
+	// vrFrameProgress spots native VR games that stopped delivering frames.
+	vrFrameProgress vrFrameProgress
 
 	// runCtx is Run's context, set before any Reconcile: the generic
 	// controller's reconcile callback takes none, and shutdown or leader loss
@@ -391,6 +393,7 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 		// ResourceClaims, are garbage collected via owner references; the
 		// port block is ours to free.
 		c.videoProgress.forget(namespace, name)
+		c.vrFrameProgress.forget(namespace, name)
 		return c.releaseUnusedPorts()
 	} else if reason := c.expiredReason(newObj, time.Now()); reason != "" {
 		err := c.endSession(ctx, newObj, reason)

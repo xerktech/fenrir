@@ -97,6 +97,20 @@ func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, err
 			return controllers.VRStatus{}, fmt.Errorf("WiVRn's %s: %w", name, err)
 		}
 	}
+	// Optional (xerktech/WiVRn XERK-2844): an older WiVRn has neither, and
+	// the operator's frame watchdog stays off.
+	if v, ok := props["AppFramesDelivered"]; ok {
+		var frames uint64
+		if err := v.Store(&frames); err != nil {
+			return controllers.VRStatus{}, fmt.Errorf("WiVRn's AppFramesDelivered: %w", err)
+		}
+		st.AppFramesDelivered = &frames
+	}
+	if v, ok := props["HeadsetFocused"]; ok {
+		if err := v.Store(&st.HeadsetFocused); err != nil {
+			return controllers.VRStatus{}, fmt.Errorf("WiVRn's HeadsetFocused: %w", err)
+		}
+	}
 	return st, nil
 }
 
