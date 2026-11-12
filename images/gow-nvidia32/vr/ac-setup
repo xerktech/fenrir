@@ -118,9 +118,7 @@ def read(d, name):
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=d)
     except OSError as e:
-        # EACCES: a file a game made unreadable reads as absent; a writer
-        # replaces it by rename, which its mode doesn't stop.
-        if e.errno in (errno.ENOENT, errno.ELOOP, errno.EACCES):
+        if e.errno in (errno.ENOENT, errno.ELOOP):
             return None
         raise
     if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -205,7 +203,9 @@ def lock_setup(compat):
 def load_marker(d):
     try:
         m = json.loads(read(d, MARKER) or b"{}")
-    except ValueError:
+    except (ValueError, PermissionError):
+        # A marker a game made unreadable reads as absent: save_marker
+        # replaces it by rename, which its mode doesn't stop.
         m = {}
     return m if isinstance(m, dict) else {}
 

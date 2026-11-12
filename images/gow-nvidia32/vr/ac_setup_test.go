@@ -679,6 +679,13 @@ func TestACSetupRecoversFromPlantsOfEveryUsersPaths(t *testing.T) {
 			mustWrite(t, filepath.Join(s.compat, "direwolf-ac-setup.lock"), "")
 			chmod(t, filepath.Join(s.compat, "direwolf-ac-setup.lock"), 0o444)
 		},
+		"flat unreadable video.ini": func(t *testing.T, s *acSetup, _ string) {
+			t.Helper()
+			nonRoot(t)
+			ini := filepath.Join(s.flatCfg("Assetto Corsa"), "video.ini")
+			mustWrite(t, ini, "[VIDEO]\r\nWIDTH=2560\r\n")
+			chmod(t, ini, 0)
+		},
 		"flat video.ini folder": func(t *testing.T, s *acSetup, _ string) {
 			t.Helper()
 			mustWrite(t, filepath.Join(s.flatCfg("Assetto Corsa"), "video.ini", "x"), "x")
@@ -728,6 +735,16 @@ func TestACSetupRecoversFromPlantsOfEveryUsersPaths(t *testing.T) {
 			} {
 				if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() {
 					t.Errorf("%s is not a file now: %v %v", p, fi, err)
+				}
+			}
+			if name == "read-only lock" && strings.Contains(out, "replacing") {
+				t.Errorf("a read-only lock, enough for flock, was replaced:\n%s", out)
+			}
+			if name == "flat unreadable video.ini" {
+				ini := filepath.Join(s.flatCfg("Assetto Corsa"), "video.ini")
+				chmod(t, ini, 0o644)
+				if got := readString(t, ini); got != "[VIDEO]\r\nWIDTH=2560\r\n" {
+					t.Errorf("an unreadable video.ini was overwritten: %q", got)
 				}
 			}
 			if strings.HasPrefix(name, "flat ") {

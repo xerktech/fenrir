@@ -361,7 +361,7 @@ paths:
     waits.
   - A game's plant must not end every User's VR (XERK-2819): a non-file at a marker, the lock or
     a temp name is replaced (`clear`: a folder is renamed aside, which its mode can't stop, then
-    rmtree'd as far as it lets us); an unreadable marker reads as absent; an unreadable lock is
+    rmtree'd as far as it lets us); an unreadable marker (only) reads as absent; an unreadable lock is
     replaced (it is opened read-only, enough for flock); a flat cfg error logs and skips it,
     unrecorded, so the next launch retries. Tests: `TestACSetupRecoversFromPlantsOfEveryUsersPaths`.
     - Its mode plants skip as root (DAC_OVERRIDE): run the test binary as a user (`setpriv`).
