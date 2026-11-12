@@ -689,6 +689,48 @@ func TestACSetupBindsVRRecenterToPad(t *testing.T) {
 			t.Errorf("%s: compat marker %s", plant(s), m)
 		}
 	}
+	// So is a cfg folder made unreadable or unwritable (a non-root run: root
+	// ignores modes), and a link planted at the flat cfg once it is set up.
+	t.Run("modes", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores file modes")
+		}
+		for _, mode := range []os.FileMode{0, 0o300, 0o500} {
+			s := newACSetup(t)
+			s.mustRun(t)
+			for _, d := range []string{filepath.Join(s.state, "cfg"), s.flatCfg("Assetto Corsa")} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(d, mode); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(d, 0o755) })
+			}
+			for range 2 {
+				if out := s.mustRun(t); !strings.Contains(out, "not binding VR recenter") {
+					t.Errorf("mode %o: no log:\n%s", mode, out)
+				}
+			}
+		}
+	})
+	s = newACSetup(t)
+	s.mustRun(t)
+	elsewhere = t.TempDir()
+	if err := os.RemoveAll(s.flatCfg("Assetto Corsa")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, s.flatCfg("Assetto Corsa")); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if out := s.mustRun(t); !strings.Contains(out, "not binding VR recenter in the flat cfg") {
+			t.Errorf("flat cfg link: no log:\n%s", out)
+		}
+	}
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Errorf("written through the flat cfg link: %v", entries)
+	}
 	// So is a socket, which open() refuses (ENXIO) rather than reading as no
 	// file. Bound from inside the folder: a socket path has a length limit.
 	for name, cfg := range map[string]func(s *acSetup) string{

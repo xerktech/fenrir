@@ -369,7 +369,9 @@ paths:
     `data_hotkeys_supported.txt`; the value names are Content Manager's (`ControllerButtonEntry`).
     - A section already naming `XBOXBUTTON` (even empty) is the User's; a button another section
       holds is not bound. The VR cfg is edited only once seeded: making it would stop the seed.
-    - A failed cfg write (a folder planted at the file or its temp name) is logged, never ends the
-      session; the flat cfg step then retries next launch. Tests: `TestACSetupBindsVRRecenterToPad`.
+    - Any recenter failure (a folder, socket, link or mode a game plants at either cfg, its
+      controls.ini or the temp name) is logged, never ends the launch: it runs every launch, so
+      one game could block every User's VR. A failed flat cfg step is logged and retried next
+      launch. Tests: `TestACSetupBindsVRRecenterToPad`.
     - Unverified in a headset: that the press recenters.
   - Its memory limit (24Gi) needs a User ceiling to match. Tests: `state_mounts_test.go`.
