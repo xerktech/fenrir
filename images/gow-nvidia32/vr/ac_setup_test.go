@@ -714,8 +714,11 @@ func TestACSetupBindsVRRecenterToPad(t *testing.T) {
 			}
 		}
 	})
+	// The VR cfg is still bound when the flat one fails.
 	s = newACSetup(t)
 	s.mustRun(t)
+	vr = filepath.Join(s.state, "cfg", "controls.ini")
+	mustWrite(t, vr, "")
 	elsewhere = t.TempDir()
 	if err := os.RemoveAll(s.flatCfg("Assetto Corsa")); err != nil {
 		t.Fatal(err)
@@ -730,6 +733,9 @@ func TestACSetupBindsVRRecenterToPad(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
 		t.Errorf("written through the flat cfg link: %v", entries)
+	}
+	if got := readString(t, vr); got != recenterIni {
+		t.Errorf("VR controls.ini after a flat failure = %q", got)
 	}
 	// So is a socket, which open() refuses (ENXIO) rather than reading as no
 	// file. Bound from inside the folder: a socket path has a length limit.
