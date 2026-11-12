@@ -41,8 +41,15 @@ func TestVRQRCode(t *testing.T) {
 	if size != 41+2*vrQRQuietZone {
 		t.Errorf("size %d", size)
 	}
-	// No module in the quiet zone: it must stay light for a camera.
-	for _, m := range strings.Split(strings.TrimSuffix(path, "z"), "z") {
+	// A camera needs the light border: no module in it, and the code starts right
+	// after it (the finder pattern's corner is always dark).
+	if vrQRQuietZone < 4 {
+		t.Errorf("quiet zone %d modules, QR codes need 4", vrQRQuietZone)
+	}
+	if !strings.HasPrefix(path, fmt.Sprintf("M%d %dh1v1h-1z", vrQRQuietZone, vrQRQuietZone)) {
+		t.Errorf("code does not start after the quiet zone: %.40s", path)
+	}
+	for m := range strings.SplitSeq(strings.TrimSuffix(path, "z"), "z") {
 		var x, y int
 		if _, err := fmt.Sscanf(m, "M%d %dh1v1h-1", &x, &y); err != nil {
 			t.Fatalf("module %q: %s", m, err)

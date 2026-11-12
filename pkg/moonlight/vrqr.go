@@ -30,7 +30,7 @@ const vrQRQuietZone = 4
 func vrQRCode(text string) (size int, path string, err error) {
 	code, err := qr.Encode(text, qr.M)
 	if err != nil {
-		return 0, "", err
+		return 0, "", fmt.Errorf("QR code of %q: %w", text, err)
 	}
 	var b strings.Builder
 	for y := range code.Size {
