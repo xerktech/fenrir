@@ -144,6 +144,9 @@ paths:
     - CI (`nexus-xgameruntime.yml`, `hack/nexus-xgameruntime/build.sh`) builds the DLL for the newest
       two upstream runtimes at the xgameruntime/wine commits each `candidate.json` pins, and publishes
       release `nexus-xgameruntime-<runtime tag>-<patch id>` here. Exit 3: patches no longer apply.
+    - On PRs `build.sh --tests` also compiles upstream's tests and runs, under Wine, each gtest
+      case a patch adds (its `+TEST(`/`+TEST_F(` lines), XERK-2839. Name a patch's tests that way;
+      don't widen it to whole suites: Ubuntu's Wine fails unpatched upstream cases there.
     - Publish runs per runtime even when another runtime's build failed (`!cancelled()`): one
       runtime the patches don't fit must not leave the newest unpublished.
     - Exit 3 fails the run only for the newest runtime; an older one is skipped with a warning

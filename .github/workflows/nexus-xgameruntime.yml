@@ -9,8 +9,11 @@ name: Nexus XGameRuntime patch builds
 # A run that fails because the patches no longer apply (build.sh exit 3) means
 # upstream changed that code: check whether it fixed the games, then drop or
 # rebase the patch. Only the newest runtime fails the run that way: a rebased
-# series rarely fits the runtime it replaced, which is skipped instead. Release tags never start with v, so the chart's version
-# tags (hack/release/next-chart-version.sh) are untouched.
+# series rarely fits the runtime it replaced, which is skipped instead. Pull
+# requests also compile upstream's tests with the patches and run the tests the
+# patches add (build.sh --tests); main and scheduled runs build only the DLL.
+# Release tags never start with v, so the chart's version tags
+# (hack/release/next-chart-version.sh) are untouched.
 on:
   schedule:
     - cron: "23 */3 * * *"
@@ -97,13 +100,23 @@ jobs:
           # Ubuntu's wine64-tools puts widl in /usr/lib/wine, off PATH.
           echo /usr/lib/wine >>"$GITHUB_PATH"
           test -x /usr/lib/wine/widl || command -v widl
+      - name: Install Wine and Xvfb (pull requests)
+        if: github.event_name == 'pull_request'
+        run: |
+          # As upstream's CI, to run the patches' tests (build.sh --tests).
+          sudo apt-get -o Acquire::Retries=3 install -y -q --no-install-recommends wine wine64 xvfb xauth
       - name: Build
         env:
           TAG: ${{ matrix.tag }}
           NEWEST: ${{ needs.plan.outputs.newest }}
+          EVENT: ${{ github.event_name }}
         run: |
+          # A PR also compiles every upstream test with the patches applied and
+          # runs the cases the patches add: a broken test hunk fails here.
+          run=(hack/nexus-xgameruntime/build.sh "$TAG" out)
+          [[ "$EVENT" == pull_request ]] && run=(xvfb-run -a "${run[@]}" --tests)
           rc=0
-          hack/nexus-xgameruntime/build.sh "$TAG" out || rc=$?
+          "${run[@]}" || rc=$?
           # Exit 3 (patches don't apply) fails the run only for the newest
           # runtime, the one the Library installs. An older one keeps its
           # builtin DLL, so it uploads nothing and publish skips it.
