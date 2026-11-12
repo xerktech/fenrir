@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -682,6 +683,36 @@ func TestACSetupBindsVRRecenterToPad(t *testing.T) {
 				t.Errorf("%s: no log of the planted folder:\n%s", plant(s), out)
 			}
 		}
+		// A failed flat step stays unrecorded, so the next launch retries it.
+		flat := strings.HasPrefix(plant(s), s.compat)
+		if m := readString(t, filepath.Join(s.compat, "direwolf-ac-setup.json")); strings.Contains(m, `"flat-cfg"`) == flat {
+			t.Errorf("%s: compat marker %s", plant(s), m)
+		}
+	}
+	// So is a socket, which open() refuses (ENXIO) rather than reading as no
+	// file. Bound from inside the folder: a socket path has a length limit.
+	for name, cfg := range map[string]func(s *acSetup) string{
+		"VR":   func(s *acSetup) string { return filepath.Join(s.state, "cfg") },
+		"flat": func(s *acSetup) string { return s.flatCfg("Assetto Corsa") },
+	} {
+		t.Run("socket in "+name+" cfg", func(t *testing.T) {
+			s := newACSetup(t)
+			if err := os.MkdirAll(cfg(s), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// Restored when the subtest ends.
+			t.Chdir(cfg(s))
+			l, err := net.Listen("unix", "controls.ini")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+			for range 2 {
+				if out := s.mustRun(t); !strings.Contains(out, "No such device or address") {
+					t.Errorf("no log of the planted socket:\n%s", out)
+				}
+			}
+		})
 	}
 }
 

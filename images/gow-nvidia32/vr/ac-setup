@@ -344,31 +344,31 @@ def flat_cfg(compat):
 
 def bind_recenter(cfg):
     """CSP's VR recenter on the pad, in the cfg folder fd cfg's controls.ini,
-    unless the User bound it already or another control has the button."""
-    section, taken = None, None
-    for line in ini_lines(cfg, "controls.ini"):
-        s = line.strip()
-        if s.startswith("[") and s.endswith("]"):
-            section = s[1:-1].strip().upper()
-        elif "=" in s:
-            k, v = s.split("=", 1)
-            k, v = k.strip().upper(), v.split(";", 1)[0].strip().upper()
-            if k != "XBOXBUTTON":
-                continue
-            if section == RECENTER:
-                # Bound (or unbound, empty) by the User: in any copy of the
-                # section, as set_ini would drop a second copy's key.
-                return
-            if v == RECENTER_BUTTON:
-                taken = section
-    if taken is not None:
-        log(f"not binding VR recenter to {RECENTER_BUTTON}: [{taken}] has it")
-        return
+    unless the User bound it already or another control has the button. A
+    failure (a folder, socket or the like planted at the file or its temporary
+    name) is logged: a convenience isn't worth ending the session over."""
     try:
+        section, taken = None, None
+        for line in ini_lines(cfg, "controls.ini"):
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                section = s[1:-1].strip().upper()
+            elif "=" in s:
+                k, v = s.split("=", 1)
+                k, v = k.strip().upper(), v.split(";", 1)[0].strip().upper()
+                if k != "XBOXBUTTON":
+                    continue
+                if section == RECENTER:
+                    # Bound (or unbound, empty) by the User: in any copy of the
+                    # section, as set_ini would drop a second copy's key.
+                    return
+                if v == RECENTER_BUTTON:
+                    taken = section
+        if taken is not None:
+            log(f"not binding VR recenter to {RECENTER_BUTTON}: [{taken}] has it")
+            return
         set_ini(cfg, "controls.ini", {RECENTER: {"XBOXBUTTON": RECENTER_BUTTON}})
     except OSError as e:
-        # A folder planted at the file or its temporary name: a convenience
-        # isn't worth ending the session over.
         log(f"not binding VR recenter: {e}")
 
 
