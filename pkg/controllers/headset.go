@@ -164,6 +164,11 @@ func stillSeeded(h *v1alpha1types.Headset, want seededHeadset) bool {
 // WiVRn was seeded with is gone, or "" if it must not. Checked on every
 // reconcile, so a delete the operator missed (it was down) still ends it.
 func (c *SessionController) headsetRevokedReason(ctx context.Context, pod *corev1.Pod) (string, error) {
+	// Seeded with none by an operator from before XERK-2811: its WiVRn
+	// pairs by PIN, which the game can use too, and nothing follows it now.
+	if v, ok := pod.Annotations[vrHeadsetsAnnotation]; ok && v == "" {
+		return "its VR server was started with in-session PIN pairing open, which is retired; pair the headset through the VR front door", nil
+	}
 	if c.HeadsetInformer == nil {
 		return "", nil
 	}

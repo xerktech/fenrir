@@ -165,6 +165,11 @@ func TestVRPodFindsHeadsetMissingFromCache(t *testing.T) {
 	withVRApp(t, f)
 	f.sc.HeadsetClient = f.dw.DirewolfV1alpha1().Headsets(portsTestNS) // no informer: every read misses
 	f.createHeadset(t, "quest", f.user, testHeadsetKeyA, "")
+	// Only the live one counts: not another User's, nor one being deleted.
+	f.createHeadset(t, "theirs", "someone-else", testHeadsetKeyB, "")
+	f.createHeadsetObj(t, "leaving", f.user, testHeadsetKeyB, "", func(h *v1alpha1types.Headset) {
+		h.DeletionTimestamp, h.Finalizers = &metav1.Time{Time: time.Now()}, []string{"test/hold"}
+	})
 	sess := f.session("alex-1", f.user)
 	if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
 		t.Fatal(err)
@@ -175,6 +180,37 @@ func TestVRPodFindsHeadsetMissingFromCache(t *testing.T) {
 	}
 	if got := app.Annotations[vrHeadsetsAnnotation]; got != "quest/quest-uid" {
 		t.Errorf("App pod %s = %q, want the live Headset", vrHeadsetsAnnotation, got)
+	}
+}
+
+// A Headset being deleted is no Headset, read live too.
+func TestVRPodRefusesTerminatingHeadsetLive(t *testing.T) {
+	f := newPortsFixture(t)
+	withVRApp(t, f)
+	f.sc.HeadsetClient = f.dw.DirewolfV1alpha1().Headsets(portsTestNS) // no informer: every read is live
+	f.createHeadsetObj(t, "leaving", f.user, testHeadsetKeyA, "", func(h *v1alpha1types.Headset) {
+		h.DeletionTimestamp, h.Finalizers = &metav1.Time{Time: time.Now()}, []string{"test/hold"}
+	})
+	sess := f.session("alex-1", f.user)
+	if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.sc.buildPods(sess, testWolfPodUID); !errors.Is(err, errInvalidSpec) {
+		t.Errorf("buildPods err %v, want InvalidSpec", err)
+	}
+}
+
+// A pod an operator from before XERK-2811 seeded with no Headsets (its WiVRn
+// pairs by PIN) ends its Session on the next look.
+func TestPodSeededWithNoHeadsetsEnds(t *testing.T) {
+	f := newPortsFixture(t)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: portsTestNS, Annotations: map[string]string{vrHeadsetsAnnotation: ""}}}
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || !strings.Contains(reason, "PIN pairing") {
+		t.Errorf("reason %q, %v; want the session ended for open PIN pairing", reason, err)
+	}
+	delete(pod.Annotations, vrHeadsetsAnnotation) // a flat pod
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || reason != "" {
+		t.Errorf("flat pod: reason %q, %v; want none", reason, err)
 	}
 }
 
@@ -264,7 +300,7 @@ func TestRevokedHeadsetEndsSessionOnReconcile(t *testing.T) {
 		ends         bool
 	}{
 		{"all present", "quest/quest-uid", false},
-		{"seeded with none", "", false},
+		{"seeded with none (PIN pairing open, XERK-2811)", "", true},
 		{"one revoked", "quest/quest-uid,gone/gone-uid", true},
 		{"re-created under its name", "quest/old-uid", true},
 		{"being deleted", "held/held-uid", true},

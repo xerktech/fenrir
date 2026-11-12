@@ -112,6 +112,9 @@ paths:
     (the Headset watch can lag a pairing the front door just made). The VR page refuses the start
     with "Pair your headset first". Tests: `TestVRPodWithoutHeadsetsIsInvalidSpec`,
     `TestVRPodFindsHeadsetMissingFromCache`, `TestVRPageRefusesUserWithoutHeadset`.
+  - A pod whose `vr-headsets` annotation is present and empty (seeded with none by an older
+    operator: its WiVRn pairs by PIN) ends its Session on reconcile (`headsetRevokedReason`).
+    Tests: `TestPodSeededWithNoHeadsetsEnds`.
   - Headsets are made only by the VR front door (XERK-2808). Never create one from what the App's
     bus reports (XERK-2742): every App process is uid 1000, WiVRn's uid and the bus owner, so a
     game can plant a key in `known_keys.json` or PIN-pair itself. Nothing on the bus proves a
