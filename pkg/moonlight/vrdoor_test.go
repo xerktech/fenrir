@@ -162,9 +162,10 @@ func (f *vrDoorFixture) newHeadset(t *testing.T) *headset {
 
 // vrReply is a front door reply: its status, JSON body and TLS state.
 type vrReply struct {
-	status int
-	body   map[string]any
-	tls    *tls.ConnectionState
+	status     int
+	body       map[string]any
+	tls        *tls.ConnectionState
+	retryAfter string
 }
 
 // str is the body's string field key, or "".
@@ -195,7 +196,7 @@ func (h *headset) do(t *testing.T, f *vrDoorFixture, method, path string, body a
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	out := vrReply{status: resp.StatusCode, tls: resp.TLS}
+	out := vrReply{status: resp.StatusCode, tls: resp.TLS, retryAfter: resp.Header.Get("Retry-After")}
 	raw, _ := io.ReadAll(resp.Body)
 	_ = json.Unmarshal(raw, &out.body)
 	return out
@@ -579,8 +580,8 @@ func TestVRFrontDoorLimitsDraws(t *testing.T) {
 		}
 	}
 	// From any client: the limit is not per key or source.
-	if r := f.newHeadset(t).do(t, f, http.MethodPost, VRPairPath, req); r.status != http.StatusTooManyRequests {
-		t.Errorf("draw past the burst: %d", r.status)
+	if r := f.newHeadset(t).do(t, f, http.MethodPost, VRPairPath, req); r.status != http.StatusTooManyRequests || r.retryAfter != "5" {
+		t.Errorf("draw past the burst: %d, Retry-After %q", r.status, r.retryAfter)
 	}
 }
 

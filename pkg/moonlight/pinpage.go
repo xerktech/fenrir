@@ -387,7 +387,7 @@ func (h *pinPageHandler) submitVR(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusTooManyRequests)
 	case err != nil:
 		klog.Errorf("Pairing page: user %s: pairing a VR headset: %v", user.Name, err)
-		http.Error(w, "Pairing failed; start pairing again on the headset.", http.StatusInternalServerError)
+		http.Error(w, "Pairing failed. Try the same code again in a minute; if it still fails, start pairing again on the headset.", http.StatusInternalServerError)
 	default:
 		_, _ = w.Write([]byte("Headset paired. It now lists your VR games."))
 	}

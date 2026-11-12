@@ -173,11 +173,14 @@ reveals its nonce, so it can't steer the headset's code.
 
 Why a rate limit: the relay can still draw server-side codes, since each `/pair` hands it a new
 server nonce and it knows every other input before it confirms (QA matched a chosen code in under a
-second). So `/pair` answers at most one per 5 seconds server-wide, burst 3, else 429: in the
-minutes the user takes to type the code a relay gets a few dozen draws at 1 in 10^8 each.
+second). So `/pair` answers at most one per 5 seconds server-wide, burst 3, else 429. Per
+pairing a relay gets a few dozen draws at 1 in 10^8 each: about 15 held from the minute before
+the headset shows its code (uncommitted pairings live 60s), then one per 5s while the user types
+(at most 3 minutes); QA measured about 5 in 10^7 at worst.
 
 A wrong code counts against the entering User: 5 per 10 minutes, in memory (a restart resets it).
-At most 16 pairings wait at once; both limits let anyone delay pairing, never complete one.
+At most 16 pairings wait at once. Both limits let anyone who reaches the port hold pairing up
+(one `/pair` per 5 seconds keeps the draw limit spent), never complete one.
 
 ### Authenticated API (paired client certificate)
 
