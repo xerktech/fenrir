@@ -55,8 +55,8 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
   - Taking the headset off keeps the session for the grace period; putting it back on resumes.
   - One VR session at a time (one GPU); it counts against `--max-concurrent-sessions`, and a
     Moonlight launch by the same User replaces it.
-  - Assetto Corsa's one-time setup in the shared Steam home (acs.exe swap, CSP, prefix fonts) is
-    still done by hand (XERK-2726).
+  - Assetto Corsa's one-time setup (acs.exe swap, CSP, prefix fonts) runs on its own at each VR
+    launch (`vr/ac-setup`, XERK-2726); install the game from the Library first.
 
 ### Administer
 
