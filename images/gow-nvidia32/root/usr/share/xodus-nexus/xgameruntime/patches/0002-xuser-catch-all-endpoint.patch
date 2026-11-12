@@ -21,8 +21,8 @@ builds its endpoints directly, so it runs on stock Wine without
 Windows.Data.Json.
 ---
  src/System/XUser.cpp      | 32 +++++++++++----
- tests/Nexus/test_user.cpp | 84 +++++++++++++++++++++++++++++++++++++++
- 2 files changed, 108 insertions(+), 8 deletions(-)
+ tests/Nexus/test_user.cpp | 86 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 110 insertions(+), 8 deletions(-)
 
 diff --git a/src/System/XUser.cpp b/src/System/XUser.cpp
 index 1e56c14..6d01731 100644
@@ -95,13 +95,14 @@ index 1e56c14..6d01731 100644
                                    ( static_cast<UINT32>( context->options ) &
                                      static_cast<UINT32>( XUserGetTokenAndSignatureOptions::ForceRefresh ) ) != 0 ) ) )
 diff --git a/tests/Nexus/test_user.cpp b/tests/Nexus/test_user.cpp
-index ceff651..2bcb636 100644
+index ceff651..22601f6 100644
 --- a/tests/Nexus/test_user.cpp
 +++ b/tests/Nexus/test_user.cpp
-@@ -2312,4 +2312,88 @@ TEST( NexusSignedRequestRetry, XstsCallerPropagatesTerminalFailureWithoutRetryin
-     WCHAR *authorization=nullptr;
+@@ -2313,3 +2313,89 @@ TEST( NexusSignedRequestRetry, XstsCallerPropagatesTerminalFailureWithoutRetryin
      EXPECT_EQ(user->GetAuthorization(L"https://service.example.invalid/",&authorization),E_ABORT);
      EXPECT_EQ(transport.rawCalls,1u);EXPECT_EQ(authorization,nullptr);free(authorization);
+ }
++
 +// Endpoints as a title's metadata would load them, built directly so the test
 +// needs no Windows.Data.Json: an exact untyped host, typed wildcards and a
 +// catch-all "*" with no relying party or token type.
@@ -186,4 +187,4 @@ index ceff651..2bcb636 100644
 +    threads->Release();
 +    EXPECT_EQ( transport.rawCalls, 0u );
 +    EXPECT_EQ( transport.httpCalls, 0u );
- }
++}

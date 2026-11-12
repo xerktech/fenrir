@@ -53,10 +53,13 @@ jobs:
           pid="$(hack/nexus-xgameruntime/patch-id.sh images/library/root/usr/share/xodus-nexus/xgameruntime/patches)"
           # The newest two published x86_64 runtimes: the Library installs the
           # newest, and a pod may still run the one it replaced.
-          mapfile -t runtimes < <(gh api 'repos/domsvoboda/nexus-runtime/releases?per_page=30' --jq '
+          # Captured first: a failed gh api inside < <(...) would escape set -e
+          # and leave a green run that built nothing.
+          list="$(gh api 'repos/domsvoboda/nexus-runtime/releases?per_page=30' --jq '
             [.[] | select((.draft or .prerelease) | not)
                  | select(any(.assets[]; .name | test("^nexus-runtime-[A-Za-z0-9._-]+-x86_64\\.tar\\.xz$")))]
-            | sort_by(.published_at) | reverse | .[0:2] | .[].tag_name')
+            | sort_by(.published_at) | reverse | .[0:2] | .[].tag_name')"
+          mapfile -t runtimes <<<"$list"
           tags=()
           for t in "${runtimes[@]}"; do
             [[ "$t" =~ ^[A-Za-z0-9._-]+$ ]] || continue
