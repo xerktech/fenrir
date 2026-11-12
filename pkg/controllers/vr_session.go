@@ -81,8 +81,7 @@ const (
 	// it: vr-agent's in native pods from before XERK-2747.
 	vrAgentTokenVolume = "wolf-agent-token"
 	// vrAgentOwnTokenVolume is vr-agent's own token Secret
-	// (vrAgentTokenSecretName), in native pods. Split App pods from before
-	// XERK-2811 mount it too, but are no longer polled.
+	// (vrAgentTokenSecretName), in native and split App pods.
 	vrAgentOwnTokenVolume = "vr-agent-token"
 )
 
@@ -169,7 +168,7 @@ func (c *SessionController) buildVRPod(session *v1alpha1types.Session) (*corev1.
 	if err != nil {
 		return nil, invalidSpec(err)
 	}
-	spec.Containers = append(spec.Containers, c.vrAgentContainer(uid, gid))
+	spec.Containers = append(spec.Containers, c.vrAgentContainer(true, uid, gid))
 	// Created by reconcileSessionPod before the pod (XERK-2747).
 	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: vrAgentOwnTokenVolume, VolumeSource: corev1.VolumeSource{
 		Secret: &corev1.SecretVolumeSource{SecretName: vrAgentTokenSecretName(session.Name)},
@@ -203,6 +202,34 @@ func vrBusVolumeSpec() corev1.Volume {
 		Medium:    corev1.StorageMediumMemory,
 		SizeLimit: new(resource.MustParse("1Mi")),
 	}}}
+}
+
+// withVRAgent adds vr-agent to a Moonlight Session's split App pod of a VR
+// App, only so the operator can record the VR server's identity key and the
+// front door hand it to the headset to pin (XERK-2811): the App's containers
+// get the bus directory (the image publishes the key there) and vr-agent its
+// own token Secret, never wolf-agent's (that one drives Wolf). Call it after
+// the App pod's volumes are pruned.
+func (c *SessionController) withVRAgent(session *v1alpha1types.Session, spec *corev1.PodSpec) {
+	uid, gid, err := vrAgentIDs(spec)
+	if err != nil {
+		// Here vr-agent only reports the server key; the stream doesn't
+		// wait on it. So the Session keeps streaming, with the front door
+		// unable to hand out the key (a bus of another uid refuses it).
+		klog.Warningf("Session %s/%s: vr-agent can't take the App's user (%v); it runs as %d and the headset can't connect through the front door", session.Namespace, session.Name, err, vrAgentUID)
+		uid, gid = vrAgentUID, vrAgentUID
+	}
+	for i := range spec.Containers {
+		if ctr := &spec.Containers[i]; ctr.Name != v1alpha1types.UdevRelayContainerName {
+			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: vrBusVolume, MountPath: VRBusDir})
+		}
+	}
+	spec.Containers = append(spec.Containers, c.vrAgentContainer(false, uid, gid))
+	spec.Volumes = append(spec.Volumes, vrBusVolumeSpec(), corev1.Volume{
+		Name: vrAgentOwnTokenVolume,
+		// Created by reconcileAppPod before the pod.
+		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: vrAgentTokenSecretName(session.Name)}},
+	})
 }
 
 // GoW images' desktop user ids.
@@ -266,11 +293,20 @@ func vrAgentIDs(spec *corev1.PodSpec) (uid, gid int64, err error) {
 // the desktop user (the bus refuses other uids) with nothing else: the token
 // and key are its alone (its own Secret, never wolf-agent's), and the App
 // never mounts them.
-func (c *SessionController) vrAgentContainer(uid, gid int64) corev1.Container {
+//
+// gateReady makes it the pod's readiness (native mode: the headset wait
+// starts once WiVRn answers). Never in a split App pod: the stream waits for
+// that pod to be ready, and the App waits for the stream's display before
+// it starts WiVRn.
+func (c *SessionController) vrAgentContainer(gateReady bool, uid, gid int64) corev1.Container {
 	probe := func(p string) *corev1.Probe {
 		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
 			Path: p, Port: intstr.FromInt32(VRAgentPort), Scheme: corev1.URISchemeHTTPS,
 		}}}
+	}
+	var readiness *corev1.Probe
+	if gateReady {
+		readiness = probe("/readyz")
 	}
 	return corev1.Container{
 		Name:            v1alpha1types.VRAgentContainerName,
@@ -287,7 +323,7 @@ func (c *SessionController) vrAgentContainer(uid, gid int64) corev1.Container {
 		Ports: []corev1.ContainerPort{{Name: "vr-agent", ContainerPort: VRAgentPort, Protocol: corev1.ProtocolTCP}},
 		// Ready once WiVRn answers on the bus: the headset wait (and its
 		// grace period) starts then.
-		ReadinessProbe: probe("/readyz"),
+		ReadinessProbe: readiness,
 		LivenessProbe:  probe("/livez"),
 		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("10m"),
@@ -396,15 +432,7 @@ func (c *SessionController) reconcileVRHeadset(ctx context.Context, session *v1a
 	// The key the front door hands the headset to pin (XERK-2808): the
 	// first one reported. A later change is the game's doing (only it and
 	// WiVRn can write the file) and is never handed out.
-	switch {
-	case vr.ServerKey == "" || vr.ServerKey == status.VRServerKey:
-	case !IsWiVRnServerKey(vr.ServerKey):
-		klog.Warningf("Session %s/%s: vr-agent reported a malformed server key; ignoring it", session.Namespace, session.Name)
-	case status.VRServerKey != "":
-		klog.Warningf("Session %s/%s: the VR server's identity key changed mid-session; keeping the first", session.Namespace, session.Name)
-	default:
-		status.VRServerKey = vr.ServerKey
-	}
+	recordVRServerKey(session, vr.ServerKey)
 	headset := meta.FindStatusCondition(status.Conditions, v1alpha1types.SessionHeadsetConnectedCondition)
 	switch {
 	case vr.HeadsetConnected:
@@ -505,4 +533,43 @@ func (c *SessionController) fetchVRStatus(ctx context.Context, token string, tls
 		return VRStatus{}, fmt.Errorf("polling vr-agent: %w", err)
 	}
 	return vr, nil
+}
+
+// recordVRServerKey records key, as vr-agent reported it, as the session's
+// VR server key: the first one only. A later change is the game's doing
+// (only it and WiVRn can write the file) and is never handed out.
+func recordVRServerKey(session *v1alpha1types.Session, key string) {
+	status := &session.Status
+	switch {
+	case key == "" || key == status.VRServerKey:
+	case !IsWiVRnServerKey(key):
+		klog.Warningf("Session %s/%s: vr-agent reported a malformed server key; ignoring it", session.Namespace, session.Name)
+	case status.VRServerKey != "":
+		klog.Warningf("Session %s/%s: the VR server's identity key changed mid-session; keeping the first", session.Namespace, session.Name)
+	default:
+		status.VRServerKey = key
+	}
+}
+
+// recordAppPodServerKey records the VR server key of a Moonlight Session's
+// split App pod (XERK-2811), so the front door can hand it to the User's
+// headset to pin: headsets pair only through the front door, and the Quest
+// app trusts no server it has neither pinned nor PIN-paired. Polled only
+// until recorded; a failure is logged, never the stream's concern.
+func (c *SessionController) recordAppPodServerKey(ctx context.Context, session *v1alpha1types.Session, wolfPod *corev1.Pod) {
+	name := wolfPod.Annotations[appPodAnnotation]
+	if name == "" || session.Status.VRServerKey != "" {
+		return
+	}
+	pod, err := c.podController.Informer().Namespaced(wolfPod.Namespace).Get(name)
+	if err != nil || !metav1.IsControlledBy(pod, session) || pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" ||
+		!slices.ContainsFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == v1alpha1types.VRAgentContainerName }) {
+		return // not up yet, or an App pod from before XERK-2740 (no vr-agent)
+	}
+	vr, err := c.pollVRAgent(ctx, session, pod.Status.PodIP, vrAgentTokenSecretName(session.Name))
+	if err != nil {
+		klog.V(2).Infof("Session %s/%s: reading the VR server key: %v", session.Namespace, session.Name, err)
+		return
+	}
+	recordVRServerKey(session, vr.ServerKey)
 }

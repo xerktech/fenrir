@@ -124,9 +124,14 @@ paths:
     ends the Session on reconcile, and at once on any Headset event (`reconcileHeadset`, found by
     annotation: a deleted object no longer names its User).
   - The spec is immutable (CEL): a changed key would admit a headset without ending Sessions.
-  - vr-agent runs only in native pods, with its own token Secret `<session>-vr-agent-token`,
-    never wolf-agent's (that one drives Wolf). A native pod from before XERK-2747 mounts
-    wolf-agent's and is polled with it. A Moonlight split App pod runs none (XERK-2811).
+  - vr-agent has its own token Secret `<session>-vr-agent-token` in both modes, never
+    wolf-agent's (that one drives Wolf). A native pod from before XERK-2747 mounts wolf-agent's
+    and is polled with it.
+  - Moonlight mode: a vrPort App's split App pod runs vr-agent too (`withVRAgent`), with the bus
+    dir and that Secret, only for the server key (`recordAppPodServerKey`, polled from the
+    Moonlight reconcile until recorded). No readiness probe there: the stream waits for the App
+    pod to be Ready, and the App waits for the stream's display before it starts WiVRn.
+  - Tests: `TestMoonlightVRRecordsServerKey`, `TestSplitVRAppPodRunsVRAgent`.
   - Tests: `headset_record_test.go`, `headset_test.go`,
     `TestHeadsetCRDValidatesKeyAndImmutability`,
     `TestVRStartSeedsKnownKeysFromHeadsets`, `TestVRStartRefusesBadHeadsetSeed`.
@@ -177,6 +182,12 @@ paths:
 - Launch, stop and the app list are `VRLaunch`'s, with moonlight-proxy's clients: one set of
   checks for both doors. moonlight-proxy's `/launch` and the front door share no lock, as the
   operator's VR page doesn't.
+- A Moonlight Session of a VR App is the headset's to join (XERK-2811): the Quest app trusts no
+  server it neither pinned nor PIN-paired (fork `client/wivrn_client.cpp`), and PIN is gone.
+  - `SessionState` reports it `starting`, then `ready` with the split App pod's `hostIP`,
+    `status.ports.vr` and key; a launch of that same App returns it, another App is refused.
+  - The headset's stop never ends it: quit it in Moonlight. Tests:
+    `TestVRFrontDoorJoinsMoonlightVRSession`, `TestVRFrontDoorLeavesFlatMoonlightSession`.
 - `ready` needs `status.vrServerKey`, which the operator sets once from vr-agent's first report
   and never replaces (`TestVRSessionRecordsServerKeyOnce`). The vr image makes the key with openssl
   and writes its public half to `VRServerKeyFile`; vr-agent reads it non-blocking, regular files

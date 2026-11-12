@@ -726,3 +726,72 @@ func TestHeadsetsHostServesOnlyTheVRPage(t *testing.T) {
 		t.Errorf("headsets host start: HTTP %d, want 404", rec.Code)
 	}
 }
+
+// A VR game started from Moonlight is the headset's to join (XERK-2811): the
+// front door reports it starting until its App pod is Ready and its server
+// key recorded, then ready with that pod's address and key, and a launch of
+// the same game joins it rather than refusing. Another game is refused, and
+// the headset never stops it.
+func TestVRFrontDoorJoinsMoonlightVRSession(t *testing.T) {
+	sess := moonlightSession("sam-ac-1", "sam")
+	sess.UID = "sam-ac-1"
+	sess.Spec.GameReference.Name = "ac"
+	sess.Status.Ports.VR = 21003
+	f := newVRFixture(t, sess)
+	sam := &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "sam"}}
+
+	st, err := f.s.VRLaunch.SessionState(t.Context(), sam)
+	if err != nil || st.State != VRStateStarting || st.App != "ac" || st.Host != "" || st.Message == "" {
+		t.Fatalf("no pods: %+v %v", st, err)
+	}
+	if refusal, err := f.s.VRLaunch.Launch(t.Context(), sam, "ac"); err != nil || refusal != "" {
+		t.Errorf("launch of the same game: %q %v, want it joined", refusal, err)
+	}
+	if refusal, _ := f.s.VRLaunch.Launch(t.Context(), sam, "beat"); refusal != vrMoonlightMessage {
+		t.Errorf("launch of another game: %q, want %q", refusal, vrMoonlightMessage)
+	}
+	if n := len(f.sessions(t)); n != 1 {
+		t.Fatalf("%d sessions, want only the Moonlight one", n)
+	}
+
+	wolf := readyVRPod(sess)
+	wolf.Annotations = map[string]string{appPodAnnotation: sess.Name + "-app"}
+	wolf.Status.HostIP = "10.10.10.99" // never the address: the App pod serves VR
+	app := readyVRPod(sess)
+	app.Name = sess.Name + "-app"
+	f.addPod(t, wolf)
+	f.addPod(t, app)
+	if st, _ = f.s.VRLaunch.SessionState(t.Context(), sam); st.State != VRStateStarting || st.Port != 0 {
+		t.Errorf("ready pods, no server key: %+v", st)
+	}
+	key := strings.Repeat("ab", 56)
+	sess.Status.VRServerKey = key
+	if _, err := f.dw.DirewolfV1alpha1().Sessions(libraryTestNS).UpdateStatus(t.Context(), sess, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = f.s.VRLaunch.SessionState(t.Context(), sam)
+	if st.State != VRStateReady || st.Host != "10.10.10.34" || st.Port != 21003 || st.ServerKey != key {
+		t.Errorf("ready: %+v", st)
+	}
+
+	if err := f.s.VRLaunch.Stop(t.Context(), sam); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.sessions(t)); n != 1 {
+		t.Errorf("headset stop ended the Moonlight session")
+	}
+}
+
+// A Moonlight session of a flat game stays "other".
+func TestVRFrontDoorLeavesFlatMoonlightSession(t *testing.T) {
+	sess := moonlightSession("sam-flat-1", "sam")
+	sess.Spec.GameReference.Name = "flat"
+	f := newVRFixture(t, sess)
+	sam := &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "sam"}}
+	if st, _ := f.s.VRLaunch.SessionState(t.Context(), sam); st.State != VRStateOther {
+		t.Errorf("flat Moonlight session: %+v", st)
+	}
+	if refusal, _ := f.s.VRLaunch.Launch(t.Context(), sam, "ac"); refusal != vrMoonlightMessage {
+		t.Errorf("launch: %q", refusal)
+	}
+}

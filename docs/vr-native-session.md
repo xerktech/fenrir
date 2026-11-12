@@ -197,7 +197,10 @@ At most 16 pairings wait at once. Both limits let anyone who reaches the port ho
   before and after the create, the user's pods waited out, `--max-concurrent-sessions`, never a
   Moonlight Session replaced. 202 with the session, or 409 `{error}` saying why not.
 - `GET /vr/v1/session`: `{state, app, title, host, port, serverKey, headsetConnected, message}`.
-  `state` is `none`, `starting`, `ready`, `stopping` or `other` (a Moonlight Session runs).
+  `state` is `none`, `starting`, `ready`, `stopping` or `other` (a Moonlight Session of a flat
+  App runs). A Moonlight Session of a VR App reads like a native one, from its split App pod, and
+  launching that App joins it (XERK-2811): the headset pins its key, as no PIN pairing remains.
+  The headset's stop leaves it; Moonlight quits it.
   `host`, `port` and `serverKey` are set only when `ready`.
 - `POST /vr/v1/stop`: ends the User's VR Sessions (204).
 - Errors are JSON `{error}` with a real HTTP status (this is not Moonlight's protocol).

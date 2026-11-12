@@ -50,6 +50,8 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
     and WiVRn never pairs by PIN in a session.
   - The VR page `headsets.xerktech.com/.direwolf/vr` (Authentik) also starts and stops a session
     and shows its address (`10.10.10.34:<port>`).
+  - A VR game launched from Moonlight (flat mirror) is joined from the headset: pick the same
+    game in the app. Quit it in Moonlight.
   - Taking the headset off keeps the session for the grace period; putting it back on resumes.
   - One VR session at a time (one GPU); it counts against `--max-concurrent-sessions`, and a
     Moonlight launch by the same User replaces it.

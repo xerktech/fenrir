@@ -10,7 +10,8 @@
 # bar across the top of the Moonlight mirror reads "VR headset: connect the WiVRn
 # app to <node IP> port <port>". Only the User's Headsets connect; they pair
 # through the VR front door (XERK-2808), never by PIN in a session (XERK-2811),
-# and a User with none gets no session.
+# and a User with none gets no session. In the WiVRn app, pick this game under
+# fenrir: it joins this session with the server's key pinned.
 #
 # Seated height: WiVRn's seated origin is a fixed 1.6 m up (XERK-2689). Once the
 # car is on track (AC ignores input in the pit), press Ctrl+Space on the

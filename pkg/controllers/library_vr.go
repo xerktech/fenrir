@@ -285,6 +285,11 @@ func (v *VRLaunch) Launch(ctx context.Context, user *v1alpha1types.User, appName
 	}
 	for _, s := range own {
 		switch {
+		case !s.Spec.IsVR() && s.DeletionTimestamp == nil && s.Spec.GameReference.Name == app.Name:
+			// The same VR game started from Moonlight: the headset joins
+			// it (SessionState), as it can pair only through the front
+			// door (XERK-2811).
+			return "", nil
 		case !s.Spec.IsVR():
 			return vrMoonlightMessage, nil
 		case s.DeletionTimestamp != nil:
@@ -447,6 +452,11 @@ func (v *VRLaunch) SessionState(ctx context.Context, user *v1alpha1types.User) (
 	idx := slices.IndexFunc(own, func(s v1alpha1types.Session) bool { return s.Spec.IsVR() })
 	switch {
 	case idx < 0 && len(own) > 0:
+		for i := range own {
+			if st, ok := v.moonlightVRState(ctx, &own[i]); ok {
+				return st, nil
+			}
+		}
 		return VRSessionState{State: VRStateOther, Message: vrMoonlightMessage}, nil
 	case idx < 0:
 		st := VRSessionState{State: VRStateNone}
@@ -681,4 +691,50 @@ func writeVRPage(w http.ResponseWriter, status int, body string, refresh int) {
 <style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0;padding:0 16px}p{max-width:32em;text-align:center;font-size:1.2em}button{font-size:1.1em;padding:.6em 1.4em}main{display:grid;justify-items:center;gap:1em}small{color:#aaa}a{color:#9cf}.big{font-size:2em;font-family:ui-monospace,monospace;margin:0}dl{display:grid;grid-template-columns:auto auto;gap:.3em 1em;align-items:baseline}dt{color:#aaa}dd{margin:0}.notice{color:#fc6}</style>
 </head><body><main><h1>Play in VR</h1>%s</main></body></html>
 `, meta, body)
+}
+
+// vrMirrorMessage is a Moonlight-started VR session's state message.
+const vrMirrorMessage = "Started from Moonlight: quit it there to stop it."
+
+// moonlightVRState is s as the front door reports it, if s is a Moonlight
+// Session of a VR App (XERK-2811): ready once its split App pod is Ready
+// and the operator recorded its VR server key, so the headset connects to
+// it pinned, as to a native session. The headset can't stop it: Stop never
+// touches a Moonlight Session.
+func (v *VRLaunch) moonlightVRState(ctx context.Context, s *v1alpha1types.Session) (VRSessionState, bool) {
+	app, err := v.Apps.Get(s.Spec.GameReference.Name)
+	if s.Spec.IsVR() || err != nil || !app.Spec.VRPort {
+		return VRSessionState{}, false
+	}
+	st := VRSessionState{State: VRStateStarting, App: app.Name, Title: appTitle(app), Message: vrMirrorMessage}
+	if s.DeletionTimestamp != nil {
+		st.State = VRStateStopping
+		return st, true
+	}
+	wolf, err := v.sessionPod(ctx, s.Name)
+	if err != nil || !metav1.IsControlledBy(wolf, s) || wolf.Annotations[appPodAnnotation] == "" {
+		return st, true
+	}
+	pod, err := v.sessionPod(ctx, wolf.Annotations[appPodAnnotation])
+	if err != nil || !metav1.IsControlledBy(pod, s) || pod.DeletionTimestamp != nil || !podReady(pod) ||
+		pod.Status.HostIP == "" || s.Status.Ports.VR == 0 || !IsWiVRnServerKey(s.Status.VRServerKey) {
+		return st, true
+	}
+	st.State, st.Host, st.Port, st.ServerKey = VRStateReady, pod.Status.HostIP, s.Status.Ports.VR, s.Status.VRServerKey
+	return st, true
+}
+
+// sessionPod is the session pod name, from the informer when there is one.
+func (v *VRLaunch) sessionPod(ctx context.Context, name string) (*corev1.Pod, error) {
+	var pod *corev1.Pod
+	var err error
+	if v.SessionPods != nil {
+		pod, err = v.SessionPods.Get(name)
+	} else {
+		pod, err = v.Pods.Get(ctx, name, metav1.GetOptions{})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting pod %s: %w", name, err)
+	}
+	return pod, nil
 }
