@@ -90,12 +90,14 @@ type LibraryServer struct {
 	// provisioning is off (--provision-group).
 	Provisioner *Provisioner
 
-	// HeadsetConfirmation serves libraryHeadsetsPath to requests with its
-	// own proxy secret; nil serves none.
-	HeadsetConfirmation *HeadsetConfirmation
+	// HeadsetsSecret is what the headsets host's own proxy sends in
+	// LibraryProxySecretHeader (XERK-2750). It must differ from the
+	// Library's: a request with it is served that host's pages and never
+	// the Library. Empty: no such host.
+	HeadsetsSecret []byte
 
 	// VRLaunch serves libraryVRPath on the headsets host (XERK-2670); nil
-	// serves none. Needs HeadsetConfirmation (its host).
+	// serves none. Needs HeadsetsSecret (its host).
 	VRLaunch *VRLaunch
 
 	// states is each library's *libraryState, by owner ("" the shared one).
@@ -287,6 +289,11 @@ func (s *LibraryServer) libraryOf(r *http.Request) (LibraryRef, error) {
 	return s.library.LibraryFor(user), nil
 }
 
+func (s *LibraryServer) hasHeadsetsSecret(r *http.Request) bool {
+	return len(s.HeadsetsSecret) > 0 &&
+		subtle.ConstantTimeCompare([]byte(r.Header.Get(LibraryProxySecretHeader)), s.HeadsetsSecret) == 1
+}
+
 func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	peer, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil || !s.isTrusted(peer.Addr().Unmap()) {
@@ -294,18 +301,16 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	// The headsets page has its own host, so its own origin (XERK-2750): the
+	// The VR page has its own host, so its own origin (XERK-2750): the
 	// Library host proxies the desktop, whose code can serve pages there
 	// (nginx proxies paths to ports abc can bind) that would drive it. Its
 	// proxy sends its own secret, so the host is never taken from a header.
-	if h := s.HeadsetConfirmation; h != nil && h.hasProxySecret(r) {
+	if s.hasHeadsetsSecret(r) {
 		switch r.URL.Path {
-		case libraryHeadsetsPath:
-			s.serveHeadsets(w, r)
 		case libraryVRPath:
 			s.serveVR(w, r)
 		case "/":
-			http.Redirect(w, r, libraryHeadsetsPath, http.StatusSeeOther)
+			http.Redirect(w, r, libraryVRPath, http.StatusSeeOther)
 		default:
 			http.NotFound(w, r)
 		}
@@ -317,7 +322,7 @@ func (s *LibraryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Never on the Library's origin, nor passed on to the pod.
-	if r.URL.Path == libraryHeadsetsPath || r.URL.Path == libraryVRPath {
+	if r.URL.Path == libraryVRPath {
 		http.NotFound(w, r)
 		return
 	}

@@ -107,7 +107,7 @@ func (s *vrStart) run(t *testing.T, env ...string) (string, error) {
 		"DBUS_LOG=" + filepath.Join(s.dir, "dbus.log"),
 		"SERVICES_LOG=" + filepath.Join(s.dir, "services.log"),
 		"DIREWOLF_VR_START_TIMEOUT=5",
-		"DIREWOLF_VR_HEADSETS=[]",
+		`DIREWOLF_VR_HEADSETS=[{"key":"` + testHeadsetKey + `","name":"Quest 3"}]`,
 	}, env...)
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
@@ -814,20 +814,20 @@ func TestVRStartSeedsKnownKeysFromHeadsets(t *testing.T) {
 		t.Errorf("known_keys.json = %s (%v); want only the seeded key", b, err)
 	}
 
-	// None: an empty list (WiVRn pairs by PIN), never the old file.
-	if out, err := s.run(t, "DIREWOLF_VR_PORT=20034"); err != nil {
-		t.Fatalf("%v\n%s", err, out)
-	}
-	if b, _ := os.ReadFile(path); string(b) != "[]" {
-		t.Errorf("known_keys.json = %s; want []", b)
+	// None: WiVRn would pair by PIN, so it refuses to start (XERK-2811).
+	out, err := s.run(t, "DIREWOLF_VR_PORT=20034", "DIREWOLF_VR_HEADSETS=[]")
+	if err == nil || !strings.Contains(out, "no headset is paired") {
+		t.Errorf("[]: err %v, output %q; want a refusal", err, out)
 	}
 }
 
-// An unparseable known_keys.json reads as no keys in WiVRn, which opens PIN
-// pairing: a bad or missing seed refuses to start and writes nothing.
+// An unparseable or empty known_keys.json reads as no keys in WiVRn, which
+// opens PIN pairing: a bad, empty or missing seed refuses to start and
+// writes nothing.
 func TestVRStartRefusesBadHeadsetSeed(t *testing.T) {
 	for _, env := range []string{
 		"DIREWOLF_VR_HEADSETS=",
+		"DIREWOLF_VR_HEADSETS=[]",
 		"DIREWOLF_VR_HEADSETS={}",
 		"DIREWOLF_VR_HEADSETS=[1]",
 		`DIREWOLF_VR_HEADSETS=[{"key":"x","name":"y"}]`,

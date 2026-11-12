@@ -21,7 +21,7 @@ import (
 )
 
 // vrAgentCommand runs the vr-agent sidecar of a native VR Session's pod
-// (XERK-2668) and of a Moonlight-mode VR Session's App pod (XERK-2740): it
+// (XERK-2668): it
 // reads WiVRn's state from the App's session bus and serves it
 // to the operator, behind the Session's bearer token and pinned cert. The pod
 // is off the host network, so only the pod network reaches it.
@@ -35,12 +35,6 @@ const (
 	// Each read dials the bus afresh: the bus and WiVRn come and go with
 	// the App's VR services (vr-services restarts wivrn-server).
 	vrBusTimeout = 5 * time.Second
-	// maxReportedKeys bounds KnownKeys in a reply: well over the operator's
-	// pending cap, well under its 64KiB read: an entry is at most a
-	// 1024-byte base64 key and a 128-character name of at most 512 bytes
-	// (four-byte runes; only " and \ escape, to two: no control runes,
-	// HTML escaping off).
-	maxReportedKeys = 32
 	// maxServerKeyFile bounds the read of the server key file, which the
 	// App can write: an X448 public key PEM is about 160 bytes.
 	maxServerKeyFile = 4096
@@ -76,7 +70,7 @@ func readServerKey(path string) string {
 	return key
 }
 
-// wivrnStatus reads WiVRn's HeadsetConnected, SessionRunning, Pin and KnownKeys from the bus
+// wivrnStatus reads WiVRn's HeadsetConnected and SessionRunning from the bus
 // at address.
 func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, vrBusTimeout)
@@ -101,39 +95,6 @@ func wivrnStatus(ctx context.Context, address string) (controllers.VRStatus, err
 		}
 		if err := v.Store(dst); err != nil {
 			return controllers.VRStatus{}, fmt.Errorf("WiVRn's %s: %w", name, err)
-		}
-	}
-	// The pairing PIN, while WiVRn pairs by PIN (XERK-2670): the VR page
-	// shows it behind Authentik. Six digits or nothing.
-	if v, ok := props["Pin"]; ok {
-		var pin string
-		if err := v.Store(&pin); err == nil && controllers.IsWiVRnPin(pin) {
-			st.Pin = pin
-		}
-	}
-	// The keys WiVRn admits, a(ssx): name, key, last connection. The
-	// operator offers a newly paired one for the User to confirm
-	// (XERK-2747).
-	if v, ok := props["KnownKeys"]; ok {
-		var keys []struct {
-			Name, Key      string
-			LastConnection int64
-		}
-		if err := v.Store(&keys); err != nil {
-			return controllers.VRStatus{}, fmt.Errorf("WiVRn's KnownKeys: %w", err)
-		}
-		// Bounded, so a game flooding the keys file can't grow the reply
-		// past what the operator reads (it would read as a lost headset).
-		for _, k := range keys {
-			if len(st.KnownKeys) == maxReportedKeys {
-				break
-			}
-			// Only what the operator would record: a key the CRD admits
-			// (base64, no JSON escapes) and a cleaned name.
-			if !controllers.IsWiVRnKey(k.Key) {
-				continue
-			}
-			st.KnownKeys = append(st.KnownKeys, controllers.VRKnownKey{Name: controllers.CleanHeadsetName(k.Name), Key: k.Key})
 		}
 	}
 	return st, nil

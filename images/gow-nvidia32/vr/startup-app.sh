@@ -111,9 +111,11 @@ mv -fT "$config.tmp" "$config"
 # The headsets that may connect, rewritten whole at every start from the
 # User's Headset objects (XERK-2669): a key an earlier session paired, or the
 # game wrote, is dropped, so deleting a Headset revokes it. WiVRn reads an
-# unparseable file as no keys, which opens PIN pairing, so only a list the
-# parser below accepts is written. With none, WiVRn pairs by PIN, shown only on
-# the authenticated mirror (vr-notice). Unset: an operator that can't revoke.
+# unparseable or empty file as no keys, which opens PIN pairing, so only a
+# non-empty list the parser below accepts is written. Headsets pair through
+# the VR front door only (XERK-2811): with none there is nothing to connect,
+# and in-session PIN pairing would let the game pair a key of its own.
+# Unset: an operator that can't revoke.
 [[ -v DIREWOLF_VR_HEADSETS ]] ||
   die "DIREWOLF_VR_HEADSETS is unset; the operator must seed this User's headsets"
 keys=$state/wivrn/known_keys.json
@@ -125,6 +127,8 @@ b64 = re.compile(r"([A-Za-z0-9+/]{4})+([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?|([
 keys = json.loads(sys.argv[1])
 if not isinstance(keys, list):
     sys.exit("not a list")
+if not keys:
+    sys.exit("no headset is paired; pair one through the VR front door")
 for k in keys:
     if not (isinstance(k, dict) and set(k) == {"key", "name"} and isinstance(k["name"], str)
             and isinstance(k["key"], str) and b64.fullmatch(k["key"])):

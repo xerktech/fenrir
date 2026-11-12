@@ -123,42 +123,6 @@ func envtestClient(t *testing.T) kubernetes.Interface {
 	}
 }
 
-// annotateHeadsets' resourceVersion precondition holds on a real API server:
-// a stale pod (another poll or kubelet wrote since it was read) fails the
-// patch with a conflict and leaves the live record alone (XERK-2747).
-func TestAnnotateHeadsetsConflictsOnStalePodEnvtest(t *testing.T) {
-	client := envtestClient(t)
-	ctx := context.Background()
-	pods := client.CoreV1().Pods("default")
-	stale, err := pods.Create(ctx, &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "vr", Annotations: map[string]string{vrHeadsetsAnnotation: ""}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "example.invalid/app"}}},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	moved := stale.DeepCopy()
-	moved.Annotations[vrHeadsetsAnnotation] = "other/other-uid"
-	if _, err = pods.Update(ctx, moved, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-
-	sc := &SessionController{K8sClient: client}
-	if err = sc.annotateHeadsets(ctx, stale, "h/u"); !apierrors.IsConflict(err) {
-		t.Fatalf("patch from a stale pod: %v, want a conflict", err)
-	}
-	live, err := pods.Get(ctx, "vr", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := live.Annotations[vrHeadsetsAnnotation]; got != "other/other-uid" {
-		t.Fatalf("live %s = %q after a refused patch", vrHeadsetsAnnotation, got)
-	}
-	if err := sc.annotateHeadsets(ctx, live, "h/u"); err != nil {
-		t.Fatalf("patch from the current pod: %v", err)
-	}
-}
-
 // The chart's floor apiserver (CI envtest runs it) keeps the fields that
 // confine the split App pod and native VR pods, and a GPU claim's memory
 // share. Older apiservers drop them silently (XERK-2755): below 1.33 the pod

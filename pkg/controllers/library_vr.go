@@ -28,18 +28,18 @@ import (
 )
 
 // The VR page (XERK-2670) starts and stops a User's native VR Session and
-// shows the address the headset dials and, while it pairs, WiVRn's PIN. It is
-// served on the headsets page's own host, never the Library's: the Library
-// host proxies the desktop, whose code can serve same-origin pages there
-// (XERK-2750) that would read the PIN or start sessions.
+// shows the address the headset dials. It is served on its own host (the
+// headsets host), never the Library's: the Library host proxies the desktop,
+// whose code can serve same-origin pages there (XERK-2750) that would start
+// sessions.
 const (
 	libraryVRPath = "/.direwolf/vr"
 	// libraryVRFormMax bounds the page's form: an action and an App name.
 	libraryVRFormMax = 4096
 	// libraryVRCallTimeout bounds one page request's API calls.
 	libraryVRCallTimeout = 10 * time.Second
-	// libraryVRStatusTimeout bounds the vr-agent read for the PIN: the page
-	// is shown without it rather than held.
+	// libraryVRStatusTimeout bounds the vr-agent read: the page is shown
+	// without it rather than held.
 	libraryVRStatusTimeout = 3 * time.Second
 	// libraryVRRefresh is how often a page waiting on the session reloads;
 	// libraryVRIdleRefresh once a headset is connected, to notice it leave.
@@ -53,9 +53,13 @@ const (
 // vrUserLabel names the User on Sessions and every pod built for one.
 const vrUserLabel = "direwolf/user"
 
-// VRLaunch turns on the VR page, on the headsets page's host.
+// VRLaunch turns on the VR page, on the headsets host.
 type VRLaunch struct {
 	Apps generic.NamespacedLister[*v1alpha1types.App]
+	// Headsets, when set, refuses a start for a User with none: their
+	// Session would only end (XERK-2811). Headsets pair through the front
+	// door, never in a session.
+	Headsets generic.NamespacedLister[*v1alpha1types.Headset]
 	// Sessions and Pods are read live when starting a session: a Session or
 	// pod created a moment ago, maybe by another replica or moonlight-proxy,
 	// must count.
@@ -102,6 +106,7 @@ const (
 	vrGameStoppingMessage    = "Your last game is still shutting down. Try again in a moment."
 	vrOtherAppMessage        = "Your VR session of another game is running. Stop it first to play this one."
 	vrNoAppMessage           = "That game can't be played in VR here."
+	vrNoHeadsetMessage       = "Pair your headset first: in the WiVRn app on your headset, open fenrir, add this server and enter the code it shows on the pairing page."
 	vrTryAgainMessage        = "Try again in a minute."
 )
 
@@ -259,6 +264,17 @@ func (v *VRLaunch) Launch(ctx context.Context, user *v1alpha1types.User, appName
 	app, ok := v.vrApp(user, appName)
 	if !ok {
 		return vrNoAppMessage, nil
+	}
+	if v.Headsets != nil {
+		all, err := v.Headsets.List(labels.Everything())
+		if err != nil {
+			return "", fmt.Errorf("listing headsets: %w", err)
+		}
+		if !slices.ContainsFunc(all, func(h *v1alpha1types.Headset) bool {
+			return h.Spec.UserReference.Name == user.Name && h.DeletionTimestamp == nil
+		}) {
+			return vrNoHeadsetMessage, nil
+		}
 	}
 	v.launchMu.Lock()
 	defer v.launchMu.Unlock()
@@ -460,13 +476,11 @@ type vrView struct {
 	ready    bool
 	host     string
 	port     int32
-	pin      string
 	headset  bool
-	pending  int
 }
 
 func (v *VRLaunch) view(ctx context.Context, s *v1alpha1types.Session) vrView {
-	view := vrView{app: s.Spec.GameReference.Name, stopping: s.DeletionTimestamp != nil, pending: len(s.Status.PendingHeadsets)}
+	view := vrView{app: s.Spec.GameReference.Name, stopping: s.DeletionTimestamp != nil}
 	if app, err := v.Apps.Get(view.app); err == nil && app.Spec.Title != "" {
 		view.app = app.Spec.Title
 	}
@@ -494,14 +508,9 @@ func (v *VRLaunch) view(ctx context.Context, s *v1alpha1types.Session) vrView {
 	}
 	view.ready, view.host, view.port = true, pod.Status.HostIP, s.Status.Ports.VR
 	if v.Status != nil {
-		st, err := v.readStatus(ctx, s, pod)
-		switch {
-		case err != nil:
+		if st, err := v.readStatus(ctx, s, pod); err != nil {
 			klog.V(2).Infof("VR page: reading session %s's VR server: %v", s.Name, err)
-		case IsWiVRnPin(st.Pin):
-			view.pin = st.Pin
-		}
-		if err == nil {
+		} else {
 			view.headset = st.HeadsetConnected
 		}
 	}
@@ -650,12 +659,6 @@ func writeVRSession(b *strings.Builder, view *vrView) int {
 		b.WriteString(`<p><small>The server isn't announced on the network, so it won't appear in the headset's list by itself: enter it by hand (` +
 			html.EscapeString(net.JoinHostPort(view.host, port)) + `).</small></p>`)
 	}
-	if view.pin != "" {
-		fmt.Fprintf(b, `<p>When the headset asks for a PIN, enter</p><p class="big">%s</p>`, html.EscapeString(view.pin))
-	}
-	if view.pending > 0 {
-		fmt.Fprintf(b, `<p>Paired a headset by PIN? <a href="%s">Confirm it</a> so it connects without a PIN next time.</p>`, libraryHeadsetsPath)
-	}
 	b.WriteString(`<p><small>With no headset connected the session stops by itself after a while.</small></p>`)
 	b.WriteString(stop)
 	if view.headset {
@@ -676,6 +679,6 @@ func writeVRPage(w http.ResponseWriter, status int, body string, refresh int) {
 	_, _ = fmt.Fprintf(w, `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">%s<title>Play in VR</title>
 <style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0;padding:0 16px}p{max-width:32em;text-align:center;font-size:1.2em}button{font-size:1.1em;padding:.6em 1.4em}main{display:grid;justify-items:center;gap:1em}small{color:#aaa}a{color:#9cf}.big{font-size:2em;font-family:ui-monospace,monospace;margin:0}dl{display:grid;grid-template-columns:auto auto;gap:.3em 1em;align-items:baseline}dt{color:#aaa}dd{margin:0}.notice{color:#fc6}</style>
-</head><body><main><h1>Play in VR</h1>%s<p><small><a href="%s">Your headsets</a></small></p></main></body></html>
-`, meta, body, libraryHeadsetsPath)
+</head><body><main><h1>Play in VR</h1>%s</main></body></html>
+`, meta, body)
 }
