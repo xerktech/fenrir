@@ -626,7 +626,24 @@ func TestACSetupBindsVRRecenterToPad(t *testing.T) {
 			t.Errorf("%s: VR controls.ini = %q", own, got)
 		}
 	}
-	taken := "[ACTION_CHANGE_CAMERA]\r\nXBOXBUTTON=rthumb_press\r\n"
+	// A second copy of the section keeps the User's binding too.
+	twice := "[__CM_RESET_CAMERA_VR]\r\nJOY=0\r\n[__CM_RESET_CAMERA_VR]\r\nXBOXBUTTON=Y\r\n"
+	mustWrite(t, vr, twice)
+	s.mustRun(t)
+	if got := readString(t, vr); got != twice {
+		t.Errorf("twice: VR controls.ini = %q", got)
+	}
+	// A set-up file is not rewritten on later launches.
+	mustWrite(t, vr, recenterIni)
+	before, err := os.Stat(vr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mustRun(t)
+	if after, err := os.Stat(vr); err != nil || !os.SameFile(before, after) {
+		t.Errorf("a bound controls.ini was rewritten: %v", err)
+	}
+	taken := "[ACTION_CHANGE_CAMERA]\r\nXBOXBUTTON=rthumb_press ; camera\r\n"
 	mustWrite(t, vr, taken)
 	if out := s.mustRun(t); !strings.Contains(out, "[ACTION_CHANGE_CAMERA] has it") {
 		t.Errorf("no log of the taken button:\n%s", out)
@@ -650,6 +667,14 @@ func TestACSetupBindsVRRecenterToPad(t *testing.T) {
 	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
 		t.Errorf("written through the link: %v", entries)
 	}
+	// A folder planted at controls.ini is skipped, not the end of the session.
+	s = newACSetup(t)
+	if err := os.MkdirAll(filepath.Join(s.state, "cfg", "controls.ini"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out := s.mustRun(t); !strings.Contains(out, "controls.ini is not a file") {
+		t.Errorf("no log of the planted folder:\n%s", out)
+	}
 }
 
 // A CSP bump removes the files the old archive installed and the new one
@@ -670,12 +695,16 @@ func TestACSetupCSPBumpRemovesDroppedFiles(t *testing.T) {
 	if err := json.Unmarshal([]byte(readString(t, marker)), &m); err != nil {
 		t.Fatal(err)
 	}
-	m["csp-files"] = append(m["csp-files"].([]any), "keep.txt", "../acs.exe", "extension/../acs.exe", 7)
+	// Planted: names outside CSP's, a folder, and names no file can have.
+	mustWrite(t, filepath.Join(s.game, "extension", "mine", "x"), "the User's")
+	m["csp-files"] = append(m["csp-files"].([]any), "keep.txt", "../acs.exe", "extension/../acs.exe", 7,
+		"extension/mine", "extension/a\x00b")
 	b, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustWrite(t, marker, string(b))
+	// A lone surrogate, which Go's encoder would replace.
+	mustWrite(t, marker, strings.Replace(string(b), `"keep.txt"`, `"extension/\ud800","keep.txt"`, 1))
 	s.pin(t, "0.3.2", map[string]string{"dwrite.dll": "CSP 0.3.2", "extension/config/vr_tweaks.ini": "[B]\r\n"})
 	s.mustRun(t, "DIREWOLF_AC_CSP=0.3.2")
 	for _, gone := range []string{"extension/config/old.ini", "extension/old/gone.lua"} {
@@ -684,11 +713,12 @@ func TestACSetupCSPBumpRemovesDroppedFiles(t *testing.T) {
 		}
 	}
 	for path, want := range map[string]string{
-		mine:                              "the User's app",
-		filepath.Join(s.game, "keep.txt"): "not CSP's",
-		filepath.Join(s.apps, "common", "acs.exe"): "",
-		filepath.Join(s.game, "acs.exe"):           "ACS",
-		filepath.Join(s.game, "dwrite.dll"):        "CSP 0.3.2",
+		mine: "the User's app",
+		filepath.Join(s.game, "extension", "mine", "x"): "the User's",
+		filepath.Join(s.game, "keep.txt"):               "not CSP's",
+		filepath.Join(s.apps, "common", "acs.exe"):      "",
+		filepath.Join(s.game, "acs.exe"):                "ACS",
+		filepath.Join(s.game, "dwrite.dll"):             "CSP 0.3.2",
 	} {
 		if want == "" {
 			if _, err := os.Lstat(path); !os.IsNotExist(err) {
