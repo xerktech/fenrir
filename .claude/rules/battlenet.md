@@ -218,6 +218,8 @@ paths:
   on DX12, vkd3d-proton on NVIDIA lights stray pixels along the inner edges of alpha-cut foliage
   (diagonal white lines through trees and grass) at every shadow quality; DX11 is clean.
   - Forced, not kept: WoW saves the API it last ran and defaults to D3D12.
+  - Forcing rewrites the file (`sed -i`): a read-only or hardlinked Config.wtf is replaced.
+    A symlinked one is left alone in every mode, never written through.
   - Check a Proton/driver bump against DX12 before dropping it.
   - Tests: `TestLaunchBattlenetForcesWoWDirectX11`.
   - `/console gxApi` did not persist live; the options menu's Graphics API did.

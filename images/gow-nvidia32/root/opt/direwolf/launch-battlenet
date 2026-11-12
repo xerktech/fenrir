@@ -116,17 +116,26 @@ set_wow_cvar() {
     return
   fi
   # Unreadable, grep fails as if nothing matched: it must not count as unset.
-  if [ ! -f "${wtf}" ] || [ ! -r "${wtf}" ] || grep -aqvE $'^(SET [^ "]+ ".*")?\r?$' "${wtf}"; then
+  # A link is never written through, nor replaced by an edited copy.
+  if [ -L "${wtf}" ] || [ ! -f "${wtf}" ] || [ ! -r "${wtf}" ] ||
+    grep -aqvE $'^(SET [^ "]+ ".*")?\r?$' "${wtf}"; then
     log "left ${wtf} alone: not a file of SET lines; ${name} unchanged"
     return 0
   fi
   # CVar names are case-insensitive; WoW writes values in either case too.
   if grep -qiE "^SET ${name} " "${wtf}"; then
     [ "${mode}" = force ] || return 0
-    grep -qiE "^SET ${name} \"${value}\"${cr}?\$" "${wtf}" && return 0
-    sed -i -E "s/^SET ${name} \"[^\"]*\"(${cr}?)\$/SET ${name} \"${value}\"\1/I" "${wtf}" &&
+    # Every line naming it, should WoW ever write it twice.
+    cvar_differs() { grep -iE "^SET ${name} " "${wtf}" | grep -qviE "^SET ${name} \"${value}\"${cr}?\$"; }
+    cvar_differs || return 0
+    # sed -i swaps in a new file: a read-only Config.wtf is replaced too.
+    sed -i -E "s/^SET ${name} \"[^\"]*\"(${cr}?)\$/SET ${name} \"${value}\"\1/I" "${wtf}" || return
+    if cvar_differs; then
+      log "left ${wtf} alone: its ${name} line is not one value; ${name} unchanged"
+    else
       log "set WoW's ${name} to ${value} in ${wtf}"
-    return
+    fi
+    return 0
   fi
   # Keep the file's line ending, and end a last line that has none (a bare
   # CR only needs its LF).

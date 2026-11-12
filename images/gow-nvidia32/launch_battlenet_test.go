@@ -769,54 +769,90 @@ func TestLaunchBattlenetTurnsOnWoWGamepadUnlessSet(t *testing.T) {
 	}
 }
 
+// runSetWoWCvar runs launch-battlenet's set_wow_cvar alone on dir (a game
+// folder): a full launch per case would cost seconds each.
+func runSetWoWCvar(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	b, err := os.ReadFile(launchBattlenet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, fn, ok := strings.Cut(string(b), "\nset_wow_cvar() {\n")
+	fn, _, ok2 := strings.Cut(fn, "\n}\n")
+	if !ok || !ok2 {
+		t.Fatal("no set_wow_cvar function in launch-battlenet")
+	}
+	fn = "set_wow_cvar() {\n" + fn + "\n}"
+	argv := append([]string{"-c", `log() { echo "$*"; }` + "\n" + fn + "\n" + `set_wow_cvar "$@"`, "bash", dir}, args...)
+	out, err := exec.CommandContext(t.Context(), "bash", argv...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("set_wow_cvar %v: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
 // WoW's D3D12 renderer, through vkd3d-proton on NVIDIA, draws diagonal lines
 // through foliage (XERK-2815): gxApi is set to d3d11 before every launch,
 // whatever the file says, keeping the file's line endings and other CVars.
-// Forever gets it too: TestLaunchBattlenetPlaysWoWForever.
+// Launches set it for retail (TestLaunchBattlenetTurnsOnWoWGamepadUnlessSet)
+// and Forever (TestLaunchBattlenetPlaysWoWForever).
 func TestLaunchBattlenetForcesWoWDirectX11(t *testing.T) {
-	const dx11 = `SET gxApi "d3d11"`
+	const dx11, pad = `SET gxApi "d3d11"`, `SET GamePadEnable "1"`
 	for _, tc := range []struct {
 		name, config, want string
 	}{
-		{"d3d12", "SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n", dx11 + "\nSET GamePadEnable \"1\"\n"},
-		{"other case", "SET GamePadEnable \"1\"\nSET GXAPI \"d3d12\"\n", "SET GamePadEnable \"1\"\n" + dx11 + "\n"},
-		{"empty value", "SET GamePadEnable \"1\"\nSET gxApi \"\"\n", "SET GamePadEnable \"1\"\n" + dx11 + "\n"},
-		{"CRLF", "SET gxApi \"D3D12\"\r\nSET GamePadEnable \"1\"\r\n", dx11 + "\r\nSET GamePadEnable \"1\"\r\n"},
-		{"already d3d11", "SET gxApi \"D3D11\"\nSET GamePadEnable \"1\"\n", "SET gxApi \"D3D11\"\nSET GamePadEnable \"1\"\n"},
-		{"lookalike CVar", "SET gxApiX \"D3D12\"\nSET GamePadEnable \"1\"\n", "SET gxApiX \"D3D12\"\nSET GamePadEnable \"1\"\n" + dx11 + "\n"},
+		{"d3d12", "SET gxApi \"D3D12\"\n" + pad + "\n", dx11 + "\n" + pad + "\n"},
+		{"other case", pad + "\nSET GXAPI \"d3d12\"\n", pad + "\n" + dx11 + "\n"},
+		{"empty value", pad + "\nSET gxApi \"\"\n", pad + "\n" + dx11 + "\n"},
+		{"CRLF", "SET gxApi \"D3D12\"\r\n" + pad + "\r\n", dx11 + "\r\n" + pad + "\r\n"},
+		{"already d3d11", "SET gxApi \"D3D11\"\n" + pad + "\n", "SET gxApi \"D3D11\"\n" + pad + "\n"},
+		{"twice", dx11 + "\nSET gxApi \"D3D12\"\n", dx11 + "\n" + dx11 + "\n"},
+		{"absent", pad + "\n", pad + "\n" + dx11 + "\n"},
+		{"lookalike CVar", "SET gxApiX \"D3D12\"\n", "SET gxApiX \"D3D12\"\n" + dx11 + "\n"},
 		{"unparseable", "SET gxApi \"D3D12\"\ngarbage\n", "SET gxApi \"D3D12\"\ngarbage\n"},
+		{"two values", "SET gxApi \"a\" \"b\"\n", "SET gxApi \"a\" \"b\"\n"},
 	} {
-		var wtf string
-		r := runLaunchBattlenetWith(t, true, func(games string) {
-			wtf = filepath.Join(games, "World of Warcraft", "_retail_", "WTF", "Config.wtf")
-			if err := os.MkdirAll(filepath.Dir(wtf), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(wtf, []byte(tc.config), 0o644); err != nil { //nolint:gosec // test fixture
-				t.Fatal(err)
-			}
-		}, []string{"wow"}, "GAME_SECONDS=3")
-		if got, err := os.ReadFile(wtf); r.code != 0 || err != nil || string(got) != tc.want {
-			t.Errorf("%s: exit %d, Config.wtf %q (%v), want 0 and %q\n%s", tc.name, r.code, got, err, tc.want, r.out)
-		}
-	}
-	// A linked Config.wtf is replaced by the edited copy; its target is untouched.
-	var wtf, target string
-	r := runLaunchBattlenetWith(t, true, func(games string) {
-		wtf = filepath.Join(games, "World of Warcraft", "_retail_", "WTF", "Config.wtf")
-		target = filepath.Join(t.TempDir(), "elsewhere")
+		dir := t.TempDir()
+		wtf := filepath.Join(dir, "WTF", "Config.wtf")
 		if err := os.MkdirAll(filepath.Dir(wtf), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(target, []byte("SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n"), 0o644); err != nil { //nolint:gosec // test fixture
+		if err := os.WriteFile(wtf, []byte(tc.config), 0o644); err != nil { //nolint:gosec // test fixture
 			t.Fatal(err)
 		}
-		if err := os.Symlink(target, wtf); err != nil {
-			t.Fatal(err)
+		out := runSetWoWCvar(t, dir, "gxApi", "d3d11", "force")
+		if got, err := os.ReadFile(wtf); err != nil || string(got) != tc.want {
+			t.Errorf("%s: Config.wtf %q (%v), want %q\n%s", tc.name, got, err, tc.want, out)
 		}
-	}, []string{"wow"}, "GAME_SECONDS=3")
-	if got, err := os.ReadFile(target); r.code != 0 || err != nil || string(got) != "SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n" {
-		t.Errorf("exit %d, link target now %q (%v), want 0 and it untouched\n%s", r.code, got, err, r.out)
+		if tc.config != tc.want && !strings.Contains(out, "set WoW's gxApi to d3d11") ||
+			tc.config == tc.want && strings.Contains(out, "set WoW's") {
+			t.Errorf("%s: log %q does not match the change", tc.name, out)
+		}
+	}
+}
+
+// A linked Config.wtf is neither written through nor replaced, whatever the
+// mode, and whether its target names the CVar or not.
+func TestSetWoWCvarLeavesLinkedConfigWtfAlone(t *testing.T) {
+	for _, target := range []string{"SET gxApi \"D3D12\"\n", "SET portal \"US\"\n"} {
+		for _, args := range [][]string{{"gxApi", "d3d11", "force"}, {"GamePadEnable", "1", "keep"}} {
+			dir, elsewhere := t.TempDir(), filepath.Join(t.TempDir(), "Config.wtf")
+			wtf := filepath.Join(dir, "WTF", "Config.wtf")
+			if err := os.MkdirAll(filepath.Dir(wtf), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(elsewhere, []byte(target), 0o644); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+			if err := os.Symlink(elsewhere, wtf); err != nil {
+				t.Fatal(err)
+			}
+			runSetWoWCvar(t, dir, args...)
+			got, err := os.ReadFile(elsewhere)
+			if fi, lerr := os.Lstat(wtf); err != nil || string(got) != target || lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("%v on a link to %q: target now %q (%v), link %v (%v); want both untouched", args, target, got, err, fi, lerr)
+			}
+		}
 	}
 }
 
