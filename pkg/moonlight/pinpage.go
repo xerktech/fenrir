@@ -1,6 +1,7 @@
 package moonlight
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -108,6 +109,9 @@ type pinPageHandler struct {
 	groupsHeader    string
 	groupsSeparator string
 	libraryURL      string
+
+	// vr, when the VR front door is on, takes the codes headsets show.
+	vr *vrFrontDoor
 }
 
 // NewPinPageHandler serves the page where an authenticated user enters the PIN
@@ -117,6 +121,18 @@ func NewPinPageHandler(
 	users generic.NamespacedLister[*v1alpha1types.User],
 	opts PinPageOptions,
 ) http.Handler {
+	return newPinPageHandler(manager, users, &opts, nil)
+}
+
+// newPinPageHandler is NewPinPageHandler, also taking VR headsets' pairing
+// codes for vr when it is non-nil.
+func newPinPageHandler(
+	manager *PairingManager,
+	users generic.NamespacedLister[*v1alpha1types.User],
+	o *PinPageOptions,
+	vr *vrFrontDoor,
+) http.Handler {
+	opts := *o
 	if opts.UserHeader == "" {
 		opts.UserHeader = DefaultPinUserHeader
 	}
@@ -129,12 +145,15 @@ func NewPinPageHandler(
 	h := &pinPageHandler{
 		manager: manager, users: users, trusted: opts.TrustedProxies, secret: opts.ProxySecret, userHeader: opts.UserHeader,
 		provisionGroup: opts.ProvisionGroup, allowedUsers: opts.ProvisionAllowedUsers, groupsHeader: opts.GroupsHeader, groupsSeparator: opts.GroupsSeparator,
-		libraryURL: opts.LibraryURL,
+		libraryURL: opts.LibraryURL, vr: vr,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /pin/", h.page)
 	mux.HandleFunc("POST /pin/", h.submit)
+	if vr != nil {
+		mux.HandleFunc("POST "+pinVRPath, h.submitVR)
+	}
 	mux.Handle("GET /{$}", http.RedirectHandler("/pin/", http.StatusFound))
 	return mux
 }
@@ -279,7 +298,8 @@ func (h *pinPageHandler) page(w http.ResponseWriter, r *http.Request) {
 	if err := pinTemplate.Execute(w, struct {
 		User    string
 		Pending []pendingView
-	}{user.Name, pending}); err != nil {
+		VR      bool
+	}{user.Name, pending, h.vr != nil}); err != nil {
 		klog.Errorf("Pairing page: render: %s", err)
 	}
 }
@@ -290,17 +310,7 @@ func (h *pinPageHandler) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CSRF: the Authentik session cookie rides along on cross-site requests,
-	// so without this a hostile page could submit the PIN of the attacker's
-	// own Moonlight client and pair it to the victim. A JSON content type
-	// cannot be sent cross-origin without a CORS preflight, which we never
-	// answer; Sec-Fetch-Site catches browsers that report it.
-	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
-		http.Error(w, "expected application/json", http.StatusUnsupportedMediaType)
-		return
-	}
-	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
-		http.Error(w, "cross-site request refused", http.StatusForbidden)
+	if !sameOriginJSON(w, r) {
 		return
 	}
 
@@ -326,4 +336,59 @@ func (h *pinPageHandler) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write([]byte("PIN sent. Moonlight will finish pairing."))
+}
+
+// sameOriginJSON is whether r is the page's own script's JSON POST, or it
+// answers r itself. CSRF: the Authentik session cookie rides along on
+// cross-site requests, so without this a hostile page could submit the PIN
+// or code of the attacker's own client or headset and pair it to the victim.
+// A JSON content type cannot be sent cross-origin without a CORS preflight,
+// which we never answer; Sec-Fetch-Site catches browsers that report it.
+func sameOriginJSON(w http.ResponseWriter, r *http.Request) bool {
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
+		http.Error(w, "expected application/json", http.StatusUnsupportedMediaType)
+		return false
+	}
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
+		http.Error(w, "cross-site request refused", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// pinVRPath takes the code a VR headset shows while it pairs with the VR
+// front door (XERK-2808).
+const pinVRPath = "/pin/vr"
+
+// submitVR pairs the headset showing the code with the signed-in User.
+func (h *pinPageHandler) submitVR(w http.ResponseWriter, r *http.Request) {
+	user := h.authenticate(w, r)
+	if user == nil || !sameOriginJSON(w, r) {
+		return
+	}
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	code, ok := normalizeVRCode(req.Code)
+	if !ok {
+		http.Error(w, "The code is the 8 digits your headset shows.", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), vrCallTimeout)
+	defer cancel()
+	switch err := h.vr.enterCode(ctx, user, code); {
+	case errors.Is(err, errVRNoSuchCode):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, errVRTooManyCodes):
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+	case err != nil:
+		klog.Errorf("Pairing page: user %s: pairing a VR headset: %v", user.Name, err)
+		http.Error(w, "Pairing failed. Try the same code again in a minute; if it still fails, start pairing again on the headset.", http.StatusInternalServerError)
+	default:
+		_, _ = w.Write([]byte("Headset paired. It now lists your VR games."))
+	}
 }

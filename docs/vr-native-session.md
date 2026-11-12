@@ -5,8 +5,9 @@ without Moonlight. Phase 2 (XERK-2665) already streams VR from an App in the spl
 is launched from Moonlight, and Moonlight's flat mirror shows the pairing PIN and carries the
 recenter key. Phase 3 removes Moonlight from that path.
 
-Status: the API (XERK-2667), the operator's pod and liveness (XERK-2668), headsets (XERK-2669) and
-the VR page that starts sessions (XERK-2670) are in place.
+Status: the API (XERK-2667), the operator's pod and liveness (XERK-2668), headsets (XERK-2669),
+the VR page that starts sessions (XERK-2670) and the VR front door (XERK-2808, below) are in
+place. The front door's Quest side is XERK-2809.
 
 ## API
 
@@ -129,6 +130,81 @@ This works as it does for Moonlight sessions.
   (XERK-2740), in both modes, on a host of its own behind Authentik
   (`--headsets-proxy-secret-file`, XERK-2750): never the Library's host, whose desktop runs user
   code that can serve pages on that origin.
+
+## VR front door (XERK-2808)
+
+Moonlight-style VR: pair the headset once by typing the code it shows into the pairing page, then
+list and launch VR Apps from the headset. It replaces the VR page plus in-session PIN for a headset
+running a Quest app that speaks it (XERK-2809); the VR page and PIN path stay as the fallback.
+
+### Where it runs
+
+- moonlight-proxy, on `--vr-port`, TLS 1.3, bound to `--vr-address` only (the chart sets it to the
+  node IP from `status.hostIP`): never a wildcard, which under hostNetwork includes the node's
+  loopback. Off without `--vr-port`; needs `--pin-port`, where codes are entered.
+- It serves moonlight-proxy's certificate, which the headset pins at pairing.
+- A client is its TLS key: SHA-256 of the client certificate's SubjectPublicKeyInfo. The Headset
+  holding it in `spec.clientKeySHA256` names the User. Deleting the Headset refuses the headset
+  and, as for any Headset, ends the Sessions seeded with it. Two Headsets holding one key admit
+  neither.
+- moonlight-proxy gains Headset create (nothing else): it is internet-facing, and the spec is
+  immutable, so it can't change one.
+
+### Pairing
+
+1. `POST /vr/v1/pair` `{publicKey, name, commitment}`: `publicKey` is WiVRn's key in Headset form
+   (the PEM's base64 body), `commitment` is hex SHA-256 of a random 32-byte headset nonce. The
+   reply is `{pairingID, serverNonce, pairingURL?}`. A key already paired gets 409.
+2. `POST /vr/v1/pair/confirm` `{pairingID, nonce}`: the nonce must match the commitment (403
+   otherwise, and the pairing is dropped). The request is held until the code is entered (200
+   `{paired: true}`) or 3 minutes pass (408). A confirm dropped mid-wait may still have paired:
+   try `GET /vr/v1/apps`.
+3. Both sides compute the code: SHA-256 over `direwolf-vr-pair-v1`, a NUL byte, the server's TLS
+   key hash, the client's TLS key hash, SHA-256 of the `publicKey` text, the server nonce and the
+   headset nonce (raw bytes, in that order). The first 8 bytes, big-endian, mod 10^8, as 8 digits
+   with leading zeros. `TestVRPairingCodeBindsEverything` holds a fixed vector.
+4. The user enters it on the pairing page (Authentik, trusted proxy and secret, JSON POST from
+   the page). A match creates the Headset, owned by the User.
+
+Why a commitment: a code derived from the two certificates alone lets a LAN relay grind
+certificate serials offline until its two connections' codes collide, in seconds for 8 digits.
+With the commitment the relay must fix the server nonce it shows the headset before the headset
+reveals its nonce, so it can't steer the headset's code.
+
+Why a rate limit: the relay can still draw server-side codes, since each `/pair` hands it a new
+server nonce and it knows every other input before it confirms (QA matched a chosen code in under a
+second). So `/pair` answers at most one per 5 seconds server-wide, burst 3, else 429. Per
+pairing a relay gets a few dozen draws at 1 in 10^8 each: about 15 held from the minute before
+the headset shows its code (uncommitted pairings live 60s), then one per 5s while the user types
+(at most 3 minutes); QA measured about 5 in 10^7 at worst.
+
+A wrong code counts against the entering User: 5 per 10 minutes, in memory (a restart resets it).
+At most 16 pairings wait at once. Both limits let anyone who reaches the port hold pairing up
+(one `/pair` per 5 seconds keeps the draw limit spent), never complete one.
+
+### Authenticated API (paired client certificate)
+
+- `GET /vr/v1/apps`: `{apps: [{id, title, cover?}]}`, the Apps with `vrPort` the User may see
+  (the VR page's list). `cover` is a path serving the box art as PNG.
+- `POST /vr/v1/launch` `{app}`: the VR page's launch (`VRLaunch.Launch`): the same Library lock
+  before and after the create, the user's pods waited out, `--max-concurrent-sessions`, never a
+  Moonlight Session replaced. 202 with the session, or 409 `{error}` saying why not.
+- `GET /vr/v1/session`: `{state, app, title, host, port, serverKey, headsetConnected, message}`.
+  `state` is `none`, `starting`, `ready`, `stopping` or `other` (a Moonlight Session runs).
+  `host`, `port` and `serverKey` are set only when `ready`.
+- `POST /vr/v1/stop`: ends the User's VR Sessions (204).
+- Errors are JSON `{error}` with a real HTTP status (this is not Moonlight's protocol).
+
+### Server key
+
+- `serverKey` is the session's WiVRn identity key (raw X448, hex): the headset pins it for the
+  stream instead of trusting the server on first use.
+- The vr image makes `server_key.pem` with openssl before WiVRn starts, if missing, and writes its
+  public half to `/run/direwolf-vr-bus/server_key.pub`; vr-agent reports it, and the operator
+  records the first report in `status.vrServerKey`. `ready` waits for it, so a pod on an image
+  from before this never reads ready.
+- The App's processes can write that file, as they can run their own WiVRn: the pin protects the
+  headset from the network, not from the game.
 
 ## Moonlight interplay
 

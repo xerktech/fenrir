@@ -14,6 +14,11 @@
     },
     "spec": {
       "properties": {
+        "clientKeySHA256": {
+          "description": "ClientKeySHA256 is the SHA-256 (lowercase hex) of the\nSubjectPublicKeyInfo of the TLS client certificate the headset paired\nwith on moonlight-proxy's VR front door (XERK-2808). The front door\nadmits a client whose certificate carries that key as this Headset,\nso as its User. Unset: a Headset confirmed after an in-session PIN\npairing, which the front door does not admit.",
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
         "displayName": {
           "description": "DisplayName is the name WiVRn shows for the key (the headset's model\nat pairing).",
           "maxLength": 128,

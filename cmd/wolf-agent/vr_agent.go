@@ -6,8 +6,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -39,7 +41,40 @@ const (
 	// (four-byte runes; only " and \ escape, to two: no control runes,
 	// HTML escaping off).
 	maxReportedKeys = 32
+	// maxServerKeyFile bounds the read of the server key file, which the
+	// App can write: an X448 public key PEM is about 160 bytes.
+	maxServerKeyFile = 4096
 )
+
+// readServerKey is the raw X448 identity key in the server key file at path
+// (controllers.VRServerKeyFile), or "" when it is missing or not one: an
+// image from before XERK-2808 writes none, and the front door then never
+// reports the session ready.
+func readServerKey(path string) string {
+	// Non-blocking: opening a FIFO the App left there would wait for a writer.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			klog.V(2).InfoS("Reading the VR server key", "err", err)
+		}
+		return ""
+	}
+	defer f.Close()
+	// Only a regular file: the App could leave a FIFO or device there.
+	if st, statErr := f.Stat(); statErr != nil || !st.Mode().IsRegular() {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxServerKeyFile+1))
+	if err != nil || len(data) > maxServerKeyFile {
+		return ""
+	}
+	key, err := controllers.ParseX448PublicKeyPEM(data)
+	if err != nil {
+		klog.V(2).InfoS("Ignoring the VR server key file", "err", err)
+		return ""
+	}
+	return key
+}
 
 // wivrnStatus reads WiVRn's HeadsetConnected, SessionRunning, Pin and KnownKeys from the bus
 // at address.
@@ -142,6 +177,7 @@ func runVRAgent(args []string) {
 	fs := flag.NewFlagSet(vrAgentCommand, flag.ExitOnError)
 	port := fs.Int("port", int(controllers.VRAgentPort), "Port to serve HTTPS on")
 	bus := fs.String("bus", controllers.VRBusAddress, "D-Bus address of the App's session bus")
+	serverKey := fs.String("server-key", controllers.VRServerKeyFile, "Public key PEM of the VR server's identity key, as the App writes it")
 	tokenPath := fs.String("token-file", "", "Path to a file holding the bearer token (required)")
 	certPath := fs.String("tls-cert", "", "Path to the serving cert (required)")
 	keyPath := fs.String("tls-key", "", "Path to the serving key (required)")
@@ -158,7 +194,13 @@ func runVRAgent(args []string) {
 		klog.Fatal("Failed to load certificates: ", err)
 	}
 	certs := newCertFile(*certPath, *keyPath, &cert)
-	status := func(ctx context.Context) (controllers.VRStatus, error) { return wivrnStatus(ctx, *bus) }
+	status := func(ctx context.Context) (controllers.VRStatus, error) {
+		st, err := wivrnStatus(ctx, *bus)
+		if err == nil {
+			st.ServerKey = readServerKey(*serverKey)
+		}
+		return st, err
+	}
 	server := newServer(*port, vrAgentHandler(token.Token, status), serverTLSConfig(certs))
 	klog.Infof("vr-agent listening on port %d, reading WiVRn on %s", *port, *bus)
 	if err := server.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {

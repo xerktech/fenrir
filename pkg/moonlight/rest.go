@@ -77,6 +77,11 @@ type RESTServerOptions struct {
 	// Moonlight clients reach directly.
 	PinPage PinPageOptions
 
+	// VRFrontDoor serves the VR front door on its own listener (XERK-2808);
+	// off when VRFrontDoor.Port is 0. Its pairing codes are entered on the
+	// pairing page, so it needs PinPage too.
+	VRFrontDoor VRFrontDoorOptions
+
 	// shutdownTimeout bounds graceful shutdown; defaults to 5s. Overridden by
 	// tests.
 	shutdownTimeout time.Duration
@@ -236,11 +241,33 @@ func (s *RESTServer) Run(ctx context.Context) error {
 		},
 	}
 
+	var vrServer *http.Server
+	var vr *vrFrontDoor
+	if s.VRFrontDoor.Port != 0 {
+		if s.PinPage.Port == 0 {
+			return errors.New("the VR front door needs the pairing page, where its codes are entered")
+		}
+		var err error
+		if vr, err = newVRFrontDoor(&s.VRFrontDoor, s.UserLister, &s.Cert); err != nil {
+			return err
+		}
+		vrServer = &http.Server{
+			// One address, never a wildcard: under hostNetwork that would
+			// listen on the node's loopback too.
+			Addr:              net.JoinHostPort(s.VRFrontDoor.Address, strconv.Itoa(s.VRFrontDoor.Port)),
+			Handler:           loggingMiddleware(vr.handler()),
+			TLSConfig:         vrTLSConfig(&s.Cert),
+			ReadHeaderTimeout: 10 * time.Second,
+			// No ReadTimeout: it would cancel a held confirm's context.
+			IdleTimeout: 2 * time.Minute,
+		}
+	}
+
 	var pinServer *http.Server
 	if s.PinPage.Port != 0 {
 		pinServer = &http.Server{
 			Addr:              fmt.Sprintf(":%d", s.PinPage.Port),
-			Handler:           loggingMiddleware(NewPinPageHandler(s.manager, s.UserLister, s.PinPage)),
+			Handler:           loggingMiddleware(newPinPageHandler(s.manager, s.UserLister, &s.PinPage, vr)),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 	}
@@ -274,6 +301,9 @@ func (s *RESTServer) Run(ctx context.Context) error {
 	if pinServer != nil {
 		go serve("Pairing page", pinServer, false)
 	}
+	if vrServer != nil {
+		go serve("VR front door", vrServer, true)
+	}
 
 	<-ctx.Done()
 	klog.Info("Shutting down server...")
@@ -289,7 +319,7 @@ func (s *RESTServer) Run(ctx context.Context) error {
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancelShutdown()
 	var wg sync.WaitGroup
-	for _, srv := range []*http.Server{server, secureServer, pinServer} {
+	for _, srv := range []*http.Server{server, secureServer, pinServer, vrServer} {
 		if srv == nil {
 			continue
 		}
@@ -1226,18 +1256,23 @@ func (s *RESTServer) appAssetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Encoded before any header is written, so a failure is an error status
-	// rather than a 200 with an empty body, and Content-Length is really sent.
+	writeBoxArt(w, app)
+}
+
+// writeBoxArt answers with app's cover as box-art-sized PNG. It is encoded
+// before any header is written, so a failure is an error status rather than
+// a 200 with an empty body, and Content-Length is really sent.
+func writeBoxArt(w http.ResponseWriter, app *v1alpha1types.App) {
 	img, err := decodeAppAsset(app.Spec.AppAssetWebP)
 	if err != nil {
-		writeAssetError(w, http.StatusInternalServerError, fmt.Errorf("decode app asset for %s: %w", appID, err))
+		writeAssetError(w, http.StatusInternalServerError, fmt.Errorf("decode app asset for %s: %w", app.Name, err))
 		return
 	}
 
 	pngData := new(bytes.Buffer)
 	encoder := png.Encoder{CompressionLevel: png.BestSpeed}
 	if err = encoder.Encode(pngData, fitBoxArt(img)); err != nil {
-		writeAssetError(w, http.StatusInternalServerError, fmt.Errorf("encode app asset for %s: %w", appID, err))
+		writeAssetError(w, http.StatusInternalServerError, fmt.Errorf("encode app asset for %s: %w", app.Name, err))
 		return
 	}
 
@@ -1248,7 +1283,7 @@ func (s *RESTServer) appAssetHandler(w http.ResponseWriter, r *http.Request) {
 		klog.Infof("Failed to write png: %s", err)
 		return
 	}
-	klog.Infof("Sent app asset for %s", appID)
+	klog.Infof("Sent app asset for %s", app.Name)
 }
 
 // Box art is shown at a few hundred pixels, so a cover is served no larger

@@ -30,6 +30,13 @@ type HeadsetSpecApplyConfiguration struct {
 	// DisplayName is the name WiVRn shows for the key (the headset's model
 	// at pairing).
 	DisplayName *string `json:"displayName,omitempty"`
+	// ClientKeySHA256 is the SHA-256 (lowercase hex) of the
+	// SubjectPublicKeyInfo of the TLS client certificate the headset paired
+	// with on moonlight-proxy's VR front door (XERK-2808). The front door
+	// admits a client whose certificate carries that key as this Headset,
+	// so as its User. Unset: a Headset confirmed after an in-session PIN
+	// pairing, which the front door does not admit.
+	ClientKeySHA256 *string `json:"clientKeySHA256,omitempty"`
 }
 
 // HeadsetSpecApplyConfiguration constructs a declarative configuration of the HeadsetSpec type for use with
@@ -59,5 +66,13 @@ func (b *HeadsetSpecApplyConfiguration) WithPublicKey(value string) *HeadsetSpec
 // If called multiple times, the DisplayName field is set to the value of the last call.
 func (b *HeadsetSpecApplyConfiguration) WithDisplayName(value string) *HeadsetSpecApplyConfiguration {
 	b.DisplayName = &value
+	return b
+}
+
+// WithClientKeySHA256 sets the ClientKeySHA256 field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ClientKeySHA256 field is set to the value of the last call.
+func (b *HeadsetSpecApplyConfiguration) WithClientKeySHA256(value string) *HeadsetSpecApplyConfiguration {
+	b.ClientKeySHA256 = &value
 	return b
 }

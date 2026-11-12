@@ -42,7 +42,11 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
 - VR (Meta Quest 3, Assetto Corsa): the Quest runs the xerktech/WiVRn fork's APK (the store
   client is refused). Design and rules: [docs/vr-native-session.md](docs/vr-native-session.md),
   `.claude/rules/vr.md`.
-  - Start and stop it at `headsets.xerktech.com/.direwolf/vr` (Authentik). Once the pod is up the
+  - With the VR front door on (moonlight-proxy `--vr-port`, XERK-2808) and a Quest app that
+    speaks it (XERK-2809): add the server in the app, type the 8-digit code it shows on the
+    pairing page (`pair.xerktech.com`), then pick and launch VR games on the headset. No address
+    or PIN per session.
+  - Otherwise, start and stop it at `headsets.xerktech.com/.direwolf/vr` (Authentik). Once the pod is up the
     page shows the address (`10.10.10.34:<port>`) to enter in WiVRn, and the PIN while no headset
     is paired.
   - After a PIN pairing, confirm the headset on `headsets.xerktech.com/.direwolf/headsets`; it
@@ -63,7 +67,8 @@ Deployment lives in [xerktech/ArgoCD](https://github.com/xerktech/ArgoCD): `apps
   names its owner). It is refused from then on, and the operator ends any session it has
   running (pod and stream included).
 - Revoke a VR headset: `kubectl delete headset -n games <name>` (`spec.userReference` names
-  its owner). Sessions seeded with it end. It can't connect again while the User has another
+  its owner; `spec.clientKeySHA256` is set on one paired through the front door, which then
+  refuses it). Sessions seeded with it end. It can't connect again while the User has another
   Headset: WiVRn offers a PIN only when no key is seeded.
 - Steam home and library are backed up hourly/daily to NFS; the restore procedure is in the
   ArgoCD streaming rules (Steam backup).

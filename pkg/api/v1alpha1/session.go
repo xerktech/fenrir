@@ -140,6 +140,15 @@ type SessionStatus struct {
 	// +listMapKey=key
 	// +kubebuilder:validation:MaxItems=8
 	PendingHeadsets []PendingHeadset `json:"pendingHeadsets,omitempty"`
+
+	// VRServerKey is the raw X448 public key (lowercase hex) of the identity
+	// key the VR server of a VR-mode Session's pod serves, as the pod's
+	// vr-agent first reported it (XERK-2808). The VR front door hands it to
+	// the paired headset, which pins it rather than trusting the server on
+	// first use. Set once; a later, different report is ignored.
+	// +optional
+	//+kubebuilder:validation:Pattern=`^[0-9a-f]{112}$`
+	VRServerKey string `json:"vrServerKey,omitempty"`
 }
 
 // PendingHeadset is a headset key awaiting its User's confirmation.

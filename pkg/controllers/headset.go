@@ -7,10 +7,8 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
-	"unicode"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -269,33 +267,11 @@ func (c *SessionController) endSessionsOfUnrecordedHeadset(ctx context.Context, 
 // one key, so more are the game's.
 const maxPendingHeadsets = 4
 
-// wivrnKeyPattern is the CRD's publicKey pattern: WiVRn's stored form.
-var wivrnKeyPattern = regexp.MustCompile(`^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`)
+// IsWiVRnKey reports whether key is in a Headset's publicKey form.
+var IsWiVRnKey = v1alpha1types.IsWiVRnKey
 
-// IsWiVRnKey is whether key is in WiVRn's stored form, as the CRD admits it.
-func IsWiVRnKey(key string) bool {
-	return len(key) >= 4 && len(key) <= 1024 && wivrnKeyPattern.MatchString(key)
-}
-
-// headsetNameMaxLen is the CRDs' limit on a headset's name. OpenAPI's
-// maxLength counts characters (code points), not bytes.
-const headsetNameMaxLen = 128
-
-// CleanHeadsetName is a headset's own name as a Headset's displayName: valid
-// UTF-8 with no control, format (bidi) or line/paragraph-separator runes, cut
-// to the CRD's 128 characters.
-func CleanHeadsetName(name string) string {
-	name = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
-			return -1
-		}
-		return r
-	}, strings.ToValidUTF8(name, ""))
-	if r := []rune(name); len(r) > headsetNameMaxLen {
-		name = string(r[:headsetNameMaxLen])
-	}
-	return name
-}
+// CleanHeadsetName is v1alpha1.CleanHeadsetName.
+var CleanHeadsetName = v1alpha1types.CleanHeadsetName
 
 // pairingWasOpen is whether pod's WiVRn was seeded with no Headsets, so it
 // paired by PIN: only there can a headset have paired.

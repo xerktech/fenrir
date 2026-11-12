@@ -34,3 +34,27 @@ func TestCheckPinFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckVRFrontDoorFlags(t *testing.T) {
+	if err := checkVRFrontDoorFlags(47970, "10.10.10.34", 47990); err != nil {
+		t.Errorf("node address refused: %v", err)
+	}
+	for name, c := range map[string]struct {
+		port    int
+		address string
+		pinPort int
+	}{
+		"wildcard v4":   {47970, "0.0.0.0", 47990},
+		"wildcard v6":   {47970, "::", 47990},
+		"loopback":      {47970, "127.0.0.1", 47990},
+		"loopback v6":   {47970, "::1", 47990},
+		"empty":         {47970, "", 47990},
+		"hostname":      {47970, "talos04", 47990},
+		"no pin page":   {47970, "10.10.10.34", 0},
+		"port too high": {70000, "10.10.10.34", 47990},
+	} {
+		if err := checkVRFrontDoorFlags(c.port, c.address, c.pinPort); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

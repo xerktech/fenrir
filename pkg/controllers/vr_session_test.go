@@ -1,8 +1,14 @@
 package controllers
 
 import (
+	"bytes"
+	"crypto/ecdh"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -667,5 +673,72 @@ func TestVRSessionUnstartedReaperFailedDeleteWarnsNothing(t *testing.T) {
 	}
 	if len(recorder.Events) != 0 {
 		t.Errorf("Event %q recorded for a Session not yet ended", <-recorder.Events)
+	}
+}
+
+// The VR server's identity key, as vr-agent first reports it, goes into the
+// Session's status for the front door to hand the headset (XERK-2808); a
+// later, different or malformed report never replaces it.
+func TestVRSessionRecordsServerKeyOnce(t *testing.T) {
+	f, s, agent := vrLifecycle(t, identity)
+	first, second := strings.Repeat("ab", 56), strings.Repeat("cd", 56)
+
+	agent.set(VRStatus{ServerKey: "not-a-key"}, false)
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Status.VRServerKey != "" {
+		t.Fatalf("recorded malformed key %q", s.Status.VRServerKey)
+	}
+	agent.set(VRStatus{ServerKey: first}, false)
+	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Status.VRServerKey != first {
+		t.Fatalf("VRServerKey %q, want the reported key", s.Status.VRServerKey)
+	}
+	for _, k := range []string{second, "", strings.ToUpper(second)} {
+		agent.set(VRStatus{ServerKey: k}, false)
+		if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+			t.Fatal(err)
+		}
+		if s.Status.VRServerKey != first {
+			t.Errorf("report %q replaced the first key: %q", k, s.Status.VRServerKey)
+		}
+	}
+}
+
+func TestParseX448PublicKeyPEM(t *testing.T) {
+	raw := bytes.Repeat([]byte{0x5a}, 56)
+	der := append(slices.Clone(x448SPKIPrefix), raw...)
+	good := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+	got, err := ParseX448PublicKeyPEM(good)
+	if err != nil || got != hex.EncodeToString(raw) || !IsWiVRnServerKey(got) {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	x25519, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x25519DER, err := x509.MarshalPKIXPublicKey(x25519.PublicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{
+		"x25519":        pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: x25519DER}),
+		"private":       pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}),
+		"short":         pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der[:60]}),
+		"trailing data": append(slices.Clone(good), "junk"...),
+		"two blocks":    append(slices.Clone(good), good...),
+		"empty":         nil,
+	} {
+		if k, err := ParseX448PublicKeyPEM(data); err == nil {
+			t.Errorf("%s: parsed as %q", name, k)
+		}
+	}
+	for _, k := range []string{"", strings.Repeat("ab", 55), strings.Repeat("AB", 56), strings.Repeat("zz", 56)} {
+		if IsWiVRnServerKey(k) {
+			t.Errorf("IsWiVRnServerKey(%q)", k)
+		}
 	}
 }

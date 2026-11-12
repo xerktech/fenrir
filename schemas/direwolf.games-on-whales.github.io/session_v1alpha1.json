@@ -294,6 +294,11 @@
         "streamURL": {
           "type": "string"
         },
+        "vrServerKey": {
+          "description": "VRServerKey is the raw X448 public key (lowercase hex) of the identity\nkey the VR server of a VR-mode Session's pod serves, as the pod's\nvr-agent first reported it (XERK-2808). The VR front door hands it to\nthe paired headset, which pins it rather than trusting the server on\nfirst use. Set once; a later, different report is ignored.",
+          "pattern": "^[0-9a-f]{112}$",
+          "type": "string"
+        },
         "wolfSessionID": {
           "description": "The RTSP url to access the stream.",
           "type": "string"

@@ -314,14 +314,15 @@ FROM steam AS vr
 # PipeWire, its pulse server and WirePlumber run per session (vr-services):
 # WiVRn 26.9 segfaults on every headset connect without PipeWire's config and
 # modules, and the game's audio reaches the headset through them. iproute2's ss
-# is the supervisor's port check. libopengl0: OpenComposite's vrclient.so
-# links libOpenGL.so.0, which the GoW base lacks.
+# is the supervisor's port check. openssl makes WiVRn's identity key
+# (startup-app.sh). libopengl0: OpenComposite's vrclient.so links
+# libOpenGL.so.0, which the GoW base lacks.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       pipewire pipewire-pulse wireplumber iproute2 \
       libavahi-client3 libavahi-glib1 libavfilter10 libswscale8 libbsd0 libcap2 libcjson1 \
       libnotify4 libpipewire-0.3-0t64 libsystemd0 libudev1 libva2 libvulkan1 libx264-164 \
       libxxf86vm1 libusb-1.0-0 librsvg2-2 libarchive13t64 libpng16-16t64 \
-      libopengl0 cabextract \
+      libopengl0 cabextract openssl \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=vr-wivrn /out/ /
 COPY --from=vr-opencomposite /out/ /
@@ -360,7 +361,7 @@ RUN ldconfig \
     ldd "$f" >/tmp/ldd || exit 1; ! grep 'not found' /tmp/ldd || { echo "$f: missing libraries" >&2; exit 1; }; \
   done && rm /tmp/ldd \
  && python3 -I -c 'import os,sys; bad=[os.path.join(d,f) for r in ("/usr/local","/opt") for d,_,fs in os.walk(r) for f in fs if not os.path.islink(os.path.join(d,f)) and "security.capability" in os.listxattr(os.path.join(d,f))]; bad and sys.exit("file capabilities on %s" % bad)' \
- && for c in pipewire pipewire-pulse wireplumber dbus-run-session ss mountpoint setsid swaymsg swaynag pkill cabextract curl; do \
+ && for c in pipewire pipewire-pulse wireplumber dbus-run-session ss mountpoint setsid swaymsg swaynag pkill cabextract curl openssl; do \
     command -v "$c" >/dev/null || { echo "no $c" >&2; exit 1; }; \
   done \
  && test -d /usr/share/pipewire && test -f /usr/share/pipewire/client.conf \

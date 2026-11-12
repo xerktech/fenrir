@@ -28,7 +28,7 @@
             text-align: left;
         }
 
-        input.pin {
+        input.pin, input.vrcode {
             margin: 1rem 0;
             padding: 0.5rem;
             border: 1px solid white;
@@ -36,6 +36,12 @@
             text-align: center;
             font-size: 3rem;
             letter-spacing: 0.5rem;
+        }
+
+        input.vrcode {
+            width: 14rem;
+            font-size: 2rem;
+            letter-spacing: 0.25rem;
         }
 
         button, a {
@@ -77,6 +83,16 @@
     <p>No Moonlight client is waiting to pair. Add this server in Moonlight, then reload this page.</p>
     <a href="/pin/">Reload</a>
     {{end}}
+    {{if .VR}}
+    <hr>
+    <form id="vr">
+        <p>Pairing a VR headset? Enter the 8-digit code it shows.</p>
+        <input class="vrcode" name="code" inputmode="numeric" autocomplete="off" pattern="[0-9 \-]{8,11}" maxlength="11" required>
+        <br>
+        <button type="submit">Pair headset</button>
+    </form>
+    <p id="vr-result"></p>
+    {{end}}
 </main>
 <script>
     const form = document.getElementById("pair");
@@ -94,6 +110,25 @@
                 });
                 result.textContent = await resp.text();
                 if (resp.ok) form.remove();
+            } catch (e) {
+                result.textContent = "Failed: " + e;
+            }
+        });
+    }
+    const vr = document.getElementById("vr");
+    if (vr) {
+        vr.addEventListener("submit", async (ev) => {
+            ev.preventDefault();
+            const result = document.getElementById("vr-result");
+            result.textContent = "Sending...";
+            try {
+                const resp = await fetch("/pin/vr", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({code: new FormData(vr).get("code")}),
+                });
+                result.textContent = await resp.text();
+                if (resp.ok) vr.remove();
             } catch (e) {
                 result.textContent = "Failed: " + e;
             }
