@@ -814,7 +814,13 @@ func TestVRFrameStallEndsSession(t *testing.T) {
 	// WiVRn's server restarting resets the count: progress, not a stall.
 	poll(new(focused(3)), step)
 	alive("on a count that changed")
-	pollFor(focused(3), vrFrameStallTimeout-step)
+	pollFor(focused(3), vrFrameStallTimeout-2*step)
+	// A gap that starts on an unfocused read never counts, nor does a
+	// clock that went backwards.
+	poll(&VRStatus{HeadsetConnected: true, AppFramesDelivered: frames(3)}, step)
+	poll(new(focused(3)), long)
+	alive("on a gap that began unfocused")
+	poll(new(focused(3)), -time.Hour)
 	poll(nil, 0)
 	alive("before the timeout")
 	pollFor(focused(3), 2*step)
