@@ -480,7 +480,15 @@ rawResources:
     spec:
       spec:
         secretName: '{{ include "bjw-s.common.lib.chart.names.fullname" $ }}-tls'
-        duration: 8760h # 1y
+        # Clients pin this certificate, so a renewal unpairs them (XERK-2818):
+        # Moonlight pins the whole certificate from pairing (any reissue breaks
+        # it); VR headsets pin its public key (a new key breaks them). Hence a
+        # ~100y lifetime, so it is never renewed, and a kept key, so a forced
+        # reissue (spec change, lost Secret) still spares the headsets.
+        # Nothing checks it against the CA, so the CA's renewal is harmless.
+        duration: 876000h # ~100y
+        privateKey:
+          rotationPolicy: Never
         issuerRef:
           name: '{{ include "bjw-s.common.lib.chart.names.fullname" $ }}-ca-issuer'
           kind: Issuer
