@@ -7,10 +7,12 @@ import (
 	"errors"
 	"html/template"
 	"mime"
+	"net"
 	"net/http"
 	"net/netip"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -294,12 +296,22 @@ func (h *pinPageHandler) page(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	setPinPageHeaders(w)
-	if err := pinTemplate.Execute(w, struct {
+	view := struct {
 		User    string
 		Pending []pendingView
 		VR      bool
-	}{user.Name, pending, h.vr != nil}); err != nil {
+		// VRAddress and VRKey are the front door's address and key
+		// fingerprint, which the headset must show before it trusts a
+		// pairing (XERK-2813).
+		VRAddress string
+		VRKey     string
+	}{User: user.Name, Pending: pending, VR: h.vr != nil}
+	if h.vr != nil {
+		view.VRAddress = net.JoinHostPort(h.vr.opts.Address, strconv.Itoa(h.vr.opts.Port))
+		view.VRKey = vrKeyFingerprint(h.vr.serverKey)
+	}
+	setPinPageHeaders(w)
+	if err := pinTemplate.Execute(w, view); err != nil {
 		klog.Errorf("Pairing page: render: %s", err)
 	}
 }
@@ -389,6 +401,7 @@ func (h *pinPageHandler) submitVR(w http.ResponseWriter, r *http.Request) {
 		klog.Errorf("Pairing page: user %s: pairing a VR headset: %v", user.Name, err)
 		http.Error(w, "Pairing failed. Try the same code again in a minute; if it still fails, start pairing again on the headset.", http.StatusInternalServerError)
 	default:
-		_, _ = w.Write([]byte("Headset paired. It now lists your VR games."))
+		_, _ = w.Write([]byte("Code accepted. Accept the pairing on the headset only if it shows this server key: " +
+			vrKeyFingerprint(h.vr.serverKey) + ". Any other key is not this server's: reject it."))
 	}
 }

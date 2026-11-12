@@ -209,6 +209,10 @@ paths:
 - The pairing code needs the commitment step: a code over the certificates alone can be ground by
   a LAN relay. Keep the derivation equal to the Quest app's (XERK-2809);
   `TestVRPairingCodeBindsEverything` pins a vector.
+- The code proves nothing to the headset: a fake front door computes it too (XERK-2813). The
+  pairing page shows the front door's key fingerprint (`vrKeyFingerprint`), which the Quest app
+  must show for the key it pins, and pin only once the user confirms a match. Keep the format
+  equal to the app's. Tests: `TestVRPairingPageShowsServerKey`, `TestVRKeyFingerprint`.
 - Never lift `/pair`'s server-wide rate limit (`vrFrontDoor.draws`): each answer is a server nonce a
   relay can test against the headset's code before confirming; unlimited, QA paired its own key
   in under a second. Tests: `TestVRFrontDoorLimitsDraws`.

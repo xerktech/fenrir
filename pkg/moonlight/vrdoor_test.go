@@ -673,3 +673,42 @@ func TestVRFrontDoorLaunchReplyAndCoverErrors(t *testing.T) {
 		t.Errorf("missing cover: %d %v", r.status, r.body)
 	}
 }
+
+// The pairing page, behind Authentik, is the only place a user learns the
+// real front door's key: a fake front door computes the code too, so the
+// headset must show the key it pinned for the user to compare (XERK-2813).
+func TestVRPairingPageShowsServerKey(t *testing.T) {
+	f := newVRDoorFixture(t, "alice")
+	h := f.newHeadset(t)
+	// The key the headset sees on the wire, as it would pin it.
+	r := h.do(t, f, http.MethodGet, VRAppsPath, nil)
+	if r.tls == nil || len(r.tls.PeerCertificates) == 0 {
+		t.Fatal("no server certificate")
+	}
+	want := vrKeyFingerprint(sha256.Sum256(r.tls.PeerCertificates[0].RawSubjectPublicKeyInfo))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/pin/", nil)
+	req.RemoteAddr = trustedPeer
+	req.Header.Set(PinProxySecretHeader, proxySecret)
+	req.Header.Set(DefaultPinUserHeader, "alice")
+	rec := httptest.NewRecorder()
+	f.pinPage.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) || !strings.Contains(rec.Body.String(), "127.0.0.1:1") {
+		t.Errorf("page %d lacks key %q or address:\n%s", rec.Code, want, rec.Body)
+	}
+
+	body, code := h.startPairing(t, f)
+	done := h.confirmAsync(t.Context(), f, body)
+	f.waitForCode(t)
+	if rec := f.enterCode("alice", code); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("code entry %d does not name the key %q: %s", rec.Code, want, rec.Body)
+	}
+	<-done
+}
+
+func TestVRKeyFingerprint(t *testing.T) {
+	// A fixed vector, for the headset app's implementation: SHA-256 of "".
+	if got := vrKeyFingerprint(sha256.Sum256(nil)); got != "e3b0 c442 98fc 1c14 9afb f4c8 996f b924" {
+		t.Errorf("fingerprint %q", got)
+	}
+}

@@ -178,6 +178,21 @@ pairing a relay gets a few dozen draws at 1 in 10^8 each: about 15 held from the
 the headset shows its code (uncommitted pairings live 60s), then one per 5s while the user types
 (at most 3 minutes); QA measured about 5 in 10^7 at worst.
 
+Why the user checks the server key (XERK-2813): the code protects only fenrir's side. A fake front
+door (LAN spoofing of the address the user typed) knows every input of the code, so a `200` from
+`/pair/confirm` proves nothing to the headset; QA's fake server got the headset to pin its key in
+23 ms, then handed it its own WiVRn host and key. Only the pairing page, behind Authentik, can tell
+the user which key is fenrir's. So:
+
+- The pairing page shows the front door's address (`--vr-address`:`--vr-port`) and its key
+  fingerprint, and repeats the fingerprint once a code is accepted.
+- The fingerprint is the first 16 bytes of SHA-256 of the front door's SPKI (the hash the headset
+  pins), in lowercase hex, groups of 4 separated by spaces. `TestVRKeyFingerprint` holds a vector.
+- On a first pairing with no key given up front, the headset shows the fingerprint of the key it
+  is about to pin, and pins it only once the user confirms it matches the page.
+- A QR code or link carrying the full key hash (XERK-2812) pins the key before the first `/pair`,
+  so no comparison is needed.
+
 A wrong code counts against the entering User: 5 per 10 minutes, in memory (a restart resets it).
 At most 16 pairings wait at once. Both limits let anyone who reaches the port hold pairing up
 (one `/pair` per 5 seconds keeps the draw limit spent), never complete one.
