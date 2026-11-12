@@ -27,6 +27,8 @@ second:
     right-stick click, in the flat cfg and the User's VR cfg, on every launch
     unless that section already names a pad button (the User's choice) or
     another control holds the button. Ctrl+Space keeps working: it is fixed.
+    Both need a Moonlight pad or keyboard; a headset-only session recenters
+    with the Quest's Meta button (WiVRn, XERK-2846).
 
 The shared home is writable by every game of every User. Every file this
 script writes or reads there is reached one folder at a time, never through a
