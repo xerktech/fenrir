@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -60,6 +61,7 @@ APPID = "244210"
 PROTON_APPID = "2805730"
 PROTON_TOOL = "proton_9"
 MARKER = "direwolf-ac-setup.json"
+LOCK = "direwolf-ac-setup.lock"
 # Bump one to rerun its step on every install.
 PREFIX_REV = 1
 FLAT_CFG_REV = 1
@@ -148,6 +150,7 @@ def write(d, name, chunks, mode=0o644):
     """Writes name in folder fd d whole: a temporary file renamed over it, so a
     link there is replaced, never followed."""
     tmp = f".{name}.direwolf-tmp"
+    clear(d, tmp)
     try:
         os.unlink(tmp, dir_fd=d)
     except FileNotFoundError:
@@ -159,15 +162,69 @@ def write(d, name, chunks, mode=0o644):
     os.replace(tmp, name, src_dir_fd=d, dst_dir_fd=d)
 
 
+def clear(d, name):
+    """Removes what a game planted where only this script's own file belongs
+    (a marker, the lock, a temporary file): a folder or anything else that is
+    not a file. It is in every User's way, not only the planting game's
+    (XERK-2819). A folder is first renamed aside, which its own mode can't
+    stop, then removed as far as it lets us, never following a link in it."""
+    k = kind(d, name)
+    if k in (None, stat.S_IFREG):
+        return
+    log(f"removing the {'folder' if k == stat.S_IFDIR else 'non-file'} a game left at {name}")
+    if k != stat.S_IFDIR:
+        os.unlink(name, dir_fd=d)
+        return
+    aside = f".{name}.direwolf-planted-{os.urandom(8).hex()}"
+    os.rename(name, aside, src_dir_fd=d, dst_dir_fd=d)
+    try:
+        shutil.rmtree(aside, dir_fd=d, ignore_errors=True)
+    except RecursionError:
+        pass  # A deep planted tree stays aside, out of the way.
+
+
+def lock_setup(compat):
+    """Locks compatdata's lock file, replacing whatever a game put there."""
+    for _ in range(3):
+        clear(compat, LOCK)
+        try:
+            # Read-only is enough for flock, so a game's chmod 444 is no bar.
+            fd = os.open(LOCK, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o644, dir_fd=compat)
+        except OSError as e:
+            if e.errno == errno.EACCES:
+                # Only a game makes it unreadable: replace it.
+                log(f"replacing the unreadable {LOCK} a game left")
+                os.unlink(LOCK, dir_fd=compat)
+                continue
+            # Planted again since the check: clear it once more.
+            if e.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO):
+                continue
+            raise
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            break
+        os.close(fd)
+    else:
+        raise Refused(f"{LOCK} keeps being replaced")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log("waiting for another session's ac-setup to finish")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
 def load_marker(d):
     try:
         m = json.loads(read(d, MARKER) or b"{}")
-    except ValueError:
+    except (ValueError, PermissionError):
+        # A marker a game made unreadable reads as absent: save_marker
+        # replaces it by rename, which its mode doesn't stop.
         m = {}
     return m if isinstance(m, dict) else {}
 
 
 def save_marker(d, m):
+    clear(d, MARKER)
     write(d, MARKER, (json.dumps(m, sort_keys=True) + "\n").encode())
 
 
@@ -549,12 +606,7 @@ def main():
     game = opendir(apps, "common/assettocorsa")
     compat = opendir(apps, f"compatdata/{APPID}", create=True)
     # Two VR launches at once must not both run winetricks in one prefix.
-    lock = os.open("direwolf-ac-setup.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=compat)
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        log("waiting for another session's ac-setup to finish")
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    lock_setup(compat)  # held until exit
 
     check_proton_pin(steam)
     pm = load_marker(compat)
@@ -566,11 +618,13 @@ def main():
         log("setting the flat config: FULLSCREEN=1, INPUT_METHOD=X360")
         try:
             flat_cfg(compat)
+        except (Refused, OSError) as e:
+            # Flat sessions' convenience only, in a folder every game can
+            # plant in: never worth every User's VR. Tried again next launch.
+            log(f"{e}; skipping the flat config")
+        else:
             pm["flat-cfg"] = FLAT_CFG_REV
             save_marker(compat, pm)
-        except OSError as e:
-            # As bind_recenter: retried next launch, never the session's end.
-            log(f"could not set the flat config: {e}")
     bind_recenters(compat)
 
     gm = load_marker(game)

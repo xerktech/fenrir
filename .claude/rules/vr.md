@@ -359,6 +359,12 @@ paths:
     swap): else an acs.exe update took the old copy for the launcher and dropped it (QA).
   - Two runs serialize on `compatdata/244210/direwolf-ac-setup.lock`, the second logging that it
     waits.
+  - A game's plant must not end every User's VR (XERK-2819): a non-file at a marker, the lock or
+    a temp name is replaced (`clear`: a folder is renamed aside, which its mode can't stop, then
+    rmtree'd as far as it lets us); an unreadable marker (only) reads as absent; an unreadable lock is
+    replaced (it is opened read-only, enough for flock); a flat cfg error logs and skips it,
+    unrecorded, so the next launch retries. Tests: `TestACSetupRecoversFromPlantsOfEveryUsersPaths`.
+    - Its mode plants skip as root (DAC_OVERRIDE): run the test binary as a user (`setpriv`).
   - The CSP marker lists the archive's files (`csp-files`); a bump removes those the new archive
     lacks, never other files in `extension/` (CM installs apps and weather there). Installs from
     before the list (XERK-2770) keep one bump's dropped files. The list is game-writable: each
