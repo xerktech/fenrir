@@ -696,9 +696,9 @@ func TestACSetupBindsVRRecenterToPad(t *testing.T) {
 			t.Skip("root ignores file modes")
 		}
 		for _, mode := range []os.FileMode{0, 0o300, 0o500} {
-			s := newACSetup(t)
-			s.mustRun(t)
-			for _, d := range []string{filepath.Join(s.state, "cfg"), s.flatCfg("Assetto Corsa")} {
+			ms := newACSetup(t)
+			ms.mustRun(t)
+			for _, d := range []string{filepath.Join(ms.state, "cfg"), ms.flatCfg("Assetto Corsa")} {
 				if err := os.MkdirAll(d, 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -708,7 +708,7 @@ func TestACSetupBindsVRRecenterToPad(t *testing.T) {
 				t.Cleanup(func() { _ = os.Chmod(d, 0o755) })
 			}
 			for range 2 {
-				if out := s.mustRun(t); !strings.Contains(out, "not binding VR recenter") {
+				if out := ms.mustRun(t); !strings.Contains(out, "not binding VR recenter") {
 					t.Errorf("mode %o: no log:\n%s", mode, out)
 				}
 			}
@@ -750,7 +750,7 @@ func TestACSetupBindsVRRecenterToPad(t *testing.T) {
 			}
 			// Restored when the subtest ends.
 			t.Chdir(cfg(s))
-			l, err := net.Listen("unix", "controls.ini")
+			l, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", "controls.ini")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -784,7 +784,11 @@ func TestACSetupCSPBumpRemovesDroppedFiles(t *testing.T) {
 	}
 	// Planted: names outside CSP's, a folder, and names no file can have.
 	mustWrite(t, filepath.Join(s.game, "extension", "mine", "x"), "the User's")
-	m["csp-files"] = append(m["csp-files"].([]any), "keep.txt", "../acs.exe", "extension/../acs.exe", 7,
+	files, ok := m["csp-files"].([]any)
+	if !ok {
+		t.Fatalf("csp-files = %v", m["csp-files"])
+	}
+	m["csp-files"] = append(files, "keep.txt", "../acs.exe", "extension/../acs.exe", 7,
 		"extension/mine", "extension/a\x00b")
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -820,7 +824,7 @@ func TestACSetupCSPBumpRemovesDroppedFiles(t *testing.T) {
 	if err := json.Unmarshal([]byte(readString(t, marker)), &m); err != nil {
 		t.Fatal(err)
 	}
-	if got := m["csp-files"]; len(got.([]any)) != 2 {
-		t.Errorf("csp-files = %v, want the new archive's two files", got)
+	if got, ok := m["csp-files"].([]any); !ok || len(got) != 2 {
+		t.Errorf("csp-files = %v, want the new archive's two files", m["csp-files"])
 	}
 }
