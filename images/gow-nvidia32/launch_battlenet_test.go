@@ -335,7 +335,7 @@ func TestLaunchBattlenetPlaysWoWForever(t *testing.T) {
 	if calls := r.calls(t); !slices.Equal(calls, want) {
 		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
 	}
-	if got, err := os.ReadFile(wtf); err != nil || string(got) != "SET GamePadEnable \"1\"\n" {
+	if got, err := os.ReadFile(wtf); err != nil || string(got) != "SET GamePadEnable \"1\"\nSET gxApi \"d3d11\"\n" {
 		t.Errorf("Config.wtf %q (%v), want the gamepad CVar", got, err)
 	}
 }
@@ -711,26 +711,26 @@ func dockerfileStage(t *testing.T, header string) string {
 // value. A file that is not all SET lines is never touched, and nothing is
 // created for a game that is not installed.
 func TestLaunchBattlenetTurnsOnWoWGamepadUnlessSet(t *testing.T) {
-	const on = `SET GamePadEnable "1"`
+	const on, dx11 = `SET GamePadEnable "1"`, `SET gxApi "d3d11"`
 	for _, tc := range []struct {
 		name      string
 		installed bool
 		config    *string // nil: no Config.wtf
 		want      *string // nil: no Config.wtf afterwards
 	}{
-		{"absent", true, nil, new(on + "\n")},
+		{"absent", true, nil, new(on + "\n" + dx11 + "\n")},
 		{"not installed", false, nil, nil},
-		{"present on", true, new("SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n"), new("SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n")},
-		{"present off", true, new("SET GamePadEnable \"0\"\nSET gxApi \"D3D12\"\n"), new("SET GamePadEnable \"0\"\nSET gxApi \"D3D12\"\n")},
-		{"present off, other case", true, new("SET gamepadenable \"0\"\n"), new("SET gamepadenable \"0\"\n")},
-		{"other CVars", true, new("SET portal \"US\"\nSET textLocale \"enUS\"\n"), new("SET portal \"US\"\nSET textLocale \"enUS\"\n" + on + "\n")},
-		{"empty", true, new(""), new(on + "\n")},
-		{"no final newline", true, new(`SET portal "US"`), new("SET portal \"US\"\n" + on + "\n")},
-		{"lookalike CVar", true, new("SET GamePadEnableX \"0\"\n"), new("SET GamePadEnableX \"0\"\n" + on + "\n")},
+		{"present on", true, new("SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n"), new(dx11 + "\nSET GamePadEnable \"1\"\n")},
+		{"present off", true, new("SET GamePadEnable \"0\"\nSET gxApi \"D3D12\"\n"), new("SET GamePadEnable \"0\"\n" + dx11 + "\n")},
+		{"present off, other case", true, new("SET gamepadenable \"0\"\n"), new("SET gamepadenable \"0\"\n" + dx11 + "\n")},
+		{"other CVars", true, new("SET portal \"US\"\nSET textLocale \"enUS\"\n"), new("SET portal \"US\"\nSET textLocale \"enUS\"\n" + on + "\n" + dx11 + "\n")},
+		{"empty", true, new(""), new(on + "\n" + dx11 + "\n")},
+		{"no final newline", true, new(`SET portal "US"`), new("SET portal \"US\"\n" + on + "\n" + dx11 + "\n")},
+		{"lookalike CVar", true, new("SET GamePadEnableX \"0\"\n"), new("SET GamePadEnableX \"0\"\n" + on + "\n" + dx11 + "\n")},
 		{"lookalike CVar, no value", true, new("SET GamePadEnable\n"), new("SET GamePadEnable\n")},
 		{"name with a quote", true, new("SET GamePad\"Enable \"1\"\n"), new("SET GamePad\"Enable \"1\"\n")},
-		{"bare CR at the end", true, new("SET portal \"US\"\r"), new("SET portal \"US\"\r\n" + on + "\r\n")},
-		{"CRLF", true, new("SET portal \"US\"\r\n"), new("SET portal \"US\"\r\n" + on + "\r\n")},
+		{"bare CR at the end", true, new("SET portal \"US\"\r"), new("SET portal \"US\"\r\n" + on + "\r\n" + dx11 + "\r\n")},
+		{"CRLF", true, new("SET portal \"US\"\r\n"), new("SET portal \"US\"\r\n" + on + "\r\n" + dx11 + "\r\n")},
 		{"unparseable", true, new("SET portal \"US\"\ngarbage\n"), new("SET portal \"US\"\ngarbage\n")},
 		{"unparseable, binary", true, new("SET portal \"US\"\n\x00\xff\n"), new("SET portal \"US\"\n\x00\xff\n")},
 		{"unparseable, indented", true, new("  SET GamePadEnable \"0\"\n"), new("  SET GamePadEnable \"0\"\n")},
@@ -766,6 +766,57 @@ func TestLaunchBattlenetTurnsOnWoWGamepadUnlessSet(t *testing.T) {
 				t.Errorf("%s: created %s for a game that is not installed", tc.name, games)
 			}
 		}
+	}
+}
+
+// WoW's D3D12 renderer, through vkd3d-proton on NVIDIA, draws diagonal lines
+// through foliage (XERK-2815): gxApi is set to d3d11 before every launch,
+// whatever the file says, keeping the file's line endings and other CVars.
+// Forever gets it too: TestLaunchBattlenetPlaysWoWForever.
+func TestLaunchBattlenetForcesWoWDirectX11(t *testing.T) {
+	const dx11 = `SET gxApi "d3d11"`
+	for _, tc := range []struct {
+		name, config, want string
+	}{
+		{"d3d12", "SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n", dx11 + "\nSET GamePadEnable \"1\"\n"},
+		{"other case", "SET GamePadEnable \"1\"\nSET GXAPI \"d3d12\"\n", "SET GamePadEnable \"1\"\n" + dx11 + "\n"},
+		{"empty value", "SET GamePadEnable \"1\"\nSET gxApi \"\"\n", "SET GamePadEnable \"1\"\n" + dx11 + "\n"},
+		{"CRLF", "SET gxApi \"D3D12\"\r\nSET GamePadEnable \"1\"\r\n", dx11 + "\r\nSET GamePadEnable \"1\"\r\n"},
+		{"already d3d11", "SET gxApi \"D3D11\"\nSET GamePadEnable \"1\"\n", "SET gxApi \"D3D11\"\nSET GamePadEnable \"1\"\n"},
+		{"lookalike CVar", "SET gxApiX \"D3D12\"\nSET GamePadEnable \"1\"\n", "SET gxApiX \"D3D12\"\nSET GamePadEnable \"1\"\n" + dx11 + "\n"},
+		{"unparseable", "SET gxApi \"D3D12\"\ngarbage\n", "SET gxApi \"D3D12\"\ngarbage\n"},
+	} {
+		var wtf string
+		r := runLaunchBattlenetWith(t, true, func(games string) {
+			wtf = filepath.Join(games, "World of Warcraft", "_retail_", "WTF", "Config.wtf")
+			if err := os.MkdirAll(filepath.Dir(wtf), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(wtf, []byte(tc.config), 0o644); err != nil { //nolint:gosec // test fixture
+				t.Fatal(err)
+			}
+		}, []string{"wow"}, "GAME_SECONDS=3")
+		if got, err := os.ReadFile(wtf); r.code != 0 || err != nil || string(got) != tc.want {
+			t.Errorf("%s: exit %d, Config.wtf %q (%v), want 0 and %q\n%s", tc.name, r.code, got, err, tc.want, r.out)
+		}
+	}
+	// A linked Config.wtf is replaced by the edited copy; its target is untouched.
+	var wtf, target string
+	r := runLaunchBattlenetWith(t, true, func(games string) {
+		wtf = filepath.Join(games, "World of Warcraft", "_retail_", "WTF", "Config.wtf")
+		target = filepath.Join(t.TempDir(), "elsewhere")
+		if err := os.MkdirAll(filepath.Dir(wtf), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n"), 0o644); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, wtf); err != nil {
+			t.Fatal(err)
+		}
+	}, []string{"wow"}, "GAME_SECONDS=3")
+	if got, err := os.ReadFile(target); r.code != 0 || err != nil || string(got) != "SET gxApi \"D3D12\"\nSET GamePadEnable \"1\"\n" {
+		t.Errorf("exit %d, link target now %q (%v), want 0 and it untouched\n%s", r.code, got, err, r.out)
 	}
 }
 
