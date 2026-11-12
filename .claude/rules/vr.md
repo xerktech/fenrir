@@ -355,10 +355,19 @@ paths:
     swap): else an acs.exe update took the old copy for the launcher and dropped it (QA).
   - Two runs serialize on `compatdata/244210/direwolf-ac-setup.lock`, the second logging that it
     waits.
-  - A CSP bump unpacks over the old one, so files the new archive dropped stay.
+  - The CSP marker lists the archive's files (`csp-files`); a bump removes those the new archive
+    lacks, never other files in `extension/` (CM installs apps and weather there). Installs from
+    before the list (XERK-2770) keep one bump's dropped files. The list is game-writable: each
+    entry must pass `csp_member`.
   - Do the first launch from Moonlight: a native VR Session's pod is reaped after
     `vrUnstartedTTL` (15m) never ready, and the first setup's downloads count against it.
   - Tests: `images/gow-nvidia32/vr/ac_setup_test.go` (stub Proton, Wine, winetricks, curl),
     `TestVRExampleRunsACSetup`.
-  - Recenter: Ctrl+Space from the Moonlight keyboard, on track. A pad/wheel binding is untested.
+  - Recenter: Ctrl+Space from the Moonlight keyboard (fixed in CSP), and the pad's right-stick
+    click: ac-setup adds `[__CM_RESET_CAMERA_VR] XBOXBUTTON=RTHUMB_PRESS` to the flat and the
+    User's VR `controls.ini` each launch (XERK-2770). CSP 0.3.1 lists the hotkey in
+    `data_hotkeys_supported.txt`; the value names are Content Manager's (`ControllerButtonEntry`).
+    - A section already naming `XBOXBUTTON` (even empty) is the User's; a button another section
+      holds is not bound. The VR cfg is edited only once seeded: making it would stop the seed.
+    - Unverified in a headset: that the press recenters.
   - Its memory limit (24Gi) needs a User ceiling to match. Tests: `state_mounts_test.go`.
