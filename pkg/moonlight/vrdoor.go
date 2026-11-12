@@ -507,6 +507,22 @@ func vrPairingCode(serverKey [32]byte, clientKey [32]byte, wivrnKey string, serv
 	return fmt.Sprintf("%0*d", vrCodeDigits, binary.BigEndian.Uint64(sum[:8])%100_000_000)
 }
 
+// vrKeyFingerprint is how the pairing page shows the front door's key
+// (SHA-256 of its SPKI), for the user to compare with the key the headset
+// pinned (XERK-2813): the first 16 bytes in hex, in groups of 4. The code
+// proves nothing to the headset, since a fake front door computes it too; the
+// page is behind Authentik, so only it can tell the user which key is real.
+// The Quest app shows the same for the key it pinned: keep the two in step.
+// 128 bits, so no LAN attacker grinds a key with a matching fingerprint.
+func vrKeyFingerprint(sum [32]byte) string {
+	hexed := hex.EncodeToString(sum[:16])
+	parts := make([]string, 0, len(hexed)/4)
+	for i := 0; i < len(hexed); i += 4 {
+		parts = append(parts, hexed[i:i+4])
+	}
+	return strings.Join(parts, " ")
+}
+
 // confirm checks the headset's nonce against its commitment, then waits for
 // its user to enter the code on the pairing page.
 func (d *vrFrontDoor) confirm(w http.ResponseWriter, r *http.Request) {

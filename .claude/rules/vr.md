@@ -202,13 +202,17 @@ paths:
 
 ## VR front door (XERK-2808; `pkg/moonlight/vrdoor.go`, protocol in `docs/vr-native-session.md`)
 
-- moonlight-proxy, `--vr-port` on `--vr-address` only: never a wildcard or loopback address
-  (`checkVRFrontDoorFlags`). Codes are entered on the pairing page, so it needs `--pin-port`.
+- moonlight-proxy, `--vr-port` on `--vr-address` only: never a wildcard, loopback or link-local
+  address, and IPv4 as itself (`checkVRFrontDoorFlags`): the pairing page shows it to add. Codes are entered on the pairing page, so it needs `--pin-port`.
 - A headset is SHA-256 of its TLS client key's SPKI, held in `Headset.spec.clientKeySHA256`; the
   Headset's User is the caller. Two Headsets on one key admit neither. Read from the informer.
 - The pairing code needs the commitment step: a code over the certificates alone can be ground by
   a LAN relay. Keep the derivation equal to the Quest app's (XERK-2809);
   `TestVRPairingCodeBindsEverything` pins a vector.
+- The code proves nothing to the headset: a fake front door computes it too (XERK-2813). The
+  pairing page shows the front door's key fingerprint (`vrKeyFingerprint`), which the Quest app
+  must show for the key it pins, and pin only once the user confirms a match. Keep the format
+  equal to the app's. Tests: `TestVRPairingPageShowsServerKey`, `TestVRKeyFingerprint`.
 - Never lift `/pair`'s server-wide rate limit (`vrFrontDoor.draws`): each answer is a server nonce a
   relay can test against the headset's code before confirming; unlimited, QA paired its own key
   in under a second. Tests: `TestVRFrontDoorLimitsDraws`.

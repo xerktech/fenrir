@@ -7,10 +7,12 @@ import (
 	"errors"
 	"html/template"
 	"mime"
+	"net"
 	"net/http"
 	"net/netip"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -294,12 +296,22 @@ func (h *pinPageHandler) page(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	setPinPageHeaders(w)
-	if err := pinTemplate.Execute(w, struct {
+	view := struct {
 		User    string
 		Pending []pendingView
 		VR      bool
-	}{user.Name, pending, h.vr != nil}); err != nil {
+		// VRAddress and VRKey are the front door's address and key
+		// fingerprint, which the headset must show before it trusts a
+		// pairing (XERK-2813).
+		VRAddress string
+		VRKey     string
+	}{User: user.Name, Pending: pending, VR: h.vr != nil}
+	if h.vr != nil {
+		view.VRAddress = net.JoinHostPort(h.vr.opts.Address, strconv.Itoa(h.vr.opts.Port))
+		view.VRKey = vrKeyFingerprint(h.vr.serverKey)
+	}
+	setPinPageHeaders(w)
+	if err := pinTemplate.Execute(w, view); err != nil {
 		klog.Errorf("Pairing page: render: %s", err)
 	}
 }
@@ -360,6 +372,10 @@ func sameOriginJSON(w http.ResponseWriter, r *http.Request) bool {
 // front door (XERK-2808).
 const pinVRPath = "/pin/vr"
 
+// vrKeyMismatchAdvice tells the user what a key other than the page's means;
+// pin.html says the same.
+const vrKeyMismatchAdvice = "If it shows any other key, it is not paired with this server: remove that server on the headset."
+
 // submitVR pairs the headset showing the code with the signed-in User.
 func (h *pinPageHandler) submitVR(w http.ResponseWriter, r *http.Request) {
 	user := h.authenticate(w, r)
@@ -389,6 +405,7 @@ func (h *pinPageHandler) submitVR(w http.ResponseWriter, r *http.Request) {
 		klog.Errorf("Pairing page: user %s: pairing a VR headset: %v", user.Name, err)
 		http.Error(w, "Pairing failed. Try the same code again in a minute; if it still fails, start pairing again on the headset.", http.StatusInternalServerError)
 	default:
-		_, _ = w.Write([]byte("Headset paired. It now lists your VR games."))
+		_, _ = w.Write([]byte("Code accepted. The headset must show this server key: " +
+			vrKeyFingerprint(h.vr.serverKey) + ". " + vrKeyMismatchAdvice))
 	}
 }

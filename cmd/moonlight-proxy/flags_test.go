@@ -39,6 +39,9 @@ func TestCheckVRFrontDoorFlags(t *testing.T) {
 	if err := checkVRFrontDoorFlags(47970, "10.10.10.34", 47990); err != nil {
 		t.Errorf("node address refused: %v", err)
 	}
+	if err := checkVRFrontDoorFlags(47970, "2001:db8::1", 47990); err != nil {
+		t.Errorf("global v6 address refused: %v", err)
+	}
 	for name, c := range map[string]struct {
 		port    int
 		address string
@@ -52,6 +55,9 @@ func TestCheckVRFrontDoorFlags(t *testing.T) {
 		"hostname":      {47970, "talos04", 47990},
 		"no pin page":   {47970, "10.10.10.34", 0},
 		"port too high": {70000, "10.10.10.34", 47990},
+		"link-local v6": {47970, "fe80::1", 47990},
+		"link-local v4": {47970, "169.254.1.2", 47990},
+		"v4-mapped v6":  {47970, "::ffff:10.1.2.3", 47990},
 	} {
 		if err := checkVRFrontDoorFlags(c.port, c.address, c.pinPort); err == nil {
 			t.Errorf("%s: accepted", name)
