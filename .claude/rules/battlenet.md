@@ -212,8 +212,17 @@ paths:
   started by the client (not a child of either `proton run`): wait on that process.
 - After the game exits, Battle.net and its Agent keep running, and so do both `proton run`
   wrappers. `wineserver -k` on the prefix ends them all at once.
-- WoW retail runs DX12 through vkd3d-proton on the GPU (RTX 3090, NVIDIA 595.91.07):
-  `Logs/gx.log` shows "D3d12 Device Create Successful"; the prefix's d3d12/d3d12core/dxgi load.
+- WoW (retail and Forever) runs on the GPU (RTX 3090, NVIDIA 595.91.07); `Logs/gx.log` names
+  the API: "Dx12 Device Create Successful" (vkd3d-proton) or "Dx11 ..." (DXVK).
+- `launch-battlenet` sets `SET gxApi "d3d11"` in Config.wtf before every launch (XERK-2815):
+  on DX12, vkd3d-proton on NVIDIA lights stray pixels along the inner edges of alpha-cut foliage
+  (diagonal white lines through trees and grass) at every shadow quality; DX11 is clean.
+  - Forced, not kept: WoW saves the API it last ran and defaults to D3D12.
+  - Forcing rewrites the file (`sed -i`): a read-only or hardlinked Config.wtf is replaced.
+    A symlinked one is left alone in every mode, never written through.
+  - Check a Proton/driver bump against DX12 before dropping it.
+  - Tests: `TestLaunchBattlenetForcesWoWDirectX11`.
+  - `/console gxApi` did not persist live; the options menu's Graphics API did.
 - Patching at launch is unverified: WoW was current. Battle.net does the update itself.
 
 ## Controller
