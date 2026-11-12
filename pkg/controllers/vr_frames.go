@@ -18,6 +18,12 @@ import (
 // picture. Generous: a game may stop submitting frames while it loads.
 const vrFrameStallTimeout = 2 * time.Minute
 
+// vrFrameMaxInterval caps how much of one gap between two reads of a frozen,
+// focused game counts toward vrFrameStallTimeout. Reads normally come every
+// streamPollInterval; a longer gap (vr-agent unreadable, a reconcile error)
+// says nothing about the headset meanwhile, so most of it never counts.
+const vrFrameMaxInterval = 2 * streamPollInterval
+
 // vrFrames is what one native VR Session's frame count last looked like.
 type vrFrames struct {
 	uid    types.UID
@@ -25,9 +31,14 @@ type vrFrames struct {
 	// delivered is whether the game has delivered a frame (a count above
 	// zero, or one changing) since the Session was first seen.
 	delivered bool
-	// since is when the count last changed or the headset was last
-	// unfocused: only time spent looking at a frozen game counts.
-	since time.Time
+	// focused is whether the last read saw the headset connected and
+	// focused, at seen.
+	focused bool
+	seen    time.Time
+	// frozen is the time read as focused with the count unchanged: between
+	// two reads that both saw it focused, each gap capped at
+	// vrFrameMaxInterval. A change of count clears it.
+	frozen time.Duration
 }
 
 // vrFrameProgress tracks vrFrames per Session ("namespace/name"). In memory:
@@ -38,15 +49,17 @@ type vrFrameProgress struct {
 	m  map[string]vrFrames
 }
 
-// stalledFor records vr at now and returns how long the focused headset has
-// seen no new frame from a game that has delivered some, or 0. WiVRn's count
-// restarts at zero with its server, so any change is progress. An image whose
-// WiVRn reports no count (AppFramesDelivered nil) is never judged.
+// stalledFor records vr, read at now, and returns how long the focused
+// headset has been seen with no new frame from a game that has delivered
+// some, or 0. WiVRn's count restarts at zero with its server, so any change
+// is progress. An image whose WiVRn reports no count (AppFramesDelivered nil)
+// is never judged.
 func (p *vrFrameProgress) stalledFor(session *v1alpha1types.Session, vr VRStatus, now time.Time) time.Duration {
 	if vr.AppFramesDelivered == nil {
 		return 0
 	}
 	frames := *vr.AppFramesDelivered
+	focused := vr.HeadsetConnected && vr.HeadsetFocused
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.m == nil {
@@ -55,33 +68,21 @@ func (p *vrFrameProgress) stalledFor(session *v1alpha1types.Session, vr VRStatus
 	key := session.Namespace + "/" + session.Name
 	prev, ok := p.m[key]
 	if !ok || prev.uid != session.UID {
-		p.m[key] = vrFrames{uid: session.UID, frames: frames, delivered: frames != 0, since: now}
+		p.m[key] = vrFrames{uid: session.UID, frames: frames, delivered: frames != 0, focused: focused, seen: now}
 		return 0
 	}
-	if frames != prev.frames {
-		prev.delivered, prev.since = true, now
+	switch {
+	case frames != prev.frames:
+		prev.delivered, prev.frozen = true, 0
+	case prev.focused && focused:
+		prev.frozen += min(max(now.Sub(prev.seen), 0), vrFrameMaxInterval)
 	}
-	prev.frames = frames
-	if !vr.HeadsetConnected || !vr.HeadsetFocused {
-		prev.since = now
-	}
+	prev.frames, prev.focused, prev.seen = frames, focused, now
 	p.m[key] = prev
 	if !prev.delivered {
 		return 0
 	}
-	return now.Sub(prev.since)
-}
-
-// unseen restarts session's stall timer at now: vr-agent could not be read,
-// so whether the headset was focused then is unknown and never counts.
-func (p *vrFrameProgress) unseen(session *v1alpha1types.Session, now time.Time) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	key := session.Namespace + "/" + session.Name
-	if prev, ok := p.m[key]; ok && prev.uid == session.UID {
-		prev.since = now
-		p.m[key] = prev
-	}
+	return prev.frozen
 }
 
 // forget drops a deleted Session's progress.

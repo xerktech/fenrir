@@ -744,74 +744,80 @@ func TestParseX448PublicKeyPEM(t *testing.T) {
 }
 
 // A native VR game that stops delivering frames while the headset is focused
-// ends its Session after vrFrameStallTimeout (XERK-2844): a crashed OpenVR
-// layer leaves it hung behind a dialog nobody sees. Time unfocused, a game
-// yet to deliver its first frame, and a WiVRn without the count never count.
+// ends its Session once vrFrameStallTimeout of that is seen (XERK-2844): a
+// crashed OpenVR layer leaves it hung behind a dialog nobody sees. Time
+// unfocused, disconnected or unread, a game yet to deliver its first frame,
+// and a WiVRn without the count never count.
 func TestVRFrameStallEndsSession(t *testing.T) {
 	f, s, agent := vrLifecycle(t, identity)
 	frames := func(n uint64) *uint64 { return &n }
-	reconcile := func(st VRStatus) {
+	focused := func(n uint64) VRStatus {
+		return VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(n)}
+	}
+	// poll reads st from vr-agent (unreachable if st is nil) as if after
+	// had passed since the last read.
+	poll := func(st *VRStatus, after time.Duration) {
 		t.Helper()
-		agent.set(st, false)
+		f.sc.vrFrameProgress.mu.Lock()
+		key := s.Namespace + "/" + s.Name
+		if p, ok := f.sc.vrFrameProgress.m[key]; ok {
+			p.seen = p.seen.Add(-after)
+			f.sc.vrFrameProgress.m[key] = p
+		}
+		f.sc.vrFrameProgress.mu.Unlock()
+		if st == nil {
+			agent.set(VRStatus{}, true)
+		} else {
+			agent.set(*st, false)
+		}
 		if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// age moves the recorded progress back by d, as if d had passed.
-	age := func(d time.Duration) {
-		f.sc.vrFrameProgress.mu.Lock()
-		defer f.sc.vrFrameProgress.mu.Unlock()
-		key := s.Namespace + "/" + s.Name
-		p := f.sc.vrFrameProgress.m[key]
-		p.since = p.since.Add(-d)
-		f.sc.vrFrameProgress.m[key] = p
+	alive := func(why string) {
+		t.Helper()
+		if !f.sessionExists(t, s.Name) {
+			t.Fatal("ended " + why)
+		}
 	}
-	long := vrFrameStallTimeout + time.Second
+	step := streamPollInterval
+	// pollFor reads st every step for d.
+	pollFor := func(st VRStatus, d time.Duration) {
+		t.Helper()
+		for range int(d / step) {
+			poll(&st, step)
+		}
+	}
+	long := vrFrameStallTimeout + step
 
 	// A WiVRn without the count: never judged.
-	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true})
-	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true})
+	pollFor(VRStatus{HeadsetConnected: true, HeadsetFocused: true}, long)
 	// The game still loading (no frame yet), focused for long.
-	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(0)})
-	age(long)
-	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(0)})
-	if !f.sessionExists(t, s.Name) {
-		t.Fatal("ended before the game delivered a frame")
-	}
-	// Frames flow, then stop while the headset is unfocused (Quest menu).
-	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(900)})
-	age(long)
-	reconcile(VRStatus{HeadsetConnected: true, AppFramesDelivered: frames(900)})
-	if !f.sessionExists(t, s.Name) {
-		t.Fatal("ended while the headset was unfocused")
-	}
-	// Disconnected (WiVRn may still say focused) and vr-agent unreadable:
-	// neither counts.
-	age(long)
-	reconcile(VRStatus{HeadsetFocused: true, AppFramesDelivered: frames(900)})
-	if !f.sessionExists(t, s.Name) {
-		t.Fatal("ended while the headset was disconnected")
-	}
-	age(long)
-	agent.set(VRStatus{}, true)
-	if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
-		t.Fatal(err)
-	}
-	// Focused again, frozen for less than the timeout.
-	age(vrFrameStallTimeout / 2)
-	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(900)})
-	if !f.sessionExists(t, s.Name) {
-		t.Fatal("ended before the timeout")
-	}
+	pollFor(focused(0), long)
+	alive("before the game delivered a frame")
+	// Frames flow, then stop while the headset is unfocused (Quest menu)
+	// or disconnected (WiVRn may still say focused).
+	poll(new(focused(900)), step)
+	pollFor(VRStatus{HeadsetConnected: true, AppFramesDelivered: frames(900)}, long)
+	pollFor(VRStatus{HeadsetFocused: true, AppFramesDelivered: frames(900)}, long)
+	alive("while the headset was unfocused or disconnected")
+	// Focused and frozen, but most of it unread: a long gap counts only
+	// vrFrameMaxInterval.
+	poll(new(focused(900)), step)
+	poll(nil, 0)
+	poll(new(focused(900)), long)
+	alive("on time vr-agent could not be read")
+	// Frozen time already seen is kept across a failed read: a flapping
+	// agent cannot keep a hung game alive.
+	pollFor(focused(900), vrFrameStallTimeout/2)
+	poll(nil, 0)
 	// WiVRn's server restarting resets the count: progress, not a stall.
-	age(long)
-	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(3)})
-	if !f.sessionExists(t, s.Name) {
-		t.Fatal("ended on a count that changed")
-	}
-	// Frozen and focused past the timeout.
-	age(long)
-	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(3)})
+	poll(new(focused(3)), step)
+	alive("on a count that changed")
+	pollFor(focused(3), vrFrameStallTimeout-step)
+	poll(nil, 0)
+	alive("before the timeout")
+	pollFor(focused(3), 2*step)
 	if f.sessionExists(t, s.Name) {
 		t.Error("kept a Session whose game delivered no frame while focused")
 	}
