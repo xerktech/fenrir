@@ -54,6 +54,12 @@ type SessionStatusApplyConfiguration struct {
 	// They are never seeded; the User confirms the one they paired on the
 	// library page, which creates its Headset. They go with the Session.
 	PendingHeadsets []PendingHeadsetApplyConfiguration `json:"pendingHeadsets,omitempty"`
+	// VRServerKey is the raw X448 public key (lowercase hex) of the identity
+	// key the VR server of a VR-mode Session's pod serves, as the pod's
+	// vr-agent first reported it (XERK-2808). The VR front door hands it to
+	// the paired headset, which pins it rather than trusting the server on
+	// first use. Set once; a later, different report is ignored.
+	VRServerKey *string `json:"vrServerKey,omitempty"`
 }
 
 // SessionStatusApplyConfiguration constructs a declarative configuration of the SessionStatus type for use with
@@ -125,5 +131,13 @@ func (b *SessionStatusApplyConfiguration) WithPendingHeadsets(values ...*Pending
 		}
 		b.PendingHeadsets = append(b.PendingHeadsets, *values[i])
 	}
+	return b
+}
+
+// WithVRServerKey sets the VRServerKey field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the VRServerKey field is set to the value of the last call.
+func (b *SessionStatusApplyConfiguration) WithVRServerKey(value string) *SessionStatusApplyConfiguration {
+	b.VRServerKey = &value
 	return b
 }

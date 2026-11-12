@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"flag"
+	"fmt"
 	"net"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	direwolfv1alpha1 "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
+	"games-on-whales.github.io/direwolf/pkg/controllers"
 	"games-on-whales.github.io/direwolf/pkg/generated/informers/externalversions"
 	"games-on-whales.github.io/direwolf/pkg/generic"
 	"games-on-whales.github.io/direwolf/pkg/moonlight"
@@ -51,6 +53,9 @@ func main() {
 		"Library page URL the pairing page links a --pin-provision-group member with no User to")
 	mdns := flag.Bool("mdns", true, "Advertise the HTTP port over mDNS (_nvstream._tcp) on every multicast interface, so LAN Moonlight clients find the host")
 	mdnsAddress := flag.String("mdns-address", "", "IPv4 address to advertise over mDNS instead of the node's own, e.g. a LoadBalancer IP in front of the proxy; only links whose subnet holds it answer, as host "+strings.ToLower(moonlight.ServerName)+".local")
+	vrPort := flag.Int("vr-port", 0, "Port of the VR front door, where paired headsets list and launch VR Apps (XERK-2808); needs --pin-port, where their pairing codes are entered. 0 disables it")
+	vrAddress := flag.String("vr-address", os.Getenv("VR_ADDRESS"), "The one IP address the VR front door listens on (the node's, under hostNetwork); never a wildcard or loopback address. Required with --vr-port")
+	vrPairingURL := flag.String("vr-pairing-url", os.Getenv("VR_PAIRING_URL"), "Pairing page URL a pairing headset shows beside its code")
 	namespace := flag.String("namespace", os.Getenv("POD_NAMESPACE"), "Namespace to watch")
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -104,6 +109,12 @@ func main() {
 		klog.Fatal(err)
 	}
 	klog.Info("Pairing page port: ", *pinPort)
+	if *vrPort != 0 {
+		if err = checkVRFrontDoorFlags(*vrPort, *vrAddress, *pinPort); err != nil {
+			klog.Fatal(err)
+		}
+		klog.Infof("VR front door: %s port %d", *vrAddress, *vrPort)
+	}
 	var allowedUsers []string
 	for u := range strings.SplitSeq(*pinProvisionAllowedUsers, ",") {
 		if u = strings.TrimSpace(u); u != "" {
@@ -132,6 +143,7 @@ func main() {
 	appInformer := direwolfFactory.Direwolf().V1alpha1().Apps().Informer()
 	userInformer := direwolfFactory.Direwolf().V1alpha1().Users().Informer()
 	sessionInformer := direwolfFactory.Direwolf().V1alpha1().Sessions().Informer()
+	headsetInformer := direwolfFactory.Direwolf().V1alpha1().Headsets().Informer()
 	direwolfFactory.Start(appContext.Done())
 	defer direwolfFactory.Shutdown()
 
@@ -154,6 +166,28 @@ func main() {
 		tlsCert,
 		direwolfClient.DirewolfV1alpha1().Pairings(*namespace),
 	)
+
+	var vrFrontDoor moonlight.VRFrontDoorOptions
+	if *vrPort != 0 {
+		// The VR page's launcher (XERK-2670), with this process's clients:
+		// the same Library lock, session cap and pod checks.
+		maxVR := max(*maxSessions, 0)
+		vrFrontDoor = moonlight.VRFrontDoorOptions{
+			Port:          *vrPort,
+			Address:       *vrAddress,
+			PairingURL:    *vrPairingURL,
+			Headsets:      generic.NewLister[*direwolfv1alpha1.Headset](headsetInformer.GetIndexer()).Namespaced(*namespace),
+			HeadsetClient: direwolfClient.DirewolfV1alpha1().Headsets(*namespace),
+			Sessions: vrSessions{&controllers.VRLaunch{
+				Apps:                  generic.NewLister[*direwolfv1alpha1.App](appInformer.GetIndexer()).Namespaced(*namespace),
+				Sessions:              direwolfClient.DirewolfV1alpha1().Sessions(*namespace),
+				Pods:                  k8sClient.CoreV1().Pods(*namespace),
+				SessionCache:          generic.NewLister[*direwolfv1alpha1.Session](sessionInformer.GetIndexer()).Namespaced(*namespace),
+				SessionPods:           generic.NewLister[*v1.Pod](podInformer.GetIndexer()).Namespaced(*namespace),
+				MaxConcurrentSessions: maxVR,
+			}},
+		}
+	}
 
 	restServer := moonlight.NewRESTServer(
 		pairingManager,
@@ -182,6 +216,7 @@ func main() {
 				GroupsSeparator:       *pinGroupsSeparator,
 				LibraryURL:            *pinLibraryURL,
 			},
+			VRFrontDoor: vrFrontDoor,
 		},
 	)
 
@@ -209,4 +244,18 @@ func main() {
 		klog.Fatalf("Server failed: %s", err)
 	}
 	klog.Info("Shut down")
+}
+
+// vrSessions adapts the VR page's launcher to the front door.
+type vrSessions struct{ *controllers.VRLaunch }
+
+func (v vrSessions) SessionState(ctx context.Context, user *direwolfv1alpha1.User) (moonlight.VRSessionInfo, error) {
+	st, err := v.VRLaunch.SessionState(ctx, user)
+	if err != nil {
+		return moonlight.VRSessionInfo{}, fmt.Errorf("reading the VR session: %w", err)
+	}
+	return moonlight.VRSessionInfo{
+		State: st.State, App: st.App, Title: st.Title, Host: st.Host, Port: st.Port,
+		ServerKey: st.ServerKey, HeadsetConnected: st.HeadsetConnected, Message: st.Message,
+	}, nil
 }

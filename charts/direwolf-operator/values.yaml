@@ -277,6 +277,12 @@ controllers:
           - --tls-key=/etc/certs/tls.key
           # One GPU: a second user's /launch gets Moonlight's busy error.
           - --max-concurrent-sessions=1
+          # The VR front door (XERK-2808; docs/vr-native-session.md): paired
+          # headsets list and launch VR Apps there. Needs --pin-port (codes are
+          # entered on the pairing page) and the operator's --vr-port-range.
+          # It listens on VR_ADDRESS (the node's IP) only, never a wildcard:
+          #   - --vr-port=<port, reachable from headsets>
+          #   - --vr-pairing-url=<the pairing page's URL, shown with the code>
         image:
           repository: ghcr.io/games-on-whales/fenrir/moonlight-proxy
           tag: main
@@ -287,6 +293,11 @@ controllers:
               fieldRef:
                 fieldPath: metadata.name
           POD_NAMESPACE: "{{ .Release.Namespace }}"
+          # --vr-address: the node's IP, as the pod is hostNetwork.
+          VR_ADDRESS:
+            valueFrom:
+              fieldRef:
+                fieldPath: status.hostIP
           # The proxyAuth and provisioning values above (--pin-user-header,
           # --pin-groups-*, --pin-provision-*, --pin-library-url), so the pairing
           # page can send an eligible person with no User to the Library.
@@ -396,6 +407,11 @@ rbac:
       - apiGroups: ["direwolf.games-on-whales.github.io"]
         resources: ["pairings", "sessions"]
         verbs: ["create", "delete", "patch", "update", "get", "list", "watch"]
+      # The VR front door records a headset paired by code (XERK-2808). Create
+      # only: the spec is immutable, and revoking is the user's or an admin's.
+      - apiGroups: ["direwolf.games-on-whales.github.io"]
+        resources: ["headsets"]
+        verbs: ["create"]
   bindings:
     direwolf_operator:
       forceRename: *operatorName

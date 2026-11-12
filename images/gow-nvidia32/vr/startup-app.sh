@@ -137,6 +137,27 @@ with open(sys.argv[2], "x") as f:
   die "DIREWOLF_VR_HEADSETS is not a list of WiVRn known keys"
 mv -fT "$keys.tmp" "$keys"
 
+# WiVRn's identity key (the xerktech fork's server_key.pem, X448), made here
+# rather than at the first headset connect, so its public half can go to the
+# pod's vr-agent before the headset dials: the VR front door hands it to the
+# headset, which pins it (XERK-2808). Only where vr-agent mounts the bus dir.
+# A key WiVRn could not load ends the session here, naming the file.
+if [[ $bus_config == "$here/dbus-session-agent.conf" ]]; then
+  server_key=$state/wivrn/server_key.pem
+  if [[ ! -e $server_key && ! -L $server_key ]]; then
+    rm -f -- "$server_key.tmp"
+    # genpkey creates its private key file owner-only (0600) on its own.
+    openssl genpkey -algorithm X448 -out "$server_key.tmp" ||
+      die "could not create the VR server's identity key"
+    mv -fT -- "$server_key.tmp" "$server_key"
+  fi
+  rm -f -- "$bus_dir/server_key.pub.tmp"
+  openssl pkey -in "$server_key" -pubout -out "$bus_dir/server_key.pub.tmp" 2>/dev/null &&
+    [[ $(openssl pkey -pubin -in "$bus_dir/server_key.pub.tmp" -noout -text 2>/dev/null | head -n1) == X448* ]] ||
+    die "$server_key is not an X448 private key WiVRn can load; move it aside to make a new one (paired headsets then pin the new key at their next launch)"
+  mv -fT -- "$bus_dir/server_key.pub.tmp" "$bus_dir/server_key.pub"
+fi
+
 # PipeWire's sockets (and its pulse server's) go in a directory of their own:
 # Wolf's pulseaudio already serves this runtime dir.
 audio=$XDG_RUNTIME_DIR/vr-audio

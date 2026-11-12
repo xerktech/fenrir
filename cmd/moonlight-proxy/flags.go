@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 
@@ -33,6 +34,26 @@ func checkPinFlags(userHeader, provisionGroup, groupsHeader, groupsSeparator, li
 		if u, err := url.Parse(libraryURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 			return fmt.Errorf("--pin-library-url %q is not an absolute http(s) URL", libraryURL)
 		}
+	}
+	return nil
+}
+
+// checkVRFrontDoorFlags refuses a VR front door that would listen on a
+// wildcard or loopback address (under hostNetwork, the node's), or whose
+// codes nobody could enter.
+func checkVRFrontDoorFlags(port int, address string, pinPort int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("--vr-port %d is not a port", port)
+	}
+	if pinPort == 0 {
+		return errors.New("--vr-port needs --pin-port: headsets' pairing codes are entered on the pairing page")
+	}
+	ip := net.ParseIP(address)
+	switch {
+	case ip == nil:
+		return fmt.Errorf("--vr-address %q is not an IP address", address)
+	case ip.IsUnspecified() || ip.IsLoopback():
+		return fmt.Errorf("--vr-address %s: the VR front door listens on one routable address, never a wildcard or loopback one", address)
 	}
 	return nil
 }

@@ -642,3 +642,38 @@ func (v *VRLaunch) waiting() int {
 	}
 	return n
 }
+
+// The front door's view of a User's VR Session (XERK-2808): ready only once
+// the pod is ready and the server's key is known, as the headset pins it.
+func TestVRSessionStateForFrontDoor(t *testing.T) {
+	sess := pageVRSession("sam-ac-1", "sam")
+	sess.Status.Ports.VR = 21003
+	f := newVRFixture(t, sess, moonlightSession("alex-flat-1", "alex"))
+	user := func(name string) *v1alpha1types.User {
+		return &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	}
+
+	st, err := f.s.VRLaunch.SessionState(t.Context(), user("sam"))
+	if err != nil || st.State != VRStateStarting || st.Host != "" || st.App != "ac" {
+		t.Fatalf("no pod: %+v %v", st, err)
+	}
+	f.addPod(t, readyVRPod(sess))
+	if st, _ = f.s.VRLaunch.SessionState(t.Context(), user("sam")); st.State != VRStateStarting || st.Port != 0 {
+		t.Errorf("ready pod, no server key: %+v", st)
+	}
+	key := strings.Repeat("ab", 56)
+	sess.Status.VRServerKey = key
+	if _, err := f.dw.DirewolfV1alpha1().Sessions(libraryTestNS).UpdateStatus(t.Context(), sess, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = f.s.VRLaunch.SessionState(t.Context(), user("sam"))
+	if st.State != VRStateReady || st.Host != "10.10.10.34" || st.Port != 21003 || st.ServerKey != key {
+		t.Errorf("ready: %+v", st)
+	}
+	if st, _ = f.s.VRLaunch.SessionState(t.Context(), user("alex")); st.State != VRStateOther || st.Message == "" {
+		t.Errorf("moonlight session: %+v", st)
+	}
+	if st, _ = f.s.VRLaunch.SessionState(t.Context(), user("dana")); st.State != VRStateNone {
+		t.Errorf("no session: %+v", st)
+	}
+}

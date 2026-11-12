@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -184,7 +187,7 @@ func TestWiVRnStatusOverDBus(t *testing.T) {
 // as a lost headset (QA, XERK-2669).
 func TestVRAgentWorstReplyFitsOperatorRead(t *testing.T) {
 	key := strings.Repeat("A", 1024)
-	st := controllers.VRStatus{HeadsetConnected: true}
+	st := controllers.VRStatus{HeadsetConnected: true, ServerKey: strings.Repeat("ab", 56), Pin: "123456"}
 	for i := range maxReportedKeys {
 		name := controllers.CleanHeadsetName(strings.Repeat(`"\<>&`, 100))
 		if i%2 == 0 {
@@ -199,5 +202,42 @@ func TestVRAgentWorstReplyFitsOperatorRead(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if n := w.Body.Len(); w.Code != http.StatusOK || n > 64<<10 {
 		t.Fatalf("worst reply: %d, %d bytes; want 200 within 64KiB", w.Code, n)
+	}
+}
+
+// vr-agent reports the server key the App published, and nothing for a file
+// that is missing, not one X448 public key, oversized, or not a regular file
+// (a FIFO must not stall the read).
+func TestReadServerKey(t *testing.T) {
+	dir := t.TempDir()
+	der := append([]byte{0x30, 0x42, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6f, 0x03, 0x39, 0x00}, bytes.Repeat([]byte{7}, 56)...)
+	good := filepath.Join(dir, "good")
+	if err := os.WriteFile(good, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readServerKey(good); got != strings.Repeat("07", 56) {
+		t.Errorf("good key read as %q", got)
+	}
+	garbage := filepath.Join(dir, "garbage")
+	_ = os.WriteFile(garbage, []byte("hello"), 0o600)
+	big := filepath.Join(dir, "big")
+	_ = os.WriteFile(big, bytes.Repeat([]byte("A"), maxServerKeyFile+1), 0o600)
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, p := range []string{filepath.Join(dir, "missing"), garbage, big, fifo, dir} {
+			if got := readServerKey(p); got != "" {
+				t.Errorf("%s read as %q", p, got)
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a FIFO blocked")
 	}
 }

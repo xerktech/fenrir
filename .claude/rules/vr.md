@@ -5,6 +5,9 @@ paths:
   - pkg/controllers/*vr*.go
   - pkg/controllers/headset*.go
   - pkg/api/v1alpha1/headset.go
+  - pkg/api/v1alpha1/headset_keys.go
+  - pkg/moonlight/vrdoor*.go
+  - cmd/moonlight-proxy/flags*.go
   - cmd/wolf-agent/vr_agent*.go
   - pkg/controllers/ports.go
   - pkg/controllers/ports_test.go
@@ -196,6 +199,26 @@ paths:
   The two processes don't share a lock, so a VR start and a Moonlight launch at the same instant
   can both pass the cap.
 - Tests: `library_vr_test.go`.
+
+## VR front door (XERK-2808; `pkg/moonlight/vrdoor.go`, protocol in `docs/vr-native-session.md`)
+
+- moonlight-proxy, `--vr-port` on `--vr-address` only: never a wildcard or loopback address
+  (`checkVRFrontDoorFlags`). Codes are entered on the pairing page, so it needs `--pin-port`.
+- A headset is SHA-256 of its TLS client key's SPKI, held in `Headset.spec.clientKeySHA256`; the
+  Headset's User is the caller. Two Headsets on one key admit neither. Read from the informer.
+- The pairing code needs the commitment step: a code over the certificates alone can be ground by
+  a LAN relay. Keep the derivation equal to the Quest app's (XERK-2809);
+  `TestVRPairingCodeBindsEverything` pins a vector.
+- Launch, stop and the app list are `VRLaunch`'s, with moonlight-proxy's clients: one set of
+  checks for both doors. moonlight-proxy's `/launch` and the front door share no lock, as the
+  operator's VR page doesn't.
+- `ready` needs `status.vrServerKey`, which the operator sets once from vr-agent's first report
+  and never replaces (`TestVRSessionRecordsServerKeyOnce`). The vr image makes the key with openssl
+  and writes its public half to `VRServerKeyFile`; vr-agent reads it non-blocking, regular files
+  only (the App can plant a FIFO there).
+- RBAC: moonlight-proxy gets Headset `create` only.
+- Tests: `vrdoor_test.go`, `TestVRSessionStateForFrontDoor`, `TestReadServerKey`,
+  `TestVRStartPublishesServerKey`.
 
 ## Operator port (XERK-2664)
 

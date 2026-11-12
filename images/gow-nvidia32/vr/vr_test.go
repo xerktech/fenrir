@@ -5,6 +5,7 @@
 package vr
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
@@ -857,5 +858,92 @@ func TestVRStartRefusesBadHeadsetSeed(t *testing.T) {
 		"XDG_RUNTIME_DIR=" + s.runtime, "DIREWOLF_VR_PORT=20034"}
 	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "DIREWOLF_VR_HEADSETS is unset") {
 		t.Errorf("unset: err %v, output %q", err, out)
+	}
+}
+
+// The identity key WiVRn serves is made before WiVRn starts and its public
+// half published in the bus directory, for vr-agent to report to the front
+// door (XERK-2808); a later start keeps the key.
+func TestVRStartPublishesServerKey(t *testing.T) {
+	if _, err := exec.LookPath("openssl"); err != nil {
+		t.Skip("no openssl")
+	}
+	s := newVRStart(t)
+	bus := shortTempDir(t)
+	env := []string{"DIREWOLF_VR_PORT=20034", "DIREWOLF_VR_MODE=native", "DIREWOLF_VR_BUS_DIR=" + bus}
+	if out, err := s.run(t, env...); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	key := filepath.Join(s.state, "wivrn", "server_key.pem")
+	st, err := os.Stat(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Errorf("server_key.pem mode %v, want 0600", st.Mode().Perm())
+	}
+	pub, err := os.ReadFile(filepath.Join(bus, "server_key.pub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := exec.CommandContext(t.Context(), "openssl", "pkey", "-pubin", "-in", filepath.Join(bus, "server_key.pub"), "-noout", "-text").Output() //nolint:gosec // the test's own temp dir
+	if err != nil || !strings.HasPrefix(string(text), "X448 Public-Key:") {
+		t.Fatalf("server_key.pub is not an X448 public key (%v):\n%s", err, pub)
+	}
+	priv, _ := os.ReadFile(key)
+	if strings.Contains(string(pub), "PRIVATE") {
+		t.Fatal("the private key reached the bus directory")
+	}
+
+	// Kept across starts: paired headsets pin it.
+	if out, err := s.run(t, env...); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if again, _ := os.ReadFile(key); !bytes.Equal(again, priv) {
+		t.Error("a second start replaced the identity key")
+	}
+	if again, _ := os.ReadFile(filepath.Join(bus, "server_key.pub")); !bytes.Equal(again, pub) {
+		t.Error("a second start published another key")
+	}
+
+	// Without the bus directory (a Moonlight App pod from before vr-agent)
+	// nothing is made: WiVRn makes its own key at the first connect.
+	s2 := newVRStart(t)
+	if out, err := s2.run(t, "DIREWOLF_VR_PORT=20034"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(s2.state, "wivrn", "server_key.pem")); !os.IsNotExist(err) {
+		t.Errorf("made a key with no bus directory: %v", err)
+	}
+}
+
+func TestVRStartRefusesUnloadableServerKey(t *testing.T) {
+	if _, err := exec.LookPath("openssl"); err != nil {
+		t.Skip("no openssl")
+	}
+	for name, content := range map[string]string{
+		"garbage": "not a key\n",
+		"x25519":  "",
+	} {
+		s := newVRStart(t)
+		key := filepath.Join(s.state, "wivrn", "server_key.pem")
+		if content == "" {
+			if out, err := exec.CommandContext(t.Context(), "openssl", "genpkey", "-algorithm", "X25519", "-out", key).CombinedOutput(); err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+		} else if err := os.WriteFile(key, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		bus := shortTempDir(t)
+		out, err := s.run(t, "DIREWOLF_VR_PORT=20034", "DIREWOLF_VR_MODE=native", "DIREWOLF_VR_BUS_DIR="+bus)
+		if err == nil || !strings.Contains(out, "server_key.pem is not an X448 private key") {
+			t.Errorf("%s: started (%v)\n%s", name, err, out)
+		}
+		if _, err := os.Stat(filepath.Join(bus, "server_key.pub")); !os.IsNotExist(err) {
+			t.Errorf("%s: published a key: %v", name, err)
+		}
+		if _, err := os.Stat(s.steamLog); err == nil {
+			t.Errorf("%s: Steam started", name)
+		}
 	}
 }

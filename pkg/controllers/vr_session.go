@@ -1,9 +1,12 @@
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	stderrors "errors"
 	"fmt"
 	"io"
@@ -50,6 +53,10 @@ const (
 	// the vr image's native bus config listens at VRBusAddress.
 	VRBusDir     = "/run/direwolf-vr-bus"
 	VRBusAddress = "unix:path=" + VRBusDir + "/bus"
+	// VRServerKeyFile is where the vr image's startup writes the public half
+	// of WiVRn's identity key (an X448 SubjectPublicKeyInfo PEM) for
+	// vr-agent to report (XERK-2808).
+	VRServerKeyFile = VRBusDir + "/server_key.pub"
 	// vrModeEnv tells the vr image to run without Wolf: its own headless
 	// sway, and its session bus on VRBusAddress.
 	vrModeEnv    = "DIREWOLF_VR_MODE"
@@ -89,6 +96,47 @@ type VRStatus struct {
 	// seeded), else "". Shown only on the VR page, behind Authentik
 	// (XERK-2670); never written to the Session, which more can read.
 	Pin string `json:"pin,omitempty"`
+	// ServerKey is WiVRn's identity public key, raw X448 in lowercase hex
+	// (IsWiVRnServerKey), from VRServerKeyFile; "" when the image writes
+	// none. The App's processes can write that file, as they can run their
+	// own WiVRn: it guards the headset against the network, not the game.
+	ServerKey string `json:"serverKey,omitempty"`
+}
+
+// x448SPKIPrefix is the DER of an X448 SubjectPublicKeyInfo (RFC 8410) up to
+// its 56-byte key: SEQUENCE { SEQUENCE { OID 1.3.101.111 }, BIT STRING }.
+var x448SPKIPrefix = []byte{0x30, 0x42, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6f, 0x03, 0x39, 0x00}
+
+// x448KeySize is an X448 public key's length in bytes.
+const x448KeySize = 56
+
+// ParseX448PublicKeyPEM is the raw key of an X448 SubjectPublicKeyInfo PEM
+// ("PUBLIC KEY", as `openssl pkey -pubout` writes), in lowercase hex: the
+// form the WiVRn fork pins a server by (identity.cpp is_trusted_key).
+func ParseX448PublicKeyPEM(data []byte) (string, error) {
+	block, rest := pem.Decode(data)
+	if block == nil || block.Type != "PUBLIC KEY" || len(bytes.TrimSpace(rest)) != 0 {
+		return "", stderrors.New("not a single PUBLIC KEY PEM block")
+	}
+	der := block.Bytes
+	if len(der) != len(x448SPKIPrefix)+x448KeySize || !bytes.HasPrefix(der, x448SPKIPrefix) {
+		return "", stderrors.New("not an X448 public key")
+	}
+	return hex.EncodeToString(der[len(x448SPKIPrefix):]), nil
+}
+
+// IsWiVRnServerKey reports whether key is an X448 public key in
+// ParseX448PublicKeyPEM's form, as SessionStatus.VRServerKey admits.
+func IsWiVRnServerKey(key string) bool {
+	if len(key) != 2*x448KeySize {
+		return false
+	}
+	for _, c := range key {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // IsWiVRnPin reports whether pin is a pairing PIN as WiVRn shows it: six
@@ -408,6 +456,18 @@ func (c *SessionController) reconcileVRHeadset(ctx context.Context, session *v1a
 	vr, err := c.pollVRAgent(ctx, session, pod.Status.PodIP, secret)
 	if err != nil {
 		return err
+	}
+	// The key the front door hands the headset to pin (XERK-2808): the
+	// first one reported. A later change is the game's doing (only it and
+	// WiVRn can write the file) and is never handed out.
+	switch {
+	case vr.ServerKey == "" || vr.ServerKey == status.VRServerKey:
+	case !IsWiVRnServerKey(vr.ServerKey):
+		klog.Warningf("Session %s/%s: vr-agent reported a malformed server key; ignoring it", session.Namespace, session.Name)
+	case status.VRServerKey != "":
+		klog.Warningf("Session %s/%s: the VR server's identity key changed mid-session; keeping the first", session.Namespace, session.Name)
+	default:
+		status.VRServerKey = vr.ServerKey
 	}
 	// A failure costs only a PIN next session; it never ends this one.
 	if err := c.trackPairedHeadsets(ctx, session, pod, vr.KnownKeys); err != nil {

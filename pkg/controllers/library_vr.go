@@ -135,9 +135,9 @@ func (s *LibraryServer) serveVR(w http.ResponseWriter, r *http.Request) {
 		var err error
 		switch r.PostFormValue("action") {
 		case "play":
-			refusal, err = v.launch(ctx, user, r.PostFormValue("app"))
+			refusal, err = v.Launch(ctx, user, r.PostFormValue("app"))
 		case "stop":
-			err = v.stop(ctx, user)
+			err = v.Stop(ctx, user)
 		default:
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
@@ -250,12 +250,12 @@ func (v *VRLaunch) vrApp(user *v1alpha1types.User, appName string) (*v1alpha1typ
 	return app, true
 }
 
-// launch starts user's VR Session of appName, or returns why not. Its checks
+// Launch starts user's VR Session of appName, or returns why not. Its checks
 // mirror moonlight-proxy's /launch: the Library's Steam lock before and after
 // the create (whichever side looks second sees the other), and the session
 // limit. Unlike /launch it never replaces a running session: that would end a
 // Moonlight game the user didn't quit.
-func (v *VRLaunch) launch(ctx context.Context, user *v1alpha1types.User, appName string) (string, error) {
+func (v *VRLaunch) Launch(ctx context.Context, user *v1alpha1types.User, appName string) (string, error) {
 	app, ok := v.vrApp(user, appName)
 	if !ok {
 		return vrNoAppMessage, nil
@@ -338,7 +338,7 @@ func (v *VRLaunch) launch(ctx context.Context, user *v1alpha1types.User, appName
 		}
 		return reason, err
 	}
-	klog.Infof("VR page: user %s started VR session %s of app %s", user.Name, session.Name, app.Name)
+	klog.Infof("VR launch: user %s started VR session %s of app %s", user.Name, session.Name, app.Name)
 	return "", nil
 }
 
@@ -368,8 +368,8 @@ func (v *VRLaunch) cachedUserPodRunning(user string) bool {
 	return err == nil && len(pods) > 0
 }
 
-// stop ends user's VR Sessions; their Moonlight ones are Moonlight's to quit.
-func (v *VRLaunch) stop(ctx context.Context, user *v1alpha1types.User) error {
+// Stop ends user's VR Sessions; their Moonlight ones are Moonlight's to quit.
+func (v *VRLaunch) Stop(ctx context.Context, user *v1alpha1types.User) error {
 	own, err := v.userSessions(ctx, user.Name)
 	if err != nil {
 		return err
@@ -383,9 +383,74 @@ func (v *VRLaunch) stop(ctx context.Context, user *v1alpha1types.User) error {
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting VR session %s: %w", s.Name, err)
 		}
-		klog.Infof("VR page: user %s stopped VR session %s", user.Name, s.Name)
+		klog.Infof("VR launch: user %s stopped VR session %s", user.Name, s.Name)
 	}
 	return nil
+}
+
+// VRSessionState is a User's VR Session as the VR front door reports it to
+// their headset (XERK-2808), read from the informers.
+type VRSessionState struct {
+	// State is VRStateNone, VRStateStarting, VRStateReady, VRStateStopping
+	// or VRStateOther.
+	State string
+	// App names the Session's App; Title is its title.
+	App, Title string
+	// Host and Port are where the headset connects, and ServerKey the VR
+	// server's identity key it pins (SessionStatus.VRServerKey): set only
+	// once State is VRStateReady.
+	Host      string
+	Port      int32
+	ServerKey string
+	// HeadsetConnected is whether a headset is connected to it.
+	HeadsetConnected bool
+	// Message says why the headset can't play now, for VRStateOther and a
+	// VRStateNone whose last session's pods still stop.
+	Message string
+}
+
+// VRSessionState.State values.
+const (
+	VRStateNone     = "none"
+	VRStateStarting = "starting"
+	VRStateReady    = "ready"
+	VRStateStopping = "stopping"
+	// VRStateOther: the User has a Moonlight Session, which a VR launch
+	// never replaces.
+	VRStateOther = "other"
+)
+
+// SessionState is user's VR Session as the VR front door reports it. Ready
+// needs the VR server's identity key too: the headset pins it, and a pod
+// that reports none (an image from before XERK-2808) stays starting.
+func (v *VRLaunch) SessionState(ctx context.Context, user *v1alpha1types.User) (VRSessionState, error) {
+	own, err := v.cachedUserSessions(ctx, user.Name)
+	if err != nil {
+		return VRSessionState{}, err
+	}
+	idx := slices.IndexFunc(own, func(s v1alpha1types.Session) bool { return s.Spec.IsVR() })
+	switch {
+	case idx < 0 && len(own) > 0:
+		return VRSessionState{State: VRStateOther, Message: vrMoonlightMessage}, nil
+	case idx < 0:
+		st := VRSessionState{State: VRStateNone}
+		if v.cachedUserPodRunning(user.Name) {
+			st.Message = vrGameStoppingMessage
+		}
+		return st, nil
+	}
+	s := &own[idx]
+	view := v.view(ctx, s)
+	st := VRSessionState{App: s.Spec.GameReference.Name, Title: view.app, HeadsetConnected: view.headset}
+	switch {
+	case view.stopping:
+		st.State = VRStateStopping
+	case view.ready && IsWiVRnServerKey(s.Status.VRServerKey):
+		st.State, st.Host, st.Port, st.ServerKey = VRStateReady, view.host, view.port, s.Status.VRServerKey
+	default:
+		st.State = VRStateStarting
+	}
+	return st, nil
 }
 
 // vrView is what the page shows of a VR Session.
@@ -519,13 +584,13 @@ func (v *VRLaunch) showPage(ctx context.Context, w http.ResponseWriter, user *v1
 			b.WriteString(`<p class="notice">` + html.EscapeString(vrGameStoppingMessage) + `</p>`)
 			refresh = libraryVRRefresh
 		}
-		writeVRApps(&b, v.apps(user))
+		writeVRApps(&b, v.VRApps(user))
 	}
 	writeVRPage(w, status, b.String(), refresh)
 }
 
-// apps is the Apps user may play in VR, by title.
-func (v *VRLaunch) apps(user *v1alpha1types.User) []*v1alpha1types.App {
+// VRApps is the Apps user may play in VR, by title.
+func (v *VRLaunch) VRApps(user *v1alpha1types.User) []*v1alpha1types.App {
 	all, err := v.Apps.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("VR page: listing apps: %v", err)

@@ -47,6 +47,16 @@ type HeadsetSpec struct {
 	//+kubebuilder:validation:MaxLength=128
 	// +optional
 	DisplayName string `json:"displayName,omitempty"`
+
+	// ClientKeySHA256 is the SHA-256 (lowercase hex) of the
+	// SubjectPublicKeyInfo of the TLS client certificate the headset paired
+	// with on moonlight-proxy's VR front door (XERK-2808). The front door
+	// admits a client whose certificate carries that key as this Headset,
+	// so as its User. Unset: a Headset confirmed after an in-session PIN
+	// pairing, which the front door does not admit.
+	//+kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	// +optional
+	ClientKeySHA256 string `json:"clientKeySHA256,omitempty"`
 }
 
 // HeadsetList is a list of Headsets.
