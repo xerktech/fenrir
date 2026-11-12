@@ -401,7 +401,7 @@ func (h *pinPageHandler) submitVR(w http.ResponseWriter, r *http.Request) {
 		klog.Errorf("Pairing page: user %s: pairing a VR headset: %v", user.Name, err)
 		http.Error(w, "Pairing failed. Try the same code again in a minute; if it still fails, start pairing again on the headset.", http.StatusInternalServerError)
 	default:
-		_, _ = w.Write([]byte("Code accepted. Accept the pairing on the headset only if it shows this server key: " +
-			vrKeyFingerprint(h.vr.serverKey) + ". Any other key is not this server's: reject it."))
+		_, _ = w.Write([]byte("Code accepted. The headset must show this server key: " +
+			vrKeyFingerprint(h.vr.serverKey) + ". If it shows any other key, it is not paired with this server: remove that server on the headset."))
 	}
 }

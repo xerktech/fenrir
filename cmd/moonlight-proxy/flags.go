@@ -54,6 +54,12 @@ func checkVRFrontDoorFlags(port int, address string, pinPort int) error {
 		return fmt.Errorf("--vr-address %q is not an IP address", address)
 	case ip.IsUnspecified() || ip.IsLoopback():
 		return fmt.Errorf("--vr-address %s: the VR front door listens on one routable address, never a wildcard or loopback one", address)
+	case ip.IsLinkLocalUnicast():
+		// A link-local address needs a zone the headset can't know.
+		return fmt.Errorf("--vr-address %s: the VR front door needs an address headsets can reach, not a link-local one", address)
+	case ip.To4() != nil && strings.Contains(address, ":"):
+		// The pairing page shows the address as given for the headset to add.
+		return fmt.Errorf("--vr-address %s: give the IPv4 address itself, %s", address, ip.To4())
 	}
 	return nil
 }
