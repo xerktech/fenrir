@@ -161,7 +161,7 @@ func generateAgentCert() (certPEM, keyPEM []byte, err error) {
 
 // errAgentCertMissing marks a token Secret from before wolf-agent's cert was
 // pinned: its pod serves a cert the operator cannot verify.
-var errAgentCertMissing = stderrors.New("wolf-agent token secret has no serving cert")
+var errAgentCertMissing = stderrors.New("agent token secret has no serving cert")
 
 // agentCredentials reads the bearer token wolf-agent in session's pod expects
 // and the TLS config that pins the cert it serves.

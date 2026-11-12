@@ -74,7 +74,7 @@ func main() {
 	maxSessions := flag.Int("max-concurrent-sessions", 1,
 		"How many users may play at once; the VR page refuses further VR sessions (-1 = unlimited). Keep equal to moonlight-proxy's")
 	headsetsProxySecretFile := flag.String("headsets-proxy-secret-file", "",
-		"File holding the secret the headset confirmation page's own proxy sends in "+controllers.LibraryProxySecretHeader+
+		"File holding the secret the VR page's own proxy (the headsets host) sends in "+controllers.LibraryProxySecretHeader+
 			". It serves that page on its own host, never the Library's (the desktop runs user code there). Empty: no page; needs --library-port")
 	libraryHomePVC := flag.String("library-home-pvc", "", "PVC holding the shared Steam home. Required with --library-port")
 	libraryGamesPVC := flag.String("library-games-pvc", "", "PVC holding the shared game library. Required with --library-port")
@@ -373,18 +373,13 @@ func main() {
 			libraryTrusted,
 			libraryProxySecret,
 		)
-		if headsetsProxySecret != nil {
-			libraryServer.HeadsetConfirmation = &controllers.HeadsetConfirmation{
-				Sessions: generic.NewLister[*direwolfv1alpha1.Session](sessionInformer.GetIndexer()).Namespaced(*namespace),
-				Headsets: direwolfClient.DirewolfV1alpha1().Headsets(*namespace),
-				Secret:   headsetsProxySecret,
-			}
-		}
-		// The VR page (XERK-2670) shares the headsets page's host: never
-		// the Library's.
+		// The VR page (XERK-2670) has the headsets host: never the
+		// Library's.
+		libraryServer.HeadsetsSecret = headsetsProxySecret
 		if headsetsProxySecret != nil && *vrPortRange != "" {
 			libraryServer.VRLaunch = &controllers.VRLaunch{
 				Apps:                  generic.NewLister[*direwolfv1alpha1.App](appInformer.GetIndexer()).Namespaced(*namespace),
+				Headsets:              generic.NewLister[*direwolfv1alpha1.Headset](headsetInformer.GetIndexer()).Namespaced(*namespace),
 				Sessions:              direwolfClient.DirewolfV1alpha1().Sessions(*namespace),
 				Pods:                  k8sClient.CoreV1().Pods(*namespace),
 				SessionCache:          generic.NewLister[*direwolfv1alpha1.Session](sessionInformer.GetIndexer()).Namespaced(*namespace),

@@ -94,5 +94,5 @@ paths:
 - The stream waits for the App pod to be Ready as it waited for the game in one pod
   (`appPodReady`). The App pod has podAffinity to its Session pod's node.
 - A vrPort App's App pod also runs `vr-agent`, with its own token Secret (never wolf-agent's) and
-  no readiness probe (XERK-2740; `.claude/rules/vr.md`).
+  no readiness probe, only to report the VR server key (XERK-2811; `.claude/rules/vr.md`).
 - Tests: `app_pod_test.go`, `pkg/inputbridge`, `TestAgentPublishesNodesThroughBridge`.

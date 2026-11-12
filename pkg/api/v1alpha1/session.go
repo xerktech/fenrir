@@ -130,17 +130,6 @@ type SessionStatus struct {
 	// disconnected; cleared when one connects again within the grace period.
 	DisconnectedAt *metav1.Time `json:"disconnectedAt,omitempty"`
 
-	// Headset keys the VR server of a pod seeded with no Headsets reports
-	// knowing and no Headset of the User holds (XERK-2742): a PIN pairing,
-	// or a key the game planted, as nothing in the pod tells them apart.
-	// They are never seeded; the User confirms the one they paired on the
-	// library page, which creates its Headset. They go with the Session.
-	// +optional
-	// +listType=map
-	// +listMapKey=key
-	// +kubebuilder:validation:MaxItems=8
-	PendingHeadsets []PendingHeadset `json:"pendingHeadsets,omitempty"`
-
 	// VRServerKey is the raw X448 public key (lowercase hex) of the identity
 	// key the VR server of a VR-mode Session's pod serves, as the pod's
 	// vr-agent first reported it (XERK-2808). The VR front door hands it to
@@ -149,25 +138,6 @@ type SessionStatus struct {
 	// +optional
 	//+kubebuilder:validation:Pattern=`^[0-9a-f]{112}$`
 	VRServerKey string `json:"vrServerKey,omitempty"`
-}
-
-// PendingHeadset is a headset key awaiting its User's confirmation.
-type PendingHeadset struct {
-	// Key is in HeadsetSpec.PublicKey's form.
-	//+kubebuilder:validation:Required
-	//+kubebuilder:validation:MinLength=4
-	//+kubebuilder:validation:MaxLength=1024
-	//+kubebuilder:validation:Pattern=`^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`
-	Key string `json:"key"`
-
-	// Name is the name the headset gave at pairing. Untrusted: the game
-	// can set it.
-	//+kubebuilder:validation:MaxLength=128
-	// +optional
-	Name string `json:"name,omitempty"`
-
-	// FirstSeen is when the operator first saw the key.
-	FirstSeen metav1.Time `json:"firstSeen"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

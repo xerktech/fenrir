@@ -74,8 +74,8 @@ const (
 	vrHeadsetGone       = "Disconnected"
 	vrAgentLost         = "AgentUnreachable"
 	vrConditionSuccess  = "Success"
-	// vrStatusMaxBytes caps vr-agent's reply (TestVRAgentWorstReplyFitsOperatorRead):
-	// an overlong list is cut, and fails to decode, rather than read whole.
+	// vrStatusMaxBytes caps vr-agent's reply: an overlong one is cut, and
+	// fails to decode, rather than read whole.
 	vrStatusMaxBytes = 64 << 10
 	// vrAgentTokenVolume is wolf-agent's token Secret, as buildPod mounts
 	// it: vr-agent's in native pods from before XERK-2747.
@@ -89,13 +89,6 @@ const (
 type VRStatus struct {
 	HeadsetConnected bool `json:"headsetConnected"`
 	SessionRunning   bool `json:"sessionRunning"`
-	// KnownKeys are the keys WiVRn lets connect: those it was seeded with,
-	// plus any a PIN pairing (or the game) added (trackPairedHeadsets).
-	KnownKeys []VRKnownKey `json:"knownKeys,omitempty"`
-	// Pin is WiVRn's pairing PIN while PIN pairing is open (no Headset
-	// seeded), else "". Shown only on the VR page, behind Authentik
-	// (XERK-2670); never written to the Session, which more can read.
-	Pin string `json:"pin,omitempty"`
 	// ServerKey is WiVRn's identity public key, raw X448 in lowercase hex
 	// (IsWiVRnServerKey), from VRServerKeyFile; "" when the image writes
 	// none. The App's processes can write that file, as they can run their
@@ -139,27 +132,6 @@ func IsWiVRnServerKey(key string) bool {
 	return true
 }
 
-// IsWiVRnPin reports whether pin is a pairing PIN as WiVRn shows it: six
-// digits. Anything else is not shown.
-func IsWiVRnPin(pin string) bool {
-	if len(pin) != 6 {
-		return false
-	}
-	for _, c := range pin {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// VRKnownKey is one entry of WiVRn's KnownKeys: the name it shows and the
-// key in its stored form (HeadsetSpec.PublicKey).
-type VRKnownKey struct {
-	Name string `json:"name"`
-	Key  string `json:"key"`
-}
-
 // vrUnstartedReason is why a VR Session never got a ready pod, or "".
 // HeadsetConnected is first set when its pod goes ready.
 func vrUnstartedReason(session *v1alpha1types.Session, now time.Time) string {
@@ -196,7 +168,7 @@ func (c *SessionController) buildVRPod(session *v1alpha1types.Session) (*corev1.
 	if err != nil {
 		return nil, invalidSpec(err)
 	}
-	spec.Containers = append(spec.Containers, c.vrAgentContainer(true, vrAgentOwnTokenVolume, uid, gid))
+	spec.Containers = append(spec.Containers, c.vrAgentContainer(true, uid, gid))
 	// Created by reconcileSessionPod before the pod (XERK-2747).
 	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: vrAgentOwnTokenVolume, VolumeSource: corev1.VolumeSource{
 		Secret: &corev1.SecretVolumeSource{SecretName: vrAgentTokenSecretName(session.Name)},
@@ -233,18 +205,18 @@ func vrBusVolumeSpec() corev1.Volume {
 }
 
 // withVRAgent adds vr-agent to a Moonlight Session's split App pod of a VR
-// App (XERK-2740), so a PIN pairing there is offered for confirmation too:
-// the App's containers get the bus directory (the image's session bus then
-// listens there) and vr-agent its own token Secret, never wolf-agent's (that
-// one drives Wolf). Call it after the App pod's volumes are pruned.
+// App, only so the operator can record the VR server's identity key and the
+// front door hand it to the headset to pin (XERK-2811): the App's containers
+// get the bus directory (the image publishes the key there) and vr-agent its
+// own token Secret, never wolf-agent's (that one drives Wolf). Call it after
+// the App pod's volumes are pruned.
 func (c *SessionController) withVRAgent(session *v1alpha1types.Session, spec *corev1.PodSpec) {
 	uid, gid, err := vrAgentIDs(spec)
 	if err != nil {
-		// Here vr-agent only offers a PIN pairing for confirmation; the
-		// stream doesn't wait on it. So the Session keeps streaming, as it
-		// did before vr-agent took the App's ids, with confirmation off in
-		// effect (a bus of another uid refuses it).
-		klog.Warningf("Session %s/%s: vr-agent can't take the App's user (%v); it runs as %d and headset confirmation won't work", session.Namespace, session.Name, err, vrAgentUID)
+		// Here vr-agent only reports the server key; the stream doesn't
+		// wait on it. So the Session keeps streaming, with the front door
+		// unable to hand out the key (a bus of another uid refuses it).
+		klog.Warningf("Session %s/%s: vr-agent can't take the App's user (%v); it runs as %d and the headset can't connect through the front door", session.Namespace, session.Name, err, vrAgentUID)
 		uid, gid = vrAgentUID, vrAgentUID
 	}
 	for i := range spec.Containers {
@@ -252,7 +224,7 @@ func (c *SessionController) withVRAgent(session *v1alpha1types.Session, spec *co
 			ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: vrBusVolume, MountPath: VRBusDir})
 		}
 	}
-	spec.Containers = append(spec.Containers, c.vrAgentContainer(false, vrAgentOwnTokenVolume, uid, gid))
+	spec.Containers = append(spec.Containers, c.vrAgentContainer(false, uid, gid))
 	spec.Volumes = append(spec.Volumes, vrBusVolumeSpec(), corev1.Volume{
 		Name: vrAgentOwnTokenVolume,
 		// Created by reconcileAppPod before the pod.
@@ -326,7 +298,7 @@ func vrAgentIDs(spec *corev1.PodSpec) (uid, gid int64, err error) {
 // starts once WiVRn answers). Never in a split App pod: the stream waits for
 // that pod to be ready, and the App waits for the stream's display before
 // it starts WiVRn.
-func (c *SessionController) vrAgentContainer(gateReady bool, tokenVolume string, uid, gid int64) corev1.Container {
+func (c *SessionController) vrAgentContainer(gateReady bool, uid, gid int64) corev1.Container {
 	probe := func(p string) *corev1.Probe {
 		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
 			Path: p, Port: intstr.FromInt32(VRAgentPort), Scheme: corev1.URISchemeHTTPS,
@@ -367,7 +339,7 @@ func (c *SessionController) vrAgentContainer(gateReady bool, tokenVolume string,
 			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: tokenVolume, MountPath: wolfAgentTokenMountPath, ReadOnly: true},
+			{Name: vrAgentOwnTokenVolume, MountPath: wolfAgentTokenMountPath, ReadOnly: true},
 			{Name: vrBusVolume, MountPath: VRBusDir},
 		},
 	}
@@ -460,19 +432,7 @@ func (c *SessionController) reconcileVRHeadset(ctx context.Context, session *v1a
 	// The key the front door hands the headset to pin (XERK-2808): the
 	// first one reported. A later change is the game's doing (only it and
 	// WiVRn can write the file) and is never handed out.
-	switch {
-	case vr.ServerKey == "" || vr.ServerKey == status.VRServerKey:
-	case !IsWiVRnServerKey(vr.ServerKey):
-		klog.Warningf("Session %s/%s: vr-agent reported a malformed server key; ignoring it", session.Namespace, session.Name)
-	case status.VRServerKey != "":
-		klog.Warningf("Session %s/%s: the VR server's identity key changed mid-session; keeping the first", session.Namespace, session.Name)
-	default:
-		status.VRServerKey = vr.ServerKey
-	}
-	// A failure costs only a PIN next session; it never ends this one.
-	if err := c.trackPairedHeadsets(ctx, session, pod, vr.KnownKeys); err != nil {
-		klog.Warningf("Session %s/%s: %v", session.Namespace, session.Name, err)
-	}
+	recordVRServerKey(session, vr.ServerKey)
 	headset := meta.FindStatusCondition(status.Conditions, v1alpha1types.SessionHeadsetConnectedCondition)
 	switch {
 	case vr.HeadsetConnected:
@@ -575,25 +535,53 @@ func (c *SessionController) fetchVRStatus(ctx context.Context, token string, tls
 	return vr, nil
 }
 
-// trackAppPodPairing follows a PIN pairing in a Moonlight Session's split
-// App pod (XERK-2740), as reconcileVRHeadset does in native mode. Polled only
-// while that pod paired by PIN; a failure is logged, never the stream's
-// concern.
-func (c *SessionController) trackAppPodPairing(ctx context.Context, session *v1alpha1types.Session, wolfPod *corev1.Pod) {
+// recordVRServerKey records key, as vr-agent reported it, as the session's
+// VR server key: the first one only. A later change is the game's doing
+// (only it and WiVRn can write the file) and is never handed out.
+func recordVRServerKey(session *v1alpha1types.Session, key string) {
+	status := &session.Status
+	switch {
+	case key == "" || key == status.VRServerKey:
+	case !IsWiVRnServerKey(key):
+		klog.Warningf("Session %s/%s: vr-agent reported a malformed server key; ignoring it", session.Namespace, session.Name)
+	case status.VRServerKey != "":
+		klog.Warningf("Session %s/%s: the VR server's identity key changed mid-session; keeping the first", session.Namespace, session.Name)
+	default:
+		status.VRServerKey = key
+	}
+}
+
+// appPodKeyPollTimeout bounds recordAppPodServerKey's vr-agent read.
+const appPodKeyPollTimeout = 3 * time.Second
+
+// recordAppPodServerKey records the VR server key of a Moonlight Session's
+// split App pod (XERK-2811), so the front door can hand it to the User's
+// headset to pin: headsets pair only through the front door, and the Quest
+// app trusts no server it has neither pinned nor PIN-paired. Polled only
+// until recorded; a failure is logged, never the stream's concern.
+func (c *SessionController) recordAppPodServerKey(ctx context.Context, session *v1alpha1types.Session, wolfPod *corev1.Pod) {
 	name := wolfPod.Annotations[appPodAnnotation]
-	if name == "" || c.HeadsetClient == nil {
+	if name == "" || session.Status.VRServerKey != "" {
 		return
 	}
 	pod, err := c.podController.Informer().Namespaced(wolfPod.Namespace).Get(name)
-	if err != nil || !pairingWasOpen(pod) || pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" ||
+	if err != nil || !metav1.IsControlledBy(pod, session) || pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" ||
 		!slices.ContainsFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == v1alpha1types.VRAgentContainerName }) {
-		return // an App pod from before XERK-2740 has no vr-agent
+		return // not up yet, or an App pod from before XERK-2740 (no vr-agent)
 	}
-	vr, err := c.pollVRAgent(ctx, session, pod.Status.PodIP, vrAgentTokenSecretName(session.Name))
+	// Never pollVRAgent: it ends the Session on a Secret with no cert, and
+	// this side channel must never end a game. Bounded tighter than a
+	// native poll: it holds one of the session workers while it waits.
+	ctx, cancel := context.WithTimeout(ctx, appPodKeyPollTimeout)
+	defer cancel()
+	token, tlsConfig, err := c.tokenCredentials(ctx, session, vrAgentTokenSecretName(session.Name))
+	var vr VRStatus
 	if err == nil {
-		err = c.trackPairedHeadsets(ctx, session, pod, vr.KnownKeys)
+		vr, err = c.fetchVRStatus(ctx, token, tlsConfig, pod.Status.PodIP)
 	}
 	if err != nil {
-		klog.Warningf("Session %s/%s: recording a paired headset: %v", session.Namespace, session.Name, err)
+		klog.V(2).Infof("Session %s/%s: reading the VR server key: %v", session.Namespace, session.Name, err)
+		return
 	}
+	recordVRServerKey(session, vr.ServerKey)
 }

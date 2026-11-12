@@ -560,7 +560,7 @@ func (c *SessionController) Reconcile(namespace, name string, newObj *v1alpha1ty
 	}
 
 	if podError == nil {
-		c.trackAppPodPairing(ctx, newObj, pod)
+		c.recordAppPodServerKey(ctx, newObj, pod)
 	}
 
 	// Set the new status, if it is changed
@@ -1385,6 +1385,18 @@ func (c *SessionController) buildPod(session *v1alpha1types.Session) (*corev1.Po
 		headsets, err := c.userHeadsets(session.Namespace, user.Name)
 		if err != nil {
 			return nil, err
+		}
+		// WiVRn pairs by PIN on an empty list, and the game can too: the
+		// image refuses one, so say why here (XERK-2811).
+		if len(headsets) == 0 && c.HeadsetClient != nil {
+			// The Headset watch can lag: one the front door made just
+			// before this launch must count.
+			if headsets, err = c.liveUserHeadsets(session.Namespace, user.Name); err != nil {
+				return nil, err
+			}
+		}
+		if len(headsets) == 0 {
+			return nil, invalidSpec(fmt.Errorf("user %s has no paired VR headset; pair one through the VR front door", user.Name))
 		}
 		if headsetNames, err = withVRHeadsets(&podToCreate.Spec, headsets); err != nil {
 			return nil, err

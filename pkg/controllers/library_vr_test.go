@@ -38,11 +38,7 @@ func newVRFixture(t *testing.T, sessions ...*v1alpha1types.Session) *vrFixture {
 	t.Helper()
 	f := newLibraryFixture(t, nil, libraryUser("sam", false), libraryUser("alex", false), libraryUser("dana", true))
 	s := f.server(t)
-	s.HeadsetConfirmation = &HeadsetConfirmation{
-		Sessions: generic.NewLister[*v1alpha1types.Session](cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})).Namespaced(libraryTestNS),
-		Headsets: f.dw.DirewolfV1alpha1().Headsets(libraryTestNS),
-		Secret:   []byte(testHeadsetsSecret),
-	}
+	s.HeadsetsSecret = []byte(testHeadsetsSecret)
 	for _, sess := range sessions {
 		if _, err := f.dw.DirewolfV1alpha1().Sessions(libraryTestNS).Create(context.Background(), sess, metav1.CreateOptions{}); err != nil {
 			t.Fatal(err)
@@ -363,43 +359,67 @@ func readyVRPod(sess *v1alpha1types.Session) *corev1.Pod {
 	return pod
 }
 
-// Once ready the page shows the node IP, the session's VR port and, while
-// WiVRn pairs, its PIN; a PIN that is not six digits is never shown.
-func TestVRPageShowsAddressAndPin(t *testing.T) {
+// Once ready the page shows the node IP and the session's VR port, and
+// never a PIN: headsets pair through the front door (XERK-2811).
+func TestVRPageShowsAddress(t *testing.T) {
 	sess := pageVRSession("sam-ac-1", "sam")
 	sess.Status.Ports.VR = 21003
 	f := newVRFixture(t, sess)
 	f.addPod(t, readyVRPod(sess))
-	f.status = VRStatus{Pin: "042137"}
 	f.s.VRLaunch.statuses = nil // a fresh read, not the cached one
 	body := f.get("sam").Body.String()
-	for _, want := range []string{"10.10.10.34", "21003", "042137", "Stop the VR session", `http-equiv="refresh"`} {
+	for _, want := range []string{"10.10.10.34", "21003", "Stop the VR session", `http-equiv="refresh"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q:\n%s", want, body)
 		}
 	}
-	for _, pin := range []string{"<b>1</b>", "1234567"} {
-		f.status = VRStatus{Pin: pin}
-		f.s.VRLaunch.statuses = nil // a fresh read, not the cached one
-		if body := f.get("sam").Body.String(); strings.Contains(body, "PIN") {
-			t.Errorf("PIN %q shown:\n%s", pin, body)
-		}
+	if strings.Contains(body, "PIN") || strings.Contains(body, "/.direwolf/headsets") {
+		t.Errorf("page offers PIN pairing:\n%s", body)
 	}
 	// An unreachable agent still shows the address.
 	f.status, f.statusErr = VRStatus{}, errors.New("down")
 	f.s.VRLaunch.statuses = nil // a fresh read, not the cached one
-	if body := f.get("sam").Body.String(); !strings.Contains(body, "21003") || strings.Contains(body, "PIN") {
+	if body := f.get("sam").Body.String(); !strings.Contains(body, "21003") {
 		t.Errorf("agent down:\n%s", body)
 	}
-	// Connected: no refresh, no PIN.
+	// Connected: a slow refresh.
 	f.status, f.statusErr = VRStatus{HeadsetConnected: true}, nil
 	f.s.VRLaunch.statuses = nil // a fresh read, not the cached one
 	if body := f.get("sam").Body.String(); !strings.Contains(body, "headset is connected") || !strings.Contains(body, `content="30"`) {
 		t.Errorf("connected:\n%s", body)
 	}
 	// Another user sees none of it.
-	if body := f.get("alex").Body.String(); strings.Contains(body, "21003") || strings.Contains(body, "042137") {
+	if body := f.get("alex").Body.String(); strings.Contains(body, "21003") || strings.Contains(body, "headset is connected") {
 		t.Errorf("alex sees sam's session:\n%s", body)
+	}
+}
+
+// A User with no Headset is told to pair one, and gets no Session: it
+// would only end, as the image refuses an empty key list (XERK-2811).
+func TestVRPageRefusesUserWithoutHeadset(t *testing.T) {
+	f := newVRFixture(t)
+	headsets := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	for _, h := range []*v1alpha1types.Headset{
+		{ObjectMeta: metav1.ObjectMeta{Name: "alex-quest", Namespace: libraryTestNS}, Spec: v1alpha1types.HeadsetSpec{UserReference: v1alpha1types.UserReference{Name: "alex"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "sam-old", Namespace: libraryTestNS, DeletionTimestamp: &metav1.Time{Time: time.Now()}},
+			Spec: v1alpha1types.HeadsetSpec{UserReference: v1alpha1types.UserReference{Name: "sam"}}},
+	} {
+		if err := headsets.Add(h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.s.VRLaunch.Headsets = generic.NewLister[*v1alpha1types.Headset](headsets).Namespaced(libraryTestNS)
+	if rec := f.play("sam", "ac"); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Pair your headset first") {
+		t.Errorf("sam (no headset): HTTP %d\n%s", rec.Code, rec.Body)
+	}
+	if n := len(f.sessions(t)); n != 0 {
+		t.Fatalf("%d sessions created for a User with no headset", n)
+	}
+	if rec := f.play("alex", "ac"); rec.Code >= 400 {
+		t.Errorf("alex (paired): HTTP %d\n%s", rec.Code, rec.Body)
+	}
+	if n := len(f.sessions(t)); n != 1 {
+		t.Errorf("%d sessions after alex's start, want 1", n)
 	}
 }
 
@@ -419,9 +439,8 @@ func TestVRPageWaitsForReadyPod(t *testing.T) {
 			edit(pod, sess)
 			f := newVRFixture(t, sess)
 			f.addPod(t, pod)
-			f.status = VRStatus{Pin: "042137"}
-			if body := f.get("sam").Body.String(); !strings.Contains(body, "Starting") || strings.Contains(body, "042137") ||
-				strings.Contains(body, "Address") {
+			f.status = VRStatus{HeadsetConnected: true}
+			if body := f.get("sam").Body.String(); !strings.Contains(body, "Starting") || strings.Contains(body, "Address") {
 				t.Errorf("page:\n%s", body)
 			}
 		})
@@ -441,10 +460,10 @@ func TestVRPageBoundsAgentReads(t *testing.T) {
 		if d, ok := ctx.Deadline(); !ok || time.Until(d) > libraryVRStatusTimeout {
 			t.Errorf("vr-agent read without its %s deadline", libraryVRStatusTimeout)
 		}
-		return VRStatus{Pin: "042137"}, nil
+		return VRStatus{HeadsetConnected: true}, nil
 	}
 	for range 3 {
-		if body := f.get("sam").Body.String(); !strings.Contains(body, "042137") {
+		if body := f.get("sam").Body.String(); !strings.Contains(body, "headset is connected") {
 			t.Fatalf("page:\n%s", body)
 		}
 	}
@@ -466,7 +485,7 @@ func TestVRPageSharesConcurrentAgentReads(t *testing.T) {
 	f.s.VRLaunch.Status = func(context.Context, *v1alpha1types.Session, *corev1.Pod) (VRStatus, error) {
 		reads.Add(1)
 		<-release
-		return VRStatus{Pin: "042137"}, nil
+		return VRStatus{HeadsetConnected: true}, nil
 	}
 	const views = 20
 	bodies := make(chan string, views)
@@ -480,7 +499,7 @@ func TestVRPageSharesConcurrentAgentReads(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	close(release)
 	for range views {
-		if body := <-bodies; !strings.Contains(body, "042137") {
+		if body := <-bodies; !strings.Contains(body, "headset is connected") {
 			t.Fatalf("page:\n%s", body)
 		}
 	}
@@ -502,7 +521,7 @@ func TestVRAgentReadOutlivesFirstRequest(t *testing.T) {
 		if err := ctx.Err(); err != nil {
 			return VRStatus{}, fmt.Errorf("read: %w", err)
 		}
-		return VRStatus{Pin: "042137"}, nil
+		return VRStatus{HeadsetConnected: true}, nil
 	}}
 	first, cancelFirst := context.WithCancel(t.Context())
 	go func() { _, _ = v.readStatus(first, sess, pod) }()
@@ -515,8 +534,8 @@ func TestVRAgentReadOutlivesFirstRequest(t *testing.T) {
 	cancelFirst()
 	time.Sleep(20 * time.Millisecond)
 	close(release)
-	if st := <-waiter; st.Pin != "042137" {
-		t.Errorf("waiter got %+v, want the read's PIN", st)
+	if st := <-waiter; !st.HeadsetConnected {
+		t.Errorf("waiter got %+v, want the read's status", st)
 	}
 
 	panicky := &VRLaunch{Status: func(context.Context, *v1alpha1types.Session, *corev1.Pod) (VRStatus, error) {
@@ -587,8 +606,8 @@ func TestVRPageIgnoresPodOfAnotherSession(t *testing.T) {
 	pod := readyVRPod(sess)
 	pod.OwnerReferences[0].UID = "old"
 	f.addPod(t, pod)
-	f.status = VRStatus{Pin: "042137"}
-	if body := f.get("sam").Body.String(); !strings.Contains(body, "Starting") || strings.Contains(body, "042137") {
+	f.status = VRStatus{HeadsetConnected: true}
+	if body := f.get("sam").Body.String(); !strings.Contains(body, "Starting") || strings.Contains(body, "21003") {
 		t.Errorf("page:\n%s", body)
 	}
 }
@@ -675,5 +694,132 @@ func TestVRSessionStateForFrontDoor(t *testing.T) {
 	}
 	if st, _ = f.s.VRLaunch.SessionState(t.Context(), user("dana")); st.State != VRStateNone {
 		t.Errorf("no session: %+v", st)
+	}
+}
+
+// testHeadsetsSecret is what the headsets host's proxy sends.
+const testHeadsetsSecret = "headsets-0123456789abcdef0123456789"
+
+// headsetsRequest is a request through the headsets host's proxy.
+func headsetsRequest(s *LibraryServer, method, target string, header http.Header) *httptest.ResponseRecorder {
+	h := http.Header{LibraryProxySecretHeader: {testHeadsetsSecret}}
+	maps.Copy(h, header)
+	return serveLibraryRequest(s, method, target, "10.1.0.5:5555", h)
+}
+
+// The headsets host and the Library never share an origin (XERK-2750): the
+// headsets host serves only the VR page, and nothing of the Library; the
+// confirm page it served before XERK-2811 is gone.
+func TestHeadsetsHostServesOnlyTheVRPage(t *testing.T) {
+	f := newVRFixture(t)
+	sam := http.Header{DefaultLibraryUserHeader: {"sam"}}
+	if rec := headsetsRequest(f.s, http.MethodGet, "/", sam); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != libraryVRPath {
+		t.Errorf("headsets host /: HTTP %d to %q, want a redirect to the VR page", rec.Code, rec.Header().Get("Location"))
+	}
+	visit := http.Header{DefaultLibraryUserHeader: {"sam"}, "Sec-Fetch-User": {"?1"}, "Sec-Fetch-Mode": {"navigate"}}
+	for _, path := range []string{"/.direwolf/headsets", "/devmode/", "/api", libraryStartPath} {
+		if rec := headsetsRequest(f.s, http.MethodGet, path, visit); rec.Code != http.StatusNotFound {
+			t.Errorf("headsets host %s: HTTP %d, want 404", path, rec.Code)
+		}
+	}
+	if rec := headsetsRequest(f.s, http.MethodPost, libraryStartPath, sam); rec.Code != http.StatusNotFound {
+		t.Errorf("headsets host start: HTTP %d, want 404", rec.Code)
+	}
+}
+
+// A VR game started from Moonlight is the headset's to join (XERK-2811): the
+// front door reports it starting until its App pod is Ready and its server
+// key recorded, then ready with that pod's address and key, and a launch of
+// the same game joins it rather than refusing. Another game is refused, and
+// the headset never stops it.
+func TestVRFrontDoorJoinsMoonlightVRSession(t *testing.T) {
+	sess := moonlightSession("sam-ac-1", "sam")
+	sess.UID = "sam-ac-1"
+	sess.Spec.GameReference.Name = "ac"
+	sess.Status.Ports.VR = 21003
+	f := newVRFixture(t, sess)
+	sam := &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "sam"}}
+
+	st, err := f.s.VRLaunch.SessionState(t.Context(), sam)
+	if err != nil || st.State != VRStateStarting || st.App != "ac" || st.Host != "" || st.Message == "" {
+		t.Fatalf("no pods: %+v %v", st, err)
+	}
+	if refusal, err := f.s.VRLaunch.Launch(t.Context(), sam, "ac"); err != nil || refusal != "" {
+		t.Errorf("launch of the same game: %q %v, want it joined", refusal, err)
+	}
+	if refusal, _ := f.s.VRLaunch.Launch(t.Context(), sam, "beat"); refusal != vrMoonlightMessage {
+		t.Errorf("launch of another game: %q, want %q", refusal, vrMoonlightMessage)
+	}
+	if n := len(f.sessions(t)); n != 1 {
+		t.Fatalf("%d sessions, want only the Moonlight one", n)
+	}
+
+	wolf := readyVRPod(sess)
+	wolf.Annotations = map[string]string{appPodAnnotation: sess.Name + "-app"}
+	wolf.Status.HostIP = "10.10.10.99" // never the address: the App pod serves VR
+	app := readyVRPod(sess)
+	app.Name = sess.Name + "-app"
+	f.addPod(t, wolf)
+	f.addPod(t, app)
+	if st, _ = f.s.VRLaunch.SessionState(t.Context(), sam); st.State != VRStateStarting || st.Port != 0 {
+		t.Errorf("ready pods, no server key: %+v", st)
+	}
+	key := strings.Repeat("ab", 56)
+	sess.Status.VRServerKey = key
+	if _, err := f.dw.DirewolfV1alpha1().Sessions(libraryTestNS).UpdateStatus(t.Context(), sess, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = f.s.VRLaunch.SessionState(t.Context(), sam)
+	if st.State != VRStateReady || st.Host != "10.10.10.34" || st.Port != 21003 || st.ServerKey != key {
+		t.Errorf("ready: %+v", st)
+	}
+	// Only a Ready App pod the Session controls is served, never one that
+	// is not ready or is another Session's.
+	for name, edit := range map[string]func(*corev1.Pod){
+		"not ready":       func(p *corev1.Pod) { p.Status.Conditions[0].Status = corev1.ConditionFalse },
+		"no host IP":      func(p *corev1.Pod) { p.Status.HostIP = "" },
+		"another session": func(p *corev1.Pod) { p.OwnerReferences[0].UID = "other" },
+		"being deleted":   func(p *corev1.Pod) { p.DeletionTimestamp = &metav1.Time{Time: time.Now()} },
+	} {
+		bad := app.DeepCopy()
+		edit(bad)
+		if _, err := f.k8s.CoreV1().Pods(libraryTestNS).Update(t.Context(), bad, metav1.UpdateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := f.s.VRLaunch.SessionState(t.Context(), sam); st.State != VRStateStarting || st.Host != "" || st.ServerKey != "" {
+			t.Errorf("%s: %+v, want starting with no address", name, st)
+		}
+	}
+	if _, err := f.k8s.CoreV1().Pods(libraryTestNS).Update(t.Context(), app, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.s.VRLaunch.Stop(t.Context(), sam); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.sessions(t)); n != 1 {
+		t.Errorf("headset stop ended the Moonlight session")
+	}
+	// Being quit in Moonlight: stopping.
+	sess.DeletionTimestamp, sess.Finalizers = &metav1.Time{Time: time.Now()}, []string{"test/hold"}
+	if _, err := f.dw.DirewolfV1alpha1().Sessions(libraryTestNS).Update(t.Context(), sess, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := f.s.VRLaunch.SessionState(t.Context(), sam); st.State != VRStateStopping || st.Host != "" {
+		t.Errorf("deleting: %+v, want stopping", st)
+	}
+}
+
+// A Moonlight session of a flat game stays "other".
+func TestVRFrontDoorLeavesFlatMoonlightSession(t *testing.T) {
+	sess := moonlightSession("sam-flat-1", "sam")
+	sess.Spec.GameReference.Name = "flat"
+	f := newVRFixture(t, sess)
+	sam := &v1alpha1types.User{ObjectMeta: metav1.ObjectMeta{Name: "sam"}}
+	if st, _ := f.s.VRLaunch.SessionState(t.Context(), sam); st.State != VRStateOther {
+		t.Errorf("flat Moonlight session: %+v", st)
+	}
+	if refusal, _ := f.s.VRLaunch.Launch(t.Context(), sam, "ac"); refusal != vrMoonlightMessage {
+		t.Errorf("launch: %q", refusal)
 	}
 }

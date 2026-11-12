@@ -2,7 +2,7 @@
 
 Design note for Phase 3 of the Fenrir VR epic (XERK-2656): a VR session the user starts and plays
 without Moonlight. Phase 2 (XERK-2665) already streams VR from an App in the split App pod, but it
-is launched from Moonlight, and Moonlight's flat mirror shows the pairing PIN and carries the
+is launched from Moonlight, and Moonlight's flat mirror shows the address and carries the
 recenter key. Phase 3 removes Moonlight from that path.
 
 Status: the API (XERK-2667), the operator's pod and liveness (XERK-2668), headsets (XERK-2669),
@@ -33,23 +33,22 @@ place. The front door's Quest side is XERK-2809.
 
 The VR page (XERK-2670, `/.direwolf/vr`, `library_vr.go`) creates the Session.
 
-- It is on the headsets page's host, not the Library's: the Library host proxies the desktop,
-  whose code can serve same-origin pages there (XERK-2750) that would read the PIN or start and
-  stop sessions. Its POSTs are the page's own clicked form, as the headsets page requires.
+- It is on a host of its own (the headsets host), not the Library's: the Library host proxies the
+  desktop, whose code can serve same-origin pages there (XERK-2750) that would start and stop
+  sessions. Its POSTs are the page's own clicked form.
 - It sits behind Authentik and maps the username header to a User (`LookupUser`), as the Library
   already does. It's the authenticated place that replaces Moonlight's pairing.
 - The Session it creates has mode `VR`, the User, and an App with `vrPort`. Moonlight's `/launch`
   never creates VR Sessions.
-- The page shows the address to dial (node IP and `status.ports.vr`) and, while pairing, WiVRn's
-  PIN (see Pairing).
+- The page shows the address to dial (node IP and `status.ports.vr`). A User with no Headset is
+  told to pair one and gets no Session (see Pairing).
 - It refuses while the User's Library pod exists (running or stopping), checking again after the
   create and deleting its Session if the Library started meanwhile, as moonlight-proxy's `/launch`
   does. The Library counts the VR Session like any other: VR Apps run in the shared Steam home.
 - It never replaces a running session (a Moonlight `/launch` does): ending a Moonlight game the
   user didn't quit loses unsaved play. It refuses instead, and caps players at the operator's
   `--max-concurrent-sessions`, which must equal moonlight-proxy's.
-- The PIN is read live from vr-agent per page view (`ReadVRStatus`), never stored in the Session:
-  more can read a Session than the page. vr-agent reports it only as six digits.
+- Whether a headset is connected is read live from vr-agent per page view (`ReadVRStatus`).
 - Stop deletes only the User's VR Sessions; Moonlight ones are Moonlight's to quit.
 - Plan for one VR Session per GPU: one used about 50% of the RTX 3090's NVENC (XERK-2662).
 
@@ -111,31 +110,22 @@ This works as it does for Moonlight sessions.
 
 ### Pairing (XERK-2669)
 
-- There's no mirror to show the PIN. While pairing is enabled, the library page reads WiVRn's `Pin`
-  property through the same agent and shows it behind Authentik.
-- A User's paired headsets are `Headset` objects, in both modes. The operator seeds WiVRn's known
-  keys from them at every start, so the keys file on the User's volume decides nothing.
+- A User's paired headsets are `Headset` objects, in both modes, made only by the VR front door
+  (below). The operator seeds WiVRn's known keys from them at every start, so the keys file on the
+  User's volume decides nothing.
 - Revoking a headset is deleting its Headset. That ends the User's Sessions seeded with it, the way
   deleting a Pairing ends a Moonlight client's. `RevokeKey` isn't used: it only works while a
   session runs, and the next start would bring the key back.
-- A new PIN pairing does not become a Headset by itself (XERK-2742, XERK-2747). The game runs as
-  WiVRn's uid and owns its bus, so it can plant or pair a key of its own; nothing the agent reads
-  proves a human paired. The operator keeps keys no Headset holds as pending in the Session's
-  `status.pendingHeadsets` (never seeded; gone with the Session), and the page lists them
-  (fingerprint, headset name, time seen) for the user to confirm, warning when more than one
-  waits. The fork's Quest app shows the same fingerprint for its own key (XERK-2743), and the page
-  tells the user to confirm only an exact match. Confirming creates the Headset; the pod then
-  records it, so revoking it ends that Session too. An unconfirmed key works for that Session only.
-  The page is `/.direwolf/headsets`
-  (XERK-2740), in both modes, on a host of its own behind Authentik
-  (`--headsets-proxy-secret-file`, XERK-2750): never the Library's host, whose desktop runs user
-  code that can serve pages on that origin.
+- No in-session PIN pairing (XERK-2811). WiVRn pairs by PIN only on an empty key list, and the
+  game runs as WiVRn's uid and owns its bus: it can read the PIN or plant a key, and nothing in
+  the pod proves a human paired (XERK-2742). So a User with no Headset gets no pod (the operator
+  ends the Session InvalidSpec), and the image refuses an empty list.
 
 ## VR front door (XERK-2808)
 
 Moonlight-style VR: pair the headset once by typing the code it shows into the pairing page, then
-list and launch VR Apps from the headset. It replaces the VR page plus in-session PIN for a headset
-running a Quest app that speaks it (XERK-2809); the VR page and PIN path stay as the fallback.
+list and launch VR Apps from the headset, with the Quest app that speaks it (XERK-2809). It is the
+only way a headset pairs (XERK-2811).
 
 ### Where it runs
 
@@ -207,7 +197,10 @@ At most 16 pairings wait at once. Both limits let anyone who reaches the port ho
   before and after the create, the user's pods waited out, `--max-concurrent-sessions`, never a
   Moonlight Session replaced. 202 with the session, or 409 `{error}` saying why not.
 - `GET /vr/v1/session`: `{state, app, title, host, port, serverKey, headsetConnected, message}`.
-  `state` is `none`, `starting`, `ready`, `stopping` or `other` (a Moonlight Session runs).
+  `state` is `none`, `starting`, `ready`, `stopping` or `other` (a Moonlight Session of a flat
+  App runs). A Moonlight Session of a VR App reads like a native one, from its split App pod, and
+  launching that App joins it (XERK-2811): the headset pins its key, as no PIN pairing remains.
+  The headset's stop leaves it; Moonlight quits it.
   `host`, `port` and `serverKey` are set only when `ready`.
 - `POST /vr/v1/stop`: ends the User's VR Sessions (204).
 - Errors are JSON `{error}` with a real HTTP status (this is not Moonlight's protocol).

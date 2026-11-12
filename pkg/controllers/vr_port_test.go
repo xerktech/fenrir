@@ -20,6 +20,14 @@ var testVRRange = PortRange{Min: 21000, Max: 21001}
 // (with requireAppPod and the split App pod, which it needs).
 func withVR(t *testing.T, f *portsFixture) *v1alpha1types.App {
 	t.Helper()
+	app := withVRApp(t, f)
+	pairTestHeadset(t, f)
+	return app
+}
+
+// withVRApp is withVR with no Headset paired: the User's VR Sessions end.
+func withVRApp(t *testing.T, f *portsFixture) *v1alpha1types.App {
+	t.Helper()
 	f.sc.VRPortRange = testVRRange
 	f.sc.vrPorts = newVRPortAllocator(testVRRange)
 	f.sc.AppPodHostDir = testAppPodHostDir

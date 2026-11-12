@@ -63,16 +63,15 @@ paths:
   goes to the headset, not the Moonlight stream. wivrn-server keeps the real runtime dir: games
   reach its IPC socket there.
 - The session bus listens on `unix:dir=/tmp` (`dbus-session.conf`), never an abstract socket.
-  - When `/run/direwolf-vr-bus` is mounted (native mode, and a vrPort App's split App pod), on
-    `unix:path=` there instead (`dbus-session-agent.conf`), for the `vr-agent` sidecar. Keep it
+  - When `/run/direwolf-vr-bus` is mounted (native mode), on `unix:path=` there instead (`dbus-session-agent.conf`), for the `vr-agent` sidecar. Keep it
     equal to `VRBusAddress` (`TestWiVRnStatusOverDBus` reads the image's file).
 - ArgoCD's `app-assetto-vr.yaml` pins this image and copies `examples/vr.yaml`'s command by hand:
   bump both after a VR change here, or production keeps the old behaviour (XERK-2671 found it
   on a pre-native, upstream-WiVRn image whose command waited for Wolf's display).
 - Either Steam or the VR services exiting ends the session. Tests: `images/gow-nvidia32/vr/vr_test.go`.
 - wivrn-server's stderr runs through `vr-notice`, which shows "connect ... to <host> port <port>"
-  and the pairing PIN in a swaynag overlay bar on the session's sway: the Moonlight mirror is the
-  authenticated place to see them (XERK-2665). `DIREWOLF_VR_HOST` is the App's `status.hostIP`.
+  in a swaynag overlay bar on the session's sway (XERK-2665). `DIREWOLF_VR_HOST` is the App's
+  `status.hostIP`. It still shows and redacts a PIN, as a guard: WiVRn opens none (XERK-2811).
   - Only an address and 6 digits reach `swaymsg exec` (a shell, single-quoted): no `'`, `;` or
     `,` in its text, as sway splits commands on the last two.
   - It starts before sway (launch-comp starts sway inside GoW's Steam startup), so it waits on
@@ -86,8 +85,9 @@ paths:
 - `"publish-service": "none"`: Avahi needs the node's system bus; the headset dials IP:port.
 - The TCP listener binds every address and closes while a headset is connected: one headset per
   server.
-- Pairing: 6-digit PIN (SMP) while the known-keys list is empty, then only stored keys connect.
-  The PIN goes to stderr and D-Bus only, so the user needs an authenticated place to see it.
+- Pairing: WiVRn opens 6-digit PIN pairing (SMP) while the known-keys list is empty, else only
+  stored keys connect. The list is never empty here (XERK-2811): the game owns the bus and can
+  read the PIN (`Pin`) or reach WiVRn on loopback, so it could pair itself.
 - Never let the PIN reach the container log: Loki serves every pod's log to any pod, and the VR
   port is reachable from other session pods, so another user's game could pair (XERK-2671).
   `vr-notice` redacts it from every line it passes on. Tests: `TestVRNoticeShowsAddressAndPairingPIN`.
@@ -106,81 +106,40 @@ paths:
   - Every vrPort App container gets `DIREWOLF_VR_HEADSETS` (WiVRn's known_keys format, the
     User's Headsets sorted by name; an App's own value is replaced). `startup-app.sh` rewrites
     `known_keys.json` from it at every start, so a key left on the volume is dropped.
-  - Unset, the image refuses to start: an operator that cannot revoke would leave old keys in
-    force. `[]` (no Headsets) opens PIN pairing, shown on the authenticated mirror only.
+  - Unset or `[]`, the image refuses to start: an operator that cannot revoke would leave old
+    keys in force, and an empty list opens PIN pairing (XERK-2811).
+  - A User with no Headset gets no pod: `buildPod` ends the Session InvalidSpec, after a live List
+    (the Headset watch can lag a pairing the front door just made). The VR page refuses the start
+    with "Pair your headset first". Tests: `TestVRPodWithoutHeadsetsIsInvalidSpec`,
+    `TestVRPodFindsHeadsetMissingFromCache`, `TestVRPageRefusesUserWithoutHeadset`.
+  - A pod whose `vr-headsets` annotation is present and empty (seeded with none by an older
+    operator: its WiVRn pairs by PIN) ends its Session on reconcile (`headsetRevokedReason`).
+    Tests: `TestPodSeededWithNoHeadsetsEnds`.
+  - Headsets are made only by the VR front door (XERK-2808). Never create one from what the App's
+    bus reports (XERK-2742): every App process is uid 1000, WiVRn's uid and the bus owner, so a
+    game can plant a key in `known_keys.json` or PIN-pair itself. Nothing on the bus proves a
+    human paired a headset; vr-agent reports no keys or PIN.
   - The App pod's `vr-headsets` annotation lists the Headsets it was seeded with as `name/uid`.
     One gone, being deleted, or re-created under its name (UID differs; cache miss confirmed live)
     ends the Session on reconcile, and at once on any Headset event (`reconcileHeadset`, found by
     annotation: a deleted object no longer names its User).
   - The spec is immutable (CEL): a changed key would admit a headset without ending Sessions.
-  - Never create a Headset from what the App's bus reports alone (XERK-2742): every App process
-    is uid 1000, WiVRn's uid and the bus owner, so a game can plant a key in `known_keys.json`
-    and make WiVRn republish `KnownKeys` (`RevokeKey`), or PIN-pair itself (it reads `Pin` and
-    reaches WiVRn on loopback). Nothing on the bus proves a human paired a headset.
-  - So a key the vr-agent reports that no Headset holds is only pending: the operator keeps it
-    in the Session's status, where it dies with the Session, and never seeds it.
-  - It becomes a Headset only when the User confirms it on the Authentik-protected page
-    (user from the trusted header, never from a request field; POST only). The page shows each
-    pending key's fingerprint, headset-supplied name and first-seen time, and warns when more
-    than one is pending: a key the user didn't pair right then is the game's.
-  - Until confirmed the headset works for that Session only, as WiVRn already allows.
-  - Implementation (XERK-2740, XERK-2747): vr-agent reports `KnownKeys`; `trackPairedHeadsets`
-    fills `status.pendingHeadsets` (at most `maxPendingHeadsets`, first-seen kept) only while the
-    pod's annotation is present and empty: WiVRn pairs only on an empty list.
-    - A reported key a Headset of the User holds is added to the pod's annotation
-      (resourceVersion-guarded patch, retried next poll), so revoking it ends the Session; the pod
-      then stops being followed.
-    - Once the Session's own pending key is confirmed its other pending keys are never offered
-      (the page skips the Session, the operator drops them): a pairing adds one key, the rest are
-      the game's. QA found the leftover offered as "the headset you just paired".
-      An older Headset's key (the game reads them from the seed env) drops none (QA, XERK-2747).
-    - A revoke before that poll is caught by the Headset event: a Session with a pending key
-      whose `recordedHeadsetName` is the event's, gone live, ends
-      (`endSessionsOfUnrecordedHeadset`, either mode).
-      Residual: an operator down for that whole window misses it; the key is then pending again.
-      A Headset re-created under that name for another key or user counts as gone (XERK-2709).
-      Accepted: a Headset an admin makes by hand under another name for a pending key, deleted
-      before a poll, ends nothing (the delete event has no key); the key is pending again.
-    - The page is `/.direwolf/headsets` on the library server (`library_headsets.go`); it
-      confirms only a key pending in the signed-in User's own Sessions, as
-      `headset-<sha256(user, key)>`, owned by the User (GC'd with it).
-    - It has its own host and Authentik provider, told apart by its own proxy secret
-      (`--headsets-proxy-secret-file`), never by `Host` (XERK-2750). Never serve it on the Library
-      host: its nginx proxies `/devmode` and `/api` to ports the desktop's user (abc) can bind, so
-      desktop code serves same-origin pages there. Off without the flag.
-    - Its POST must be the page's own clicked form: `Sec-Fetch-Site: same-origin` (the Library
-      host is same-site, not cross-site), `-Mode: navigate`, `-User: ?1` (never a script's fetch;
-      QA, XERK-2747). Tests: `TestHeadsetsPageHasItsOwnHost`, `TestHeadsetsPageRefuses`.
-    - Confirms run one at a time, re-reading the pending keys under the lock: two at once for
-      one Session's keys both saved (XERK-2709). One operator replica serves the page; a second
-      replica would need a server-side guard. Tests: `TestHeadsetsPageConfirmsOneKeyPerSessionAtOnce`.
-    - Nothing on the headset shows a fingerprint yet, so a game's lookalike key can still be
-      confirmed by mistake (XERK-2743).
-    - A failure is logged, never ends the Session: it costs only a PIN next time.
-    - vr-agent sends at most 32 keys, only CRD-valid ones, names cleaned (`CleanHeadsetName`, 128
-      characters, as the CRD counts), so its reply fits the operator's 64KiB read: past it the
-      poll fails and the session ends. `TestVRAgentWorstReplyFitsOperatorRead`.
-    - The operator cleans each pending name again: an older vr-agent sends them raw, and a name
-      over the CRD's 128 characters fails the status write. `TestTrackPairedHeadsetsCleansNames`.
   - vr-agent has its own token Secret `<session>-vr-agent-token` in both modes, never
     wolf-agent's (that one drives Wolf). A native pod from before XERK-2747 mounts wolf-agent's
     and is polled with it.
   - Moonlight mode: a vrPort App's split App pod runs vr-agent too (`withVRAgent`), with the bus
-    dir and that Secret (the pod is the game's). Polled from the Moonlight reconcile while it
-    pairs by PIN.
-    - No readiness probe there: the stream waits for the App pod to be Ready, and the App waits
-      for the stream's display before it starts WiVRn. A deadlock otherwise.
-    - An App pod from before has no vr-agent and is never polled.
-  - The fake clientset ignores preconditions; `*Envtest` tests run a real apiserver from
-    `KUBEBUILDER_ASSETS` (CI `test.yml`), e.g. `TestAnnotateHeadsetsConflictsOnStalePodEnvtest`.
-  - Tests: `headset_record_test.go`, `library_headsets_test.go`, `headset_test.go`,
+    dir and that Secret, only for the server key (`recordAppPodServerKey`, polled from the
+    Moonlight reconcile until recorded). No readiness probe there: the stream waits for the App
+    pod to be Ready, and the App waits for the stream's display before it starts WiVRn.
+  - Tests: `TestMoonlightVRRecordsServerKey`, `TestSplitVRAppPodRunsVRAgent`.
+  - Tests: `headset_record_test.go`, `headset_test.go`,
     `TestHeadsetCRDValidatesKeyAndImmutability`,
     `TestVRStartSeedsKnownKeysFromHeadsets`, `TestVRStartRefusesBadHeadsetSeed`.
 
 ## VR page (XERK-2670; `library_vr.go`, `/.direwolf/vr`)
 
-- Served only on the headsets host (its proxy secret), never the Library's: desktop code serves
-  same-origin pages there that could read the PIN or start sessions (XERK-2750). Needs
+- Served only on the headsets host (its proxy secret), the only page there, never the Library's:
+  desktop code serves same-origin pages there that could start sessions (XERK-2750). Needs
   `--headsets-proxy-secret-file` and `--vr-port-range`. POSTs need `userSubmittedForm`.
 - The Library lock is checked before and after the Session create (the Library's `EnsurePod`
   does the mirror image); drop either check and two racing starts can both survive.
@@ -192,9 +151,9 @@ paths:
   (QPS 5) until the session controller's calls timed out (QA). Only POSTs read live.
   - The vr-agent read is single-flight per Session: concurrent views wait for one read (each is a
     Secret GET). Without it a scripted flood of one's own page slowed others' starts to ~10s.
-- The PIN is read live from vr-agent (`ReadVRStatus`, which never ends a Session) and never
-  written to the Session. The address is the pod's `status.hostIP` and `status.ports.vr`, shown
-  only once the pod the Session controls is Ready.
+- Headset state is read live from vr-agent (`ReadVRStatus`, which never ends a Session). The
+  address is the pod's `status.hostIP` and `status.ports.vr`, shown only once the pod the Session
+  controls is Ready. It shows no PIN (XERK-2811).
 - Its session cap is the operator's `--max-concurrent-sessions`; keep it equal to moonlight-proxy's.
   The two processes don't share a lock, so a VR start and a Moonlight launch at the same instant
   can both pass the cap.
@@ -223,6 +182,12 @@ paths:
 - Launch, stop and the app list are `VRLaunch`'s, with moonlight-proxy's clients: one set of
   checks for both doors. moonlight-proxy's `/launch` and the front door share no lock, as the
   operator's VR page doesn't.
+- A Moonlight Session of a VR App is the headset's to join (XERK-2811): the Quest app trusts no
+  server it neither pinned nor PIN-paired (fork `client/wivrn_client.cpp`), and PIN is gone.
+  - `SessionState` reports it `starting`, then `ready` with the split App pod's `hostIP`,
+    `status.ports.vr` and key; a launch of that same App returns it, another App is refused.
+  - The headset's stop never ends it: quit it in Moonlight. Tests:
+    `TestVRFrontDoorJoinsMoonlightVRSession`, `TestVRFrontDoorLeavesFlatMoonlightSession`.
 - `ready` needs `status.vrServerKey`, which the operator sets once from vr-agent's first report
   and never replaces (`TestVRSessionRecordsServerKeyOnce`). The vr image makes the key with openssl
   and writes its public half to `VRServerKeyFile`; vr-agent reads it non-blocking, regular files
@@ -267,11 +232,9 @@ paths:
   - A sidecar, not an agent in the App: the token stays out of the game's reach, and the agent
     ships with the chart, not the hand-pinned App digest.
   - It runs as the App's PUID/PGID (1000 if unset or empty, as GoW reads them; the last of a
-    repeated name): the bus's EXTERNAL auth admits only its owner. In a native VR pod an id the
-    spec can't tell (valueFrom, not a number, 0, two containers disagreeing) is InvalidSpec
-    (`vrAgentIDs`, XERK-2709); a fixed 1000 left such pods never ready for 15 min.
-    - In a Moonlight split App pod it falls back to 1000 with a warning: nothing waits on
-      vr-agent there, so the stream keeps working and only confirmation is lost.
+    repeated name): the bus's EXTERNAL auth admits only its owner. An id the spec can't tell
+    (valueFrom, not a number, 0, two containers disagreeing) is InvalidSpec (`vrAgentIDs`,
+    XERK-2709); a fixed 1000 left such pods never ready for 15 min.
     - Not read: a PUID from `envFrom` (ConfigMap/Secret) stays 1000 unseen. Set PUID as a value.
   - Ready only once WiVRn answers. First ready: `HeadsetConnected` False `WaitingForHeadset` and
     `disconnectedAt` set, so the grace period covers putting the headset on. A connect clears it;

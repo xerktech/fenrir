@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,7 +88,7 @@ func headsetEnv(c *corev1.Container) []string {
 // the operator's containers get neither.
 func TestVRPodSeededWithUsersHeadsets(t *testing.T) {
 	f := newPortsFixture(t)
-	withVR(t, f)
+	withVRApp(t, f)
 	watchHeadsets(t, f)
 	f.createHeadset(t, "quest-b", f.user, testHeadsetKeyB, "")
 	f.createHeadset(t, "quest-a", f.user, testHeadsetKeyA, "Quest 3")
@@ -136,30 +137,101 @@ func TestVRPodSeededWithUsersHeadsets(t *testing.T) {
 	}
 }
 
-// No Headsets (or no WatchHeadsets): an empty list, so WiVRn pairs by PIN,
-// never "unset" (the image refuses that) or the keys left on the volume.
-func TestVRPodWithoutHeadsetsSeedsNone(t *testing.T) {
+// No Headsets: no pod. An empty list would open WiVRn's PIN pairing, which
+// the game can use too (XERK-2811); the Session ends InvalidSpec.
+func TestVRPodWithoutHeadsetsIsInvalidSpec(t *testing.T) {
 	for _, watch := range []bool{false, true} {
 		f := newPortsFixture(t)
-		withVR(t, f)
+		withVRApp(t, f)
 		if watch {
 			watchHeadsets(t, f)
+			f.createHeadset(t, "theirs", "someone-else", testHeadsetKeyA, "")
+			f.waitHeadsets(t, 1)
 		}
 		sess := f.session("alex-1", f.user)
 		if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
 			t.Fatal(err)
 		}
-		_, app, err := f.sc.buildPods(sess, testWolfPodUID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got, ok := app.Annotations[vrHeadsetsAnnotation]; !ok || got != "" {
-			t.Errorf("watch=%v: annotation %q (present %v), want present and empty", watch, got, ok)
-		}
-		if got := headsetEnv(&app.Spec.Containers[0]); len(got) != 1 || got[0] != "[]" {
-			t.Errorf("watch=%v: %s = %v, want [[]]", watch, vrHeadsetsEnv, got)
+		if _, _, err := f.sc.buildPods(sess, testWolfPodUID); !errors.Is(err, errInvalidSpec) || !strings.Contains(err.Error(), "no paired VR headset") {
+			t.Errorf("watch=%v: buildPods err %v, want InvalidSpec naming the missing headset", watch, err)
 		}
 	}
+}
+
+// A Headset the cache doesn't hold yet (the front door made it just before
+// the launch) is found live, not refused.
+func TestVRPodFindsHeadsetMissingFromCache(t *testing.T) {
+	f := newPortsFixture(t)
+	withVRApp(t, f)
+	f.sc.HeadsetClient = f.dw.DirewolfV1alpha1().Headsets(portsTestNS) // no informer: every read misses
+	f.createHeadset(t, "quest", f.user, testHeadsetKeyA, "")
+	// Only the live one counts: not another User's, nor one being deleted.
+	f.createHeadset(t, "theirs", "someone-else", testHeadsetKeyB, "")
+	f.createHeadsetObj(t, "leaving", f.user, testHeadsetKeyB, "", func(h *v1alpha1types.Headset) {
+		h.DeletionTimestamp, h.Finalizers = &metav1.Time{Time: time.Now()}, []string{"test/hold"}
+	})
+	sess := f.session("alex-1", f.user)
+	if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	_, app, err := f.sc.buildPods(sess, testWolfPodUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := app.Annotations[vrHeadsetsAnnotation]; got != "quest/quest-uid" {
+		t.Errorf("App pod %s = %q, want the live Headset", vrHeadsetsAnnotation, got)
+	}
+}
+
+// A Headset being deleted is no Headset, read live too.
+func TestVRPodRefusesTerminatingHeadsetLive(t *testing.T) {
+	f := newPortsFixture(t)
+	withVRApp(t, f)
+	f.sc.HeadsetClient = f.dw.DirewolfV1alpha1().Headsets(portsTestNS) // no informer: every read is live
+	f.createHeadsetObj(t, "leaving", f.user, testHeadsetKeyA, "", func(h *v1alpha1types.Headset) {
+		h.DeletionTimestamp, h.Finalizers = &metav1.Time{Time: time.Now()}, []string{"test/hold"}
+	})
+	sess := f.session("alex-1", f.user)
+	if err := f.sc.allocatePorts(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.sc.buildPods(sess, testWolfPodUID); !errors.Is(err, errInvalidSpec) {
+		t.Errorf("buildPods err %v, want InvalidSpec", err)
+	}
+}
+
+// A pod an operator from before XERK-2811 seeded with no Headsets (its WiVRn
+// pairs by PIN) ends its Session on the next look.
+func TestPodSeededWithNoHeadsetsEnds(t *testing.T) {
+	f := newPortsFixture(t)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: portsTestNS, Annotations: map[string]string{vrHeadsetsAnnotation: ""}}}
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || !strings.Contains(reason, "PIN pairing") {
+		t.Errorf("reason %q, %v; want the session ended for open PIN pairing", reason, err)
+	}
+	delete(pod.Annotations, vrHeadsetsAnnotation) // a flat pod
+	if reason, err := f.sc.headsetRevokedReason(context.Background(), pod); err != nil || reason != "" {
+		t.Errorf("flat pod: reason %q, %v; want none", reason, err)
+	}
+}
+
+// pairTestHeadset gives f's User one Headset, as the front door would, and
+// turns on Headset handling: a VR App's Session needs one.
+func pairTestHeadset(t *testing.T, f *portsFixture) {
+	t.Helper()
+	if f.sc.HeadsetInformer == nil {
+		watchHeadsets(t, f)
+	}
+	if hs, _ := f.sc.userHeadsets(portsTestNS, f.user); len(hs) > 0 {
+		return // a second withVR
+	}
+	f.createHeadset(t, "fixture-quest", f.user, testHeadsetKeyA, "Quest 3")
+	for range 500 {
+		if hs, _ := f.sc.userHeadsets(portsTestNS, f.user); len(hs) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("headset cache never held the fixture headset")
 }
 
 // A flat App gets no headsets, nor the annotation.
@@ -228,7 +300,7 @@ func TestRevokedHeadsetEndsSessionOnReconcile(t *testing.T) {
 		ends         bool
 	}{
 		{"all present", "quest/quest-uid", false},
-		{"seeded with none", "", false},
+		{"seeded with none (PIN pairing open, XERK-2811)", "", true},
 		{"one revoked", "quest/quest-uid,gone/gone-uid", true},
 		{"re-created under its name", "quest/old-uid", true},
 		{"being deleted", "held/held-uid", true},

@@ -8,10 +8,10 @@
 #
 # Connecting a headset (mDNS is off, so the headset can't find the server): a
 # bar across the top of the Moonlight mirror reads "VR headset: connect the WiVRn
-# app to <node IP> port <port>", plus " - pairing PIN <6 digits>" until a
-# headset is paired. In the WiVRn app add a server by that address and port and
-# enter the PIN. Once paired, only that headset connects (its key is kept per
-# User, below); WiVRn asks for a PIN again only if its key list is emptied.
+# app to <node IP> port <port>". Only the User's Headsets connect; they pair
+# through the VR front door (XERK-2808), never by PIN in a session (XERK-2811),
+# and a User with none gets no session. In the WiVRn app, pick this game under
+# fenrir: it joins this session with the server's key pinned.
 #
 # Seated height: WiVRn's seated origin is a fixed 1.6 m up (XERK-2689). Once the
 # car is on track (AC ignores input in the pit), press Ctrl+Space on the
