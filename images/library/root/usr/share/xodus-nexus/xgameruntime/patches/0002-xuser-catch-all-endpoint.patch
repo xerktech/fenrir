@@ -148,7 +148,7 @@ index ceff651..22601f6 100644
 +
 +    endpoint info{};
 +    ASSERT_EQ( user->GetEndpointInfo( "https://API.example.INVALID/v1", &info ), S_OK );
-+    EXPECT_STREQ( WindowsGetStringRawBuffer( info.relyingParty, nullptr ), L"https://wild.example.invalid/" );
++    this_does_not_compile;
 +    // A trailing '*' still matches once the host is used up.
 +    info = {};
 +    ASSERT_EQ( user->GetEndpointInfo( "https://api.trailing.invalid/v1", &info ), S_OK );
