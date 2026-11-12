@@ -147,10 +147,12 @@ spec:
           value: "true"
         - name: GBM_BACKENDS_PATH
           value: /usr/lib/gbm:/usr/lib/x86_64-linux-gnu/gbm
-        # OpenComposite: AC's recenter (Ctrl+Space) was verified on it, and it
-        # looked better than xrizer in the spike.
+        # xrizer, not OpenComposite (XERK-2842): AC reads legacy controller
+        # input, so OpenComposite recreates the OpenXR session after the first
+        # frames; with a frame in flight the next swapchain acquire failed and
+        # AC froze on black. xrizer attaches legacy input without a restart.
         - name: DIREWOLF_VR_OPENVR
-          value: opencomposite
+          value: xrizer
         # CSP's dwrite.dll (Steam passes it to Proton with GoW's own).
         - name: DIREWOLF_WINEDLLOVERRIDES
           value: dwrite=n,b

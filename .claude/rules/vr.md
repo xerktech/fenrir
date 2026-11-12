@@ -22,6 +22,12 @@ paths:
 
 - WiVRn (OpenXR runtime + server) with xrizer or OpenComposite as the OpenVR layer.
   Both layers ran Assetto Corsa; OpenComposite "looks better", xrizer is maintained.
+- AC runs on xrizer (XERK-2842): for a legacy-input game OpenComposite (cff07db) recreates the
+  OpenXR session after the first frames (`MaybeRestartForInputs`). With a frame in flight WiVRn
+  logged `Fence waiting failed`, a later `xrAcquireSwapchainImage` failed, and OC aborted into an
+  invisible MessageBox: AC alive, render dead, black for good, Session never ended (2 of 3).
+  xrizer restarts only before the real session's first frame. OC logs to
+  `~/.local/state/OpenComposite/logs/opencomposite.log`.
 - The server is built from the xerktech/WiVRn fork (`WIVRN_REPO`/`WIVRN_COMMIT`): AES-GCM stream
   (XERK-2691) and a long-term `server_key.pem` the headset pins (XERK-2699).
   - The protocol hash covers the AEAD revision, so the Horizon store client is refused: the Quest
