@@ -272,6 +272,9 @@ paths:
   - The fork's Monado patch 0016 makes the Quest's own recenter (hold Meta) set LOCAL's height
     to the head's too (XERK-2846). Upstream keeps y, so a game with no reachable in-game recenter
     stayed off for good. It is the only recenter a headset-only session has: no pad, no keyboard.
+  - Don't mix it with an in-game recenter: xrizer and OpenComposite build Seated as LOCAL plus
+    the offset taken at `ResetSeatedZeroPose` and ignore LOCAL's change event, so a Meta recenter
+    after a game one stacks both (height too). Another in-game recenter clears it.
 - Headless sway on NVIDIA needs `--unsupported-gpu` and has no keyboard: xdotool keys are dropped
   and wtype's keymap is read wrongly by DirectInput. Inject keys through a real virtual device.
 
