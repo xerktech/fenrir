@@ -98,6 +98,9 @@ paths:
       own processes go in as decoys (`decoy`), never started from Go outside it; the whole process
       group is killed after. `TestLaunchBattlenetDecoysRun` proves decoys start: a field-split bug
       once made every "ignores" test pass with none running.
+    - Without that namespace (root where unshare fails), the script sees every root process on the
+      host: another run's wineserver decoy skips the repair. Tests needing the repair to run skip
+      then (`skipBesideOtherWineserver`, XERK-2840).
 
 ## Managed WoW addons (XERK-2366)
 
