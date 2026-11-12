@@ -118,7 +118,9 @@ def read(d, name):
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=d)
     except OSError as e:
-        if e.errno in (errno.ENOENT, errno.ELOOP):
+        # EACCES: a file a game made unreadable reads as absent; a writer
+        # replaces it by rename, which its mode doesn't stop.
+        if e.errno in (errno.ENOENT, errno.ELOOP, errno.EACCES):
             return None
         raise
     if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -137,6 +139,7 @@ def write(d, name, chunks, mode=0o644):
     """Writes name in folder fd d whole: a temporary file renamed over it, so a
     link there is replaced, never followed."""
     tmp = f".{name}.direwolf-tmp"
+    clear(d, tmp)
     try:
         os.unlink(tmp, dir_fd=d)
     except FileNotFoundError:
@@ -150,17 +153,23 @@ def write(d, name, chunks, mode=0o644):
 
 def clear(d, name):
     """Removes what a game planted where only this script's own file belongs
-    (a marker, the lock): a folder or anything else that is not a file. It is
-    in every User's way, not only the planting game's (XERK-2819). A folder is
-    removed without following links in it."""
+    (a marker, the lock, a temporary file): a folder or anything else that is
+    not a file. It is in every User's way, not only the planting game's
+    (XERK-2819). A folder is first renamed aside, which its own mode can't
+    stop, then removed as far as it lets us, never following a link in it."""
     k = kind(d, name)
     if k in (None, stat.S_IFREG):
         return
     log(f"removing the {'folder' if k == stat.S_IFDIR else 'non-file'} a game left at {name}")
-    if k == stat.S_IFDIR:
-        shutil.rmtree(name, dir_fd=d)
-    else:
+    if k != stat.S_IFDIR:
         os.unlink(name, dir_fd=d)
+        return
+    aside = f".{name}.direwolf-planted-{os.urandom(8).hex()}"
+    os.rename(name, aside, src_dir_fd=d, dst_dir_fd=d)
+    try:
+        shutil.rmtree(aside, dir_fd=d, ignore_errors=True)
+    except RecursionError:
+        pass  # A deep planted tree stays aside, out of the way.
 
 
 def lock_setup(compat):
@@ -168,8 +177,14 @@ def lock_setup(compat):
     for _ in range(3):
         clear(compat, LOCK)
         try:
-            fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o644, dir_fd=compat)
+            # Read-only is enough for flock, so a game's chmod 444 is no bar.
+            fd = os.open(LOCK, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o644, dir_fd=compat)
         except OSError as e:
+            if e.errno == errno.EACCES:
+                # Only a game makes it unreadable: replace it.
+                log(f"replacing the unreadable {LOCK} a game left")
+                os.unlink(LOCK, dir_fd=compat)
+                continue
             # Planted again since the check: clear it once more.
             if e.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO):
                 continue

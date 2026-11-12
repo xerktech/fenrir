@@ -628,6 +628,57 @@ func TestACSetupRecoversFromPlantsOfEveryUsersPaths(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		"links in a marker folder": func(t *testing.T, s *acSetup, outside string) {
+			t.Helper()
+			dir := filepath.Join(s.compat, "direwolf-ac-setup.json", "sub")
+			mustWrite(t, filepath.Join(dir, "x"), "x")
+			for link, target := range map[string]string{"d": outside, "f": filepath.Join(outside, "victim")} {
+				if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		},
+		"temporary marker folders": func(t *testing.T, s *acSetup, _ string) {
+			t.Helper()
+			mustWrite(t, filepath.Join(s.compat, ".direwolf-ac-setup.json.direwolf-tmp", "x"), "x")
+			mustWrite(t, filepath.Join(s.game, ".direwolf-ac-setup.json.direwolf-tmp", "x"), "x")
+		},
+		"unremovable marker folder": func(t *testing.T, s *acSetup, _ string) {
+			t.Helper()
+			nonRoot(t)
+			dir := filepath.Join(s.compat, "direwolf-ac-setup.json")
+			mustWrite(t, filepath.Join(dir, "sub", "x"), "x")
+			mustWrite(t, filepath.Join(dir, "y"), "y")
+			chmod(t, filepath.Join(dir, "sub"), 0)
+			chmod(t, dir, 0o555)
+		},
+		"unremovable lock folder": func(t *testing.T, s *acSetup, _ string) {
+			t.Helper()
+			nonRoot(t)
+			dir := filepath.Join(s.compat, "direwolf-ac-setup.lock")
+			mustWrite(t, filepath.Join(dir, "sub", "x"), "x")
+			chmod(t, filepath.Join(dir, "sub"), 0)
+		},
+		"unreadable markers": func(t *testing.T, s *acSetup, _ string) {
+			t.Helper()
+			nonRoot(t)
+			for _, m := range []string{filepath.Join(s.compat, "direwolf-ac-setup.json"), filepath.Join(s.game, "direwolf-ac-setup.json")} {
+				mustWrite(t, m, "{}")
+				chmod(t, m, 0)
+			}
+		},
+		"unreadable lock": func(t *testing.T, s *acSetup, _ string) {
+			t.Helper()
+			nonRoot(t)
+			mustWrite(t, filepath.Join(s.compat, "direwolf-ac-setup.lock"), "")
+			chmod(t, filepath.Join(s.compat, "direwolf-ac-setup.lock"), 0)
+		},
+		"read-only lock": func(t *testing.T, s *acSetup, _ string) {
+			t.Helper()
+			nonRoot(t)
+			mustWrite(t, filepath.Join(s.compat, "direwolf-ac-setup.lock"), "")
+			chmod(t, filepath.Join(s.compat, "direwolf-ac-setup.lock"), 0o444)
+		},
 		"flat video.ini folder": func(t *testing.T, s *acSetup, _ string) {
 			t.Helper()
 			mustWrite(t, filepath.Join(s.flatCfg("Assetto Corsa"), "video.ini", "x"), "x")
@@ -647,6 +698,15 @@ func TestACSetupRecoversFromPlantsOfEveryUsersPaths(t *testing.T) {
 			s.madePrefix(t)
 			outside := t.TempDir()
 			mustWrite(t, filepath.Join(outside, "victim"), "victim")
+			// Lets t.TempDir remove what a plant made unremovable.
+			t.Cleanup(func() {
+				_ = filepath.WalkDir(s.home, func(path string, e os.DirEntry, _ error) error {
+					if e != nil && e.IsDir() {
+						_ = os.Chmod(path, 0o755) //nolint:gosec // the test's own dir
+					}
+					return nil
+				})
+			})
 			plant(t, s, outside)
 			out, err := s.run(t)
 			if err != nil {
@@ -680,5 +740,22 @@ func TestACSetupRecoversFromPlantsOfEveryUsersPaths(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// nonRoot skips a plant only a non-root run sees: root's DAC_OVERRIDE ignores
+// modes, which a game can set but production's PUID can't override. CI runs
+// tests as a user.
+func nonRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file modes")
+	}
+}
+
+func chmod(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
 	}
 }
