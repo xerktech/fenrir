@@ -94,6 +94,12 @@ type VRStatus struct {
 	// none. The App's processes can write that file, as they can run their
 	// own WiVRn: it guards the headset against the network, not the game.
 	ServerKey string `json:"serverKey,omitempty"`
+	// AppFramesDelivered is how many frames the game has delivered to WiVRn
+	// since its server started, and HeadsetFocused whether the headset's own
+	// session is FOCUSED (XERK-2844). Nil and false on a WiVRn without them
+	// (before xerktech/WiVRn XERK-2844): the frame watchdog is then off.
+	AppFramesDelivered *uint64 `json:"appFramesDelivered,omitempty"`
+	HeadsetFocused     bool    `json:"headsetFocused"`
 }
 
 // x448SPKIPrefix is the DER of an X448 SubjectPublicKeyInfo (RFC 8410) up to
@@ -458,6 +464,9 @@ func (c *SessionController) reconcileVRHeadset(ctx context.Context, session *v1a
 		stream.Status, stream.Reason = metav1.ConditionTrue, "Streaming"
 	}
 	meta.SetStatusCondition(&status.Conditions, stream)
+	if reason := c.vrFramesStalledReason(session, vr, time.Now()); reason != "" {
+		return c.endSessionErr(ctx, session, reason)
+	}
 	return nil
 }
 
