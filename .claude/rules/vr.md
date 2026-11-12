@@ -32,6 +32,8 @@ paths:
   (XERK-2691) and a long-term `server_key.pem` the headset pins (XERK-2699).
   - The protocol hash covers the AEAD revision, so the Horizon store client is refused: the Quest
     runs the fork's APK from the same commit. Bump server and APK together.
+  - Only the headset packets (`common/wivrn_packets.h` + serialization) enter the hash: a server
+    commit leaving them alone still pairs with the deployed APK (check `git diff` on them).
 - ALVR + SteamVR is rejected, not a fallback to reach for: its TCP control port 9943 is a
   hard-coded const (no port block), its dashboard on 127.0.0.1:8082 lets any node process set a
   script ALVR runs, and its stream is plaintext.
@@ -249,6 +251,13 @@ paths:
     even NotReady: else a hung bus or WiVRn (the game can move the bus) held the GPU forever (QA).
   - The Moonlight reaper skips VR Sessions; one whose pod is never ready goes after `vrUnstartedTTL`,
     with a `VRPodNeverReady` Warning Event on the App (the VR page cannot show a deleted Session).
+  - Frame watchdog (XERK-2844): a game whose count of delivered frames (the fork's D-Bus
+    `AppFramesDelivered`) stops changing for `vrFrameStallTimeout` while `HeadsetFocused` ends
+    the Session. A crashed OpenVR layer otherwise hangs the game behind a dialog nobody sees
+    (OpenComposite's MessageBox, xrizer's X11 panic window) or an infinite fence wait, and WiVRn
+    keeps streaming black. Armed only once a frame was delivered (loading); unfocused time never
+    counts; any change is progress (the count restarts with WiVRn's server). Off when the image's
+    WiVRn lacks the properties. Tests: `TestVRFrameStallEndsSession`.
   - Tests: `vr_session_test.go`, `cmd/wolf-agent/vr_agent_test.go`.
 - moonlight-proxy's `/resume` never picks a VR Session. Tests: `TestResumeSkipsVRSession`.
 - Moonlight never sees one: `/cancel` skips VR Sessions and serverinfo and the cancel wait skip

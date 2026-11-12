@@ -742,3 +742,65 @@ func TestParseX448PublicKeyPEM(t *testing.T) {
 		}
 	}
 }
+
+// A native VR game that stops delivering frames while the headset is focused
+// ends its Session after vrFrameStallTimeout (XERK-2844): a crashed OpenVR
+// layer leaves it hung behind a dialog nobody sees. Time unfocused, a game
+// yet to deliver its first frame, and a WiVRn without the count never count.
+func TestVRFrameStallEndsSession(t *testing.T) {
+	f, s, agent := vrLifecycle(t, identity)
+	frames := func(n uint64) *uint64 { return &n }
+	reconcile := func(st VRStatus) {
+		t.Helper()
+		agent.set(st, false)
+		if err := f.sc.Reconcile(portsTestNS, s.Name, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// age moves the recorded progress back by d, as if d had passed.
+	age := func(d time.Duration) {
+		f.sc.vrFrameProgress.mu.Lock()
+		defer f.sc.vrFrameProgress.mu.Unlock()
+		key := s.Namespace + "/" + s.Name
+		p := f.sc.vrFrameProgress.m[key]
+		p.since = p.since.Add(-d)
+		f.sc.vrFrameProgress.m[key] = p
+	}
+	long := vrFrameStallTimeout + time.Second
+
+	// A WiVRn without the count: never judged.
+	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true})
+	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true})
+	// The game still loading (no frame yet), focused for long.
+	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(0)})
+	age(long)
+	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(0)})
+	if !f.sessionExists(t, s.Name) {
+		t.Fatal("ended before the game delivered a frame")
+	}
+	// Frames flow, then stop while the headset is unfocused (Quest menu).
+	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(900)})
+	age(long)
+	reconcile(VRStatus{HeadsetConnected: true, AppFramesDelivered: frames(900)})
+	if !f.sessionExists(t, s.Name) {
+		t.Fatal("ended while the headset was unfocused")
+	}
+	// Focused again, frozen for less than the timeout.
+	age(vrFrameStallTimeout / 2)
+	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(900)})
+	if !f.sessionExists(t, s.Name) {
+		t.Fatal("ended before the timeout")
+	}
+	// WiVRn's server restarting resets the count: progress, not a stall.
+	age(long)
+	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(3)})
+	if !f.sessionExists(t, s.Name) {
+		t.Fatal("ended on a count that changed")
+	}
+	// Frozen and focused past the timeout.
+	age(long)
+	reconcile(VRStatus{HeadsetConnected: true, HeadsetFocused: true, AppFramesDelivered: frames(3)})
+	if f.sessionExists(t, s.Name) {
+		t.Error("kept a Session whose game delivered no frame while focused")
+	}
+}
