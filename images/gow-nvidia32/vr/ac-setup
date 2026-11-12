@@ -131,9 +131,11 @@ def read(d, name):
         if e.errno in (errno.ENOENT, errno.ELOOP):
             return None
         raise
+    # Checked before fdopen, which refuses a folder (EISDIR).
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
     with os.fdopen(fd, "rb") as f:
-        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-            return None
         return f.read()
 
 
@@ -173,10 +175,9 @@ def ini_lines(d, name):
     return (read(d, name) or b"").decode("utf-8-sig", errors="surrogateescape").splitlines()
 
 
-def set_ini(d, name, want, keep=False):
+def set_ini(d, name, want):
     """Sets want's {section: {key: value}} in the ini file name, keeping every
-    other line (as the App command's video.ini edit does). keep only adds keys
-    the section lacks, and writes nothing if the file already has them all."""
+    other line (as the App command's video.ini edit does)."""
     lines = ini_lines(d, name)
     out, section, done = [], None, set()
 
@@ -196,8 +197,7 @@ def set_ini(d, name, want, keep=False):
             if k in want[section]:
                 if (section, k) in done:
                     continue
-                if not keep:
-                    line = f"{k}={want[section][k]}"
+                line = f"{k}={want[section][k]}"
                 done.add((section, k))
         out.append(line)
     finish(section)
@@ -205,8 +205,6 @@ def set_ini(d, name, want, keep=False):
         if any((sec, k) not in done for k in want[sec]):
             out.append(f"[{sec}]")
             finish(sec)
-    if keep and out == lines:
-        return
     write(d, name, ("\r\n".join(out) + "\r\n").encode("utf-8", errors="surrogateescape"))
 
 
@@ -347,9 +345,6 @@ def flat_cfg(compat):
 def bind_recenter(cfg):
     """CSP's VR recenter on the pad, in the cfg folder fd cfg's controls.ini,
     unless the User bound it already or another control has the button."""
-    if kind(cfg, "controls.ini") not in (None, stat.S_IFREG, stat.S_IFLNK):
-        log("not binding VR recenter: controls.ini is not a file")
-        return
     section, taken = None, None
     for line in ini_lines(cfg, "controls.ini"):
         s = line.strip()
@@ -369,7 +364,12 @@ def bind_recenter(cfg):
     if taken is not None:
         log(f"not binding VR recenter to {RECENTER_BUTTON}: [{taken}] has it")
         return
-    set_ini(cfg, "controls.ini", {RECENTER: {"XBOXBUTTON": RECENTER_BUTTON}}, keep=True)
+    try:
+        set_ini(cfg, "controls.ini", {RECENTER: {"XBOXBUTTON": RECENTER_BUTTON}})
+    except OSError as e:
+        # A folder planted at the file or its temporary name: a convenience
+        # isn't worth ending the session over.
+        log(f"not binding VR recenter: {e}")
 
 
 def bind_recenters(compat):
@@ -562,9 +562,13 @@ def main():
         save_marker(compat, pm)
     if pm.get("flat-cfg") != FLAT_CFG_REV:
         log("setting the flat config: FULLSCREEN=1, INPUT_METHOD=X360")
-        flat_cfg(compat)
-        pm["flat-cfg"] = FLAT_CFG_REV
-        save_marker(compat, pm)
+        try:
+            flat_cfg(compat)
+            pm["flat-cfg"] = FLAT_CFG_REV
+            save_marker(compat, pm)
+        except OSError as e:
+            # As bind_recenter: retried next launch, never the session's end.
+            log(f"could not set the flat config: {e}")
     bind_recenters(compat)
 
     gm = load_marker(game)

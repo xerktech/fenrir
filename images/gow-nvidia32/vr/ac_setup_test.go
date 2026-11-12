@@ -667,13 +667,21 @@ func TestACSetupBindsVRRecenterToPad(t *testing.T) {
 	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
 		t.Errorf("written through the link: %v", entries)
 	}
-	// A folder planted at controls.ini is skipped, not the end of the session.
-	s = newACSetup(t)
-	if err := os.MkdirAll(filepath.Join(s.state, "cfg", "controls.ini"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if out := s.mustRun(t); !strings.Contains(out, "controls.ini is not a file") {
-		t.Errorf("no log of the planted folder:\n%s", out)
+	// A folder planted at controls.ini or at its temporary name, in the VR
+	// or the flat cfg (before its first setup too), is logged and skipped,
+	// not the end of every launch.
+	for _, plant := range []func(s *acSetup) string{
+		func(s *acSetup) string { return filepath.Join(s.state, "cfg", "controls.ini") },
+		func(s *acSetup) string { return filepath.Join(s.state, "cfg", ".controls.ini.direwolf-tmp") },
+		func(s *acSetup) string { return filepath.Join(s.flatCfg("Assetto Corsa"), "controls.ini") },
+	} {
+		s = newACSetup(t)
+		mustWrite(t, filepath.Join(plant(s), "x"), "planted")
+		for range 2 {
+			if out := s.mustRun(t); !strings.Contains(out, "Is a directory") {
+				t.Errorf("%s: no log of the planted folder:\n%s", plant(s), out)
+			}
+		}
 	}
 }
 
