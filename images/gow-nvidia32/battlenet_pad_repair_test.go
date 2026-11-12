@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -72,6 +73,21 @@ func padRepair(t *testing.T, path string) *exec.Cmd {
 var userNamespaceWorks = sync.OnceValue(func() bool {
 	return exec.Command("unshare", "-Ur", "true").Run() == nil
 })
+
+// skipBesideOtherWineserver skips a launch test that needs the pad repair to
+// run when launch-battlenet would see a wineserver it did not start. Without
+// a PID namespace of its own the script's check sees every process of the
+// uid: as root that is every root process on the host, such as another test
+// run's wineserver decoy, and the repair is skipped (XERK-2840).
+func skipBesideOtherWineserver(t *testing.T) {
+	t.Helper()
+	if pidNamespaceWorks() {
+		return
+	}
+	if exec.CommandContext(t.Context(), "pgrep", "-u", strconv.Itoa(os.Geteuid()), "-x", "wineserver").Run() == nil { //nolint:gosec // our own uid
+		t.Skip("a wineserver of this uid runs outside the test, and unshare cannot hide it")
+	}
+}
 
 func runPadRepair(t *testing.T, reg string) (got, log string) {
 	t.Helper()
@@ -158,6 +174,7 @@ func TestLaunchBattlenetRepairsHalfInstalledPad(t *testing.T) {
 	if os.Geteuid() == 0 && !userNamespaceWorks() {
 		t.Skip("as root without unshare -Ur the repair refuses (TestBattlenetPadRepairRefusesRoot)")
 	}
+	skipBesideOtherWineserver(t)
 	var reg string
 	r := runLaunchBattlenetWith(t, true, func(games string) {
 		reg = filepath.Join(filepath.Dir(games), ".local", "share", "battlenet", "pfx", "system.reg")
@@ -204,6 +221,7 @@ func TestLaunchBattlenetSkipsPadRepairBesideWineserver(t *testing.T) {
 
 // A repair that fails is logged, and the game still launches.
 func TestLaunchBattlenetLaunchesWhenPadRepairFails(t *testing.T) {
+	skipBesideOtherWineserver(t)
 	r := runLaunchBattlenetWith(t, true, func(games string) {
 		// A directory where system.reg should be: reading it fails.
 		reg := filepath.Join(filepath.Dir(games), ".local", "share", "battlenet", "pfx", "system.reg")
