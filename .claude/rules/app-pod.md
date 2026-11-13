@@ -66,6 +66,14 @@ paths:
     has no API access, so the operator passes `--live-session` per UID (every Session in its
     cache) and `--sweep-before` (its Session's creation less `sweepMargin`): a Session made later is unlisted
     but its dir is newer. Hence `<dir>` must not be shared by two operators (namespaces).
+  - A live Session's dir is never swept, yet a SIGKILLed bridge's nodes stay mounted in its App
+    pod while the kernel hands their minors to the next device (another Session's; XERK-2859). So
+    a Session ending with the bridge exited non-zero, or the Wolf pod failed or gone, deletes the
+    App pod with grace 1 first (`killAppPodIfBridgeDied`); GC alone gives it its full grace.
+    - Grace 1, not 0: a force delete drops the object before kubelet kills the containers.
+    - The bridge exits non-zero when its own cleanup fails, so that path kills too.
+    - Residual: detection plus kubelet's 2s kill floor, a few seconds. Tests:
+      `TestUncleanBridgeExitKillsAppPod`.
   - It unmounts every mount under a dead dir (`/proc/self/mountinfo`, deepest first), not only
     `input/` nodes: a leftover on talos04 held a tmpfs on `runtime/`. Any mount left keeps the dir,
     since `RemoveAll` crosses mounts and would empty the mounted filesystem.

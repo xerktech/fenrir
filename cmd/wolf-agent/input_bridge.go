@@ -97,12 +97,14 @@ func runInputBridge(args []string) {
 	if err := server.Serve(ctx, l); err != nil {
 		klog.Errorf("input-bridge: %v", err)
 	}
+	// A failed cleanup exits non-zero: the operator then kills the App pod
+	// at once rather than leave it the nodes for its termination grace
+	// (killAppPodIfBridgeDied).
 	if err := server.Clear(); err != nil {
-		klog.Errorf("input-bridge: clearing %s: %v", server.InputDir, err)
-		return
+		klog.Exitf("input-bridge: clearing %s: %v", server.InputDir, err)
 	}
 	if err := inputbridge.RemoveSessionDir(*sessionDir); err != nil {
-		klog.Errorf("input-bridge: removing %s: %v", *sessionDir, err)
+		klog.Exitf("input-bridge: removing %s: %v", *sessionDir, err)
 	}
 }
 
