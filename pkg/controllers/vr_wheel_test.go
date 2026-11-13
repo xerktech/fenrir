@@ -11,6 +11,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
@@ -349,6 +351,80 @@ func TestWheelPodLifecycle(t *testing.T) {
 			}
 			if _, err := f.sc.K8sClient.CoreV1().Pods(portsTestNS).Get(context.Background(), s.Name+"-wheel", metav1.GetOptions{}); mutate == nil && err == nil {
 				t.Error("helper pod recreated")
+			}
+		})
+	}
+}
+
+// A native VR Session ending with its wheel helper's bridge dead, or the
+// helper pod gone, deletes the VR pod without grace: the bridge's nodes stay
+// mounted there (XERK-2859). A running or clean bridge, or a Session that
+// never made a helper, leaves the VR pod to garbage collection.
+func TestUncleanWheelBridgeExitKillsVRPod(t *testing.T) {
+	bridge := func(code int32) func(*corev1.Pod) {
+		return func(p *corev1.Pod) {
+			p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: v1alpha1types.InputBridgeContainerName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: code}}}}
+		}
+	}
+	running := func(p *corev1.Pod) {
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: v1alpha1types.InputBridgeContainerName,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+	}
+	for _, tc := range []struct {
+		name       string
+		helper     func(*corev1.Pod) // nil: the helper pod is gone
+		notCreated bool
+		wantKill   bool
+	}{
+		{name: "bridge SIGKILLed", helper: bridge(137), wantKill: true},
+		{name: "helper evicted", helper: func(p *corev1.Pod) { p.Status.Phase = corev1.PodFailed }, wantKill: true},
+		{name: "helper gone", wantKill: true},
+		{name: "bridge running", helper: running},
+		{name: "bridge exited cleanly", helper: bridge(0)},
+		{name: "no helper made", notCreated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, s := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
+				s := vrSession(f)
+				if !tc.notCreated {
+					s.Status.Conditions = []metav1.Condition{{Type: wheelPodCreatedCondition, Status: metav1.ConditionTrue, Reason: "Test"}}
+				}
+				return s
+			}, func(s *v1alpha1types.Session) []runtime.Object {
+				objs := []runtime.Object{readyPod(s)}
+				if tc.helper != nil {
+					h := readyPod(s)
+					h.Name = s.Name + "-wheel"
+					tc.helper(h)
+					objs = append(objs, h)
+				}
+				return objs
+			})
+			waitPod(t, f, s.Name)
+			if tc.helper != nil {
+				waitPod(t, f, s.Name+"-wheel")
+			}
+			if err := f.sc.endSession(context.Background(), s, "test"); err != nil {
+				t.Fatalf("endSession: %v", err)
+			}
+			fake, ok := f.sc.K8sClient.(*k8sfake.Clientset)
+			if !ok {
+				t.Fatalf("K8sClient is %T", f.sc.K8sClient)
+			}
+			var grace *int64
+			for _, a := range fake.Actions() {
+				d, ok := a.(k8stesting.DeleteAction)
+				if !ok || d.GetResource().Resource != "pods" {
+					continue
+				}
+				if !tc.wantKill || d.GetName() != s.Name {
+					t.Fatalf("unexpected delete of pod %q", d.GetName())
+				}
+				grace = d.GetDeleteOptions().GracePeriodSeconds
+			}
+			if killed := grace != nil; killed != tc.wantKill || killed && *grace != 1 {
+				t.Errorf("VR pod deleted with grace %v, want kill %v with grace 1", grace, tc.wantKill)
 			}
 		})
 	}

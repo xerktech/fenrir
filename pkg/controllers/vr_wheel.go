@@ -3,12 +3,15 @@ package controllers
 import (
 	"context"
 	stderrors "errors"
+	"fmt"
 	"maps"
 	"path"
 	"slices"
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
@@ -262,4 +265,24 @@ func (c *SessionController) reconcileWheelPod(ctx context.Context, session *v1al
 		return err
 	}
 	return c.createCompanionPod(ctx, session, pod, wheelPodCreatedCondition, "wheel helper pod")
+}
+
+// killVRPodIfWheelBridgeDied is killAppPodIfBridgeDied for a native VR
+// Session: its wheel helper pod's bridge publishes the nodes the VR pod
+// mounts, so that pod is the one to kill when the bridge died uncleanly or
+// its pod is gone (nothing says it cleaned up).
+func (c *SessionController) killVRPodIfWheelBridgeDied(ctx context.Context, session *v1alpha1types.Session) error {
+	if !meta.IsStatusConditionTrue(session.Status.Conditions, wheelPodCreatedCondition) {
+		return nil
+	}
+	name := c.wheelPodName(session)
+	helper, err := c.podController.Informer().Namespaced(session.Namespace).Get(name)
+	switch {
+	case errors.IsNotFound(err):
+	case err != nil:
+		return fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, name, err)
+	case !bridgeExitedUncleanly(helper):
+		return nil
+	}
+	return c.killPodNow(ctx, session, c.podName(session))
 }

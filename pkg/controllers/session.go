@@ -1221,6 +1221,9 @@ func operatorSidecar(name string) bool {
 // pod's generated ResourceClaims) and frees its port block.
 func (c *SessionController) endSession(ctx context.Context, session *v1alpha1types.Session, reason string) error {
 	klog.Infof("Ending session %s/%s: %s", session.Namespace, session.Name, reason)
+	if err := c.killAppPodIfBridgeDied(ctx, session); err != nil {
+		return err
+	}
 	// reason was decided from session as read. If it has changed since (an
 	// attach or /resume landing, possibly not yet in our cache), the delete
 	// conflicts and the requeue decides again on the newer object.
