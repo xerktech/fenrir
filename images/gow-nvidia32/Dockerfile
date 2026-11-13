@@ -237,7 +237,7 @@ FROM steam AS vr-wivrn
 ARG WIVRN_REPO=https://github.com/xerktech/WiVRn
 # The fork's master at the commit built. Its CMakeLists pins every
 # FetchContent dependency by URL_HASH, and monado by commit (monado-rev).
-ARG WIVRN_COMMIT=88acb12c1bbc6081b0d28d48bc0b922475685cf2
+ARG WIVRN_COMMIT=0b82e130cefbee0f9fafe16d7ad1c01bfdbecbf4
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build git pkg-config ca-certificates python3 \
       glslang-tools spirv-tools gettext libssl-dev \
