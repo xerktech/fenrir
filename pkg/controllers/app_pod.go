@@ -545,7 +545,10 @@ func (c *SessionController) killAppPodIfBridgeDied(ctx context.Context, session 
 	err = c.K8sClient.CoreV1().Pods(session.Namespace).Delete(ctx, name, metav1.DeleteOptions{
 		GracePeriodSeconds: &grace,
 	})
-	if err != nil && !errors.IsNotFound(err) {
+	switch {
+	case errors.IsNotFound(err):
+		return nil
+	case err != nil:
 		return fmt.Errorf("failed to delete app pod %s/%s: %w", session.Namespace, name, err)
 	}
 	klog.Infof("Session %s/%s: input-bridge exited uncleanly, deleted app pod %s without grace", session.Namespace, session.Name, name)

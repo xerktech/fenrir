@@ -553,35 +553,58 @@ func TestUncleanBridgeExitKillsAppPod(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct {
-		name     string
-		wolfPod  func(*corev1.Pod)
-		wantKill bool
+		name       string
+		wolfPod    func(*corev1.Pod)
+		notSplit   bool // the Wolf pod names no App pod
+		notCreated bool // AppPodCreated is unset
+		noAppPod   bool // the App pod is already gone
+		wantKill   bool
 	}{
-		{"bridge SIGKILLed", bridge(137), true},
-		{"bridge exited cleanly", bridge(0), false},
-		{"evicted, bridge not reported", func(p *corev1.Pod) { p.Status.Phase = corev1.PodFailed; p.Status.ContainerStatuses = nil }, true},
-		{"wolf pod gone", nil, true},
+		{name: "bridge SIGKILLed", wolfPod: bridge(137), wantKill: true},
+		{name: "bridge failed", wolfPod: bridge(1), wantKill: true},
+		{name: "wolf crashed, bridge running", wolfPod: func(p *corev1.Pod) {
+			p.Status.ContainerStatuses = []corev1.ContainerStatus{
+				{Name: v1alpha1types.WolfContainerName, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 139}}},
+				{Name: v1alpha1types.InputBridgeContainerName, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			}
+		}},
+		{name: "app pod already gone", wolfPod: bridge(137), noAppPod: true, wantKill: true},
+		{name: "bridge exited cleanly", wolfPod: bridge(0)},
+		{name: "evicted, bridge not reported", wolfPod: func(p *corev1.Pod) { p.Status.Phase = corev1.PodFailed; p.Status.ContainerStatuses = nil }, wantKill: true},
+		{name: "succeeded, bridge not reported", wolfPod: func(p *corev1.Pod) { p.Status.Phase = corev1.PodSucceeded; p.Status.ContainerStatuses = nil }, wantKill: true},
+		{name: "not split", wolfPod: bridge(137), notSplit: true},
+		{name: "wolf pod gone", wantKill: true},
+		{name: "wolf pod gone, app pod never created", notCreated: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, sess := lifecycleFixture(t, func(f *portsFixture) *v1alpha1types.Session {
 				s := podReadySession(f)
-				s.Status.Conditions = append(s.Status.Conditions, metav1.Condition{Type: appPodCreatedCondition, Status: metav1.ConditionTrue, Reason: "Test"})
+				if !tc.notCreated {
+					s.Status.Conditions = append(s.Status.Conditions, metav1.Condition{Type: appPodCreatedCondition, Status: metav1.ConditionTrue, Reason: "Test"})
+				}
 				return s
 			}, func(s *v1alpha1types.Session) []runtime.Object {
 				app := readyPod(s)
 				app.Name = s.Name + "-app"
 				delete(app.Annotations, portBlockAnnotation)
-				objs := []runtime.Object{app}
+				var objs []runtime.Object
+				if !tc.noAppPod {
+					objs = append(objs, app)
+				}
 				if tc.wolfPod != nil {
 					wolf := readyPod(s)
-					wolf.Annotations[appPodAnnotation] = app.Name
+					if !tc.notSplit {
+						wolf.Annotations[appPodAnnotation] = app.Name
+					}
 					tc.wolfPod(wolf)
 					objs = append(objs, wolf)
 				}
 				return objs
 			})
 			f.sc.AppPodHostDir = testAppPodHostDir
-			waitPod(t, f, sess.Name+"-app")
+			if !tc.noAppPod {
+				waitPod(t, f, sess.Name+"-app")
+			}
 			if tc.wolfPod != nil {
 				waitPod(t, f, sess.Name)
 			}
@@ -598,12 +621,19 @@ func TestUncleanBridgeExitKillsAppPod(t *testing.T) {
 			}
 			var grace *int64
 			for _, a := range fake.Actions() {
-				if d, ok := a.(k8stesting.DeleteAction); ok && d.GetName() == sess.Name+"-app" {
-					grace = d.GetDeleteOptions().GracePeriodSeconds
+				d, ok := a.(k8stesting.DeleteAction)
+				if !ok || d.GetResource().Resource != "pods" {
+					continue
 				}
+				// Any pod delete is a kill here: GC deletes nothing in a fake.
+				if !tc.wantKill || d.GetName() != sess.Name+"-app" {
+					t.Fatalf("unexpected delete of pod %q", d.GetName())
+				}
+				grace = d.GetDeleteOptions().GracePeriodSeconds
 			}
-			if killed := grace != nil && *grace <= 1; killed != tc.wantKill {
-				t.Errorf("App pod deleted without grace = %v, want %v", killed, tc.wantKill)
+			// 1, never 0: a force delete drops the pod before kubelet kills it.
+			if killed := grace != nil; killed != tc.wantKill || killed && *grace != 1 {
+				t.Errorf("App pod deleted with grace %v, want kill %v with grace 1", grace, tc.wantKill)
 			}
 		})
 	}

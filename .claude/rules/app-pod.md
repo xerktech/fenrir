@@ -71,8 +71,10 @@ paths:
     a Session ending with the bridge exited non-zero, or the Wolf pod failed or gone, deletes the
     App pod with grace 1 first (`killAppPodIfBridgeDied`); GC alone gives it its full grace.
     - Grace 1, not 0: a force delete drops the object before kubelet kills the containers.
-    - The bridge exits non-zero when its own cleanup fails, so that path kills too.
-    - Residual: detection plus kubelet's 2s kill floor, a few seconds. Tests:
+    - A bridge whose own cleanup fails after SIGTERM is not covered: its pod was already being
+      deleted, so the Session ended with the bridge running (unmounts use MNT_DETACH, so rare).
+    - Residual: detection (after any in-flight reconcile of the Session) plus kubelet's 2s kill
+      floor; and a Session deleted directly (`/cancel`, kubectl) skips it. Tests:
       `TestUncleanBridgeExitKillsAppPod`.
   - It unmounts every mount under a dead dir (`/proc/self/mountinfo`, deepest first), not only
     `input/` nodes: a leftover on talos04 held a tmpfs on `runtime/`. Any mount left keeps the dir,
