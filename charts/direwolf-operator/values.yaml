@@ -120,6 +120,10 @@ controllers:
           # unless set. The directory must be on a shared-propagation mount and
           # belong to this operator alone (it sweeps Sessions it doesn't know):
           #   --app-pod-host-dir=/var/lib/direwolf/sessions
+          # A uinput wheel for vrPort Apps' WiVRn, made by a privileged helper per
+          # Session (XERK-2852; native VR Sessions get a <session>-wheel pod), off
+          # unless set; needs --app-pod-host-dir:
+          #   --vr-wheel
           # The Library (on-demand Steam + Heroic desktop) is off unless
           # --library-port is set; enabling it needs, with service.library:
           #   --library-port=8080

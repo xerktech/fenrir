@@ -29,4 +29,8 @@ const (
 	// VRAgentContainerName reports a native VR Session's headset state from
 	// the App's VR server over D-Bus (XERK-2668); it opens no device nodes.
 	VRAgentContainerName = "vr-agent"
+	// WheelWaitContainerName holds a native VR pod's App until its wheel
+	// helper has set up the pod's udev directory (XERK-2852); it opens no
+	// device nodes.
+	WheelWaitContainerName = "wheel-wait"
 )

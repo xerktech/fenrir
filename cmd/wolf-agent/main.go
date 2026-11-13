@@ -31,6 +31,10 @@ func main() {
 		runUdevRelay(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == wheelWaitCommand {
+		runWheelWait(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == vrAgentCommand {
 		runVRAgent(os.Args[2:])
 		return

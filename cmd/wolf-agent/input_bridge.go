@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"games-on-whales.github.io/direwolf/pkg/inputbridge"
+	"games-on-whales.github.io/direwolf/pkg/wheel"
 )
 
 // inputBridgeCommand runs this binary as the session's input-bridge sidecar
@@ -31,6 +34,9 @@ func runInputBridge(args []string) {
 		"Unix socket the App pod's udev-relay reads udev events from; in a directory only it mounts")
 	sessionDir := fs.String("session-dir", "", "The session's host directory, mounted Bidirectional; nodes go in its input/ (required)")
 	liveSessions := liveSessionFlags(fs)
+	wheelSocket := fs.String("wheel-socket", "",
+		"Unix (seqpacket) socket serving uinput wheels to the VR App (pkg/wheel); in a directory the App mounts (empty: off)")
+	wheelOwner := fs.String("wheel-owner", "", "uid:gid the wheel socket is given to: the App's desktop user")
 	sweepBefore := fs.String("sweep-before", "",
 		"RFC 3339 time; sibling directories of no live Session last changed before it are removed (empty: no sweep)")
 	klog.InitFlags(fs)
@@ -56,6 +62,18 @@ func runInputBridge(args []string) {
 	if err := server.Clear(); err != nil {
 		klog.Fatalf("clearing %s: %v", server.InputDir, err)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	// The wheel socket listens before the udev control file exists: a
+	// native VR pod's wheel-wait starts the App once it does, and WiVRn
+	// then finds the socket.
+	var wl net.Listener
+	if *wheelSocket != "" {
+		var err error
+		if wl, err = listenWheel(ctx, *wheelSocket, *wheelOwner); err != nil {
+			klog.Fatal(err)
+		}
+	}
 	if err := resetUdevDir(udevDir, *sessionDir); err != nil {
 		klog.Fatal(err)
 	}
@@ -72,8 +90,6 @@ func runInputBridge(args []string) {
 		}()
 	}
 	_ = os.Remove(*socket)
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 	l, err := (&net.ListenConfig{}).Listen(ctx, "unix", *socket)
 	if err != nil {
 		klog.Fatalf("listening on %s: %v", *socket, err)
@@ -93,10 +109,27 @@ func runInputBridge(args []string) {
 			}
 		}()
 	}
+	wheelDone := make(chan struct{})
+	if wl == nil {
+		close(wheelDone)
+	} else {
+		ws := &wheel.Server{Backend: wheel.NewUinput(), Publisher: wheel.BridgePublisher{Bridge: server}}
+		go func() {
+			defer close(wheelDone)
+			if err := ws.Serve(ctx, wl); err != nil {
+				klog.Errorf("input-bridge: wheel: %v", err)
+			}
+		}()
+		klog.Infof("input-bridge: serving wheels on %s", *wheelSocket)
+	}
 	klog.Infof("input-bridge: serving %s on %s", server.InputDir, *socket)
 	if err := server.Serve(ctx, l); err != nil {
 		klog.Errorf("input-bridge: %v", err)
 	}
+	// Serve returns on SIGTERM (or a failed accept): the wheels go first,
+	// each node withdrawn before its device frees the minor.
+	stop()
+	<-wheelDone
 	if err := server.Clear(); err != nil {
 		klog.Errorf("input-bridge: clearing %s: %v", server.InputDir, err)
 		return
@@ -104,6 +137,66 @@ func runInputBridge(args []string) {
 	if err := inputbridge.RemoveSessionDir(*sessionDir); err != nil {
 		klog.Errorf("input-bridge: removing %s: %v", *sessionDir, err)
 	}
+}
+
+// listenWheel listens on socket for wivrn-server, in a directory the App
+// mounts: locked first (only the node's root changes what is in it), then the
+// socket is handed to owner, the App's desktop user, 0600.
+// Variables so tests run without root that can chown.
+var (
+	lockWheelDir = inputbridge.LockDir
+	chownSocket  = os.Lchown
+)
+
+func listenWheel(ctx context.Context, socket, owner string) (net.Listener, error) {
+	uid, gid, err := parseOwner(owner)
+	if err != nil {
+		return nil, fmt.Errorf("--wheel-owner: %w", err)
+	}
+	dir := filepath.Dir(socket)
+	if err = os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating %s: %w", dir, err)
+	}
+	if err = lockWheelDir(dir); err != nil {
+		return nil, fmt.Errorf("locking %s: %w", dir, err)
+	}
+	// Whatever the App left there before the lock.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if err = os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return nil, fmt.Errorf("clearing %s: %w", dir, err)
+		}
+	}
+	l, err := (&net.ListenConfig{}).Listen(ctx, "unixpacket", socket)
+	if err != nil {
+		return nil, fmt.Errorf("listening on %s: %w", socket, err)
+	}
+	// The App can't connect until both are done; nothing it could gain
+	// from the gap.
+	if err := errors.Join(chownSocket(socket, uid, gid), os.Chmod(socket, 0o600)); err != nil {
+		l.Close()
+		return nil, fmt.Errorf("handing %s over: %w", socket, err)
+	}
+	return l, nil
+}
+
+func parseOwner(s string) (uid, gid int, err error) {
+	u, g, ok := strings.Cut(s, ":")
+	if !ok {
+		return 0, 0, fmt.Errorf("%q is not uid:gid", s)
+	}
+	uid, err1 := strconv.Atoi(u)
+	gid, err2 := strconv.Atoi(g)
+	if err := errors.Join(err1, err2); err != nil {
+		return 0, 0, fmt.Errorf("%q: %w", s, err)
+	}
+	if uid <= 0 || gid <= 0 {
+		return 0, 0, fmt.Errorf("%q: the App's user is never root", s)
+	}
+	return uid, gid, nil
 }
 
 // liveSessionFlags registers the flags listing the Sessions the operator knew

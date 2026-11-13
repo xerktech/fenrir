@@ -14,6 +14,8 @@ paths:
   - examples/vr*.yaml
   - pkg/api/v1alpha1/session.go
   - docs/vr-native-session.md
+  - pkg/wheel/**
+  - cmd/wolf-agent/wheel*.go
   - hack/vr-wheel/**
 ---
 
@@ -407,3 +409,45 @@ paths:
   - A test that frees one effect and creates another type gets no upload: SDL reuses the slot and
     refuses a type change. Keep effects alive at once, as games do.
 - Test tool: `hack/vr-wheel/fftest.c` (DirectInput FF exe, build line in its header).
+
+## Wheel helper (`--vr-wheel`, XERK-2852; epic XERK-2848)
+
+- wivrn-server asks `DIREWOLF_WHEEL_SOCKET` (`pkg/wheel`) for a uinput wheel; the App container
+  gets only the socket (read-only mount of `<dir>/<UID>/wheel`), never a device or capability.
+  - The helper is the Session's input-bridge (`--wheel-socket`), privileged in the host user
+    namespace: a hostUsers:false container can't open `/dev/uinput` or propagate a mount.
+  - Moonlight mode: the Wolf pod's bridge. Native VR: a `<session>-wheel` pod (bridge only,
+    podAffinity to the VR pod) whose input/udev/events dirs the VR pod mounts as a split App
+    pod does; never recreated, its exit ends the Session (`reconcileWheelPod`).
+  - The VR pod's `wheel-wait` init container holds the App until the bridge made
+    `/run/udev/control`: libudev checks for it once, so a game started first misses the wheel.
+  - Needs `--app-pod-host-dir` (operator exits without it). Off by default.
+- Protocol: SOCK_SEQPACKET, one JSON object per packet; keys agreed with the fork's
+  `server/driver/wivrn_wheel.cpp` (XERK-2850). Change both together.
+  - The helper acks the kernel's FF upload/erase at once and relays it: the game blocks until
+    the ack, and nothing on the headset can usefully refuse one.
+  - A create for an id the connection holds replaces it, and destroying an unknown id is
+    silent: WiVRn recreates a wheel 1s after any error naming it, so either one erroring loops.
+- Anything in the App can connect (every process is uid 1000), so the helper enforces limits:
+  4 wheels per Session, 4 connections, gamepad buttons only (no keyboard key, mouse button or
+  digitizer tool), absolute axes below the multitouch ones, no FF_CUSTOM (a pointer into the
+  game), only EV_KEY/EV_ABS/EV_SYN events, 4,000 events/s per connection (more are dropped).
+- A wheel's node is withdrawn before its device is destroyed. A failed withdraw (on destroy, or
+  after a failed publish) keeps the device open for good, holding its slot (`Server.stuck`):
+  dropped, Go's finalizer would close its fd and free the minor under the mounted node.
+- A SIGKILLed bridge skips all that: its nodes stay mounted and the kernel reuses their minors
+  at once (QA read another Session's wheel through one). So a native VR Session ending with the
+  helper's bridge exited non-zero, or the helper pod failed or gone, deletes the VR pod with
+  grace 1 (`killVRPodIfWheelBridgeDied`, as `killAppPodIfBridgeDied` for split mode, XERK-2859).
+  Tests: `TestUncleanWheelBridgeExitKillsVRPod`.
+- Logs an App client can trigger (dropped messages, refused connections, creates and destroys)
+  are rate-limited: unlimited, a client writing without reading logged 64 MB in 2 s (QA).
+  Each Server has its own limits; the test checks them as declared (never reassign them).
+  Tests: `TestClientCannotFloodLog` (run log-limit mutants with `-count=20`: timing-dependent).
+- The bridge listens on the wheel socket before it writes `/run/udev/control`, which releases
+  `wheel-wait`, so WiVRn finds the socket when the App starts.
+- The bridge's `Clear` (wolf-agent sends it whenever a stream stops) leaves the wheel's node,
+  udev entry and announced add (`Server.Publish`); the socket can't replace or remove them.
+- Unverified until XERK-2853: the full path with a real headset and G920.
+- Tests: `pkg/wheel` (`TestUinputRoundTrip` needs `/dev/uinput`), `vr_wheel_test.go`,
+  `TestPublishedNodeSurvivesClear`, `TestListenWheelLocksAndHandsOver`.

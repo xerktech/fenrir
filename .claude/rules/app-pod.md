@@ -105,4 +105,6 @@ paths:
   (`appPodReady`). The App pod has podAffinity to its Session pod's node.
 - A vrPort App's App pod also runs `vr-agent`, with its own token Secret (never wolf-agent's) and
   no readiness probe, only to report the VR server key (XERK-2811; `.claude/rules/vr.md`).
+- The bridge also serves vrPort Apps' wheel socket with `--vr-wheel` (`vr.md`, "Wheel helper"):
+  its nodes are published in-process (`Server.Publish`), and `Clear` leaves them.
 - Tests: `app_pod_test.go`, `pkg/inputbridge`, `TestAgentPublishesNodesThroughBridge`.

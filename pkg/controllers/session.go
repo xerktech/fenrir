@@ -143,6 +143,9 @@ type SessionControllerOptions struct {
 	// user-namespaced pod of its own (see app_pod.go). Empty: the App runs
 	// in the session pod.
 	AppPodHostDir string
+	// Serve DIREWOLF_WHEEL_SOCKET to vrPort Apps (vr_wheel.go, XERK-2852).
+	// Needs AppPodHostDir.
+	VRWheel bool
 	// How long a session's pod outlives its client's disconnect, so /resume
 	// can re-attach to the still-running game. Zero ends the session on
 	// disconnect.
@@ -992,6 +995,9 @@ func (c *SessionController) reconcilePod(ctx context.Context, session *v1alpha1t
 		return nil, err
 	}
 	if err := c.reconcileAppPod(ctx, session, pod); err != nil {
+		return nil, err
+	}
+	if err := c.reconcileWheelPod(ctx, session, pod); err != nil {
 		return nil, err
 	}
 	return pod, nil
@@ -2327,6 +2333,7 @@ var operatorVolumes = []string{
 	udevEventsVolume,
 	vrBusVolume,
 	vrAgentOwnTokenVolume,
+	wheelVolume,
 }
 
 // validateNoOperatorVolumeMounts rejects App template containers (init too)
@@ -2492,6 +2499,7 @@ var operatorContainerNames = []string{
 	v1alpha1types.PulseAudioContainerName, v1alpha1types.InitContainerName,
 	v1alpha1types.SteamRelinkContainerName, v1alpha1types.InputBridgeContainerName,
 	v1alpha1types.UdevRelayContainerName, v1alpha1types.VRAgentContainerName,
+	v1alpha1types.WheelWaitContainerName,
 }
 
 // defaultProfileHoleCapability returns the first added capability with which
