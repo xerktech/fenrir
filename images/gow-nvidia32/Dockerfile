@@ -291,6 +291,8 @@ RUN git clone https://gitlab.com/znixian/OpenOVR.git /src/oc \
 FROM rust:1.89-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6 AS vr-xrizer
 ARG XRIZER_COMMIT=a1216c7b53fb562a5bc4de473163e97a483042af
 ARG XRIZER_VERSION=v0.6-direwolf1
+# The openxr-sys loader build's cmake would default to make, which is not installed.
+ENV CMAKE_GENERATOR=Ninja
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates cmake ninja-build clang libclang-dev g++ glslc \
       libvulkan-dev libx11-xcb-dev libgl-dev

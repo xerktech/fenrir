@@ -287,7 +287,8 @@ paths:
     stayed off for good. It is the only recenter a headset-only session has: no pad, no keyboard.
   - xrizer builds Seated as LOCAL plus the offset taken at `ResetSeatedZeroPose`; upstream keeps
     it, so a Meta recenter after a game one stacked both (height too). The vr/xrizer patch clears
-    it on LOCAL's `XrEventDataReferenceSpaceChangePending` (XERK-2847).
+    it on LOCAL's `XrEventDataReferenceSpaceChangePending` (XERK-2847). Keep 0016 with it: without
+    0016 the Meta recenter keeps 1.6 m, and clearing the offset drops the game's height fix.
   - OpenComposite (cff07db) still stacks them: its Seated is LOCAL plus its own offset. Another
     in-game recenter clears it.
 - Headless sway on NVIDIA needs `--unsupported-gpu` and has no keyboard: xdotool keys are dropped
