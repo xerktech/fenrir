@@ -77,10 +77,21 @@ var (
 	uiEndFFErase    = ioc(iocWrite, 203, ffEraseSize)
 )
 
-// ioctl retries EINTR: the Go runtime's own signals interrupted
-// UI_DEV_CREATE on talos04 (2 of 541 creates, QA).
+// ioctl and ioctlInt retry EINTR: the Go runtime's own signals interrupted
+// UI_DEV_CREATE on talos04 (2 of 541 creates, QA). The pointer must reach
+// Syscall as uintptr(arg) in the call itself: converted any earlier, the
+// runtime no longer tracks it, and a stack move leaves the kernel writing to
+// the old copy of the buffer (QA lost 120 of 16,000 results).
 func ioctl(fd int, req uintptr, arg unsafe.Pointer) error {
-	return ioctlInt(fd, req, int(uintptr(arg)))
+	for {
+		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), req, uintptr(arg))
+		if errno == 0 {
+			return nil
+		}
+		if errno != unix.EINTR {
+			return errno
+		}
+	}
 }
 
 func ioctlInt(fd int, req uintptr, v int) error {
