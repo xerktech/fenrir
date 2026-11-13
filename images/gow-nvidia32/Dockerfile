@@ -283,18 +283,33 @@ RUN git clone https://gitlab.com/znixian/OpenOVR.git /src/oc \
  && install -D -m 0755 "$(find /src/oc/build -name vrclient.so | head -1)" \
       /out/opt/opencomposite/bin/linux64/vrclient.so
 
-# xrizer's release zip, checked against its SHA256 (update both together).
-FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS vr-xrizer
-ARG XRIZER_VERSION=v0.6
-ARG XRIZER_SHA256=9b2105433e48a20f789e20a14113dbd98650afd116bd232419725a4438dd2149
-ADD --checksum=sha256:${XRIZER_SHA256} \
-  https://github.com/Supreeeme/xrizer/releases/download/${XRIZER_VERSION}/xrizer-${XRIZER_VERSION}.zip /tmp/xrizer.zip
-RUN set -eu; \
-  apt-get update; apt-get install -y --no-install-recommends unzip; \
-  unzip -q /tmp/xrizer.zip -d /tmp/xrizer; \
-  test -f "/tmp/xrizer/xrizer-${XRIZER_VERSION}/bin/linux64/vrclient.so"; \
-  chmod -R u=rwX,go=rX "/tmp/xrizer/xrizer-${XRIZER_VERSION}"; \
-  mkdir -p /out/opt; mv "/tmp/xrizer/xrizer-${XRIZER_VERSION}" /out/opt/xrizer
+# xrizer (github.com/Supreeeme/xrizer), built from its release tag's commit
+# with fenrir's patches in vr/xrizer/ (XERK-2847: a Quest recenter after an
+# in-game one applied twice). Its Cargo.lock pins every crate (--locked).
+# static-openxr links the OpenXR loader in, as the release zip does.
+# Bookworm keeps the glibc floor below the steam image's.
+FROM rust:1.89-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6 AS vr-xrizer
+ARG XRIZER_COMMIT=a1216c7b53fb562a5bc4de473163e97a483042af
+ARG XRIZER_VERSION=v0.6-direwolf1
+# The openxr-sys loader build's cmake would default to make, which is not installed.
+ENV CMAKE_GENERATOR=Ninja
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates cmake ninja-build clang libclang-dev g++ glslc \
+      libvulkan-dev libx11-xcb-dev libgl-dev
+RUN git clone https://github.com/Supreeeme/xrizer.git /src/xrizer \
+ && git -C /src/xrizer checkout --detach "${XRIZER_COMMIT}" \
+ && test "$(git -C /src/xrizer rev-parse HEAD)" = "${XRIZER_COMMIT}"
+COPY vr/xrizer/ /src/patches/
+# The patches' own tests run first: a patch that no longer does its job fails
+# the build rather than shipping.
+RUN set -eu; cd /src/xrizer; \
+  git apply --index /src/patches/*.patch; \
+  export XRIZER_VERSION; \
+  cargo test --release --locked --features static-openxr --lib openxr_data::tests; \
+  cargo build --release --locked --features static-openxr; \
+  install -D -m 0755 target/release/libxrizer.so /out/opt/xrizer/bin/linux64/vrclient.so; \
+  printf '%s\n' "${XRIZER_VERSION}" >/out/opt/xrizer/bin/version.txt; \
+  chmod 0644 /out/opt/xrizer/bin/version.txt
 
 # Selawik (OFL), Assetto Corsa's segoeui*.ttf stand-in (vr/ac-setup), from
 # its release zip, checked against its SHA256 (update both together).

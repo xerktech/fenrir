@@ -57,8 +57,10 @@ paths:
 
 ## Image (`images/gow-nvidia32` target `vr`, files in `vr/`; XERK-2663)
 
-- The steam image plus WiVRn (built from source at a verified commit), xrizer (zip, sha256) and
-  OpenComposite (commit); `DIREWOLF_VR_OPENVR` = `xrizer` (default) or `opencomposite`.
+- The steam image plus WiVRn (built from source at a verified commit), xrizer and OpenComposite
+  (both commits); `DIREWOLF_VR_OPENVR` = `xrizer` (default) or `opencomposite`.
+- xrizer is built from source with `vr/xrizer/*.patch` applied; each patch's xrizer tests run
+  in the build. Rebase them on a version bump; drop one once upstream has it.
 - `/opt/gow/startup-app.sh` links to `vr/startup-app.sh`; GoW's Steam startup moves beside it as
   `steam-startup-app.sh`. Siblings are found by the script's own path (tests copy them).
 - It refuses to start (the session ends) without `DIREWOLF_VR_PORT` (XERK-2664 sets it on App
@@ -283,9 +285,12 @@ paths:
   - The fork's Monado patch 0016 makes the Quest's own recenter (hold Meta) set LOCAL's height
     to the head's too (XERK-2846). Upstream keeps y, so a game with no reachable in-game recenter
     stayed off for good. It is the only recenter a headset-only session has: no pad, no keyboard.
-  - Don't mix it with an in-game recenter: xrizer and OpenComposite build Seated as LOCAL plus
-    the offset taken at `ResetSeatedZeroPose` and ignore LOCAL's change event, so a Meta recenter
-    after a game one stacks both (height too). Another in-game recenter clears it.
+  - xrizer builds Seated as LOCAL plus the offset taken at `ResetSeatedZeroPose`; upstream keeps
+    it, so a Meta recenter after a game one stacked both (height too). The vr/xrizer patch clears
+    it on LOCAL's `XrEventDataReferenceSpaceChangePending` (XERK-2847). Keep 0016 with it: without
+    0016 the Meta recenter keeps 1.6 m, and clearing the offset drops the game's height fix.
+  - OpenComposite (cff07db) still stacks them: its Seated is LOCAL plus its own offset. Another
+    in-game recenter clears it.
 - Headless sway on NVIDIA needs `--unsupported-gpu` and has no keyboard: xdotool keys are dropped
   and wtype's keymap is read wrongly by DirectInput. Inject keys through a real virtual device.
 

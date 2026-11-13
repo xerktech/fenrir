@@ -553,8 +553,8 @@ func TestVRFilesAvoidForbiddenSettings(t *testing.T) {
 	}
 }
 
-// Every upstream input is pinned: WiVRn and OpenComposite by commit, xrizer
-// by checksum, and the vr target builds in both image workflows.
+// Every upstream input is pinned: WiVRn, OpenComposite and xrizer by commit,
+// and the vr target builds in both image workflows.
 func TestVRImageIsPinnedAndBuilt(t *testing.T) {
 	b, err := os.ReadFile("../Dockerfile")
 	if err != nil {
@@ -569,8 +569,11 @@ func TestVRImageIsPinnedAndBuilt(t *testing.T) {
 		`-DWIVRN_USE_PIPEWIRE=ON`,
 		`\nARG OPENCOMPOSITE_COMMIT=[0-9a-f]{40}\n`,
 		`test "\$\(git -C /src/oc rev-parse HEAD\)" = "\$\{OPENCOMPOSITE_COMMIT\}"`,
-		`\nARG XRIZER_SHA256=[0-9a-f]{64}\n`,
-		`ADD --checksum=sha256:\$\{XRIZER_SHA256\}`,
+		`\nARG XRIZER_COMMIT=[0-9a-f]{40}\n`,
+		`test "\$\(git -C /src/xrizer rev-parse HEAD\)" = "\$\{XRIZER_COMMIT\}"`,
+		// XERK-2847's patch is applied and its tests gate the build.
+		`git apply --index /src/patches/\*\.patch;`,
+		`cargo test --release --locked --features static-openxr --lib openxr_data::tests;`,
 		`ln -s /opt/direwolf/vr/startup-app.sh /opt/gow/startup-app.sh`,
 		// Assetto Corsa's setup (ac-setup, XERK-2726).
 		`\nARG WINETRICKS_VERSION=[0-9]{8}\n`,
