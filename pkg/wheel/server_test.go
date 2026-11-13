@@ -326,14 +326,41 @@ func TestWheelCap(t *testing.T) {
 	if m := a.recv(); m.Op != OpError {
 		t.Errorf("wheel past the cap: %+v", m)
 	}
-	a.send(g920(0))
-	if m := a.recv(); m.Op != OpError || !strings.Contains(m.Msg, "exists") {
-		t.Errorf("repeated id: %+v", m)
-	}
 	a.send(Request{Op: OpDestroy, ID: 0})
 	a.send(g920(99))
 	if m := a.recv(); m.Op != OpCreated {
 		t.Errorf("after a destroy: %+v", m)
+	}
+}
+
+// A create for an id the connection holds replaces that wheel, withdrawn and
+// destroyed first; a destroy of an unknown id is silent. So a client that
+// recreates a wheel after an error can't loop.
+func TestCreateReplacesAndDestroyIsIdempotent(t *testing.T) {
+	h := newHarness(t)
+	c := h.dial()
+	c.send(g920(5))
+	c.recv()
+	c.send(g920(5))
+	if m := c.recv(); m.Op != OpCreated || m.ID != 5 {
+		t.Fatalf("replace: %+v", m)
+	}
+	want := []string{"create event1", "publish event1", "withdraw event1", "close event1", "create event2", "publish event2"}
+	if got := h.b.calls(); !slices.Equal(got, want) {
+		t.Errorf("calls = %v, want %v", got, want)
+	}
+	c.send(Request{Op: OpDestroy, ID: 99})
+	c.send(Request{Op: OpEvents, ID: 99, Events: []Event{{Type: evAbs}}})
+	if m := c.recv(); m.Op != OpError || !strings.Contains(m.Msg, "no wheel 99") {
+		t.Errorf("got %+v, want only the events error", m)
+	}
+	// An invalid replacement leaves the old wheel alone.
+	bad := g920(5)
+	bad.Keys = []uint16{28}
+	c.send(bad)
+	c.recv()
+	if h.b.devs[1].closed {
+		t.Error("invalid create destroyed the wheel it would replace")
 	}
 }
 
@@ -399,6 +426,16 @@ func TestPublishFailures(t *testing.T) {
 	}
 	if h.b.devs[1].closed {
 		t.Error("device closed under a node still published")
+	}
+	// Still held, and retried when the connection closes; still stuck, it
+	// stays open and keeps its slot.
+	c.c.Close()
+	waitFor(t, func() bool {
+		return slices.Equal(h.b.calls()[len(h.b.calls())-2:], []string{"withdraw event2", "withdraw event2"})
+	})
+	h.stop()
+	if h.b.devs[1].closed {
+		t.Error("stuck device closed")
 	}
 }
 

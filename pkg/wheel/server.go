@@ -71,6 +71,11 @@ type Server struct {
 	mu     sync.Mutex
 	wheels int
 	conns  int
+	// Wheels whose node would not withdraw, kept open for good: closed
+	// (or collected, whose finalizer closes the fd), their minor would go
+	// to another device under the node still mounted in the App. They keep
+	// their slot.
+	stuck []*wheel
 }
 
 // Serve accepts connections on l until ctx ends, then destroys every wheel.
@@ -191,21 +196,20 @@ func (c *conn) handle(req *Request) error {
 	case OpEvents:
 		return c.events(req)
 	case OpDestroy:
-		w, ok := c.wheels[req.ID]
-		if !ok {
-			return fmt.Errorf("no wheel %d", req.ID)
-		}
-		delete(c.wheels, req.ID)
-		return c.destroy(w)
+		// An unknown id is already gone: silent, so a client retrying
+		// after an error can't loop on it.
+		return c.destroy(req.ID)
 	}
 	return fmt.Errorf("unknown op %q", req.Op)
 }
 
+// create makes the wheel req describes, replacing one of the same id: a
+// client that lost track of it (after an error) recreates it.
 func (c *conn) create(req *Request) error {
-	if _, ok := c.wheels[req.ID]; ok {
-		return fmt.Errorf("wheel %d exists", req.ID)
-	}
 	if err := validateCreate(req); err != nil {
+		return err
+	}
+	if err := c.destroy(req.ID); err != nil {
 		return err
 	}
 	if !c.s.take(&c.s.wheels, MaxWheels) {
@@ -257,17 +261,21 @@ func (c *conn) events(req *Request) error {
 	return nil
 }
 
-// destroy withdraws w's node before the kernel frees its minor for another
-// device: a node left mounted would then open that one.
-func (c *conn) destroy(w *wheel) error {
-	defer c.s.give(&c.s.wheels)
-	werr := c.s.Publisher.Withdraw(w.node)
-	if werr != nil {
-		// Keep the device (and its minor) rather than free the minor under
-		// a node still mounted in the App.
-		klog.Errorf("wheel: withdrawing %s, keeping the device: %v", w.node.Event, werr)
-		return fmt.Errorf("withdraw: %w", werr)
+// destroy withdraws wheel id's node, then destroys the device: freed first,
+// its minor could go to another device under the node still mounted. A
+// wheel whose node won't withdraw stays, and is retried. No such wheel is
+// not an error.
+func (c *conn) destroy(id uint32) error {
+	w, ok := c.wheels[id]
+	if !ok {
+		return nil
 	}
+	if err := c.s.Publisher.Withdraw(w.node); err != nil {
+		klog.Errorf("wheel: withdrawing %s, keeping the device: %v", w.node.Event, err)
+		return fmt.Errorf("withdraw: %w", err)
+	}
+	delete(c.wheels, id)
+	c.s.give(&c.s.wheels)
 	klog.InfoS("wheel: destroyed", "node", w.node.Event)
 	if err := w.dev.Close(); err != nil {
 		return fmt.Errorf("destroy %s: %w", w.node.Event, err)
@@ -275,12 +283,19 @@ func (c *conn) destroy(w *wheel) error {
 	return nil
 }
 
+// destroyAll destroys the connection's wheels; those whose node won't
+// withdraw move to the server's stuck list, still open.
 func (c *conn) destroyAll() {
-	for id, w := range c.wheels {
-		delete(c.wheels, id)
-		if err := c.destroy(w); err != nil {
+	for id := range c.wheels {
+		if err := c.destroy(id); err != nil {
 			klog.Errorf("wheel: %v", err)
 		}
+	}
+	c.s.mu.Lock()
+	defer c.s.mu.Unlock()
+	for id, w := range c.wheels {
+		c.s.stuck = append(c.s.stuck, w)
+		delete(c.wheels, id)
 	}
 }
 

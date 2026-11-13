@@ -401,11 +401,14 @@ paths:
   `server/driver/wivrn_wheel.cpp` (XERK-2850). Change both together.
   - The helper acks the kernel's FF upload/erase at once and relays it: the game blocks until
     the ack, and nothing on the headset can usefully refuse one.
+  - A create for an id the connection holds replaces it, and destroying an unknown id is
+    silent: WiVRn recreates a wheel 1s after any error naming it, so either one erroring loops.
 - Anything in the App can connect (every process is uid 1000), so the helper enforces limits:
   4 wheels per Session, 4 connections, gamepad buttons only (no keyboard key, mouse button or
   digitizer tool), absolute axes below the multitouch ones, no FF_CUSTOM (a pointer into the
   game), only EV_KEY/EV_ABS/EV_SYN events, 4,000 events/s per connection (more are dropped).
-- A wheel's node is withdrawn before its device is destroyed; a failed withdraw keeps the device.
+- A wheel's node is withdrawn before its device is destroyed; a failed withdraw keeps the device
+  open for good (`Server.stuck`): dropped, Go's finalizer would close its fd.
   Freed first, the kernel could give its minor to another session's device under the mounted node.
 - The bridge's `Clear` (wolf-agent sends it whenever a stream stops) leaves the wheel's node,
   udev entry and announced add (`Server.Publish`); the socket can't replace or remove them.
