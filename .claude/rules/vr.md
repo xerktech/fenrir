@@ -14,6 +14,7 @@ paths:
   - examples/vr*.yaml
   - pkg/api/v1alpha1/session.go
   - docs/vr-native-session.md
+  - hack/vr-wheel/**
 ---
 
 # VR streaming (epic XERK-2656; spike report on XERK-2662)
@@ -382,3 +383,27 @@ paths:
       launch. Tests: `TestACSetupBindsVRRecenterToPad`.
     - Unverified in a headset: that the press recenters.
   - Its memory limit (24Gi) needs a User ceiling to match. Tests: `state_mounts_test.go`.
+
+## Wheel (G920 epic XERK-2848; spike XERK-2849, measured on talos04)
+
+- A uinput wheel made by a privileged helper reaches AC's Proton (9.0-4, under
+  SteamLinuxRuntime_sniper) in a `hostUsers: false` VR pod, with force feedback both ways.
+- Publish the node like `input-bridge`: mknod `0666` in a host dir mounted Bidirectional in the
+  helper, then bind-mount it onto itself; the App mounts that dir HostToContainer at `/dev/input`.
+  - A plain mknod lands `nodev` in the userns pod; the self bind mount arrives without it.
+  - The node shows as `65534:65534` (host root is unmapped): `0660` gives EACCES to the App user.
+    `0666` is the only mode that opens; keep the dir per Session so no other pod sees the node.
+  - The open still needs nri-input's `13:*` grant: an unlabelled userns pod got EPERM. Any App
+    container of a `direwolf/session=true` pod already has it; no new device grant is needed.
+- Proton needs no udev data and no env: winebus sees a container, skips udevd and watches
+  `/dev/input` itself (a wheel created 25s after Proton started was listed).
+  - Its udev backend classes 046d:c262 as a hidraw wheel and defers it; with no hidraw node the
+    SDL backend takes it. So `PROTON_ENABLE_HIDRAW` changes nothing for a uinput wheel.
+  - DirectInput lists it as a game controller with FF (`dwFFDriverVersion` 1): 4 axes,
+    16 buttons, 1 POV; steering and buttons arrive live. Pedal axis mapping is unchecked.
+- FF from DirectInput reaches the helper as `UI_FF_UPLOAD` (CONSTANT/SPRING/DAMPER, one id each),
+  `EV_FF` play/stop, `FF_GAIN` (DIPROP_FFGAIN 7500 → 49151), `FF_AUTOCENTER` 0, and erase.
+  - Helper needs: EV_FF with those bits and `ff_effects_max`; answer every upload/erase request.
+  - A test that frees one effect and creates another type gets no upload: SDL reuses the slot and
+    refuses a type change. Keep effects alive at once, as games do.
+- Test tool: `hack/vr-wheel/fftest.c` (DirectInput FF exe, build line in its header).
