@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 
 	v1alpha1types "games-on-whales.github.io/direwolf/pkg/api/v1alpha1"
 )
@@ -510,4 +511,62 @@ func (c *SessionController) appPodReady(wolfPod *corev1.Pod) error {
 		return fmt.Errorf("app pod %s/%s not ready (phase %s)", pod.Namespace, pod.Name, pod.Status.Phase)
 	}
 	return nil
+}
+
+// killAppPodIfBridgeDied deletes a split Session's App pod at once when its
+// input-bridge did not exit cleanly (XERK-2859). A SIGKILLed bridge (OOM,
+// hard eviction) leaves its nodes mounted in the App's input/, while the
+// kernel frees their minors with the bridge's uinput devices: the next device
+// given one (another Session's) opens through the stale node until the App
+// pod dies. Garbage collection would give it its full termination grace.
+//
+// Clean means the bridge is still running, so it gets SIGTERM and withdraws
+// its nodes, or it exited 0 after doing so. A Wolf pod missing from the cache
+// is treated as unclean: nothing says its bridge cleaned up.
+func (c *SessionController) killAppPodIfBridgeDied(ctx context.Context, session *v1alpha1types.Session) error {
+	wolfPod, err := c.podController.Informer().Namespaced(session.Namespace).Get(c.podName(session))
+	switch {
+	case errors.IsNotFound(err):
+		if !meta.IsStatusConditionTrue(session.Status.Conditions, appPodCreatedCondition) {
+			return nil
+		}
+	case err != nil:
+		return fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, c.podName(session), err)
+	case wolfPod.Annotations[appPodAnnotation] == "" || !bridgeExitedUncleanly(wolfPod):
+		return nil
+	}
+	name := c.appPodName(session)
+	if wolfPod != nil {
+		name = wolfPod.Annotations[appPodAnnotation]
+	}
+	// 1s, not 0: a force delete drops the object before kubelet has killed
+	// the containers. Kubelet's own floor is 2s either way.
+	grace := int64(1)
+	err = c.K8sClient.CoreV1().Pods(session.Namespace).Delete(ctx, name, metav1.DeleteOptions{
+		GracePeriodSeconds: &grace,
+	})
+	switch {
+	case errors.IsNotFound(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("failed to delete app pod %s/%s: %w", session.Namespace, name, err)
+	}
+	klog.Infof("Session %s/%s: input-bridge exited uncleanly, deleted app pod %s without grace", session.Namespace, session.Name, name)
+	return nil
+}
+
+// bridgeExitedUncleanly reports whether the Wolf pod's input-bridge has
+// stopped without its exit cleanup: terminated non-zero, or the pod finished
+// with the bridge never reported terminated.
+func bridgeExitedUncleanly(wolfPod *corev1.Pod) bool {
+	for _, cs := range wolfPod.Status.ContainerStatuses {
+		if cs.Name != v1alpha1types.InputBridgeContainerName {
+			continue
+		}
+		if t := cs.State.Terminated; t != nil {
+			return t.ExitCode != 0
+		}
+		break
+	}
+	return wolfPod.Status.Phase == corev1.PodFailed || wolfPod.Status.Phase == corev1.PodSucceeded
 }
