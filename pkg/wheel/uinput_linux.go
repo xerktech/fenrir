@@ -77,8 +77,9 @@ var (
 	uiEndFFErase    = ioc(iocWrite, 203, ffEraseSize)
 )
 
-// ioctl and ioctlInt retry EINTR: the Go runtime's own signals interrupted
-// UI_DEV_CREATE on talos04 (2 of 541 creates, QA). The pointer must reach
+// ioctl and ioctlInt retry EINTR (the Go runtime's own signals), which the
+// uinput handlers return before changing any state. Not UI_DEV_CREATE: see
+// Create. The pointer must reach
 // Syscall as uintptr(arg) in the call itself: converted any earlier, the
 // runtime no longer tracks it, and a stack move leaves the kernel writing to
 // the old copy of the buffer (QA lost 120 of 16,000 results).
@@ -96,15 +97,22 @@ func ioctl(fd int, req uintptr, arg unsafe.Pointer) error {
 
 func ioctlInt(fd int, req uintptr, v int) error {
 	for {
-		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), req, uintptr(v))
-		if errno == 0 {
-			return nil
-		}
-		if errno != unix.EINTR {
-			return errno
+		if err := ioctlOnce(fd, req, v); !errors.Is(err, unix.EINTR) {
+			return err
 		}
 	}
 }
+
+func ioctlOnce(fd int, req uintptr, v int) error {
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), req, uintptr(v))
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+// createAttempts bounds Create's retries of an interrupted UI_DEV_CREATE.
+const createAttempts = 5
 
 // Create makes the uinput device req describes.
 func (u *Uinput) Create(req *Request, ff func(Message)) (Device, Node, error) {
@@ -112,13 +120,22 @@ func (u *Uinput) Create(req *Request, ff func(Message)) (Device, Node, error) {
 	if err != nil {
 		return nil, Node{}, fmt.Errorf("open %s: %w", u.Path, err)
 	}
-	if err = setup(fd, req); err != nil {
-		_ = unix.Close(fd)
-		return nil, Node{}, err
-	}
-	if err = ioctlInt(fd, uiDevCreate, 0); err != nil {
-		_ = unix.Close(fd)
-		return nil, Node{}, fmt.Errorf("UI_DEV_CREATE: %w", err)
+	// An interrupted UI_DEV_CREATE (EINTR from input_register_device's
+	// mutex; 2 of 541 creates on talos04, QA) has uinput tear the device back
+	// down to unset: retried alone it fails EINVAL, so the setup is redone.
+	for attempt := 1; ; attempt++ {
+		if err = setup(fd, req); err != nil {
+			_ = unix.Close(fd)
+			return nil, Node{}, err
+		}
+		err = ioctlOnce(fd, uiDevCreate, 0)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EINTR) || attempt == createAttempts {
+			_ = unix.Close(fd)
+			return nil, Node{}, fmt.Errorf("UI_DEV_CREATE: %w", err)
+		}
 	}
 	// The fd is non-blocking, so the runtime poller serves Read and Close
 	// wakes a pending Read.
