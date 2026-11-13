@@ -14,6 +14,8 @@ paths:
   - examples/vr*.yaml
   - pkg/api/v1alpha1/session.go
   - docs/vr-native-session.md
+  - pkg/wheel/**
+  - cmd/wolf-agent/wheel*.go
 ---
 
 # VR streaming (epic XERK-2656; spike report on XERK-2662)
@@ -382,3 +384,31 @@ paths:
       launch. Tests: `TestACSetupBindsVRRecenterToPad`.
     - Unverified in a headset: that the press recenters.
   - Its memory limit (24Gi) needs a User ceiling to match. Tests: `state_mounts_test.go`.
+
+## Wheel helper (`--vr-wheel`, XERK-2852; epic XERK-2848)
+
+- wivrn-server asks `DIREWOLF_WHEEL_SOCKET` (`pkg/wheel`) for a uinput wheel; the App container
+  gets only the socket (read-only mount of `<dir>/<UID>/wheel`), never a device or capability.
+  - The helper is the Session's input-bridge (`--wheel-socket`), privileged in the host user
+    namespace: a hostUsers:false container can't open `/dev/uinput` or propagate a mount.
+  - Moonlight mode: the Wolf pod's bridge. Native VR: a `<session>-wheel` pod (bridge only,
+    podAffinity to the VR pod) whose input/udev/events dirs the VR pod mounts as a split App
+    pod does; never recreated, its exit ends the Session (`reconcileWheelPod`).
+  - The VR pod's `wheel-wait` init container holds the App until the bridge made
+    `/run/udev/control`: libudev checks for it once, so a game started first misses the wheel.
+  - Needs `--app-pod-host-dir` (operator exits without it). Off by default.
+- Protocol: SOCK_SEQPACKET, one JSON object per packet; keys agreed with the fork's
+  `server/driver/wivrn_wheel.cpp` (XERK-2850). Change both together.
+  - The helper acks the kernel's FF upload/erase at once and relays it: the game blocks until
+    the ack, and nothing on the headset can usefully refuse one.
+- Anything in the App can connect (every process is uid 1000), so the helper enforces limits:
+  4 wheels per Session, 4 connections, gamepad buttons only (no keyboard key, mouse button or
+  digitizer tool), absolute axes below the multitouch ones, no FF_CUSTOM (a pointer into the
+  game), only EV_KEY/EV_ABS/EV_SYN events, 4,000 events/s per connection (more are dropped).
+- A wheel's node is withdrawn before its device is destroyed; a failed withdraw keeps the device.
+  Freed first, the kernel could give its minor to another session's device under the mounted node.
+- The bridge's `Clear` (wolf-agent sends it whenever a stream stops) leaves the wheel's node,
+  udev entry and announced add (`Server.Publish`); the socket can't replace or remove them.
+- Unverified until XERK-2853: the full path with a real headset and G920.
+- Tests: `pkg/wheel` (`TestUinputRoundTrip` needs `/dev/uinput`), `vr_wheel_test.go`,
+  `TestPublishedNodeSurvivesClear`, `TestListenWheelLocksAndHandsOver`.

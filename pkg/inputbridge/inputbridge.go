@@ -22,10 +22,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -88,6 +90,31 @@ type Server struct {
 	chown func(f *os.File) error
 
 	events eventHub
+
+	// mu serializes requests: Serve's and the in-process owners' (Publish).
+	mu sync.Mutex
+	// Nodes (by name), udev entries (by file name) and DEVPATHs an
+	// in-process owner published (the wheel helper, pkg/wheel). Clear,
+	// which wolf-agent sends when a stream stops, leaves them, and the
+	// socket can't replace or remove them.
+	owned owned
+}
+
+type owned struct {
+	nodes, udev, devpaths map[string]bool
+}
+
+func (o *owned) set(node, udev, devpath string, on bool) {
+	if o.nodes == nil {
+		o.nodes, o.udev, o.devpaths = map[string]bool{}, map[string]bool{}, map[string]bool{}
+	}
+	if on {
+		o.nodes[node], o.udev[udev], o.devpaths[devpath] = true, true, true
+		return
+	}
+	delete(o.nodes, node)
+	delete(o.udev, udev)
+	delete(o.devpaths, devpath)
 }
 
 // NewServer returns a Server publishing into inputDir and udevDataDir,
@@ -224,6 +251,22 @@ func (s *Server) serveConn(conn net.Conn) {
 
 // Handle runs one request.
 func (s *Server) Handle(req Request) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch req.Op {
+	case OpCreate, OpRemove:
+		if path, err := s.nodePath(req.Props); err == nil && s.owned.nodes[filepath.Base(path)] {
+			return fmt.Errorf("%s is the wheel helper's", req.Props["DEVNAME"])
+		}
+	case OpWriteHwDB, OpRemoveHwDB:
+		if s.owned.udev[req.Filename] {
+			return fmt.Errorf("udev entry %s is the wheel helper's", req.Filename)
+		}
+	case OpUevent:
+		if s.owned.devpaths[req.Props["DEVPATH"]] {
+			return fmt.Errorf("%s is the wheel helper's", req.Props["DEVPATH"])
+		}
+	}
 	switch req.Op {
 	case OpCreate:
 		return s.create(req.Props)
@@ -247,9 +290,54 @@ func (s *Server) Handle(req Request) error {
 	case OpUevent:
 		return s.uevent(req.Props)
 	case OpClear:
-		return s.Clear()
+		return s.clear()
 	}
 	return fmt.Errorf("unknown op %q", req.Op)
+}
+
+// Publish creates props' node, writes its udev entry udevFile and announces
+// it, for an owner in this process. Clear leaves it until Withdraw.
+func (s *Server) Publish(props map[string]string, udevFile string, content []string) error {
+	if err := hwdbName(udevFile); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.create(props); err != nil {
+		return err
+	}
+	s.owned.set(filepath.Base(props["DEVNAME"]), udevFile, props["DEVPATH"], true)
+	if err := writeLockedFile(s.TmpDir, filepath.Join(s.UdevDataDir, udevFile),
+		[]byte(strings.Join(content, "\n")), s.chown); err != nil {
+		return err
+	}
+	add := maps.Clone(props)
+	add["ACTION"] = "add"
+	return s.uevent(add)
+}
+
+// Withdraw undoes Publish, announcing the removal first.
+func (s *Server) Withdraw(props map[string]string, udevFile string) error {
+	if err := hwdbName(udevFile); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.owned.devpaths[props["DEVPATH"]] {
+		rm := maps.Clone(props)
+		rm["ACTION"] = "remove"
+		if err := s.uevent(rm); err != nil {
+			return err
+		}
+	}
+	if err := fakeudev.RemoveHwDbEntry(s.UdevDataDir, udevFile); err != nil {
+		return fmt.Errorf("remove udev entry: %w", err)
+	}
+	if err := s.remove(props); err != nil {
+		return err
+	}
+	s.owned.set(filepath.Base(props["DEVNAME"]), udevFile, props["DEVPATH"], false)
+	return nil
 }
 
 func (s *Server) create(props map[string]string) error {
@@ -300,8 +388,15 @@ func hwdbName(name string) error {
 // Clear unmounts and removes every node in InputDir and every udev entry.
 // Wolf destroys a stopped stream's devices without unplug events (see
 // Agent.clearDevices).
+// What an in-process owner published stays (Publish).
 func (s *Server) Clear() error {
-	s.events.removeAll()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clear()
+}
+
+func (s *Server) clear() error {
+	s.events.removeAll(s.owned.devpaths)
 	return errors.Join(s.clearNodes(), s.clearUdev())
 }
 
@@ -309,7 +404,23 @@ func (s *Server) clearUdev() error {
 	if s.UdevDataDir == "" {
 		return nil
 	}
-	if err := fakeudev.ClearDir(s.UdevDataDir); err != nil {
+	entries, err := os.ReadDir(s.UdevDataDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("clear udev entries: %w", err)
+	}
+	var errs []error
+	for _, e := range entries {
+		if s.owned.udev[e.Name()] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.UdevDataDir, e.Name())); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("clear udev entries: %w", err)
 	}
 	return nil
@@ -325,6 +436,9 @@ func (s *Server) clearNodes() error {
 	}
 	var errs []error
 	for _, e := range entries {
+		if s.owned.nodes[e.Name()] {
+			continue
+		}
 		path := filepath.Join(s.InputDir, e.Name())
 		if err := s.unmount(path); err != nil {
 			errs = append(errs, err)

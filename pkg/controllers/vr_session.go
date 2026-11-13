@@ -159,13 +159,17 @@ func (c *SessionController) buildVRPod(session *v1alpha1types.Session) (*corev1.
 	spec := &pod.Spec
 	spec.InitContainers = slices.DeleteFunc(spec.InitContainers, func(c corev1.Container) bool { return isWolfPodContainer(c.Name) })
 	spec.Containers = slices.DeleteFunc(spec.Containers, func(c corev1.Container) bool { return isWolfPodContainer(c.Name) })
+	_, vrApp := pod.Annotations[vrPortAnnotation]
+	wheel := vrApp && c.wheelOn()
 	for i := range spec.Containers {
 		ctr := &spec.Containers[i]
 		// No wolf-agent publishes input nodes: Quest controllers reach the
-		// game through OpenXR.
-		ctr.VolumeMounts = slices.DeleteFunc(ctr.VolumeMounts, func(m corev1.VolumeMount) bool {
-			return m.Name == hotplugDevVolume || m.Name == hotplugUdevVolume
-		})
+		// game through OpenXR. Only a wheel helper does (withNativeWheel).
+		if !wheel {
+			ctr.VolumeMounts = slices.DeleteFunc(ctr.VolumeMounts, func(m corev1.VolumeMount) bool {
+				return m.Name == hotplugDevVolume || m.Name == hotplugUdevVolume
+			})
+		}
 		ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{Name: vrBusVolume, MountPath: VRBusDir})
 		ctr.Env = append(slices.DeleteFunc(ctr.Env, func(e corev1.EnvVar) bool { return e.Name == vrModeEnv }),
 			corev1.EnvVar{Name: vrModeEnv, Value: vrModeNative})
@@ -175,6 +179,9 @@ func (c *SessionController) buildVRPod(session *v1alpha1types.Session) (*corev1.
 		return nil, invalidSpec(err)
 	}
 	spec.Containers = append(spec.Containers, c.vrAgentContainer(true, uid, gid))
+	if wheel {
+		c.withNativeWheel(session, pod, uid, gid)
+	}
 	// Created by reconcileSessionPod before the pod (XERK-2747).
 	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: vrAgentOwnTokenVolume, VolumeSource: corev1.VolumeSource{
 		Secret: &corev1.SecretVolumeSource{SecretName: vrAgentTokenSecretName(session.Name)},

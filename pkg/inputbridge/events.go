@@ -47,17 +47,24 @@ func (h *eventHub) publish(ev map[string]string) {
 	h.sendLocked(ev)
 }
 
-// removeAll announces the removal of every device still announced, newest
-// first: Wolf destroys a stopped stream's devices without unplug events.
-func (h *eventHub) removeAll() {
+// removeAll announces the removal of every device still announced but those
+// in keep (by DEVPATH), newest first: Wolf destroys a stopped stream's
+// devices without unplug events.
+func (h *eventHub) removeAll(keep map[string]bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	var kept []map[string]string
 	for _, a := range slices.Backward(h.added) {
+		if keep[a["DEVPATH"]] {
+			kept = append(kept, a)
+			continue
+		}
 		ev := maps.Clone(a)
 		ev["ACTION"] = "remove"
 		h.sendLocked(ev)
 	}
-	h.added = nil
+	slices.Reverse(kept)
+	h.added = kept
 }
 
 func (h *eventHub) sendLocked(ev map[string]string) {

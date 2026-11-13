@@ -59,6 +59,9 @@ func main() {
 		"Absolute node directory under which each Session's App runs in a user-namespaced pod of its own, apart from Wolf "+
 			"(must be on a mount with shared propagation, and used by this operator alone: it removes the directories of "+
 			"Sessions it doesn't know); empty runs the App in the session pod")
+	vrWheel := flag.Bool("vr-wheel", false,
+		"Serve DIREWOLF_WHEEL_SOCKET to vrPort Apps: a privileged helper (the Session's input-bridge) makes the uinput "+
+			"wheel wivrn-server asks for and publishes its node into the App (needs --app-pod-host-dir)")
 	disconnectGracePeriod := flag.Duration("disconnect-grace-period", 10*time.Minute,
 		"How long a session's pod is kept after its Moonlight client disconnects, so /resume can re-attach")
 	libraryPort := flag.Int("library-port", 0,
@@ -143,6 +146,9 @@ func main() {
 			klog.Fatalf("--app-pod-host-dir must be an absolute directory other than /, got %q", *appPodHostDir)
 		}
 		*appPodHostDir = path.Clean(*appPodHostDir)
+	}
+	if *vrWheel && *appPodHostDir == "" {
+		klog.Fatal("--vr-wheel needs --app-pod-host-dir: the wheel's node is published through the Session's host directory")
 	}
 	tolerations, err := controllers.ParseTolerations(*sessionTolerations)
 	if err != nil {
@@ -312,6 +318,7 @@ func main() {
 			VRPortRange:         vrRange,
 			SessionNodeSelector: nodeSelector,
 			AppPodHostDir:       *appPodHostDir,
+			VRWheel:             *vrWheel,
 			SessionTolerations:  tolerations,
 			LibraryHomePVC:      *libraryHomePVC,
 			LibraryGamesPVC:     *libraryGamesPVC,

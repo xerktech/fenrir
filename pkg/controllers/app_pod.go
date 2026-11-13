@@ -223,6 +223,9 @@ func (c *SessionController) splitAppPod(session *v1alpha1types.Session, combined
 		HostPath: &corev1.HostPathVolumeSource{Path: c.sessionHostDir(session, "events"), Type: new(corev1.HostPathDirectoryOrCreate)},
 	}})
 	if _, vr := app.Annotations[vrPortAnnotation]; vr {
+		if c.wheelOn() {
+			c.withSplitWheel(session, wolf, app)
+		}
 		c.withVRAgent(session, &app.Spec)
 	}
 	app.Spec.HostUsers = new(false)
@@ -423,21 +426,7 @@ func (c *SessionController) reconcileAppPod(ctx context.Context, session *v1alph
 	if name == "" {
 		return nil
 	}
-	existing, err := c.podController.Informer().Namespaced(session.Namespace).Get(name)
-	switch {
-	case err == nil:
-		_, err = c.checkPodContainers(ctx, session, existing)
-		return err
-	case !errors.IsNotFound(err):
-		return fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, name, err)
-	case meta.IsStatusConditionTrue(session.Status.Conditions, appPodCreatedCondition):
-		live, getErr := c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, name, metav1.GetOptions{})
-		if errors.IsNotFound(getErr) {
-			return c.endSessionErr(ctx, session, "its app pod was deleted")
-		} else if getErr != nil {
-			return fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, name, getErr)
-		}
-		_, err = c.checkPodContainers(ctx, session, live)
+	if found, err := c.checkCompanionPod(ctx, session, name, appPodCreatedCondition, "app pod"); found {
 		return err
 	}
 	// Kubelet sets up the Wolf pod's runtime emptyDir before its init
@@ -468,27 +457,58 @@ func (c *SessionController) reconcileAppPod(ctx context.Context, session *v1alph
 			return tokenErr
 		}
 	}
-	_, err = c.K8sClient.CoreV1().Pods(session.Namespace).Create(ctx, pod, metav1.CreateOptions{
+	return c.createCompanionPod(ctx, session, pod, appPodCreatedCondition, "app pod")
+}
+
+// checkCompanionPod checks a Session's pod beside its own (the App pod, the
+// wheel helper pod), named name, if it exists or was created (condition
+// True): found is then true and err the check's. Gone after its creation, it
+// ends the Session: like the Session's own pod it is never recreated.
+func (c *SessionController) checkCompanionPod(ctx context.Context, session *v1alpha1types.Session, name, condition, what string) (found bool, err error) {
+	existing, err := c.podController.Informer().Namespaced(session.Namespace).Get(name)
+	switch {
+	case err == nil:
+		_, err = c.checkPodContainers(ctx, session, existing)
+		return true, err
+	case !errors.IsNotFound(err):
+		return true, fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, name, err)
+	case meta.IsStatusConditionTrue(session.Status.Conditions, condition):
+		live, getErr := c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if errors.IsNotFound(getErr) {
+			return true, c.endSessionErr(ctx, session, "its "+what+" was deleted")
+		} else if getErr != nil {
+			return true, fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, name, getErr)
+		}
+		_, err = c.checkPodContainers(ctx, session, live)
+		return true, err
+	}
+	return false, nil
+}
+
+// createCompanionPod creates pod, a companion checkCompanionPod found
+// missing, and records condition.
+func (c *SessionController) createCompanionPod(ctx context.Context, session *v1alpha1types.Session, pod *corev1.Pod, condition, what string) error {
+	_, err := c.K8sClient.CoreV1().Pods(session.Namespace).Create(ctx, pod, metav1.CreateOptions{
 		FieldManager: "direwolf-session-controller-pod",
 	})
 	switch {
 	case errors.IsAlreadyExists(err):
-		live, getErr := c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, name, metav1.GetOptions{})
+		live, getErr := c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 		if getErr != nil {
-			return fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, name, getErr)
+			return fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, pod.Name, getErr)
 		}
 		if _, checkErr := c.checkPodContainers(ctx, session, live); checkErr != nil {
 			return checkErr
 		}
 	case errors.IsInvalid(err):
-		reason := fmt.Sprintf("its app pod is invalid (check its App, User and namespace LimitRanges): %v", err)
+		reason := fmt.Sprintf("its %s is invalid (check its App, User and namespace LimitRanges): %v", what, err)
 		c.warnApp(session, "InvalidPod", reason)
 		return c.endSessionErr(ctx, session, reason)
 	case err != nil:
 		return fmt.Errorf("failed to create pod: %w", err)
 	}
 	meta.SetStatusCondition(&session.Status.Conditions, metav1.Condition{
-		Type:   appPodCreatedCondition,
+		Type:   condition,
 		Status: metav1.ConditionTrue,
 		Reason: "Created",
 	})
