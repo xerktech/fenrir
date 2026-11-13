@@ -415,7 +415,8 @@ paths:
   (XERK-2859); split mode has the same exposure for Wolf's pads.
 - Logs an App client can trigger (dropped messages, refused connections, creates and destroys)
   are rate-limited: unlimited, a client writing without reading logged 64 MB in 2 s (QA).
-  Tests: `TestClientCannotFloodLog`.
+  Each Server has its own limits; the test checks them as declared (never reassign them).
+  Tests: `TestClientCannotFloodLog` (run log-limit mutants with `-count=20`: timing-dependent).
 - The bridge listens on the wheel socket before it writes `/run/udev/control`, which releases
   `wheel-wait`, so WiVRn finds the socket when the App starts.
 - The bridge's `Clear` (wolf-agent sends it whenever a stream stops) leaves the wheel's node,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/time/rate"
 	"k8s.io/klog/v2"
 )
 
@@ -483,9 +483,6 @@ func TestClientCannotFloodLog(t *testing.T) {
 	klog.LogToStderr(false)
 	klog.SetOutput(&buf)
 	t.Cleanup(func() { klog.SetOutput(os.Stderr); klog.LogToStderr(true) })
-	churnLog = rate.Sometimes{First: 32, Interval: 10 * time.Second}
-	droppedLog = rate.Sometimes{First: 1, Interval: 10 * time.Second}
-	refusedLog = rate.Sometimes{First: 1, Interval: 10 * time.Second}
 
 	h := newHarness(t)
 	c := h.dial()
@@ -494,11 +491,20 @@ func TestClientCannotFloodLog(t *testing.T) {
 		c.send(Request{Op: OpDestroy, ID: 1})
 	}
 	// Never read: the queue fills and drops.
-	for range 2 * sendQueue {
+	for range 20 * sendQueue {
 		c.send(Request{Op: "nope"})
 	}
-	for range 3 * MaxConns {
+	// Each refused, read to EOF: dialled into the backlog, a connection
+	// Serve never accepted would log nothing.
+	for range MaxConns - 1 {
 		h.dial()
+	}
+	for range 3 * MaxConns {
+		extra := h.dial()
+		_ = extra.c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := extra.c.Read(make([]byte, 16)); !errors.Is(err, io.EOF) {
+			t.Fatalf("connection past the cap: %v", err)
+		}
 	}
 	waitFor(t, func() bool { return len(h.b.calls()) >= 4*200 })
 	h.stop()

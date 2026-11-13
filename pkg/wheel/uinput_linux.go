@@ -77,20 +77,22 @@ var (
 	uiEndFFErase    = ioc(iocWrite, 203, ffEraseSize)
 )
 
+// ioctl retries EINTR: the Go runtime's own signals interrupted
+// UI_DEV_CREATE on talos04 (2 of 541 creates, QA).
 func ioctl(fd int, req uintptr, arg unsafe.Pointer) error {
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), req, uintptr(arg))
-	if errno != 0 {
-		return errno
-	}
-	return nil
+	return ioctlInt(fd, req, int(uintptr(arg)))
 }
 
 func ioctlInt(fd int, req uintptr, v int) error {
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), req, uintptr(v))
-	if errno != 0 {
-		return errno
+	for {
+		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), req, uintptr(v))
+		if errno == 0 {
+			return nil
+		}
+		if errno != unix.EINTR {
+			return errno
+		}
 	}
-	return nil
 }
 
 // Create makes the uinput device req describes.

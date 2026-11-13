@@ -66,16 +66,24 @@ const (
 // Logs an untrusted client can trigger at will are rate-limited. A session's
 // few creates and destroys all log (First); a client looping them (QA: 135
 // cycles in 5 s) logs one line per Interval.
-var (
-	refusedLog = rate.Sometimes{First: 1, Interval: 10 * time.Second}
-	droppedLog = rate.Sometimes{First: 1, Interval: 10 * time.Second}
-	churnLog   = rate.Sometimes{First: 32, Interval: 10 * time.Second}
-)
+// Each Server has its own (one per Session's bridge).
+type logLimits struct{ refused, dropped, churn rate.Sometimes }
+
+func newLogLimits() *logLimits {
+	return &logLimits{
+		refused: rate.Sometimes{First: 1, Interval: 10 * time.Second},
+		dropped: rate.Sometimes{First: 1, Interval: 10 * time.Second},
+		churn:   rate.Sometimes{First: 32, Interval: 10 * time.Second},
+	}
+}
 
 // Server answers wheel requests on a SOCK_SEQPACKET listener.
 type Server struct {
 	Backend   Backend
 	Publisher Publisher
+
+	logs     *logLimits
+	logsOnce sync.Once
 
 	mu     sync.Mutex
 	wheels int
@@ -104,7 +112,7 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 			return fmt.Errorf("accept: %w", err)
 		}
 		if !s.take(&s.conns, MaxConns) {
-			refusedLog.Do(func() { klog.Warningf("wheel: refusing connections past %d", MaxConns) })
+			s.limits().refused.Do(func() { klog.Warningf("wheel: refusing connections past %d", MaxConns) })
 			conn.Close()
 			continue
 		}
@@ -113,6 +121,11 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 			s.serveConn(ctx, conn)
 		})
 	}
+}
+
+func (s *Server) limits() *logLimits {
+	s.logsOnce.Do(func() { s.logs = newLogLimits() })
+	return s.logs
 }
 
 func (s *Server) take(n *int, limit int) bool {
@@ -244,7 +257,7 @@ func (c *conn) create(req *Request) error {
 		return fmt.Errorf("publish: %w", errors.Join(err, dev.Close()))
 	}
 	c.wheels[id] = &wheel{dev: dev, node: node}
-	churnLog.Do(func() {
+	c.s.limits().churn.Do(func() {
 		klog.InfoS("wheel: created", "id", id, "name", req.Name, "node", node.Event,
 			"vendor", fmt.Sprintf("%04x", req.Vendor), "product", fmt.Sprintf("%04x", req.Product))
 	})
@@ -293,7 +306,7 @@ func (c *conn) destroy(id uint32) error {
 		return fmt.Errorf("withdraw: %w", err)
 	}
 	c.s.give(&c.s.wheels)
-	churnLog.Do(func() { klog.InfoS("wheel: destroyed", "node", w.node.Event) })
+	c.s.limits().churn.Do(func() { klog.InfoS("wheel: destroyed", "node", w.node.Event) })
 	if err := w.dev.Close(); err != nil {
 		return fmt.Errorf("destroy %s: %w", w.node.Event, err)
 	}
@@ -327,7 +340,7 @@ func (c *conn) send(m Message) { //nolint:gocritic // a copy per queued message
 	default:
 		// Rate-limited: the client is untrusted, and one writing without
 		// reading would otherwise fill the node's log (QA: 64 MB in 2 s).
-		droppedLog.Do(func() { klog.Warningf("wheel: client not reading, dropping messages (%s %s)", m.Op, m.Kind) })
+		c.s.limits().dropped.Do(func() { klog.Warningf("wheel: client not reading, dropping messages (%s %s)", m.Op, m.Kind) })
 	}
 }
 
