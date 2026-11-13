@@ -74,9 +74,12 @@ func TestAdjustmentOperatorSidecarsGetNothing(t *testing.T) {
 		v1alpha1types.InputBridgeContainerName,
 		v1alpha1types.UdevRelayContainerName,
 		v1alpha1types.VRAgentContainerName,
+		v1alpha1types.WheelWaitContainerName,
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Nil(t, (&plugin{}).adjustment(sessionPod("games"), name))
+			// Nor the App's seccomp filter: it is the operator's.
+			require.True(t, isOperatorContainer(name))
 		})
 	}
 }

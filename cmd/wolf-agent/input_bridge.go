@@ -62,6 +62,18 @@ func runInputBridge(args []string) {
 	if err := server.Clear(); err != nil {
 		klog.Fatalf("clearing %s: %v", server.InputDir, err)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	// The wheel socket listens before the udev control file exists: a
+	// native VR pod's wheel-wait starts the App once it does, and WiVRn
+	// then finds the socket.
+	var wl net.Listener
+	if *wheelSocket != "" {
+		var err error
+		if wl, err = listenWheel(ctx, *wheelSocket, *wheelOwner); err != nil {
+			klog.Fatal(err)
+		}
+	}
 	if err := resetUdevDir(udevDir, *sessionDir); err != nil {
 		klog.Fatal(err)
 	}
@@ -78,8 +90,6 @@ func runInputBridge(args []string) {
 		}()
 	}
 	_ = os.Remove(*socket)
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 	l, err := (&net.ListenConfig{}).Listen(ctx, "unix", *socket)
 	if err != nil {
 		klog.Fatalf("listening on %s: %v", *socket, err)
@@ -100,13 +110,9 @@ func runInputBridge(args []string) {
 		}()
 	}
 	wheelDone := make(chan struct{})
-	if *wheelSocket == "" {
+	if wl == nil {
 		close(wheelDone)
 	} else {
-		wl, err := listenWheel(ctx, *wheelSocket, *wheelOwner)
-		if err != nil {
-			klog.Fatal(err)
-		}
 		ws := &wheel.Server{Backend: wheel.NewUinput(), Publisher: wheel.BridgePublisher{Bridge: server}}
 		go func() {
 			defer close(wheelDone)
@@ -136,6 +142,12 @@ func runInputBridge(args []string) {
 // listenWheel listens on socket for wivrn-server, in a directory the App
 // mounts: locked first (only the node's root changes what is in it), then the
 // socket is handed to owner, the App's desktop user, 0600.
+// Variables so tests run without root that can chown.
+var (
+	lockWheelDir = inputbridge.LockDir
+	chownSocket  = os.Lchown
+)
+
 func listenWheel(ctx context.Context, socket, owner string) (net.Listener, error) {
 	uid, gid, err := parseOwner(owner)
 	if err != nil {
@@ -145,7 +157,7 @@ func listenWheel(ctx context.Context, socket, owner string) (net.Listener, error
 	if err = os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating %s: %w", dir, err)
 	}
-	if err = inputbridge.LockDir(dir); err != nil {
+	if err = lockWheelDir(dir); err != nil {
 		return nil, fmt.Errorf("locking %s: %w", dir, err)
 	}
 	// Whatever the App left there before the lock.
@@ -164,7 +176,7 @@ func listenWheel(ctx context.Context, socket, owner string) (net.Listener, error
 	}
 	// The App can't connect until both are done; nothing it could gain
 	// from the gap.
-	if err := errors.Join(os.Lchown(socket, uid, gid), os.Chmod(socket, 0o600)); err != nil {
+	if err := errors.Join(chownSocket(socket, uid, gid), os.Chmod(socket, 0o600)); err != nil {
 		l.Close()
 		return nil, fmt.Errorf("handing %s over: %w", socket, err)
 	}

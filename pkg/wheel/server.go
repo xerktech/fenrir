@@ -63,6 +63,12 @@ const (
 	writeTimeout = 2 * time.Second
 )
 
+// Logs an untrusted client can trigger at will are rate-limited.
+var (
+	refusedLog = rate.Sometimes{First: 1, Interval: 10 * time.Second}
+	droppedLog = rate.Sometimes{First: 1, Interval: 10 * time.Second}
+)
+
 // Server answers wheel requests on a SOCK_SEQPACKET listener.
 type Server struct {
 	Backend   Backend
@@ -95,7 +101,7 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 			return fmt.Errorf("accept: %w", err)
 		}
 		if !s.take(&s.conns, MaxConns) {
-			klog.Warningf("wheel: refusing a connection past %d", MaxConns)
+			refusedLog.Do(func() { klog.Warningf("wheel: refusing connections past %d", MaxConns) })
 			conn.Close()
 			continue
 		}
@@ -225,10 +231,14 @@ func (c *conn) create(req *Request) error {
 		return fmt.Errorf("create: %w", err)
 	}
 	if err := c.s.Publisher.Publish(node, req); err != nil {
-		// Withdraw whatever part was published.
-		err = errors.Join(err, c.s.Publisher.Withdraw(node), dev.Close())
+		// Withdraw whatever part was published; a part that won't go may
+		// be the mounted node, so the device then stays (keepStuck).
+		if werr := c.s.Publisher.Withdraw(node); werr != nil {
+			c.s.keepStuck(&wheel{dev: dev, node: node})
+			return fmt.Errorf("publish: %w", errors.Join(err, werr))
+		}
 		c.s.give(&c.s.wheels)
-		return fmt.Errorf("publish: %w", err)
+		return fmt.Errorf("publish: %w", errors.Join(err, dev.Close()))
 	}
 	c.wheels[id] = &wheel{dev: dev, node: node}
 	klog.InfoS("wheel: created", "id", id, "name", req.Name, "node", node.Event,
@@ -270,11 +280,13 @@ func (c *conn) destroy(id uint32) error {
 	if !ok {
 		return nil
 	}
+	delete(c.wheels, id)
 	if err := c.s.Publisher.Withdraw(w.node); err != nil {
-		klog.Errorf("wheel: withdrawing %s, keeping the device: %v", w.node.Event, err)
+		// Off the connection's table, so a create of the id makes a new
+		// wheel rather than erroring on this one forever.
+		c.s.keepStuck(w)
 		return fmt.Errorf("withdraw: %w", err)
 	}
-	delete(c.wheels, id)
 	c.s.give(&c.s.wheels)
 	klog.InfoS("wheel: destroyed", "node", w.node.Event)
 	if err := w.dev.Close(); err != nil {
@@ -283,20 +295,23 @@ func (c *conn) destroy(id uint32) error {
 	return nil
 }
 
-// destroyAll destroys the connection's wheels; those whose node won't
-// withdraw move to the server's stuck list, still open.
+// destroyAll destroys the connection's wheels.
 func (c *conn) destroyAll() {
 	for id := range c.wheels {
 		if err := c.destroy(id); err != nil {
 			klog.Errorf("wheel: %v", err)
 		}
 	}
-	c.s.mu.Lock()
-	defer c.s.mu.Unlock()
-	for id, w := range c.wheels {
-		c.s.stuck = append(c.s.stuck, w)
-		delete(c.wheels, id)
-	}
+}
+
+// keepStuck keeps w open for good, holding its slot: its node won't
+// withdraw, and freed, its minor would go to another device under that
+// node, still mounted in the App.
+func (s *Server) keepStuck(w *wheel) {
+	klog.Errorf("wheel: %s won't withdraw; keeping its device open", w.node.Event)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stuck = append(s.stuck, w)
 }
 
 // send queues m; a client that doesn't read loses messages rather than
@@ -305,7 +320,9 @@ func (c *conn) send(m Message) { //nolint:gocritic // a copy per queued message
 	select {
 	case c.out <- m:
 	default:
-		klog.Warningf("wheel: client not reading, dropped %s %s", m.Op, m.Kind)
+		// Rate-limited: the client is untrusted, and one writing without
+		// reading would otherwise fill the node's log (QA: 64 MB in 2 s).
+		droppedLog.Do(func() { klog.Warningf("wheel: client not reading, dropping messages (%s %s)", m.Op, m.Kind) })
 	}
 }
 

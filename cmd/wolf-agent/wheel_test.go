@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -36,12 +38,16 @@ func TestWaitForFile(t *testing.T) {
 	}
 }
 
-// The wheel socket's directory is locked and emptied of what the App left,
-// and the socket handed to the App's user, 0600 (needs root: chown).
+// The wheel socket's directory is locked, then emptied of what the App left,
+// and the socket handed to the App's user, 0600.
 func TestListenWheelLocksAndHandsOver(t *testing.T) {
-	if probe := t.TempDir(); os.Geteuid() != 0 || inputbridge.LockDir(probe) != nil {
-		t.Skip("needs root that can chown to inputbridge.LockedOwner")
+	var calls []string
+	lockWheelDir = func(dir string) error { calls = append(calls, "lock "+filepath.Base(dir)); return nil }
+	chownSocket = func(p string, uid, gid int) error {
+		calls = append(calls, fmt.Sprintf("chown %s %d:%d", filepath.Base(p), uid, gid))
+		return nil
 	}
+	t.Cleanup(func() { lockWheelDir, chownSocket = inputbridge.LockDir, os.Lchown })
 	dir, err := os.MkdirTemp("", "wheel") //nolint:usetesting // t.TempDir's path is too long for a socket
 	if err != nil {
 		t.Fatal(err)
@@ -68,4 +74,7 @@ func TestListenWheelLocksAndHandsOver(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	c.Close()
+	if want := []string{"lock " + filepath.Base(dir), "chown wheel.sock 1000:1000"}; !slices.Equal(calls, want) {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
 }

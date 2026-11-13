@@ -407,8 +407,16 @@ paths:
   4 wheels per Session, 4 connections, gamepad buttons only (no keyboard key, mouse button or
   digitizer tool), absolute axes below the multitouch ones, no FF_CUSTOM (a pointer into the
   game), only EV_KEY/EV_ABS/EV_SYN events, 4,000 events/s per connection (more are dropped).
-- A wheel's node is withdrawn before its device is destroyed; a failed withdraw keeps the device
-  open for good (`Server.stuck`): dropped, Go's finalizer would close its fd.
+- A wheel's node is withdrawn before its device is destroyed. A failed withdraw (on destroy, or
+  after a failed publish) keeps the device open for good, holding its slot (`Server.stuck`):
+  dropped, Go's finalizer would close its fd and free the minor under the mounted node.
+- A SIGKILLed bridge skips all that: its nodes stay mounted and the kernel reuses their minors
+  at once (QA read another Session's wheel through one). The Session ending is the only bound
+  (XERK-2859); split mode has the same exposure for Wolf's pads.
+- Logs an App client can trigger (dropped messages, refused connections) are rate-limited:
+  a client writing without reading logged 64 MB in 2 s (QA).
+- The bridge listens on the wheel socket before it writes `/run/udev/control`, which releases
+  `wheel-wait`, so WiVRn finds the socket when the App starts.
   Freed first, the kernel could give its minor to another session's device under the mounted node.
 - The bridge's `Clear` (wolf-agent sends it whenever a stream stops) leaves the wheel's node,
   udev entry and announced add (`Server.Publish`); the socket can't replace or remove them.

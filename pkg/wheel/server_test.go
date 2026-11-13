@@ -427,15 +427,36 @@ func TestPublishFailures(t *testing.T) {
 	if h.b.devs[1].closed {
 		t.Error("device closed under a node still published")
 	}
-	// Still held, and retried when the connection closes; still stuck, it
-	// stays open and keeps its slot.
-	c.c.Close()
-	waitFor(t, func() bool {
-		return slices.Equal(h.b.calls()[len(h.b.calls())-2:], []string{"withdraw event2", "withdraw event2"})
-	})
+	// The id is free again, but the stuck wheel keeps its slot.
+	h.p.failWithdraw = false
+	for i := range uint32(MaxWheels - 1) {
+		c.send(g920(10 + i))
+		if m := c.recv(); m.Op != OpCreated {
+			t.Fatalf("wheel %d: %+v", i, m)
+		}
+	}
+	c.send(g920(2))
+	if m := c.recv(); m.Op != OpError || !strings.Contains(m.Msg, "at most") {
+		t.Errorf("stuck wheel gave its slot back: %+v", m)
+	}
 	h.stop()
 	if h.b.devs[1].closed {
 		t.Error("stuck device closed")
+	}
+}
+
+// A publish that fails and leaves something it can't withdraw (maybe the
+// mounted node) keeps the device open too.
+func TestFailedPublishThatWontWithdrawKeepsDevice(t *testing.T) {
+	h := newHarness(t)
+	c := h.dial()
+	h.p.failPublish, h.p.failWithdraw = true, true
+	c.send(g920(1))
+	if m := c.recv(); m.Op != OpError {
+		t.Fatalf("got %+v", m)
+	}
+	if h.b.devs[0].closed {
+		t.Error("device closed under a node that may still be mounted")
 	}
 }
 
