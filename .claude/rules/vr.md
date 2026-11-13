@@ -418,7 +418,6 @@ paths:
   Tests: `TestClientCannotFloodLog`.
 - The bridge listens on the wheel socket before it writes `/run/udev/control`, which releases
   `wheel-wait`, so WiVRn finds the socket when the App starts.
-  Freed first, the kernel could give its minor to another session's device under the mounted node.
 - The bridge's `Clear` (wolf-agent sends it whenever a stream stops) leaves the wheel's node,
   udev entry and announced add (`Server.Publish`); the socket can't replace or remove them.
 - Unverified until XERK-2853: the full path with a real headset and G920.
