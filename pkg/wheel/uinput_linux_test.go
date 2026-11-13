@@ -48,9 +48,7 @@ func TestUinputIoctlNumbers(t *testing.T) {
 // and an FF upload and play from the node come back as messages.
 func TestUinputRoundTrip(t *testing.T) {
 	u := NewUinput()
-	if _, err := os.Stat(u.Path); err != nil {
-		t.Skipf("no uinput: %v", err)
-	}
+	needUinput(t, u)
 	req := g920(1)
 	msgs := make(chan Message, 16)
 	dev, node, err := u.Create(&req, func(m Message) { msgs <- m })
@@ -115,9 +113,7 @@ func TestUinputRoundTrip(t *testing.T) {
 // capability asked for. Past createAttempts it fails, leaking nothing.
 func TestUinputCreateRetriesAfterUnwind(t *testing.T) {
 	u := NewUinput()
-	if _, err := os.Stat(u.Path); err != nil {
-		t.Skipf("no uinput: %v", err)
-	}
+	needUinput(t, u)
 	caps := func(n Node) string {
 		files := []string{"name", "id/vendor", "id/product", "capabilities/key", "capabilities/abs", "capabilities/ff"}
 		out := make([]string, 0, len(files))
@@ -164,4 +160,15 @@ func TestUinputCreateRetriesAfterUnwind(t *testing.T) {
 	if _, _, err = u.Create(&req, func(Message) {}); !errors.Is(err, unix.EINTR) {
 		t.Errorf("after %d interrupts: %v, want EINTR", createAttempts, err)
 	}
+}
+
+// needUinput skips unless this process can open u's uinput: CI runners have
+// /dev/uinput but no access to it.
+func needUinput(t *testing.T, u *Uinput) {
+	t.Helper()
+	fd, err := unix.Open(u.Path, unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Skipf("no usable uinput: %v", err)
+	}
+	unix.Close(fd)
 }
