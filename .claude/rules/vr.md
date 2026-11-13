@@ -278,9 +278,14 @@ paths:
   `PRESSURE_VESSEL_FILESYSTEMS_RO=<OpenVR layer dir>`.
 - WiVRn rewrites `~/.config/openvr/openvrpaths.vrpath` while it runs: in a shared home every
   Proton game then finds a VR runtime. Keep VR config on a per-user volume.
-- Seated height: WiVRn uses Monado's legacy space overseer, so OpenXR LOCAL (OpenVR Seated) is a
-  fixed 1.6 m up and the Quest recenter keeps y. The seated view sits ~0.4 m low until the game
-  calls `ResetSeatedZeroPose` (XERK-2689); the App needs a recenter reachable in the headset.
+- Seated height: WiVRn uses Monado's legacy space overseer, so OpenXR LOCAL (OpenVR Seated)
+  starts a fixed 1.6 m up; the seated view sits ~0.4 m off until a recenter (XERK-2689).
+  - The fork's Monado patch 0016 makes the Quest's own recenter (hold Meta) set LOCAL's height
+    to the head's too (XERK-2846). Upstream keeps y, so a game with no reachable in-game recenter
+    stayed off for good. It is the only recenter a headset-only session has: no pad, no keyboard.
+  - Don't mix it with an in-game recenter: xrizer and OpenComposite build Seated as LOCAL plus
+    the offset taken at `ResetSeatedZeroPose` and ignore LOCAL's change event, so a Meta recenter
+    after a game one stacks both (height too). Another in-game recenter clears it.
 - Headless sway on NVIDIA needs `--unsupported-gpu` and has no keyboard: xdotool keys are dropped
   and wtype's keymap is read wrongly by DirectInput. Inject keys through a real virtual device.
 
@@ -357,6 +362,9 @@ paths:
     `vrUnstartedTTL` (15m) never ready, and the first setup's downloads count against it.
   - Tests: `images/gow-nvidia32/vr/ac_setup_test.go` (stub Proton, Wine, winetricks, curl),
     `TestVRExampleRunsACSetup`.
+  - Recenter in a headset-only session: hold the Quest's Meta button (WiVRn's recenter, see
+    Seated height). The bindings below need a Moonlight pad or keyboard: Quest controllers reach
+    AC through OpenVR, never as an XInput pad (XERK-2846).
   - Recenter: Ctrl+Space from the Moonlight keyboard (fixed in CSP), and the pad's right-stick
     click: ac-setup adds `[__CM_RESET_CAMERA_VR] XBOXBUTTON=RTHUMB_PRESS` to the flat and the
     User's VR `controls.ini` each launch (XERK-2770). CSP 0.3.1 lists the hotkey in
