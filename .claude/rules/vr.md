@@ -413,8 +413,9 @@ paths:
 - A SIGKILLed bridge skips all that: its nodes stay mounted and the kernel reuses their minors
   at once (QA read another Session's wheel through one). The Session ending is the only bound
   (XERK-2859); split mode has the same exposure for Wolf's pads.
-- Logs an App client can trigger (dropped messages, refused connections) are rate-limited:
-  a client writing without reading logged 64 MB in 2 s (QA).
+- Logs an App client can trigger (dropped messages, refused connections, creates and destroys)
+  are rate-limited: unlimited, a client writing without reading logged 64 MB in 2 s (QA).
+  Tests: `TestClientCannotFloodLog`.
 - The bridge listens on the wheel socket before it writes `/run/udev/control`, which releases
   `wheel-wait`, so WiVRn finds the socket when the App starts.
   Freed first, the kernel could give its minor to another session's device under the mounted node.

@@ -13,6 +13,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/time/rate"
+	"k8s.io/klog/v2"
 )
 
 // fakeBackend records wheels instead of making uinput devices.
@@ -458,6 +461,68 @@ func TestFailedPublishThatWontWithdrawKeepsDevice(t *testing.T) {
 	if h.b.devs[0].closed {
 		t.Error("device closed under a node that may still be mounted")
 	}
+	// And it keeps its slot.
+	h.p.failPublish, h.p.failWithdraw = false, false
+	for i := range uint32(MaxWheels - 1) {
+		c.send(g920(10 + i))
+		if m := c.recv(); m.Op != OpCreated {
+			t.Fatalf("wheel %d: %+v", i, m)
+		}
+	}
+	c.send(g920(20))
+	if m := c.recv(); m.Op != OpError || !strings.Contains(m.Msg, "at most") {
+		t.Errorf("stuck wheel gave its slot back: %+v", m)
+	}
+}
+
+// Whatever a client does, what it makes the helper log stays bounded: a
+// create/destroy loop, a flood it never reads the answers to, connections
+// past the cap.
+func TestClientCannotFloodLog(t *testing.T) {
+	var buf safeBuffer
+	klog.LogToStderr(false)
+	klog.SetOutput(&buf)
+	t.Cleanup(func() { klog.SetOutput(os.Stderr); klog.LogToStderr(true) })
+	churnLog = rate.Sometimes{First: 32, Interval: 10 * time.Second}
+	droppedLog = rate.Sometimes{First: 1, Interval: 10 * time.Second}
+	refusedLog = rate.Sometimes{First: 1, Interval: 10 * time.Second}
+
+	h := newHarness(t)
+	c := h.dial()
+	for range 200 {
+		c.send(g920(1))
+		c.send(Request{Op: OpDestroy, ID: 1})
+	}
+	// Never read: the queue fills and drops.
+	for range 2 * sendQueue {
+		c.send(Request{Op: "nope"})
+	}
+	for range 3 * MaxConns {
+		h.dial()
+	}
+	waitFor(t, func() bool { return len(h.b.calls()) >= 4*200 })
+	h.stop()
+	klog.Flush()
+	if n := strings.Count(buf.String(), "\n"); n > 32+4 {
+		t.Errorf("%d log lines, want at most %d:\n%s", n, 32+4, buf.String())
+	}
+}
+
+type safeBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p) //nolint:wrapcheck // never fails
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 func TestBadPackets(t *testing.T) {

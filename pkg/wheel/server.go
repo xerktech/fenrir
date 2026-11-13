@@ -63,10 +63,13 @@ const (
 	writeTimeout = 2 * time.Second
 )
 
-// Logs an untrusted client can trigger at will are rate-limited.
+// Logs an untrusted client can trigger at will are rate-limited. A session's
+// few creates and destroys all log (First); a client looping them (QA: 135
+// cycles in 5 s) logs one line per Interval.
 var (
 	refusedLog = rate.Sometimes{First: 1, Interval: 10 * time.Second}
 	droppedLog = rate.Sometimes{First: 1, Interval: 10 * time.Second}
+	churnLog   = rate.Sometimes{First: 32, Interval: 10 * time.Second}
 )
 
 // Server answers wheel requests on a SOCK_SEQPACKET listener.
@@ -241,8 +244,10 @@ func (c *conn) create(req *Request) error {
 		return fmt.Errorf("publish: %w", errors.Join(err, dev.Close()))
 	}
 	c.wheels[id] = &wheel{dev: dev, node: node}
-	klog.InfoS("wheel: created", "id", id, "name", req.Name, "node", node.Event,
-		"vendor", fmt.Sprintf("%04x", req.Vendor), "product", fmt.Sprintf("%04x", req.Product))
+	churnLog.Do(func() {
+		klog.InfoS("wheel: created", "id", id, "name", req.Name, "node", node.Event,
+			"vendor", fmt.Sprintf("%04x", req.Vendor), "product", fmt.Sprintf("%04x", req.Product))
+	})
 	c.send(Message{Op: OpCreated, ID: id})
 	return nil
 }
@@ -288,7 +293,7 @@ func (c *conn) destroy(id uint32) error {
 		return fmt.Errorf("withdraw: %w", err)
 	}
 	c.s.give(&c.s.wheels)
-	klog.InfoS("wheel: destroyed", "node", w.node.Event)
+	churnLog.Do(func() { klog.InfoS("wheel: destroyed", "node", w.node.Event) })
 	if err := w.dev.Close(); err != nil {
 		return fmt.Errorf("destroy %s: %w", w.node.Event, err)
 	}
