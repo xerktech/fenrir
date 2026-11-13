@@ -114,6 +114,9 @@ func ioctlOnce(fd int, req uintptr, v int) error {
 // createAttempts bounds Create's retries of an interrupted UI_DEV_CREATE.
 const createAttempts = 5
 
+// devCreate is UI_DEV_CREATE, once; a variable so a test can interrupt it.
+var devCreate = func(fd int) error { return ioctlOnce(fd, uiDevCreate, 0) }
+
 // Create makes the uinput device req describes.
 func (u *Uinput) Create(req *Request, ff func(Message)) (Device, Node, error) {
 	fd, err := unix.Open(u.Path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
@@ -128,7 +131,7 @@ func (u *Uinput) Create(req *Request, ff func(Message)) (Device, Node, error) {
 			_ = unix.Close(fd)
 			return nil, Node{}, err
 		}
-		err = ioctlOnce(fd, uiDevCreate, 0)
+		err = devCreate(fd)
 		if err == nil {
 			break
 		}

@@ -4,7 +4,9 @@ package wheel
 
 import (
 	"encoding/binary"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -105,5 +107,61 @@ func TestUinputRoundTrip(t *testing.T) {
 	}
 	if p := <-msgs; p.Kind != FFPlay || *p.EffectID != m.Effect.ID || *p.Value != 1 {
 		t.Errorf("play: %+v", p)
+	}
+}
+
+// An interrupted UI_DEV_CREATE has uinput tear the device back down to
+// unset, so Create redoes the setup: the device it then makes has every
+// capability asked for. Past createAttempts it fails, leaking nothing.
+func TestUinputCreateRetriesAfterUnwind(t *testing.T) {
+	u := NewUinput()
+	if _, err := os.Stat(u.Path); err != nil {
+		t.Skipf("no uinput: %v", err)
+	}
+	caps := func(n Node) string {
+		files := []string{"name", "id/vendor", "id/product", "capabilities/key", "capabilities/abs", "capabilities/ff"}
+		out := make([]string, 0, len(files))
+		for _, f := range files {
+			b, err := os.ReadFile(u.SysDir + "/" + n.Sysname + "/" + f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, f+"="+strings.TrimSpace(string(b)))
+		}
+		return strings.Join(out, " ")
+	}
+	req := g920(1)
+	dev, node, err := u.Create(&req, func(Message) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := caps(node)
+	dev.Close()
+
+	interrupts := 0
+	t.Cleanup(func() { devCreate = func(fd int) error { return ioctlOnce(fd, uiDevCreate, 0) } })
+	// The kernel's unwind: registered, then destroyed back to unset.
+	devCreate = func(fd int) error {
+		if interrupts == 0 {
+			return ioctlOnce(fd, uiDevCreate, 0)
+		}
+		interrupts--
+		if uerr := errors.Join(ioctlOnce(fd, uiDevCreate, 0), ioctlOnce(fd, uiDevDestroy, 0)); uerr != nil {
+			return uerr
+		}
+		return unix.EINTR
+	}
+	interrupts = createAttempts - 1
+	dev, node, err = u.Create(&req, func(Message) {})
+	if err != nil {
+		t.Fatalf("after %d interrupts: %v", createAttempts-1, err)
+	}
+	if got := caps(node); got != want {
+		t.Errorf("recreated device:\n got %s\nwant %s", got, want)
+	}
+	dev.Close()
+	interrupts = createAttempts
+	if _, _, err = u.Create(&req, func(Message) {}); !errors.Is(err, unix.EINTR) {
+		t.Errorf("after %d interrupts: %v, want EINTR", createAttempts, err)
 	}
 }
