@@ -1160,3 +1160,53 @@ func TestACSetupInputPicksWheelOrPad(t *testing.T) {
 		t.Errorf("planted folder: %s", out)
 	}
 }
+
+// The wheel wait is bounded whatever the App sets: at most 600s, and 20s for
+// a value that isn't a finite number. Run on a fake clock.
+func TestACSetupWheelWaitIsBounded(t *testing.T) {
+	s := newACSetup(t)
+	const probe = `import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("acsetup", sys.argv[1])
+spec = importlib.util.spec_from_loader("acsetup", loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+class Clock:
+    now = 0.0
+    def monotonic(self): return self.now
+    def sleep(self, d): self.now += d
+m.time = Clock()
+m.wheel_present = lambda: False
+m.wait_for_wheel()
+print(round(m.time.now))
+`
+	for in, want := range map[string]string{"1e9": "600", "601": "600", "599": "599", "inf": "20", "nan": "20", "-5": "0", "abc": "20"} {
+		cmd := exec.CommandContext(t.Context(), "python3", "-I", "-c", probe, filepath.Join(s.dir, "ac-setup")) //nolint:gosec // the test's own copy
+		cmd.Env = []string{"DIREWOLF_WHEEL_SOCKET=/run/wheel", "DIREWOLF_AC_WHEEL_WAIT=" + in}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", in, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != want {
+			t.Errorf("DIREWOLF_AC_WHEEL_WAIT=%s waited %ss, want %s", in, got, want)
+		}
+	}
+}
+
+// An unreadable udev entry is skipped, not the end of the input step: the
+// wheel's entry after it still counts (a non-root run: root ignores modes).
+func TestACSetupInputSkipsUnreadableUdevEntry(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file modes")
+	}
+	s := newACSetup(t)
+	vr := filepath.Join(s.state, "cfg", "controls.ini")
+	mustWrite(t, vr, "[HEADER]\r\nINPUT_METHOD=X360\r\n")
+	udev := t.TempDir()
+	mustWrite(t, filepath.Join(udev, "c13:01"), "E:ID_VENDOR_ID=045e\n")
+	chmod(t, filepath.Join(udev, "c13:01"), 0)
+	mustWrite(t, filepath.Join(udev, "c13:66"), "E:ID_VENDOR_ID=046d\nE:ID_MODEL_ID=c262\n")
+	s.runInput(t, udev)
+	if got := iniValues(t, vr)["HEADER.INPUT_METHOD"]; got != "WHEEL" {
+		t.Errorf("INPUT_METHOD=%s past an unreadable entry, want WHEEL", got)
+	}
+}
