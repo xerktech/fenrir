@@ -950,3 +950,71 @@ func TestVRStartRefusesUnloadableServerKey(t *testing.T) {
 		}
 	}
 }
+
+// With DIREWOLF_AC_INPUT=auto, Assetto Corsa's input is set just before Steam;
+// with the wheel helper, only once a headset holds the VR port (XERK-2853):
+// AC reads its controllers once, and the wheel comes with the headset.
+func TestVRStartSetsACInputOnceHeadsetConnects(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  []string
+		runs bool
+		wait bool
+	}{
+		{"not asked", nil, false, false},
+		{"no wheel helper", []string{"DIREWOLF_AC_INPUT=auto"}, true, false},
+		{"wheel helper", []string{"DIREWOLF_AC_INPUT=auto", "DIREWOLF_WHEEL_SOCKET=/run/direwolf-wheel/wheel"}, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newVRStart(t)
+			connected := filepath.Join(s.dir, "connected")
+			setupLog := filepath.Join(s.dir, "ac-setup.log")
+			// ss answers an established connection on the port once the
+			// headset "connects".
+			writeExec(t, filepath.Join(s.bin, "ss"),
+				`echo "$*" >>"`+filepath.Join(s.dir, "ss.log")+`"
+[ -e "`+connected+`" ] && echo "ESTAB 0 0 10.0.0.1:20034 10.0.0.9:5000"
+exit 0
+`)
+			writeExecNoT(filepath.Join(s.dir, "ac-setup"), `echo "$* steam-started=$([ -e "`+s.steamLog+`" ] && echo yes || echo no)" >>"`+setupLog+`"`+"\n")
+			if tc.wait {
+				go func() {
+					time.Sleep(2 * time.Second)
+					_ = os.WriteFile(connected, nil, 0o600)
+				}()
+			}
+			start := time.Now()
+			out, err := s.run(t, append([]string{"DIREWOLF_VR_PORT=20034"}, tc.env...)...)
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			b, _ := os.ReadFile(setupLog)
+			if tc.runs != (string(b) == "--input steam-started=no\n") {
+				t.Errorf("ac-setup ran %q; want it run (%v) once, before Steam", b, tc.runs)
+			}
+			if _, err := os.Stat(s.steamLog); err != nil {
+				t.Errorf("Steam did not start: %v\n%s", err, out)
+			}
+			if waited := time.Since(start) > 2*time.Second; waited != tc.wait {
+				t.Errorf("waited for the headset: %v, want %v\n%s", waited, tc.wait, out)
+			}
+			if b, _ := os.ReadFile(filepath.Join(s.dir, "ss.log")); tc.wait && !strings.Contains(string(b), "state established sport = :20034") {
+				t.Errorf("ss asked %q", b)
+			}
+		})
+	}
+}
+
+// No headset ever: the wait ends with the VR services, not never.
+func TestVRStartHeadsetWaitEndsWithServices(t *testing.T) {
+	s := newVRStart(t)
+	s.services("sleep 2\n")
+	writeExec(t, filepath.Join(s.bin, "ss"), "exit 0\n")
+	out, err := s.run(t, "DIREWOLF_VR_PORT=20034", "DIREWOLF_AC_INPUT=auto", "DIREWOLF_WHEEL_SOCKET=/w")
+	if err == nil || !strings.Contains(out, "before a headset connected") {
+		t.Errorf("err %v\n%s", err, out)
+	}
+	if _, err := os.Stat(s.steamLog); err == nil {
+		t.Error("Steam started without a headset")
+	}
+}

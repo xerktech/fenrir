@@ -1012,3 +1012,201 @@ func chmod(t *testing.T, path string, mode os.FileMode) {
 		t.Fatal(err)
 	}
 }
+
+// runInput runs `ac-setup --input` with a udev data dir of its own.
+func (s *acSetup) runInput(t *testing.T, udev string, env ...string) string {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "python3", "-I", filepath.Join(s.dir, "ac-setup"), "--input") //nolint:gosec // the test's own copy
+	cmd.Env = append([]string{
+		"PATH=" + os.Getenv("PATH"),
+		"DIREWOLF_AC_STATE=" + s.state,
+		"DIREWOLF_AC_UDEV=" + udev,
+		"DIREWOLF_AC_UID_MAP=0 1000 1",
+	}, env...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ac-setup --input: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+// iniValues reads controls.ini as AC does: the last value per section/key.
+func iniValues(t *testing.T, path string) map[string]string {
+	t.Helper()
+	m, sec := map[string]string{}, ""
+	for l := range strings.SplitSeq(readString(t, path), "\r\n") {
+		if strings.HasPrefix(l, "[") {
+			sec = strings.Trim(l, "[]")
+		} else if k, v, ok := strings.Cut(l, "="); ok {
+			m[sec+"."+k] = v
+		}
+	}
+	return m
+}
+
+// With a G920 published (046d:c262 in the session's udev data), the VR cfg
+// drives with it: Proton 9's G920 axes and the HID button order, the pad's
+// recenter kept; FFB defaults go in once, then are the User's. Without one, a
+// WHEEL left by an earlier session goes back to X360; KEYBOARD stays (XERK-2853).
+func TestACSetupInputPicksWheelOrPad(t *testing.T) {
+	s := newACSetup(t)
+	vr := filepath.Join(s.state, "cfg", "controls.ini")
+	mustWrite(t, vr, "[HEADER]\r\nINPUT_METHOD=X360\r\n[THROTTLE]\r\nKEY=87\r\n"+recenterIni)
+	udev := t.TempDir()
+	// A Moonlight pad's entry, another Logitech wheel (G29) or a G920 entry
+	// outside major 13 is not the wheel; without the wheel helper nothing
+	// waits for one.
+	mustWrite(t, filepath.Join(udev, "c13:65"), "E:ID_INPUT_JOYSTICK=1\nE:ID_VENDOR_ID=045e\nE:ID_MODEL_ID=02ea\n")
+	mustWrite(t, filepath.Join(udev, "c13:68"), "E:ID_VENDOR_ID=046d\nE:ID_MODEL_ID=c24f\n")
+	mustWrite(t, filepath.Join(udev, "c189:1"), "E:ID_VENDOR_ID=046d\nE:ID_MODEL_ID=c262\n")
+	start := time.Now()
+	if out := s.runInput(t, udev, "DIREWOLF_AC_WHEEL_WAIT=30"); strings.Contains(out, "G920 connected") {
+		t.Errorf("a pad taken for the wheel:\n%s", out)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("waited %v for a wheel without the wheel helper", d)
+	}
+	if got := iniValues(t, vr)["HEADER.INPUT_METHOD"]; got != "X360" {
+		t.Errorf("no wheel: INPUT_METHOD=%s", got)
+	}
+	mustWrite(t, filepath.Join(udev, "c13:66"), "I:1\nE:ID_INPUT=1\nE:ID_INPUT_JOYSTICK=1\nE:ID_BUS=usb\nE:ID_VENDOR_ID=046d\nE:ID_MODEL_ID=c262\n")
+	s.runInput(t, udev)
+	got := iniValues(t, vr)
+	for k, v := range map[string]string{
+		"HEADER.INPUT_METHOD":             "WHEEL",
+		"CONTROLLERS.PGUID0":              "{C262046D-0000-0000-0000-504944564944}",
+		"CONTROLLERS.CON0":                "Logitech G920 Driving Force Racing Wheel",
+		"BRAKES.MIN":                      "1",
+		"BRAKES.MAX":                      "-1",
+		"CLUTCH.MIN":                      "1",
+		"CLUTCH.MAX":                      "-1",
+		"STEER.JOY":                       "0",
+		"STEER.AXLE":                      "0",
+		"STEER.LOCK":                      "900",
+		"STEER.FF_GAIN":                   "0.75",
+		"THROTTLE.AXLE":                   "1",
+		"THROTTLE.MIN":                    "1",
+		"THROTTLE.MAX":                    "-1",
+		"THROTTLE.KEY":                    "87",
+		"BRAKES.AXLE":                     "2",
+		"CLUTCH.AXLE":                     "5",
+		"GEARUP.BUTTON":                   "4",
+		"GEARDN.BUTTON":                   "5",
+		"FF_SKIP_STEPS.VALUE":             "1",
+		"__CM_RESET_CAMERA_VR.XBOXBUTTON": "RTHUMB_PRESS",
+	} {
+		if got[k] != v {
+			t.Errorf("wheel: %s=%q, want %q", k, got[k], v)
+		}
+	}
+	// The User's FFB tuning survives later launches; the bindings are reset.
+	b := strings.Replace(readString(t, vr), "FF_GAIN=0.75", "FF_GAIN=0.4", 1)
+	b = strings.Replace(b, "AXLE=0", "AXLE=3", 1)
+	mustWrite(t, vr, b)
+	s.runInput(t, udev)
+	if got := iniValues(t, vr); got["STEER.FF_GAIN"] != "0.4" || got["STEER.AXLE"] != "0" {
+		t.Errorf("relaunch: FF_GAIN=%s AXLE=%s; want the User's 0.4 and the wheel's 0", got["STEER.FF_GAIN"], got["STEER.AXLE"])
+	}
+	// The wheel gone: back to the pad, bindings kept for its return.
+	if err := os.Remove(filepath.Join(udev, "c13:66")); err != nil {
+		t.Fatal(err)
+	}
+	s.runInput(t, udev)
+	if got := iniValues(t, vr); got["HEADER.INPUT_METHOD"] != "X360" || got["STEER.FF_GAIN"] != "0.4" {
+		t.Errorf("wheel gone: %v", got)
+	}
+	mustWrite(t, vr, "[HEADER]\r\nINPUT_METHOD=KEYBOARD\r\n")
+	s.runInput(t, udev)
+	if got := iniValues(t, vr)["HEADER.INPUT_METHOD"]; got != "KEYBOARD" {
+		t.Errorf("the User's KEYBOARD became %s", got)
+	}
+	// With the wheel helper it waits for the wheel to appear.
+	go func() {
+		time.Sleep(time.Second)
+		mustWrite(t, filepath.Join(udev, "c13:67"), "E:ID_VENDOR_ID=046D\nE:ID_MODEL_ID=C262\n")
+	}()
+	s.runInput(t, udev, "DIREWOLF_WHEEL_SOCKET=/run/wheel", "DIREWOLF_AC_WHEEL_WAIT=10")
+	if got := iniValues(t, vr)["HEADER.INPUT_METHOD"]; got != "WHEEL" {
+		t.Errorf("a wheel appearing during the wait: INPUT_METHOD=%s", got)
+	}
+	// An infinite wait is bounded: with the helper set and no G920 entry, the
+	// 20s fallback, then the pad, not a hang.
+	if err := os.Remove(filepath.Join(udev, "c13:67")); err != nil {
+		t.Fatal(err)
+	}
+	start = time.Now()
+	s.runInput(t, udev, "DIREWOLF_WHEEL_SOCKET=/run/wheel", "DIREWOLF_AC_WHEEL_WAIT=inf")
+	if d := time.Since(start); d < 19*time.Second || d > 40*time.Second {
+		t.Errorf("DIREWOLF_AC_WHEEL_WAIT=inf waited %v, want the 20s fallback", d)
+	}
+	// Nothing to set (no VR cfg), a link at it, or a planted folder: logged,
+	// exit 0, nothing written through.
+	s = newACSetup(t)
+	if out := s.runInput(t, udev); !strings.Contains(out, "no VR cfg") {
+		t.Errorf("no VR cfg: %s", out)
+	}
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(s.state, "cfg")); err != nil {
+		t.Fatal(err)
+	}
+	s.runInput(t, udev)
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Errorf("written through the link: %v", entries)
+	}
+	s = newACSetup(t)
+	mustWrite(t, filepath.Join(udev, "c13:67"), "E:ID_VENDOR_ID=046d\nE:ID_MODEL_ID=c262\n")
+	mustWrite(t, filepath.Join(s.state, "cfg", "controls.ini", "x"), "planted")
+	if out := s.runInput(t, udev); !strings.Contains(out, "not setting Assetto Corsa's input") {
+		t.Errorf("planted folder: %s", out)
+	}
+}
+
+// The wheel wait is bounded whatever the App sets: at most 600s, and 20s for
+// a value that isn't a finite number. Run on a fake clock.
+func TestACSetupWheelWaitIsBounded(t *testing.T) {
+	s := newACSetup(t)
+	const probe = `import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("acsetup", sys.argv[1])
+spec = importlib.util.spec_from_loader("acsetup", loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+class Clock:
+    now = 0.0
+    def monotonic(self): return self.now
+    def sleep(self, d): self.now += d
+m.time = Clock()
+m.wheel_present = lambda: False
+m.wait_for_wheel()
+print(round(m.time.now))
+`
+	for in, want := range map[string]string{"1e9": "600", "601": "600", "599": "599", "inf": "20", "nan": "20", "-5": "0", "abc": "20"} {
+		cmd := exec.CommandContext(t.Context(), "python3", "-I", "-c", probe, filepath.Join(s.dir, "ac-setup")) //nolint:gosec // the test's own copy
+		cmd.Env = []string{"DIREWOLF_WHEEL_SOCKET=/run/wheel", "DIREWOLF_AC_WHEEL_WAIT=" + in}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", in, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != want {
+			t.Errorf("DIREWOLF_AC_WHEEL_WAIT=%s waited %ss, want %s", in, got, want)
+		}
+	}
+}
+
+// An unreadable udev entry is skipped, not the end of the input step: the
+// wheel's entry after it still counts (a non-root run: root ignores modes).
+func TestACSetupInputSkipsUnreadableUdevEntry(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file modes")
+	}
+	s := newACSetup(t)
+	vr := filepath.Join(s.state, "cfg", "controls.ini")
+	mustWrite(t, vr, "[HEADER]\r\nINPUT_METHOD=X360\r\n")
+	udev := t.TempDir()
+	mustWrite(t, filepath.Join(udev, "c13:01"), "E:ID_VENDOR_ID=045e\n")
+	chmod(t, filepath.Join(udev, "c13:01"), 0)
+	mustWrite(t, filepath.Join(udev, "c13:66"), "E:ID_VENDOR_ID=046d\nE:ID_MODEL_ID=c262\n")
+	s.runInput(t, udev)
+	if got := iniValues(t, vr)["HEADER.INPUT_METHOD"]; got != "WHEEL" {
+		t.Errorf("INPUT_METHOD=%s past an unreadable entry, want WHEEL", got)
+	}
+}

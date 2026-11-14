@@ -30,19 +30,30 @@ second:
     Both need a Moonlight pad or keyboard; a headset-only session recenters
     with the Quest's Meta button (WiVRn, XERK-2846).
 
+`ac-setup --input` (XERK-2853) is a separate step: startup-app.sh runs it just
+before Steam, once a headset is connected when the App has the wheel helper.
+AC picks its controllers once, at start, and a G920 on the Quest exists only
+while the headset is connected. It waits up to $DIREWOLF_AC_WHEEL_WAIT seconds
+(20; only with $DIREWOLF_WHEEL_SOCKET) for the wheel's udev entry, then sets
+the User's VR controls.ini to it (INPUT_METHOD=WHEEL, axes, paddles, FFB
+defaults once) or, with no wheel, puts WHEEL back to X360. It never ends the
+session: a failure is logged and AC starts with the controls as they were.
+
 The shared home is writable by every game of every User. Every file this
 script writes or reads there is reached one folder at a time, never through a
 link (a planted one is refused, or replaced when it sits where a file is
 written). Proton, Wine and winetricks do follow links in the prefix, as the
 game does: they run as the same user in the same container.
 
-DIREWOLF_AC_HOME, DIREWOLF_AC_STATE and DIREWOLF_AC_UID_MAP are for tests only.
+DIREWOLF_AC_HOME, DIREWOLF_AC_STATE, DIREWOLF_AC_UDEV and DIREWOLF_AC_UID_MAP
+are for tests only.
 """
 
 import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -50,6 +61,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -79,6 +91,44 @@ SEGOE = {
 # XBOXBUTTON names). The right-stick click: AC's pad layout leaves it free.
 RECENTER = "__CM_RESET_CAMERA_VR"
 RECENTER_BUTTON = "RTHUMB_PRESS"
+# The G920 as the Quest's WiVRn client creates it (046d:c262, its HID-mode ids)
+# and as Proton 9's winebus presents it: for exactly this vid:pid its SDL
+# backend makes the axes X (wheel), Y (accelerator), Z (brake), Rz (clutch)
+# (bus_sdl.c g920_absolute_usages), and dinput gives AC's AXLE indices
+# X 0, Y 1, Z 2, Rz 5 (Content Manager's DirectInputDevice order). Buttons keep
+# the wheel's HID order: A B X Y RB LB ..., so the right paddle is 4, the left 5.
+# Pedals report their maximum released, hence MIN=1 MAX=-1 (inverted).
+UDEV = os.environ.get("DIREWOLF_AC_UDEV", "/run/udev/data")
+WHEEL_IDS = ("046d", "c262")
+# dinput's product GUID: MAKELONG(vid, pid) then "PIDVID".
+WHEEL_PGUID = "{C262046D-0000-0000-0000-504944564944}"
+WHEEL_NAME = "Logitech G920 Driving Force Racing Wheel"
+WHEEL_PEDAL = {"JOY": "0", "MIN": "1", "MAX": "-1"}
+WHEEL_BINDINGS = {
+    "HEADER": {"INPUT_METHOD": "WHEEL"},
+    "CONTROLLERS": {"CON0": WHEEL_NAME, "PGUID0": WHEEL_PGUID},
+    "STEER": {"JOY": "0", "AXLE": "0"},
+    "THROTTLE": WHEEL_PEDAL | {"AXLE": "1"},
+    "BRAKES": WHEEL_PEDAL | {"AXLE": "2"},
+    "CLUTCH": WHEEL_PEDAL | {"AXLE": "5"},
+    "GEARUP": {"JOY": "0", "BUTTON": "4"},
+    "GEARDN": {"JOY": "0", "BUTTON": "5"},
+}
+# Set once per VR cfg (WHEEL_REV in its [__DIREWOLF] section), then the
+# User's: the G920's 900 degrees, FFB at 75% unfiltered (Logitech's own gain
+# at 100% clips at AC's 100%), a 5% minimum force over the G920's dead band,
+# milder kerb and road effects, and every other FFB step skipped, halving the
+# updates that cross the headset's Wi-Fi.
+WHEEL_REV = 1
+WHEEL_DEFAULTS = {
+    "STEER": {"LOCK": "900", "SCALE": "1", "STEER_GAMMA": "1", "STEER_FILTER": "0",
+              "SPEED_SENSITIVITY": "0", "FF_GAIN": "0.75", "FILTER_FF": "0"},
+    "FF_TWEAKS": {"MIN_FF": "0.05", "CENTER_BOOST_GAIN": "0", "CENTER_BOOST_RANGE": "0.1"},
+    "FF_ENHANCEMENT": {"CURBS": "0.2", "ROAD": "0.2", "SLIPS": "0", "ABS": "0.25"},
+    "FF_ENHANCEMENT_2": {"UNDERSTEER": "0"},
+    "FF_SKIP_STEPS": {"VALUE": "1"},
+    "__DIREWOLF": {"WHEEL_REV": str(WHEEL_REV)},
+}
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
@@ -426,6 +476,107 @@ def bind_recenter(cfg):
     set_ini(cfg, "controls.ini", {RECENTER: {"XBOXBUTTON": RECENTER_BUTTON}})
 
 
+def vr_cfg():
+    """This User's VR cfg folder, once the App command seeded it; else None."""
+    try:
+        state = os.open(STATE, DIR_FLAGS)
+    except FileNotFoundError:
+        return None
+    try:
+        return opendir(state, "cfg") if kind(state, "cfg") == stat.S_IFDIR else None
+    finally:
+        os.close(state)
+
+
+def ini_get(d, name, section, key):
+    """The last value of key in section (as AC reads it), or None."""
+    cur, val = None, None
+    for line in ini_lines(d, name):
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            cur = s[1:-1].strip().upper()
+        elif cur == section and "=" in s:
+            k, v = s.split("=", 1)
+            if k.strip().upper() == key:
+                val = v.split(";", 1)[0].strip()
+    return val
+
+
+def wheel_present():
+    """Whether the wheel helper published a G920: its udev entry (the
+    session's own /run/udev/data, c13:<minor>) names 046d:c262."""
+    try:
+        d = os.open(UDEV, DIR_FLAGS)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    try:
+        for name in os.listdir(d):
+            if not name.startswith("c13:"):
+                continue
+            try:
+                b = read(d, name) or b""
+            except OSError:
+                continue  # Unreadable: not the bridge's entry for us.
+            props = dict(l[2:].split("=", 1) for l in b.decode("utf-8", "replace").splitlines()
+                         if l.startswith("E:") and "=" in l)
+            if (props.get("ID_VENDOR_ID", "").lower(), props.get("ID_MODEL_ID", "").lower()) == WHEEL_IDS:
+                return True
+        return False
+    finally:
+        os.close(d)
+
+
+def wait_for_wheel():
+    """The wheel exists only once the headset connected with it plugged in,
+    after its client got USB access: wait a while, and only when the App has
+    the wheel helper at all."""
+    wait = 0.0
+    if os.environ.get("DIREWOLF_WHEEL_SOCKET"):
+        try:
+            wait = float(os.environ.get("DIREWOLF_AC_WHEEL_WAIT", "20"))
+        except ValueError:
+            wait = 20.0
+        # Bounded: an infinite wait would never start Steam.
+        wait = min(max(wait, 0.0), 600.0) if math.isfinite(wait) else 20.0
+    deadline = time.monotonic() + wait
+    while True:
+        if wheel_present():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+
+
+def set_input(cfg, wheel):
+    """The VR controls.ini in folder fd cfg: the G920's bindings, or back to
+    the pad when a wheel session left WHEEL and none is connected now. Another
+    method the User chose (KEYBOARD) is left alone."""
+    if wheel:
+        rev = ini_get(cfg, "controls.ini", "__DIREWOLF", "WHEEL_REV")
+        want = {k: dict(v) for k, v in WHEEL_BINDINGS.items()}
+        if rev != str(WHEEL_REV):
+            for sec, kv in WHEEL_DEFAULTS.items():
+                want.setdefault(sec, {}).update(kv)
+        log("G920 connected: Assetto Corsa drives with the wheel (INPUT_METHOD=WHEEL)")
+        set_ini(cfg, "controls.ini", want)
+    elif (ini_get(cfg, "controls.ini", "HEADER", "INPUT_METHOD") or "").upper() == "WHEEL":
+        log("no G920 connected: Assetto Corsa drives with the pad (INPUT_METHOD=X360)")
+        set_ini(cfg, "controls.ini", {"HEADER": {"INPUT_METHOD": "X360"}})
+
+
+def main_input():
+    refuse_root()
+    wheel = wait_for_wheel()
+    cfg = vr_cfg()
+    if cfg is None:
+        log(f"no VR cfg in {STATE}: controls left as they are")
+        return
+    try:
+        set_input(cfg, wheel)
+    finally:
+        os.close(cfg)
+
+
 def bind_recenters(compat):
     """The flat cfg, which a new User's VR cfg is seeded from, and this User's
     VR cfg once seeded (the App command seeds it after this script). Any
@@ -439,17 +590,7 @@ def bind_recenters(compat):
         finally:
             os.close(docs)
 
-    def vr():
-        try:
-            state = os.open(STATE, DIR_FLAGS)
-        except FileNotFoundError:
-            return None
-        try:
-            return opendir(state, "cfg") if kind(state, "cfg") == stat.S_IFDIR else None
-        finally:
-            os.close(state)
-
-    for which, find in (("flat", flat), ("VR", vr)):
+    for which, find in (("flat", flat), ("VR", vr_cfg)):
         try:
             cfg = find()
             if cfg is None:
@@ -641,6 +782,13 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--input"]:
+        try:
+            main_input()
+        except (Refused, OSError, ValueError) as e:
+            # The session goes on: AC starts with the controls as they were.
+            log(f"not setting Assetto Corsa's input: {e}")
+        sys.exit(0)
     try:
         main()
     except (Refused, OSError, subprocess.TimeoutExpired, ValueError, zipfile.BadZipFile) as e:

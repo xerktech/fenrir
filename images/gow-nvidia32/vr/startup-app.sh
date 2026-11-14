@@ -191,6 +191,24 @@ for what in pulse runtime; do
   done
 done
 
+# Assetto Corsa's input (DIREWOLF_AC_INPUT=auto, examples/vr.yaml; XERK-2853):
+# AC picks its controllers once, at start, and a G920 on the Quest exists only
+# while the headset is connected. So with the wheel helper
+# (DIREWOLF_WHEEL_SOCKET) Steam waits for a headset: an established connection
+# on the VR port, as vr-services checks it. ac-setup --input then waits a
+# little for the wheel and points the User's VR controls.ini at it or the pad.
+# It never fails; no headset at all ends the Session by the grace period.
+if [[ ${DIREWOLF_AC_INPUT:-} == auto ]]; then
+  if [[ -n ${DIREWOLF_WHEEL_SOCKET:-} ]]; then
+    echo "direwolf-vr: waiting for the headset before starting Steam (Assetto Corsa reads its wheel at start)" >&2
+    until [[ -n $(ss -Htn state established "sport = :$port") ]]; do
+      kill -0 "$services" 2>/dev/null || die "the VR services exited before a headset connected"
+      sleep 1
+    done
+  fi
+  "$here/ac-setup" --input || true
+fi
+
 # Game audio goes to the headset through PipeWire's pulse server.
 export PULSE_SERVER=unix:$audio/pulse/native
 # Pressure-vessel hides /usr/local and /opt: it imports the OpenXR runtime the
