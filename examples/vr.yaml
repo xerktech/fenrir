@@ -161,6 +161,13 @@ spec:
         # only CSP; empty leaves the installed CSP alone.
         - name: DIREWOLF_AC_CSP
           value: "0.3.1"
+        # A G920 on the Quest drives AC (XERK-2853): with the operator's wheel
+        # helper (--vr-wheel), Steam starts once the headset connects, and the
+        # image's ac-setup --input sets this User's VR controls.ini to the
+        # wheel if it is there, else to the pad. Connect the headset with the
+        # wheel plugged in; plugging it in later needs AC restarted.
+        - name: DIREWOLF_AC_INPUT
+          value: auto
         # The address the headset dials, shown on the mirror: the node's, as the
         # VR port is a hostPort there.
         - name: DIREWOLF_VR_HOST

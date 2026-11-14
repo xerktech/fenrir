@@ -448,6 +448,26 @@ paths:
   `wheel-wait`, so WiVRn finds the socket when the App starts.
 - The bridge's `Clear` (wolf-agent sends it whenever a stream stops) leaves the wheel's node,
   udev entry and announced add (`Server.Publish`); the socket can't replace or remove them.
-- Unverified until XERK-2853: the full path with a real headset and G920.
+- Unverified: the full path with a real headset and G920 (XERK-2853's hand check).
+
+## Assetto Corsa on the wheel (XERK-2853)
+
+- AC reads its controllers once, at start, and the G920 exists only while the headset is
+  connected. So with `DIREWOLF_AC_INPUT=auto` (the App) and the wheel helper, `startup-app.sh`
+  holds Steam until the VR port has an established connection (as `vr-services` checks it).
+  - Then `ac-setup --input` waits up to `DIREWOLF_AC_WHEEL_WAIT` (20s) for a udev entry naming
+    046d:c262 and sets the User's VR `controls.ini`; it never ends the Session.
+  - No headset: the wait ends with the VR services, or the grace period ends the Session.
+- Bindings come from Proton 9's winebus, which special-cases 046d:c262 (`bus_sdl.c`
+  `g920_absolute_usages`): AXLE steer 0 (X), throttle 1 (Y), brake 2 (Z), clutch 5 (Rz);
+  pedals inverted (`MIN=1 MAX=-1`); paddles BUTTON 4 (right, up) and 5 (left, down);
+  `PGUID0={C262046D-0000-0000-0000-504944564944}` (dinput's PIDVID GUID).
+  - A WiVRn client that reports other ids loses the special case: winebus orders axes
+    X Y Z Rx, so the clutch moves to 3.
+  - Bindings and `INPUT_METHOD=WHEEL` are forced each wheel launch; FFB/steer defaults go in once
+    (`[__DIREWOLF] WHEEL_REV`), then are the User's. No wheel: WHEEL goes back to X360.
+- Unverified on hardware: pedal direction, button numbers, the CON0 name AC matches, FFB feel,
+  and whether CSP's pad recenter (`XBOXBUTTON`) still fires in WHEEL mode.
+- Tests: `TestACSetupInputPicksWheelOrPad`, `TestVRStartSetsACInputOnceHeadsetConnects`.
 - Tests: `pkg/wheel` (`TestUinputRoundTrip` needs `/dev/uinput`), `vr_wheel_test.go`,
   `TestPublishedNodeSurvivesClear`, `TestListenWheelLocksAndHandsOver`.

@@ -448,4 +448,12 @@ func TestVRExampleRunsACSetup(t *testing.T) {
 	if _, ok := pins[csp]; !ok {
 		t.Errorf("DIREWOLF_AC_CSP=%q is not a version the image pins", csp)
 	}
+	// The image's startup picks the wheel or the pad only when asked (XERK-2853).
+	auto := false
+	for _, e := range c.Env {
+		auto = auto || (e.Name == "DIREWOLF_AC_INPUT" && e.Value == "auto")
+	}
+	if !auto {
+		t.Errorf("the VR example does not set DIREWOLF_AC_INPUT=auto")
+	}
 }
