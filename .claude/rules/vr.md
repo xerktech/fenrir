@@ -448,7 +448,7 @@ paths:
   `wheel-wait`, so WiVRn finds the socket when the App starts.
 - The bridge's `Clear` (wolf-agent sends it whenever a stream stops) leaves the wheel's node,
   udev entry and announced add (`Server.Publish`); the socket can't replace or remove them.
-- Unverified: the full path with a real headset and G920 (XERK-2853's hand check).
+- Works end to end with a real Quest and G920 in native VR AC (operator's hand test, 2026-11-15).
 
 ## Assetto Corsa on the wheel (XERK-2853)
 
@@ -466,8 +466,9 @@ paths:
     X Y Z Rx, so the clutch moves to 3.
   - Bindings and `INPUT_METHOD=WHEEL` are forced each wheel launch; FFB/steer defaults go in once
     (`[__DIREWOLF] WHEEL_REV`), then are the User's. No wheel: WHEEL goes back to X360.
-- Unverified on hardware: pedal direction, button numbers, the CON0 name AC matches, FFB feel,
-  and whether CSP's pad recenter (`XBOXBUTTON`) still fires in WHEEL mode.
+- The hand test (2026-11-15) found it working as a whole; not recorded one by one: pedal
+  direction, button numbers, FFB feel, CSP's pad recenter (`XBOXBUTTON`) in WHEEL mode, and
+  whether AC matched the wheel by `PGUID0` or the guessed `CON0` name.
 - Tests: `TestACSetupInputPicksWheelOrPad`, `TestVRStartSetsACInputOnceHeadsetConnects`.
 - Tests: `pkg/wheel` (`TestUinputRoundTrip` needs `/dev/uinput`), `vr_wheel_test.go`,
   `TestPublishedNodeSurvivesClear`, `TestListenWheelLocksAndHandsOver`.
