@@ -591,7 +591,7 @@ func TestVRImageIsPinnedAndBuilt(t *testing.T) {
 		`\nARG XRIZER_COMMIT=[0-9a-f]{40}\n`,
 		`test "\$\(git -C /src/xrizer rev-parse HEAD\)" = "\$\{XRIZER_COMMIT\}"`,
 		// XERK-2847's patch is applied and its tests gate the build.
-		`git apply --index /src/patches/\*\.patch;`,
+		`git update-index -q --refresh; \\\n  git apply --index /src/patches/\*\.patch;`,
 		`cargo test --release --locked --features static-openxr --lib openxr_data::tests;`,
 		`ln -s /opt/direwolf/vr/startup-app.sh /opt/gow/startup-app.sh`,
 		// Assetto Corsa's setup (ac-setup, XERK-2726).

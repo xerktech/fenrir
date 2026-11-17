@@ -292,6 +292,10 @@ paths:
     it, so a Meta recenter after a game one stacked both (height too). The vr/xrizer patch clears
     it on LOCAL's `XrEventDataReferenceSpaceChangePending` (XERK-2847). Keep 0016 with it: without
     0016 the Meta recenter keeps 1.6 m, and clearing the offset drops the game's height fix.
+    - Patch tests (`openxr_data::tests`): `local_recenter_clears_seated_offset`,
+      `stage_recenter_clears_standing_offset`, `foreign_session_recenter_keeps_offsets`
+      (XERK-3058). fakexr puts STAGE at a fixed floor pose off LOCAL, so a STAGE built as
+      LOCAL fails.
   - OpenComposite (cff07db) still stacks them: its Seated is LOCAL plus its own offset. Another
     in-game recenter clears it.
 - Headless sway on NVIDIA needs `--unsupported-gpu` and has no keyboard: xdotool keys are dropped
