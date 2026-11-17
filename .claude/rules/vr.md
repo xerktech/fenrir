@@ -440,6 +440,8 @@ paths:
   helper's bridge exited non-zero, or the helper pod failed or gone, deletes the VR pod with
   grace 1 (`killVRPodIfWheelBridgeDied`, as `killAppPodIfBridgeDied` for split mode, XERK-2859).
   Tests: `TestUncleanWheelBridgeExitKillsVRPod`.
+  - A helper (or split mode's Wolf pod) missing from the cache is confirmed gone with a live GET
+    first: a Session ending right after the create would otherwise kill a clean pod (XERK-2835).
 - Logs an App client can trigger (dropped messages, refused connections, creates and destroys)
   are rate-limited: unlimited, a client writing without reading logged 64 MB in 2 s (QA).
   Each Server has its own limits; the test checks them as declared (never reassign them).

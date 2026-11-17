@@ -541,18 +541,23 @@ func (c *SessionController) appPodReady(wolfPod *corev1.Pod) error {
 // pod dies. Garbage collection would give it its full termination grace.
 //
 // Clean means the bridge is still running, so it gets SIGTERM and withdraws
-// its nodes, or it exited 0 after doing so. A Wolf pod missing from the cache
-// is treated as unclean: nothing says its bridge cleaned up.
+// its nodes, or it exited 0 after doing so. A Wolf pod gone (a cache miss
+// confirmed live) is treated as unclean: nothing says its bridge cleaned up.
 func (c *SessionController) killAppPodIfBridgeDied(ctx context.Context, session *v1alpha1types.Session) error {
 	if session.Spec.IsVR() {
 		return c.killVRPodIfWheelBridgeDied(ctx, session)
 	}
 	wolfPod, err := c.podController.Informer().Namespaced(session.Namespace).Get(c.podName(session))
-	switch {
-	case errors.IsNotFound(err):
+	if errors.IsNotFound(err) {
 		if !meta.IsStatusConditionTrue(session.Status.Conditions, appPodCreatedCondition) {
 			return nil
 		}
+		// Gone, or not yet in the cache: ask the API server which (XERK-2835).
+		wolfPod, err = c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, c.podName(session), metav1.GetOptions{})
+	}
+	switch {
+	case errors.IsNotFound(err):
+		wolfPod = nil
 	case err != nil:
 		return fmt.Errorf("failed to get pod %s/%s: %w", session.Namespace, c.podName(session), err)
 	case wolfPod.Annotations[appPodAnnotation] == "" || !bridgeExitedUncleanly(wolfPod):

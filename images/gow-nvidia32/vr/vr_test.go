@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -415,7 +416,11 @@ case "$*" in *established*) want=established;; esac
 [ "$(cat "$SERVING" 2>/dev/null)" = "$want" ] && echo "0 0 *:20034 *:*"
 exit 0
 `)
-	writeExec(t, filepath.Join(bin, "wivrn-server"), `echo "start $PIPEWIRE_RUNTIME_DIR $*" >>"$LOG"
+	// vr-services starts each wivrn-server under setsid, out of its process
+	// group, so the stub records its pid for the cleanup to kill (XERK-2835).
+	pids := filepath.Join(dir, "wivrn-pids")
+	writeExec(t, filepath.Join(bin, "wivrn-server"), `echo $$ >>"$PIDS"
+echo "start $PIPEWIRE_RUNTIME_DIR $*" >>"$LOG"
 trap 'echo term >>"$LOG"; exit 0' TERM
 while :; do sleep 0.05; done
 `)
@@ -427,7 +432,7 @@ while :; do sleep 0.05; done
 	cmd := exec.CommandContext(t.Context(), "bash", "vr-services", "20034", audio)
 	cmd.Env = []string{
 		"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=/home/retro", "LOG=" + logPath, "SERVING=" + servingPath,
-		"DIREWOLF_VR_CHECK_INTERVAL=0.1", "DIREWOLF_VR_CHECK_MISSES=3",
+		"PIDS=" + pids, "DIREWOLF_VR_CHECK_INTERVAL=0.1", "DIREWOLF_VR_CHECK_MISSES=3",
 	}
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -437,8 +442,20 @@ while :; do sleep 0.05; done
 	t.Cleanup(func() {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
+		killWiVRnStubs(pids)
 	})
 	return logPath, servingPath
+}
+
+// killWiVRnStubs kills the process group of every stub wivrn-server that
+// recorded its pid in the file pids.
+func killWiVRnStubs(pids string) {
+	b, _ := os.ReadFile(pids)
+	for f := range strings.FieldsSeq(string(b)) {
+		if pid, err := strconv.Atoi(f); err == nil && pid > 1 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	}
 }
 
 func waitForLog(t *testing.T, path string, re *regexp.Regexp, d time.Duration) string {
@@ -501,7 +518,9 @@ exec sleep 60
 	writeExec(t, filepath.Join(bin, "wireplumber"), "sleep 0.5; exit 2\n")
 	writeExec(t, filepath.Join(bin, "pipewire-pulse"), "exec sleep 60\n")
 	writeExec(t, filepath.Join(bin, "ss"), "exit 0\n")
-	writeExec(t, filepath.Join(bin, "wivrn-server"), "exec sleep 60\n")
+	pids := filepath.Join(dir, "wivrn-pids")
+	writeExec(t, filepath.Join(bin, "wivrn-server"), "echo $$ >>"+pids+"\nexec sleep 60\n")
+	t.Cleanup(func() { killWiVRnStubs(pids) })
 	out, err := os.Create(filepath.Join(dir, "log"))
 	if err != nil {
 		t.Fatal(err)

@@ -556,6 +556,7 @@ func TestUncleanBridgeExitKillsAppPod(t *testing.T) {
 		name       string
 		wolfPod    func(*corev1.Pod)
 		notSplit   bool // the Wolf pod names no App pod
+		uncached   bool // the Wolf pod is live but not yet in the cache
 		notCreated bool // AppPodCreated is unset
 		noAppPod   bool // the App pod is already gone
 		wantKill   bool
@@ -574,6 +575,8 @@ func TestUncleanBridgeExitKillsAppPod(t *testing.T) {
 		{name: "succeeded, bridge not reported", wolfPod: func(p *corev1.Pod) { p.Status.Phase = corev1.PodSucceeded; p.Status.ContainerStatuses = nil }, wantKill: true},
 		{name: "not split", wolfPod: bridge(137), notSplit: true},
 		{name: "wolf pod gone", wantKill: true},
+		{name: "wolf pod not yet cached, bridge exited cleanly", wolfPod: bridge(0), uncached: true},
+		{name: "wolf pod not yet cached, bridge SIGKILLed", wolfPod: bridge(137), uncached: true, wantKill: true},
 		{name: "wolf pod gone, app pod never created", notCreated: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -591,7 +594,7 @@ func TestUncleanBridgeExitKillsAppPod(t *testing.T) {
 				if !tc.noAppPod {
 					objs = append(objs, app)
 				}
-				if tc.wolfPod != nil {
+				if tc.wolfPod != nil && !tc.uncached {
 					wolf := readyPod(s)
 					if !tc.notSplit {
 						wolf.Annotations[appPodAnnotation] = app.Name
@@ -605,7 +608,22 @@ func TestUncleanBridgeExitKillsAppPod(t *testing.T) {
 			if !tc.noAppPod {
 				waitPod(t, f, sess.Name+"-app")
 			}
-			if tc.wolfPod != nil {
+			switch {
+			case tc.uncached:
+				wolf := readyPod(sess)
+				wolf.Annotations[appPodAnnotation] = sess.Name + "-app"
+				tc.wolfPod(wolf)
+				fake, ok := f.sc.K8sClient.(*k8sfake.Clientset)
+				if !ok {
+					t.Fatalf("K8sClient is %T", f.sc.K8sClient)
+				}
+				fake.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+					if g, ok := a.(k8stesting.GetAction); ok && g.GetName() == wolf.Name {
+						return true, wolf, nil
+					}
+					return false, nil, nil
+				})
+			case tc.wolfPod != nil:
 				waitPod(t, f, sess.Name)
 			}
 

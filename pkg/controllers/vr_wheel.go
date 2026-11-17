@@ -277,6 +277,11 @@ func (c *SessionController) killVRPodIfWheelBridgeDied(ctx context.Context, sess
 	}
 	name := c.wheelPodName(session)
 	helper, err := c.podController.Informer().Namespaced(session.Namespace).Get(name)
+	if errors.IsNotFound(err) {
+		// Created, so either gone or not yet in the cache (a Session ending
+		// right after the create): ask the API server which (XERK-2835).
+		helper, err = c.K8sClient.CoreV1().Pods(session.Namespace).Get(ctx, name, metav1.GetOptions{})
+	}
 	switch {
 	case errors.IsNotFound(err):
 	case err != nil:

@@ -694,6 +694,10 @@ func TestACSetupBindsVRRecenterToPad(t *testing.T) {
 			if out := s.mustRun(t); !strings.Contains(out, "Is a directory") {
 				t.Errorf("%s: no log of the planted folder:\n%s", plant(s), out)
 			}
+			// The failed rename leaves no temporary file (XERK-2835).
+			if _, err := os.Lstat(filepath.Join(filepath.Dir(plant(s)), ".controls.ini.direwolf-tmp")); !os.IsNotExist(err) {
+				t.Errorf("%s: temporary file left beside the plant: %v", plant(s), err)
+			}
 		}
 		// A failed flat step stays unrecorded, so the next launch retries it.
 		flat := strings.HasPrefix(plant(s), s.compat)

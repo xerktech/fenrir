@@ -211,7 +211,16 @@ def write(d, name, chunks, mode=0o644):
     with os.fdopen(fd, "wb") as f:
         for c in [chunks] if isinstance(chunks, bytes) else chunks:
             f.write(c)
-    os.replace(tmp, name, src_dir_fd=d, dst_dir_fd=d)
+    try:
+        os.replace(tmp, name, src_dir_fd=d, dst_dir_fd=d)
+    except OSError:
+        # A folder a game planted at name refuses the rename: leave no
+        # temporary file behind.
+        try:
+            os.unlink(tmp, dir_fd=d)
+        except OSError:
+            pass
+        raise
 
 
 def clear(d, name):
