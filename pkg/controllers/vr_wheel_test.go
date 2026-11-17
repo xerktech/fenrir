@@ -432,6 +432,9 @@ func TestUncleanWheelBridgeExitKillsVRPod(t *testing.T) {
 			if err := f.sc.endSession(context.Background(), s, "test"); (err != nil) != tc.getErr {
 				t.Fatalf("endSession: %v, want an error %v", err, tc.getErr)
 			}
+			if f.sessionExists(t, s.Name) != tc.getErr {
+				t.Errorf("session kept %v, want kept only on a failed GET", !tc.getErr)
+			}
 			var grace *int64
 			for _, a := range fake.Actions() {
 				d, ok := a.(k8stesting.DeleteAction)
