@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
@@ -374,6 +375,8 @@ func TestUncleanWheelBridgeExitKillsVRPod(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		helper     func(*corev1.Pod) // nil: the helper pod is gone
+		uncached   bool              // the helper is live but not yet in the cache
+		getErr     bool              // with uncached: the live GET fails, so nothing is killed yet
 		notCreated bool
 		wantKill   bool
 	}{
@@ -381,6 +384,9 @@ func TestUncleanWheelBridgeExitKillsVRPod(t *testing.T) {
 		{name: "helper evicted", helper: func(p *corev1.Pod) { p.Status.Phase = corev1.PodFailed }, wantKill: true},
 		{name: "helper gone", wantKill: true},
 		{name: "bridge running", helper: running},
+		{name: "helper not yet cached", helper: running, uncached: true},
+		{name: "helper not yet cached, bridge SIGKILLed", helper: bridge(137), uncached: true, wantKill: true},
+		{name: "live get fails", helper: running, uncached: true, getErr: true},
 		{name: "bridge exited cleanly", helper: bridge(0)},
 		{name: "no helper made", notCreated: true},
 	} {
@@ -393,7 +399,7 @@ func TestUncleanWheelBridgeExitKillsVRPod(t *testing.T) {
 				return s
 			}, func(s *v1alpha1types.Session) []runtime.Object {
 				objs := []runtime.Object{readyPod(s)}
-				if tc.helper != nil {
+				if tc.helper != nil && !tc.uncached {
 					h := readyPod(s)
 					h.Name = s.Name + "-wheel"
 					tc.helper(h)
@@ -402,15 +408,32 @@ func TestUncleanWheelBridgeExitKillsVRPod(t *testing.T) {
 				return objs
 			})
 			waitPod(t, f, s.Name)
-			if tc.helper != nil {
-				waitPod(t, f, s.Name+"-wheel")
-			}
-			if err := f.sc.endSession(context.Background(), s, "test"); err != nil {
-				t.Fatalf("endSession: %v", err)
-			}
 			fake, ok := f.sc.K8sClient.(*k8sfake.Clientset)
 			if !ok {
 				t.Fatalf("K8sClient is %T", f.sc.K8sClient)
+			}
+			switch {
+			case tc.uncached:
+				h := readyPod(s)
+				h.Name = s.Name + "-wheel"
+				tc.helper(h)
+				fake.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+					if g, ok := a.(k8stesting.GetAction); ok && g.GetName() == h.Name {
+						if tc.getErr {
+							return true, nil, apierrors.NewInternalError(errors.New("boom"))
+						}
+						return true, h, nil
+					}
+					return false, nil, nil
+				})
+			case tc.helper != nil:
+				waitPod(t, f, s.Name+"-wheel")
+			}
+			if err := f.sc.endSession(context.Background(), s, "test"); (err != nil) != tc.getErr {
+				t.Fatalf("endSession: %v, want an error %v", err, tc.getErr)
+			}
+			if f.sessionExists(t, s.Name) != tc.getErr {
+				t.Errorf("session kept %v, want kept only on a failed GET", !tc.getErr)
 			}
 			var grace *int64
 			for _, a := range fake.Actions() {

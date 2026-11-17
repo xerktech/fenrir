@@ -457,3 +457,37 @@ func TestVRExampleRunsACSetup(t *testing.T) {
 		t.Errorf("the VR example does not set DIREWOLF_AC_INPUT=auto")
 	}
 }
+
+// The example's OpenVR layer must be one the image's startup accepts: any
+// other value ends every Session at start (XERK-2835). Runs startup-app.sh's
+// own case statement on it.
+func TestVRExampleOpenVRLayerIsAccepted(t *testing.T) {
+	_, app := vrExampleFixture(t)
+	var layer string
+	found := false
+	for _, e := range app.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "DIREWOLF_VR_OPENVR" {
+			layer, found = e.Value, true
+		}
+	}
+	if !found {
+		t.Fatal("the VR example sets no DIREWOLF_VR_OPENVR")
+	}
+	b, err := os.ReadFile("../../images/gow-nvidia32/vr/startup-app.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(b)
+	start := strings.Index(script, "case ${DIREWOLF_VR_OPENVR")
+	end := strings.Index(script[max(start, 0):], "\nesac\n")
+	if start < 0 || end < 0 {
+		t.Fatal("no DIREWOLF_VR_OPENVR case in startup-app.sh")
+	}
+	block := script[start : start+end+len("\nesac\n")]
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", `die() { echo "$*" >&2; exit 1; }`+"\n"+block+`echo "$layer"`) //nolint:gosec // the repo's own script
+	cmd.Env = []string{"DIREWOLF_VR_OPENVR=" + layer}
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.HasPrefix(string(out), "/opt/") {
+		t.Errorf("DIREWOLF_VR_OPENVR=%q: startup-app.sh's case gives %q, %v; want a layer dir", layer, out, err)
+	}
+}
