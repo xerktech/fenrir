@@ -10,15 +10,15 @@ signals XrEventDataReferenceSpaceChangePending; the stale offset then applied
 that recenter a second time. On the event, recreate the adjusted space with
 no offset so Seated follows the runtime's recentered LOCAL (XERK-2847).
 ---
- fakexr/src/lib.rs  |  34 ++++++++++--
- src/openxr_data.rs | 127 ++++++++++++++++++++++++++++++++++++++++++---
- 2 files changed, 152 insertions(+), 9 deletions(-)
+ fakexr/src/lib.rs  |  45 +++++++++--
+ src/openxr_data.rs | 188 +++++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 222 insertions(+), 11 deletions(-)
 
 diff --git a/fakexr/src/lib.rs b/fakexr/src/lib.rs
-index 3021e72..fe20ea7 100644
+index 3021e72..8ad8d14 100644
 --- a/fakexr/src/lib.rs
 +++ b/fakexr/src/lib.rs
-@@ -126,6 +126,29 @@ pub fn set_grip(session: xr::Session, path: UserPath, pose: xr::Posef) {
+@@ -126,6 +126,35 @@ pub fn set_grip(session: xr::Session, path: UserPath, pose: xr::Posef) {
      get_hand_data(path, &session).grip_pose.store(pose);
  }
  
@@ -27,15 +27,21 @@ index 3021e72..fe20ea7 100644
 +    session.to_handle().unwrap().view_pose.store(pose);
 +}
 +
-+/// Queues an XrEventDataReferenceSpaceChangePending, as a runtime recenter does.
-+pub fn send_reference_space_change_pending(session: xr::Session, ty: xr::ReferenceSpaceType) {
++/// Queues an XrEventDataReferenceSpaceChangePending, as a runtime recenter does,
++/// on `session`'s event queue. The event names `event_session`, which is
++/// normally `session`; another handle stands in for a foreign session's event.
++pub fn send_reference_space_change_pending(
++    session: xr::Session,
++    event_session: xr::Session,
++    ty: xr::ReferenceSpaceType,
++) {
 +    let s = session.to_handle().unwrap();
 +    send_event(
 +        &s.event_sender,
 +        xr::EventDataReferenceSpaceChangePending {
 +            ty: xr::EventDataReferenceSpaceChangePending::TYPE,
 +            next: std::ptr::null(),
-+            session,
++            session: event_session,
 +            reference_space_type: ty,
 +            change_time: xr::Time::from_nanos(0),
 +            pose_valid: xr::TRUE,
@@ -48,7 +54,7 @@ index 3021e72..fe20ea7 100644
  pub fn set_aim(session: xr::Session, path: UserPath, pose: xr::Posef) {
      let session = session.to_handle().unwrap();
      get_hand_data(path, &session).aim_pose.store(pose);
-@@ -542,6 +565,7 @@ struct Session {
+@@ -542,6 +571,7 @@ struct Session {
      should_render: AtomicBool,
      frame_state: AtomicCell<FrameState>,
      with_trackers: AtomicBool,
@@ -56,7 +62,7 @@ index 3021e72..fe20ea7 100644
  }
  
  impl Session {
-@@ -668,7 +692,10 @@ impl Space {
+@@ -668,7 +698,10 @@ impl Space {
              .ok_or(xr::Result::ERROR_SESSION_LOST)?;
  
          let SpaceType::Action { hand, action } = &self.ty else {
@@ -68,7 +74,7 @@ index 3021e72..fe20ea7 100644
              let mat = pose_to_mat(pose);
              let offset = pose_to_mat(self.offset);
  
-@@ -886,6 +913,7 @@ extern "system" fn create_session(
+@@ -886,6 +919,7 @@ extern "system" fn create_session(
          should_render: false.into(),
          frame_state: FrameState::Ended.into(),
          with_trackers: false.into(),
@@ -76,7 +82,7 @@ index 3021e72..fe20ea7 100644
      });
  
      let tx = sess.event_sender.clone();
-@@ -1127,7 +1155,6 @@ extern "system" fn create_reference_space(
+@@ -1127,7 +1161,6 @@ extern "system" fn create_reference_space(
      space: *mut xr::Space,
  ) -> xr::Result {
      let info = unsafe { create_info.as_ref().unwrap() };
@@ -84,7 +90,23 @@ index 3021e72..fe20ea7 100644
      let session = get_handle!(session);
  
      unsafe {
-@@ -1573,7 +1600,8 @@ extern "system" fn locate_space(
+@@ -1533,12 +1566,13 @@ extern "system" fn locate_space(
+     location: *mut xr::SpaceLocation,
+ ) -> xr::Result {
+     let base_space = get_handle!(base_space);
++    // STAGE coincides with LOCAL here, so it is located like any other space.
+     assert!(
+         !matches!(
+             base_space.ty,
+-            SpaceType::Reference(xr::ReferenceSpaceType::STAGE | xr::ReferenceSpaceType::VIEW),
++            SpaceType::Reference(xr::ReferenceSpaceType::VIEW),
+         ),
+-        "stage/view locate unimplemented"
++        "view locate unimplemented"
+     );
+ 
+     let space = get_handle!(space);
+@@ -1573,7 +1607,8 @@ extern "system" fn locate_space(
      if matches!(
          base_space.ty,
          SpaceType::Reference(xr::ReferenceSpaceType::LOCAL)
@@ -95,7 +117,7 @@ index 3021e72..fe20ea7 100644
              Ok(loc) => {
                  out_loc = loc;
 diff --git a/src/openxr_data.rs b/src/openxr_data.rs
-index e20c4c1..77c6869 100644
+index e20c4c1..7a140c6 100644
 --- a/src/openxr_data.rs
 +++ b/src/openxr_data.rs
 @@ -201,13 +201,28 @@ impl<C: Compositor> OpenXrData<C> {
@@ -195,20 +217,49 @@ index e20c4c1..77c6869 100644
      pub fn tracking_space(&self) -> &xr::Space {
          self.get_space_for_origin(self.current_origin)
      }
-@@ -812,6 +859,74 @@ mod tests {
+@@ -812,6 +859,135 @@ mod tests {
          }
      }
  
-+    fn seated_head_pose(data: &OpenXrData<FakeCompositor>) -> xr::Posef {
++    fn head_pose(
++        data: &OpenXrData<FakeCompositor>,
++        origin: openvr::ETrackingUniverseOrigin,
++    ) -> xr::Posef {
 +        let session = data.session_data.get();
 +        session
 +            .view_space
 +            .locate(
-+                session.get_space_for_origin(openvr::ETrackingUniverseOrigin::Seated),
++                session.get_space_for_origin(origin),
 +                xr::Time::from_nanos(1),
 +            )
 +            .unwrap()
 +            .pose
++    }
++
++    fn seated_head_pose(data: &OpenXrData<FakeCompositor>) -> xr::Posef {
++        head_pose(data, openvr::ETrackingUniverseOrigin::Seated)
++    }
++
++    fn standing_head_pose(data: &OpenXrData<FakeCompositor>) -> xr::Posef {
++        head_pose(data, openvr::ETrackingUniverseOrigin::Standing)
++    }
++
++    /// Head off-centre, 1.2 m up, turned 30 degrees.
++    fn off_centre_head() -> xr::Posef {
++        let (s, c) = (15f32.to_radians().sin(), 15f32.to_radians().cos());
++        xr::Posef {
++            position: xr::Vector3f {
++                x: 0.3,
++                y: 1.2,
++                z: -0.2,
++            },
++            orientation: xr::Quaternionf {
++                x: 0.0,
++                y: s,
++                z: 0.0,
++                w: c,
++            },
++        }
 +    }
 +
 +    fn assert_pose_eq(actual: xr::Posef, expected: xr::Posef) {
@@ -233,21 +284,7 @@ index e20c4c1..77c6869 100644
 +        crate::init_logging();
 +        let data = OpenXrData::<FakeCompositor>::new(&Injector::default()).unwrap();
 +        let raw = data.session_data.get().session.as_raw();
-+        // Head off-centre, 1.2 m up, turned 30 degrees.
-+        let (s, c) = (15f32.to_radians().sin(), 15f32.to_radians().cos());
-+        let head = xr::Posef {
-+            position: xr::Vector3f {
-+                x: 0.3,
-+                y: 1.2,
-+                z: -0.2,
-+            },
-+            orientation: xr::Quaternionf {
-+                x: 0.0,
-+                y: s,
-+                z: 0.0,
-+                w: c,
-+            },
-+        };
++        let head = off_centre_head();
 +        fakexr::set_view_pose(raw, head);
 +        assert_pose_eq(seated_head_pose(&data), head);
 +
@@ -256,15 +293,61 @@ index e20c4c1..77c6869 100644
 +        assert_pose_eq(seated_head_pose(&data), xr::Posef::IDENTITY);
 +
 +        // A STAGE change leaves the seated offset alone.
-+        fakexr::send_reference_space_change_pending(raw, xr::ReferenceSpaceType::STAGE);
++        fakexr::send_reference_space_change_pending(raw, raw, xr::ReferenceSpaceType::STAGE);
 +        data.poll_events();
 +        assert_pose_eq(seated_head_pose(&data), xr::Posef::IDENTITY);
 +
 +        // The runtime recenters LOCAL: Seated follows LOCAL again, so the
 +        // runtime's recenter is not applied on top of the game's.
-+        fakexr::send_reference_space_change_pending(raw, xr::ReferenceSpaceType::LOCAL);
++        fakexr::send_reference_space_change_pending(raw, raw, xr::ReferenceSpaceType::LOCAL);
 +        data.poll_events();
 +        assert_pose_eq(seated_head_pose(&data), head);
++    }
++
++    #[test]
++    fn stage_recenter_clears_standing_offset() {
++        crate::init_logging();
++        let data = OpenXrData::<FakeCompositor>::new(&Injector::default()).unwrap();
++        let raw = data.session_data.get().session.as_raw();
++        let head = off_centre_head();
++        fakexr::set_view_pose(raw, head);
++        assert_pose_eq(standing_head_pose(&data), head);
++
++        // The game recenters Standing: it is now the head.
++        data.reset_tracking_space(openvr::ETrackingUniverseOrigin::Standing);
++        assert_pose_eq(standing_head_pose(&data), xr::Posef::IDENTITY);
++
++        // A LOCAL change leaves the standing offset alone.
++        fakexr::send_reference_space_change_pending(raw, raw, xr::ReferenceSpaceType::LOCAL);
++        data.poll_events();
++        assert_pose_eq(standing_head_pose(&data), xr::Posef::IDENTITY);
++
++        // The runtime recenters STAGE: Standing follows STAGE again.
++        fakexr::send_reference_space_change_pending(raw, raw, xr::ReferenceSpaceType::STAGE);
++        data.poll_events();
++        assert_pose_eq(standing_head_pose(&data), head);
++    }
++
++    #[test]
++    fn foreign_session_recenter_keeps_offsets() {
++        crate::init_logging();
++        let data = OpenXrData::<FakeCompositor>::new(&Injector::default()).unwrap();
++        let raw = data.session_data.get().session.as_raw();
++        // A handle that is not this session's; the event only names it.
++        use xr::sys::Handle;
++        let foreign = xr::sys::Session::from_raw(raw.into_raw() ^ 1);
++        assert_ne!(foreign, raw);
++        fakexr::set_view_pose(raw, off_centre_head());
++        data.reset_tracking_space(openvr::ETrackingUniverseOrigin::Seated);
++        data.reset_tracking_space(openvr::ETrackingUniverseOrigin::Standing);
++
++        // Recenters reported for another session change neither offset.
++        for ty in [xr::ReferenceSpaceType::LOCAL, xr::ReferenceSpaceType::STAGE] {
++            fakexr::send_reference_space_change_pending(raw, foreign, ty);
++        }
++        data.poll_events();
++        assert_pose_eq(seated_head_pose(&data), xr::Posef::IDENTITY);
++        assert_pose_eq(standing_head_pose(&data), xr::Posef::IDENTITY);
 +    }
 +
      #[test]
