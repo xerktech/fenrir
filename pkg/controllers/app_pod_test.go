@@ -557,6 +557,7 @@ func TestUncleanBridgeExitKillsAppPod(t *testing.T) {
 		wolfPod    func(*corev1.Pod)
 		notSplit   bool // the Wolf pod names no App pod
 		uncached   bool // the Wolf pod is live but not yet in the cache
+		getErr     bool // with uncached: the live GET fails, so nothing is killed yet
 		notCreated bool // AppPodCreated is unset
 		noAppPod   bool // the App pod is already gone
 		wantKill   bool
@@ -577,6 +578,7 @@ func TestUncleanBridgeExitKillsAppPod(t *testing.T) {
 		{name: "wolf pod gone", wantKill: true},
 		{name: "wolf pod not yet cached, bridge exited cleanly", wolfPod: bridge(0), uncached: true},
 		{name: "wolf pod not yet cached, bridge SIGKILLed", wolfPod: bridge(137), uncached: true, wantKill: true},
+		{name: "live get fails", wolfPod: bridge(137), uncached: true, getErr: true},
 		{name: "wolf pod gone, app pod never created", notCreated: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -619,6 +621,9 @@ func TestUncleanBridgeExitKillsAppPod(t *testing.T) {
 				}
 				fake.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
 					if g, ok := a.(k8stesting.GetAction); ok && g.GetName() == wolf.Name {
+						if tc.getErr {
+							return true, nil, apierrors.NewInternalError(errors.New("boom"))
+						}
 						return true, wolf, nil
 					}
 					return false, nil, nil
@@ -627,11 +632,11 @@ func TestUncleanBridgeExitKillsAppPod(t *testing.T) {
 				waitPod(t, f, sess.Name)
 			}
 
-			if err := f.sc.endSession(context.Background(), sess, "test"); err != nil {
-				t.Fatalf("endSession: %v", err)
+			if err := f.sc.endSession(context.Background(), sess, "test"); (err != nil) != tc.getErr {
+				t.Fatalf("endSession: %v, want an error %v", err, tc.getErr)
 			}
-			if f.sessionExists(t, sess.Name) {
-				t.Error("session not deleted")
+			if f.sessionExists(t, sess.Name) != tc.getErr {
+				t.Errorf("session kept %v, want kept only on a failed GET", !tc.getErr)
 			}
 			fake, ok := f.sc.K8sClient.(*k8sfake.Clientset)
 			if !ok {
