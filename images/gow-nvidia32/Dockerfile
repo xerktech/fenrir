@@ -302,8 +302,11 @@ RUN git clone https://github.com/Supreeeme/xrizer.git /src/xrizer \
  && test "$(git -C /src/xrizer rev-parse HEAD)" = "${XRIZER_COMMIT}"
 COPY vr/xrizer/ /src/patches/
 # The patches' own tests run first: a patch that no longer does its job fails
-# the build rather than shipping.
+# the build rather than shipping. The index is refreshed first: a clone layer
+# restored from the build cache keeps stale stat data, and --index then fails
+# with "does not match index" (XERK-3058).
 RUN set -eu; cd /src/xrizer; \
+  git update-index -q --refresh; \
   git apply --index /src/patches/*.patch; \
   export XRIZER_VERSION; \
   cargo test --release --locked --features static-openxr --lib openxr_data::tests; \
